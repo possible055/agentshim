@@ -278,7 +278,7 @@ impl LaunchEncoding {
     fn new(resolved: &ResolvedProgram, request: &ProcessRequest) -> Result<Self, ProcessError> {
         match resolved.launcher {
             Launcher::Native => {
-                let application = nul_terminated(resolved.absolute.as_os_str());
+                let application = nul_terminated(resolved.executable.as_os_str());
                 let mut command_line = Vec::new();
                 append_native_argv0(&mut command_line, resolved.absolute.as_os_str());
                 for argument in &request.args {
@@ -293,7 +293,7 @@ impl LaunchEncoding {
             Launcher::CmdCompat => {
                 let command = system_cmd()?;
                 let application = nul_terminated(command.as_os_str());
-                let script = batch_user_path(&resolved.absolute)?;
+                let script = batch_user_path(&resolved.executable)?;
                 let mut command_line = "cmd.exe /e:ON /v:OFF /d /c \"\""
                     .encode_utf16()
                     .collect::<Vec<_>>();
@@ -336,11 +336,9 @@ fn finish_batch_command_line(mut encoded: Vec<u16>) -> Result<Vec<u16>, ProcessE
 fn append_native_argument(output: &mut Vec<u16>, argument: &OsStr) {
     let encoded = argument.encode_wide().collect::<Vec<_>>();
     let quote = encoded.is_empty() || encoded.iter().any(|unit| matches!(*unit, 0x09 | 0x20));
-    if !quote {
-        output.extend(encoded);
-        return;
+    if quote {
+        output.push(u16::from(b'"'));
     }
-    output.push(u16::from(b'"'));
     let mut backslashes = 0_usize;
     for unit in encoded {
         if unit == u16::from(b'\\') {
@@ -356,8 +354,11 @@ fn append_native_argument(output: &mut Vec<u16>, argument: &OsStr) {
         }
         backslashes = 0;
     }
-    output.extend(std::iter::repeat_n(u16::from(b'\\'), backslashes * 2));
-    output.push(u16::from(b'"'));
+    let trailing_backslashes = if quote { backslashes * 2 } else { backslashes };
+    output.extend(std::iter::repeat_n(u16::from(b'\\'), trailing_backslashes));
+    if quote {
+        output.push(u16::from(b'"'));
+    }
 }
 
 fn append_native_argv0(output: &mut Vec<u16>, argument: &OsStr) {
@@ -888,9 +889,33 @@ mod tests {
     }
 
     #[test]
+    fn native_launch_separates_executable_identity_from_argv0() {
+        let resolved = ResolvedProgram {
+            absolute: PathBuf::from(r"C:\tools\cargo.exe"),
+            executable: PathBuf::from(r"C:\toolchains\rustup.exe"),
+            launcher: Launcher::Native,
+        };
+        let request = fixture_request(vec!["--version"]);
+
+        let launch = LaunchEncoding::new(&resolved, &request).expect("encode native proxy");
+
+        assert_eq!(
+            String::from_utf16(&launch.application[..launch.application.len() - 1])
+                .expect("valid application UTF-16"),
+            r"C:\toolchains\rustup.exe"
+        );
+        assert_eq!(
+            String::from_utf16(&launch.command_line[..launch.command_line.len() - 1])
+                .expect("valid command-line UTF-16"),
+            r#""C:\tools\cargo.exe" --version"#
+        );
+    }
+
+    #[test]
     fn batch_encoder_tracks_rust_1_88_regular_argument_policy() {
         let resolved = ResolvedProgram {
             absolute: PathBuf::from(r"C:\repo\probe.cmd"),
+            executable: PathBuf::from(r"C:\repo\probe.cmd"),
             launcher: Launcher::CmdCompat,
         };
         let request = fixture_request(vec![
@@ -918,7 +943,8 @@ mod tests {
         let fixture = tempfile::tempdir().expect("fixture");
         let executable = std::env::current_exe().expect("test executable");
         let resolved = ResolvedProgram {
-            absolute: executable,
+            absolute: executable.clone(),
+            executable,
             launcher: Launcher::Native,
         };
         for point in [
@@ -959,18 +985,36 @@ mod tests {
     #[test]
     fn command_evaluation_launchers_and_ps1_are_rejected() {
         let cmd = ResolvedProgram {
-            absolute: PathBuf::from(r"C:\Windows\System32\cmd.exe"),
+            absolute: PathBuf::from(r"C:\tools\safe.exe"),
+            executable: PathBuf::from(r"C:\Windows\System32\cmd.exe"),
             launcher: Launcher::Native,
         };
         let cmd_request = fixture_request(vec!["/d", "/c", "echo injected"]);
         assert!(validate_launcher_request(&cmd, &cmd_request).is_err());
 
         let powershell = ResolvedProgram {
-            absolute: PathBuf::from(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
+            absolute: PathBuf::from(r"C:\tools\safe.exe"),
+            executable: PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe"),
             launcher: Launcher::Native,
         };
-        let powershell_request = fixture_request(vec!["-NoProfile", "-Command", "Get-Process"]);
-        assert!(validate_launcher_request(&powershell, &powershell_request).is_err());
+        for switch in [
+            "-Command",
+            "-c",
+            "-CommandWithArgs",
+            "-cwa",
+            "-EncodedCommand",
+            "-e",
+            "-ec",
+            "-enc",
+            "-command:Get-Process",
+            "-encodedcommand=payload",
+        ] {
+            let powershell_request = fixture_request(vec!["-NoProfile", switch, "Get-Process"]);
+            assert!(
+                validate_launcher_request(&powershell, &powershell_request).is_err(),
+                "{switch} must be rejected"
+            );
+        }
         assert!(launcher_for(PathBuf::from("script.ps1").as_path()).is_err());
     }
 

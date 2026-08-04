@@ -4,6 +4,7 @@ use std::{
     fmt::Display,
     io,
     path::Path,
+    str::FromStr,
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
@@ -29,12 +30,73 @@ use crate::{
 };
 
 pub const SERVER_INSTRUCTIONS: &str = "Local repository tools for reading source files, searching contents, finding paths, and running programs with structured arguments without PowerShell command strings.";
+pub const MCP_COMPATIBILITY_ENV: &str = "CODEXSHIM_MCP_COMPATIBILITY";
+
+const STRICT_PROTOCOLS: &[ProtocolVersion] = &[ProtocolVersion::V_2026_07_28];
+const LEGACY_PROTOCOLS: &[ProtocolVersion] =
+    &[ProtocolVersion::V_2026_07_28, ProtocolVersion::V_2025_06_18];
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ProtocolCompatibility {
+    #[default]
+    Strict,
+    Legacy,
+}
+
+impl ProtocolCompatibility {
+    fn from_env() -> io::Result<Self> {
+        let Some(value) = std::env::var_os(MCP_COMPATIBILITY_ENV) else {
+            return Ok(Self::Strict);
+        };
+        let value = value.into_string().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{MCP_COMPATIBILITY_ENV} must be valid Unicode"),
+            )
+        })?;
+        value.parse()
+    }
+
+    fn supported_protocol_versions(self) -> &'static [ProtocolVersion] {
+        match self {
+            Self::Strict => STRICT_PROTOCOLS,
+            Self::Legacy => LEGACY_PROTOCOLS,
+        }
+    }
+}
+
+impl Display for ProtocolCompatibility {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Strict => formatter.write_str("strict"),
+            Self::Legacy => formatter.write_str("legacy"),
+        }
+    }
+}
+
+impl FromStr for ProtocolCompatibility {
+    type Err = io::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "strict" => Ok(Self::Strict),
+            "legacy" => Ok(Self::Legacy),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{MCP_COMPATIBILITY_ENV} must be either `strict` or `legacy`, got `{value}`"
+                ),
+            )),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct CodexShim {
     root: Arc<RepositoryRoot>,
     resources: RuntimeResources,
     process_resolver: ProcessResolver,
+    protocol_compatibility: ProtocolCompatibility,
 }
 
 impl CodexShim {
@@ -74,6 +136,7 @@ impl CodexShim {
             root: Arc::new(RepositoryRoot::open(path)?),
             resources,
             process_resolver: ProcessResolver::capture(),
+            protocol_compatibility: ProtocolCompatibility::from_env()?,
         })
     }
 
@@ -85,6 +148,11 @@ impl CodexShim {
     #[must_use]
     pub fn resources(&self) -> &RuntimeResources {
         &self.resources
+    }
+
+    #[must_use]
+    pub fn protocol_compatibility(&self) -> ProtocolCompatibility {
+        self.protocol_compatibility
     }
 
     /// Verify that the retained repository root remains accessible.
@@ -131,7 +199,14 @@ impl CodexShim {
 
     #[must_use]
     pub fn discovery_result() -> DiscoverResult {
-        DiscoverResult::from_server_info(vec![ProtocolVersion::V_2026_07_28], Self::server_info())
+        Self::discovery_result_for(ProtocolCompatibility::Strict)
+    }
+
+    fn discovery_result_for(compatibility: ProtocolCompatibility) -> DiscoverResult {
+        DiscoverResult::from_server_info(
+            compatibility.supported_protocol_versions().to_vec(),
+            Self::server_info(),
+        )
     }
 
     #[must_use]
@@ -324,22 +399,29 @@ impl ServerHandler for CodexShim {
     }
 
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
-        Cow::Borrowed(&[ProtocolVersion::V_2026_07_28])
+        Cow::Borrowed(self.protocol_compatibility.supported_protocol_versions())
     }
 
     async fn initialize(
         &self,
-        _request: InitializeRequestParams,
-        _context: RequestContext<RoleServer>,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
-        Err(McpError::method_not_found::<InitializeResultMethod>())
+        if self.protocol_compatibility != ProtocolCompatibility::Legacy
+            || request.protocol_version != ProtocolVersion::V_2025_06_18
+        {
+            return Err(McpError::method_not_found::<InitializeResultMethod>());
+        }
+
+        context.peer.set_peer_info(request);
+        Ok(Self::server_info().with_protocol_version(ProtocolVersion::V_2025_06_18))
     }
 
     async fn discover(
         &self,
         _context: RequestContext<RoleServer>,
     ) -> Result<DiscoverResult, McpError> {
-        Ok(Self::discovery_result())
+        Ok(Self::discovery_result_for(self.protocol_compatibility))
     }
 
     async fn list_tools(
@@ -641,7 +723,21 @@ fn read_only_annotations() -> ToolAnnotations {
 mod tests {
     use std::{fs, sync::Arc};
 
-    use super::CodexShim;
+    use super::{CodexShim, ProtocolCompatibility};
+
+    #[test]
+    fn protocol_compatibility_accepts_only_explicit_levels() {
+        assert_eq!(
+            "strict".parse::<ProtocolCompatibility>().expect("strict"),
+            ProtocolCompatibility::Strict
+        );
+        assert_eq!(
+            "legacy".parse::<ProtocolCompatibility>().expect("legacy"),
+            ProtocolCompatibility::Legacy
+        );
+        assert!("auto".parse::<ProtocolCompatibility>().is_err());
+        assert!("LEGACY".parse::<ProtocolCompatibility>().is_err());
+    }
 
     #[test]
     fn root_capability_blocks_parent_escape() {

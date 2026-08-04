@@ -16,14 +16,26 @@ struct Session {
 
 impl Session {
     fn start() -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_codexshim"))
+        Self::start_with_compatibility(None)
+    }
+
+    fn start_legacy() -> Self {
+        Self::start_with_compatibility(Some("legacy"))
+    }
+
+    fn start_with_compatibility(compatibility: Option<&str>) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_codexshim"));
+        command
             .arg("serve")
             .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .env_remove("CODEXSHIM_MCP_COMPATIBILITY")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start codexshim");
+            .stderr(Stdio::null());
+        if let Some(compatibility) = compatibility {
+            command.env("CODEXSHIM_MCP_COMPATIBILITY", compatibility);
+        }
+        let mut child = command.spawn().expect("start codexshim");
         let stdin = child.stdin.take().expect("child stdin");
         let stdout = BufReader::new(child.stdout.take().expect("child stdout"));
         Self {
@@ -290,8 +302,30 @@ fn missing_modern_metadata_is_rejected_without_corrupting_stdio() {
 }
 
 #[test]
-fn legacy_initialize_is_method_not_found() {
+fn strict_compatibility_rejects_legacy_initialize() {
     let mut session = Session::start();
+    session.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": { "name": "legacy-test", "version": "1.0.0" }
+        }
+    }));
+    let response = session.receive();
+    assert_eq!(response["id"], 1);
+    assert_eq!(response["error"]["code"], -32601);
+
+    drop(session.stdin);
+    let status = session.child.wait().expect("wait for rejected server");
+    assert!(!status.success());
+}
+
+#[test]
+fn legacy_compatibility_rejects_unlisted_protocol_versions() {
+    let mut session = Session::start_legacy();
     session.send(&json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -309,6 +343,81 @@ fn legacy_initialize_is_method_not_found() {
     drop(session.stdin);
     let status = session.child.wait().expect("wait for rejected server");
     assert!(!status.success());
+}
+
+#[test]
+fn explicit_legacy_compatibility_uses_native_initialize_lifecycle() {
+    let mut session = Session::start_legacy();
+    session.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": { "name": "legacy-test", "version": "1.0.0" }
+        }
+    }));
+    let initialize = session.receive();
+    assert_eq!(initialize["id"], 1);
+    assert_eq!(initialize["result"]["protocolVersion"], "2025-06-18");
+    assert_eq!(initialize["result"]["capabilities"], json!({ "tools": {} }));
+
+    session.send(&json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    }));
+    session.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list",
+        "params": {}
+    }));
+    let list = session.receive();
+    assert_eq!(list["id"], 2);
+    assert_eq!(
+        list["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name"))
+            .collect::<Vec<_>>(),
+        ["read", "grep", "glob", "run_process"]
+    );
+
+    session.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "read",
+            "arguments": { "path": "src/main.rs", "line_count": 2 }
+        }
+    }));
+    let read = session.receive();
+    assert_eq!(read["id"], 3);
+    assert_eq!(read["result"]["isError"], false);
+    assert!(read["result"].get("resultType").is_none());
+    assert!(
+        read["result"]["content"][0]["text"]
+            .as_str()
+            .expect("read text")
+            .contains("1\tuse std::")
+    );
+    session.close();
+}
+
+#[test]
+fn explicit_legacy_compatibility_advertises_modern_first() {
+    let mut session = Session::start_legacy();
+    session.send(&modern_request(1, "server/discover", empty_params()));
+    let discover = session.receive();
+    assert_eq!(discover["id"], 1);
+    assert_eq!(
+        discover["result"]["supportedVersions"],
+        json!(["2026-07-28", "2025-06-18"])
+    );
+    session.close();
 }
 
 #[test]
@@ -364,6 +473,58 @@ fn eight_parallel_process_calls_respect_admission_without_protocol_corruption() 
     }
     ids.sort_unstable();
     assert_eq!(ids, (20..28).collect::<Vec<_>>());
+    session.close();
+}
+
+#[cfg(unix)]
+#[test]
+fn run_process_preserves_cargo_multicall_proxy_identity() {
+    let mut session = Session::start();
+    session.send(&modern_request(1, "server/discover", empty_params()));
+    assert_eq!(session.receive()["id"], 1);
+
+    let mut process = empty_params();
+    process.insert("name".to_owned(), json!("run_process"));
+    process.insert(
+        "arguments".to_owned(),
+        json!({
+            "program": "cargo",
+            "args": [
+                "test",
+                "--locked",
+                "--test",
+                "modern_stdio",
+                "explicit_legacy_compatibility_uses_native_initialize_lifecycle",
+                "--",
+                "--nocapture"
+            ],
+            "cwd": env!("CARGO_MANIFEST_DIR"),
+            "timeout_ms": 120_000
+        }),
+    );
+    session.send(&modern_request(2, "tools/call", process));
+    let response = session.receive();
+    assert_eq!(response["id"], 2);
+    assert_eq!(response["result"]["isError"], false);
+    let output = response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("process output");
+    let resolved = output
+        .lines()
+        .find_map(|line| line.strip_prefix("Resolved program: "))
+        .expect("resolved program line");
+    assert_eq!(
+        std::path::Path::new(resolved)
+            .file_name()
+            .and_then(|name| name.to_str()),
+        Some("cargo")
+    );
+    assert!(
+        output
+            .contains("test explicit_legacy_compatibility_uses_native_initialize_lifecycle ... ok")
+    );
+    assert!(output.contains("1 passed; 0 failed"));
+    assert!(output.contains("Exit code: 0"));
     session.close();
 }
 

@@ -61,6 +61,10 @@ async fn run(config: RuntimeConfig) -> Result<(), Box<dyn Error>> {
             println!("codexshim doctor: ok");
             println!("root: {}", service.root_path().display());
             println!("protocol: 2026-07-28");
+            println!(
+                "protocol compatibility: {}",
+                service.protocol_compatibility()
+            );
             println!("read-only calls: {MAX_READ_ONLY_CALLS}");
             println!("process calls: {MAX_PROCESS_CALLS}");
             println!("process lifecycle: ok");

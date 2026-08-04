@@ -306,11 +306,35 @@ fn resolve_candidate(candidate: &Path) -> Result<ResolvedProgram, ProcessError> 
             )));
         }
     }
-    let absolute = fs::canonicalize(candidate).map_err(|error| {
+    let executable = fs::canonicalize(candidate).map_err(|error| {
         ProcessError::Resolve(format!("cannot normalize {}: {error}", candidate.display()))
     })?;
-    let launcher = launcher_for(&absolute)?;
-    Ok(ResolvedProgram { absolute, launcher })
+    let file_name = candidate.file_name().ok_or_else(|| {
+        ProcessError::Resolve(format!(
+            "program path has no executable name: {}",
+            candidate.display()
+        ))
+    })?;
+    let parent = candidate.parent().ok_or_else(|| {
+        ProcessError::Resolve(format!(
+            "program path has no parent directory: {}",
+            candidate.display()
+        ))
+    })?;
+    let absolute = fs::canonicalize(parent)
+        .map_err(|error| {
+            ProcessError::Resolve(format!(
+                "cannot normalize program directory {}: {error}",
+                parent.display()
+            ))
+        })?
+        .join(file_name);
+    let launcher = launcher_for(&executable)?;
+    Ok(ResolvedProgram {
+        absolute,
+        executable,
+        launcher,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -360,6 +384,7 @@ fn launcher_for(path: &Path) -> Result<Launcher, ProcessError> {
 #[derive(Clone, Debug)]
 struct ResolvedProgram {
     absolute: PathBuf,
+    executable: PathBuf,
     launcher: Launcher,
 }
 
@@ -444,7 +469,7 @@ fn validate_launcher_request(
     request: &ProcessRequest,
 ) -> Result<(), ProcessError> {
     let file_name = resolved
-        .absolute
+        .executable
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or_default();
@@ -460,15 +485,30 @@ fn validate_launcher_request(
     }
     if (file_name.eq_ignore_ascii_case("powershell.exe")
         || file_name.eq_ignore_ascii_case("pwsh.exe"))
-        && request.args.iter().any(|arg| {
-            arg.eq_ignore_ascii_case("-command") || arg.eq_ignore_ascii_case("-encodedcommand")
-        })
+        && request
+            .args
+            .iter()
+            .any(|arg| is_powershell_command_evaluation_arg(arg))
     {
         return Err(ProcessError::Validation(
-            "PowerShell -Command and -EncodedCommand are not accepted".to_owned(),
+            "PowerShell command-evaluation switches are not accepted".to_owned(),
         ));
     }
     Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn is_powershell_command_evaluation_arg(argument: &str) -> bool {
+    let name = argument
+        .split_once([':', '='])
+        .map_or(argument, |(name, _)| name)
+        .to_ascii_lowercase();
+    if matches!(name.as_str(), "-cwa" | "-e" | "-ec") {
+        return true;
+    }
+    ["-command", "-commandwithargs", "-encodedcommand"]
+        .iter()
+        .any(|full| name.len() > 1 && full.starts_with(&name))
 }
 
 #[cfg(unix)]
@@ -694,8 +734,9 @@ mod platform {
         cancellation: &CancellationToken,
     ) -> Result<String, ProcessError> {
         let started = Instant::now();
-        let mut command = Command::new(&resolved.absolute);
+        let mut command = Command::new(&resolved.executable);
         command
+            .arg0(&resolved.absolute)
             .args(&request.args)
             .current_dir(cwd)
             .stdin(Stdio::piped())
@@ -919,6 +960,39 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn powershell_command_evaluation_switches_are_classified_conservatively() {
+        for denied in [
+            "-Command",
+            "-c",
+            "-command:Get-Process",
+            "-CommandWithArgs",
+            "-cwa",
+            "-EncodedCommand",
+            "-e",
+            "-ec",
+            "-enc",
+            "-encodedcommand=payload",
+        ] {
+            assert!(
+                is_powershell_command_evaluation_arg(denied),
+                "{denied} must be rejected"
+            );
+        }
+        for allowed in [
+            "-ConfigurationName",
+            "-EncodedArguments",
+            "-ExecutionPolicy",
+            "-File",
+            "-NoProfile",
+        ] {
+            assert!(
+                !is_powershell_command_evaluation_arg(allowed),
+                "{allowed} is not a command-evaluation switch"
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn resolver_ignores_empty_path_and_requires_executable_regular_file() {
@@ -929,14 +1003,61 @@ mod tests {
         fs::write(&executable, "#!/bin/sh\nexit 0\n").expect("write probe");
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).expect("chmod");
         let resolver = ProcessResolver::for_tests(vec![fixture.path().to_owned()]);
-        assert_eq!(
-            resolver
-                .resolve("probe", fixture.path())
-                .expect("resolve")
-                .absolute,
-            fs::canonicalize(executable).expect("canonical")
-        );
+        let program = resolver.resolve("probe", fixture.path()).expect("resolve");
+        let executable = fs::canonicalize(executable).expect("canonical");
+        assert_eq!(program.absolute, executable);
+        assert_eq!(program.executable, executable);
         assert!(resolver.resolve("probe arg", fixture.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_multicall_proxy_preserves_resolved_argv0() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempfile::tempdir().expect("fixture");
+        let proxy = fixture.path().join("cargo");
+        symlink(std::env::current_exe().expect("test executable"), &proxy)
+            .expect("create multicall proxy");
+        let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+        let resolver = ProcessResolver::for_tests(vec![fixture.path().to_owned()]);
+        let mut proxy_request = request("cargo".to_owned());
+        proxy_request.args = vec![
+            "--exact".to_owned(),
+            "tools::process::tests::unix_multicall_argv0_child_fixture".to_owned(),
+            "--nocapture".to_owned(),
+        ];
+        proxy_request
+            .env
+            .insert("CODEXSHIM_MULTICALL_FIXTURE".to_owned(), "child".to_owned());
+
+        let output = execute(
+            &root,
+            &resolver,
+            &proxy_request,
+            Duration::from_secs(5),
+            &CancellationToken::new(),
+        )
+        .expect("multicall proxy");
+
+        assert!(output.contains(&format!("Resolved program: {}", proxy.display())));
+        assert!(output.contains("multicall argv0: cargo"));
+        assert!(output.contains("Exit code: 0"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_multicall_argv0_child_fixture() {
+        if std::env::var("CODEXSHIM_MULTICALL_FIXTURE").as_deref() != Ok("child") {
+            return;
+        }
+        let argv0 = std::env::args_os().next().expect("argv0");
+        let name = Path::new(&argv0)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .expect("UTF-8 argv0 name");
+        assert_eq!(name, "cargo");
+        println!("multicall argv0: {name}");
     }
 
     #[test]
