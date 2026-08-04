@@ -318,31 +318,52 @@ fn reject_nul(path: &Path) -> Result<(), PathError> {
 
 #[cfg(windows)]
 fn windows_component_eq(left: Component<'_>, right: Component<'_>) -> bool {
+    use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
+    use std::path::Prefix;
     use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 
-    fn units(component: Component<'_>) -> Vec<u16> {
-        match component {
-            Component::Prefix(prefix) => prefix.as_os_str().encode_wide().collect(),
-            Component::RootDir => vec![u16::from(b'\\')],
-            Component::Normal(segment) => segment.encode_wide().collect(),
-            Component::CurDir => vec![u16::from(b'.')],
-            Component::ParentDir => vec![u16::from(b'.'), u16::from(b'.')],
+    fn os_str_eq(left: &OsStr, right: &OsStr) -> bool {
+        let left = left.encode_wide().collect::<Vec<_>>();
+        let right = right.encode_wide().collect::<Vec<_>>();
+        let Ok(left_len) = i32::try_from(left.len()) else {
+            return false;
+        };
+        let Ok(right_len) = i32::try_from(right.len()) else {
+            return false;
+        };
+        // SAFETY: Both pointers remain valid for the supplied slice lengths, and TRUE is the
+        // documented value for ordinal case-insensitive comparison.
+        unsafe {
+            CompareStringOrdinal(left.as_ptr(), left_len, right.as_ptr(), right_len, 1)
+                == CSTR_EQUAL
         }
     }
 
-    let left = units(left);
-    let right = units(right);
-    let Ok(left_len) = i32::try_from(left.len()) else {
-        return false;
-    };
-    let Ok(right_len) = i32::try_from(right.len()) else {
-        return false;
-    };
-    // SAFETY: Both pointers remain valid for the supplied slice lengths, and TRUE is the
-    // documented value for ordinal case-insensitive comparison.
-    unsafe {
-        CompareStringOrdinal(left.as_ptr(), left_len, right.as_ptr(), right_len, 1) == CSTR_EQUAL
+    fn prefix_eq(left: Prefix<'_>, right: Prefix<'_>) -> bool {
+        match (left, right) {
+            (
+                Prefix::Disk(left) | Prefix::VerbatimDisk(left),
+                Prefix::Disk(right) | Prefix::VerbatimDisk(right),
+            ) => left.eq_ignore_ascii_case(&right),
+            (
+                Prefix::UNC(left_server, left_share) | Prefix::VerbatimUNC(left_server, left_share),
+                Prefix::UNC(right_server, right_share)
+                | Prefix::VerbatimUNC(right_server, right_share),
+            ) => os_str_eq(left_server, right_server) && os_str_eq(left_share, right_share),
+            (Prefix::Verbatim(left), Prefix::Verbatim(right))
+            | (Prefix::DeviceNS(left), Prefix::DeviceNS(right)) => os_str_eq(left, right),
+            _ => false,
+        }
+    }
+
+    match (left, right) {
+        (Component::Prefix(left), Component::Prefix(right)) => prefix_eq(left.kind(), right.kind()),
+        (Component::RootDir, Component::RootDir)
+        | (Component::CurDir, Component::CurDir)
+        | (Component::ParentDir, Component::ParentDir) => true,
+        (Component::Normal(left), Component::Normal(right)) => os_str_eq(left, right),
+        _ => false,
     }
 }
 
@@ -520,6 +541,54 @@ mod tests {
             .resolve(Path::new(&folded))
             .expect("Windows absolute comparison is case-insensitive");
         assert_eq!(resolved.slash_path(), Some("CASESENSITIVENAME.RS"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_standard_and_verbatim_prefixes_are_equivalent() {
+        use std::path::PathBuf;
+
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root = RepositoryRoot::open(fixture.path()).expect("open root");
+        let canonical = root.path().to_string_lossy();
+        let standard = canonical
+            .strip_prefix(r"\\?\")
+            .expect("canonical drive path uses a verbatim prefix");
+        let resolved = root
+            .resolve(&PathBuf::from(standard).join("CaseSensitiveName.rs"))
+            .expect("standard drive path resolves under verbatim root");
+        assert_eq!(resolved.slash_path(), Some("CaseSensitiveName.rs"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_prefix_equivalence_is_narrow() {
+        use super::windows_component_eq;
+
+        fn prefix(path: &Path) -> std::path::Component<'_> {
+            path.components().next().expect("path prefix")
+        }
+
+        assert!(windows_component_eq(
+            prefix(Path::new(r"C:\repo")),
+            prefix(Path::new(r"\\?\c:\repo")),
+        ));
+        assert!(windows_component_eq(
+            prefix(Path::new(r"\\server\share\repo")),
+            prefix(Path::new(r"\\?\UNC\SERVER\SHARE\repo")),
+        ));
+        assert!(!windows_component_eq(
+            prefix(Path::new(r"C:\repo")),
+            prefix(Path::new(r"D:\repo")),
+        ));
+        assert!(!windows_component_eq(
+            prefix(Path::new(r"\\server\share\repo")),
+            prefix(Path::new(r"\\?\UNC\server\other\repo")),
+        ));
+        assert!(!windows_component_eq(
+            prefix(Path::new(r"\\.\COM1")),
+            prefix(Path::new(r"\\?\COM1")),
+        ));
     }
 
     #[cfg(unix)]

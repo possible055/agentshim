@@ -3,7 +3,7 @@ command = 'C:\Users\me\AppData\Local\codexshim\codexshim.exe'
 args = ["serve"]
 required = true
 startup_timeout_sec = 15
-tool_timeout_sec = 300
+tool_timeout_sec = 310
 enabled_tools = ["read", "grep", "glob", "run_process"]
 default_tools_approval_mode = "writes"
 # Codex 確實送出 initialize/2025-06-18 時，才在 env 加入 CODEXSHIM_MCP_COMPATIBILITY = "legacy"。
@@ -13,5 +13,5 @@ env = { CODEX_MCP_PROTOCOL_VERSION = "2026-07-28" }
 approval_mode = "prompt"
 
 [features]
-shell_tool = false
+shell_tool = true
 mcp_2026_07_28 = true

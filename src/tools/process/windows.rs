@@ -45,7 +45,8 @@ use windows_sys::Win32::{
 
 use super::{
     CLEANUP_DEADLINE, Capture, CompletedProcess, ENVIRONMENT_DEFAULTS, Launcher, ProcessError,
-    ProcessRequest, ResolvedProgram, drain, render_completed, spawn_monitored, write_stdin,
+    ProcessRequest, ResolvedProgram, TimedOutProcess, drain, render_completed, render_timeout,
+    spawn_monitored, write_stdin,
 };
 use std::sync::{Arc, atomic::Ordering as AtomicOrdering};
 
@@ -86,11 +87,10 @@ pub(super) fn run(
     cancellation: &CancellationToken,
 ) -> Result<String, ProcessError> {
     let started = Instant::now();
-    let launch = LaunchEncoding::new(resolved, request)?;
-    let environment = environment_block(request);
-    let cwd_wide = create_process_cwd(cwd)?;
+    let (launch, environment, cwd_wide) = prepare_launch_inputs(resolved, cwd, request)?;
 
-    let (stdin_pipe, stdout_pipe, stderr_pipe, attributes, startup) = prepare_stdio()?;
+    let (stdin_pipe, stdout_pipe, stderr_pipe, attributes, startup) =
+        prepare_stdio().map_err(|error| io_context("prepare stdio", &error))?;
 
     let mut command_line = launch.command_line;
     let mut process_info = PROCESS_INFORMATION::default();
@@ -112,9 +112,10 @@ pub(super) fn run(
         )
     };
     if created == 0 {
-        return Err(io::Error::last_os_error().into());
+        return Err(io_context("CreateProcessW", &io::Error::last_os_error()).into());
     }
-    let mut lifecycle = Lifecycle::new(process_info)?;
+    let mut lifecycle =
+        Lifecycle::new(process_info).map_err(|error| io_context("create lifecycle", &error))?;
     #[cfg(test)]
     inject_failure(FailurePoint::SpawnedSuspended)?;
     drop(attributes);
@@ -122,8 +123,12 @@ pub(super) fn run(
     drop(stdout_pipe.child);
     drop(stderr_pipe.child);
 
-    lifecycle.install_job()?;
-    lifecycle.resume()?;
+    lifecycle
+        .install_job()
+        .map_err(|error| io_context("install job", &error))?;
+    lifecycle
+        .resume()
+        .map_err(|error| io_context("resume primary process", &error))?;
     #[cfg(test)]
     inject_failure(FailurePoint::Running)?;
 
@@ -159,13 +164,14 @@ pub(super) fn run(
             return Err(ProcessError::Cancelled);
         }
         if started.elapsed() >= timeout {
-            lifecycle.terminate_and_wait()?;
-            let (stdin_result, _, _) = settle_threads(stdin_thread, stdout_thread, stderr_thread)?;
-            let _ = stdin_result;
-            lifecycle.finish();
-            return Err(ProcessError::Timeout {
-                timeout_ms: request.timeout_ms(),
-            });
+            return terminate_after_timeout(
+                &mut lifecycle,
+                (stdin_thread, stdout_thread, stderr_thread),
+                resolved,
+                cwd,
+                request,
+                started,
+            );
         }
         thread::sleep(Duration::from_millis(10));
     };
@@ -187,8 +193,30 @@ pub(super) fn run(
     )
 }
 
+fn io_context(context: &str, error: &io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("{context}: {error}"))
+}
+
+fn prepare_launch_inputs(
+    resolved: &ResolvedProgram,
+    cwd: &Path,
+    request: &ProcessRequest,
+) -> Result<(LaunchEncoding, Vec<u16>, Vec<u16>), ProcessError> {
+    Ok((
+        LaunchEncoding::new(resolved, request)?,
+        environment_block(request),
+        create_process_cwd(cwd)?,
+    ))
+}
+
 type IoThreads = (
     Arc<super::AtomicBool>,
+    thread::JoinHandle<io::Result<()>>,
+    thread::JoinHandle<io::Result<Capture>>,
+    thread::JoinHandle<io::Result<Capture>>,
+);
+
+type PendingIo = (
     thread::JoinHandle<io::Result<()>>,
     thread::JoinHandle<io::Result<Capture>>,
     thread::JoinHandle<io::Result<Capture>>,
@@ -202,6 +230,32 @@ fn spawn_io_threads(stdin: File, stdout: File, stderr: File, input: Option<Strin
     let stdout = spawn_monitored(Arc::clone(&failed), move || drain(stdout));
     let stderr = spawn_monitored(Arc::clone(&failed), move || drain(stderr));
     (failed, stdin, stdout, stderr)
+}
+
+fn terminate_after_timeout(
+    lifecycle: &mut Lifecycle,
+    (stdin, stdout, stderr): PendingIo,
+    resolved: &ResolvedProgram,
+    cwd: &Path,
+    request: &ProcessRequest,
+    started: Instant,
+) -> Result<String, ProcessError> {
+    lifecycle.terminate_and_wait()?;
+    let (stdin_result, stdout, stderr) = settle_threads(stdin, stdout, stderr)?;
+    let _ = stdin_result;
+    lifecycle.finish();
+    let timeout_ms = request.timeout_ms();
+    let report = render_timeout(
+        &TimedOutProcess {
+            resolved: resolved.clone(),
+            cwd: cwd.to_owned(),
+            duration: started.elapsed(),
+            stdout,
+            stderr,
+        },
+        timeout_ms,
+    )?;
+    Err(ProcessError::Timeout { timeout_ms, report })
 }
 
 fn terminate_after_io_failure(
@@ -560,6 +614,7 @@ impl Pipe {
 
 struct AttributeList {
     storage: Vec<usize>,
+    handles: Box<[HANDLE]>,
 }
 
 impl AttributeList {
@@ -577,14 +632,15 @@ impl AttributeList {
         if unsafe { InitializeProcThreadAttributeList(pointer, 1, 0, &raw mut bytes) } == 0 {
             return Err(io::Error::last_os_error());
         }
-        let list = Self { storage };
+        let handles = handles.to_vec().into_boxed_slice();
+        let list = Self { storage, handles };
         if unsafe {
             UpdateProcThreadAttribute(
                 list.as_ptr(),
                 0,
                 PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
-                handles.as_ptr().cast::<c_void>(),
-                mem::size_of_val(handles),
+                list.handles.as_ptr().cast::<c_void>(),
+                mem::size_of_val(list.handles.as_ref()),
                 null_mut(),
                 null(),
             )
@@ -659,7 +715,7 @@ impl Lifecycle {
             CreateIoCompletionPort(INVALID_HANDLE_VALUE, null_mut(), 0, 1)
         })?;
         let association = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
-            CompletionKey: null_mut(),
+            CompletionKey: job.raw(),
             CompletionPort: completion.raw(),
         };
         set_job_information(

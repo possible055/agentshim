@@ -485,9 +485,13 @@ fn blocking_response<E: Display>(
 }
 
 fn process_queue_timeout(timeout_ms: u64) -> CallToolResponse {
-    tool_error(format!(
+    tool_error(process_queue_timeout_message(timeout_ms))
+}
+
+fn process_queue_timeout_message(timeout_ms: u64) -> String {
+    format!(
         "run_process timed out after {timeout_ms} ms while waiting for process capacity; no child was started"
-    ))
+    )
 }
 
 fn relayed_cancellation(
@@ -533,7 +537,7 @@ fn read_tool() -> Tool {
                 "path": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Absolute or repository-root-relative regular file path."
+                    "description": "Platform-native absolute or repository-root-relative regular file path."
                 },
                 "start_line": {
                     "type": "integer",
@@ -593,7 +597,7 @@ fn grep_tool() -> Tool {
                 },
                 "path": {
                     "type": "string",
-                    "description": "Optional absolute or repository-root-relative file or directory path."
+                    "description": "Optional platform-native absolute or repository-root-relative file or directory path."
                 },
                 "pattern": {
                     "type": "string",
@@ -632,7 +636,7 @@ fn glob_tool() -> Tool {
                 "path": {
                     "type": "string",
                     "default": ".",
-                    "description": "Absolute or repository-root-relative directory to traverse."
+                    "description": "Platform-native absolute or repository-root-relative directory to traverse."
                 },
                 "pattern": {
                     "type": "string",
@@ -662,7 +666,7 @@ fn run_process_tool() -> Tool {
                 },
                 "cwd": {
                     "type": "string",
-                    "description": "Optional working directory; defaults to the repository root."
+                    "description": "Optional platform-native absolute or repository-root-relative working directory; defaults to the repository root."
                 },
                 "env": {
                     "type": "object",
@@ -683,7 +687,7 @@ fn run_process_tool() -> Tool {
                 "timeout_ms": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 290_000,
+                    "maximum": 300_000,
                     "default": 120_000
                 },
                 "unset_env": {
@@ -721,9 +725,9 @@ fn read_only_annotations() -> ToolAnnotations {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, sync::Arc};
+    use std::fs;
 
-    use super::{CodexShim, ProtocolCompatibility};
+    use super::{CodexShim, ProtocolCompatibility, process_queue_timeout_message};
 
     #[test]
     fn protocol_compatibility_accepts_only_explicit_levels() {
@@ -737,6 +741,15 @@ mod tests {
         );
         assert!("auto".parse::<ProtocolCompatibility>().is_err());
         assert!("LEGACY".parse::<ProtocolCompatibility>().is_err());
+    }
+
+    #[test]
+    fn process_queue_timeout_does_not_claim_process_diagnostics() {
+        let message = process_queue_timeout_message(25);
+        assert!(message.contains("no child was started"));
+        for field in ["Resolved program:", "Launcher:", "Cwd:", "Exit code:"] {
+            assert!(!message.contains(field));
+        }
     }
 
     #[test]
@@ -778,8 +791,9 @@ mod tests {
             .expect_err("symlink escape must fail");
     }
 
+    #[cfg(any(unix, windows))]
     #[test]
-    fn root_handle_survives_root_replacement() {
+    fn root_handle_preserves_repository_identity() {
         let fixture = tempfile::tempdir().expect("create fixture");
         let root = fixture.path().join("root");
         let moved = fixture.path().join("moved");
@@ -787,9 +801,21 @@ mod tests {
         fs::write(root.join("identity.txt"), "original").expect("write original");
         let server = CodexShim::from_path(&root).expect("open root");
 
-        fs::rename(&root, &moved).expect("move original root");
-        fs::create_dir(&root).expect("create replacement root");
-        fs::write(root.join("identity.txt"), "replacement").expect("write replacement");
+        #[cfg(unix)]
+        {
+            fs::rename(&root, &moved).expect("move original root");
+            fs::create_dir(&root).expect("create replacement root");
+            fs::write(root.join("identity.txt"), "replacement").expect("write replacement");
+        }
+        #[cfg(windows)]
+        {
+            let error =
+                fs::rename(&root, &moved).expect_err("held Windows root blocks replacement");
+            assert!(
+                matches!(error.raw_os_error(), Some(5 | 32)),
+                "unexpected Windows root rename error: {error}"
+            );
+        }
 
         assert_eq!(
             server
@@ -799,6 +825,5 @@ mod tests {
                 .expect("read held root"),
             "original"
         );
-        assert!(Arc::strong_count(server.root.capability()) >= 1);
     }
 }

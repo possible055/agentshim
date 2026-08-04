@@ -945,6 +945,10 @@ mod tests {
         (fixture, root)
     }
 
+    fn native_path(path: &str) -> String {
+        path.replace('/', std::path::MAIN_SEPARATOR_STR)
+    }
+
     #[test]
     fn content_fixed_case_context_and_worker_counts_are_deterministic() {
         let (_fixture, root) = fixture();
@@ -954,7 +958,7 @@ mod tests {
         query.context_lines = Some(1);
         let cancellation = CancellationToken::new();
         let baseline = execute(&root, &query, 1, &cancellation).expect("grep");
-        assert!(baseline.contains("src/a.rs"));
+        assert!(baseline.contains(&native_path("src/a.rs")));
         assert!(baseline.contains("-1-before"));
         assert!(!baseline.contains("ignored.rs"));
         for workers in [2, 4, 8, 16] {
@@ -973,8 +977,8 @@ mod tests {
         query.fixed_strings = Some(true);
         let cancellation = CancellationToken::new();
         let baseline = execute(&root, &query, 1, &cancellation).expect("grep without glob");
-        assert!(baseline.contains("src/a.rs"));
-        assert!(baseline.contains("src/b.rs"));
+        assert!(baseline.contains(&native_path("src/a.rs")));
+        assert!(baseline.contains(&native_path("src/b.rs")));
         assert!(!baseline.contains("ignored.rs"));
         for workers in [2, 4, 8, 16] {
             assert_eq!(
@@ -992,14 +996,14 @@ mod tests {
         files.mode = Some(GrepMode::Files);
         files.limit = Some(1);
         let output = execute(&root, &files, 4, &cancellation).expect("files");
-        assert!(output.contains("src/a.rs"));
+        assert!(output.contains(&native_path("src/a.rs")));
         assert!(output.contains("\"offset\":1"));
 
         let mut count = request("needle");
         count.mode = Some(GrepMode::Count);
         let output = execute(&root, &count, 4, &cancellation).expect("count");
-        assert!(output.contains("src/a.rs:2"));
-        assert!(output.contains("src/b.rs:2"));
+        assert!(output.contains(&format!("{}:2", native_path("src/a.rs"))));
+        assert!(output.contains(&format!("{}:2", native_path("src/b.rs"))));
     }
 
     #[test]
@@ -1035,7 +1039,7 @@ mod tests {
 
         let output =
             execute(&root, &request("needle"), 4, &CancellationToken::new()).expect("bounded grep");
-        assert!(output.contains("src/large.rs"));
+        assert!(output.contains(&native_path("src/large.rs")));
         assert!(output.contains("Skipped: 1"));
     }
 
@@ -1100,7 +1104,7 @@ mod tests {
         page.reduce(stable_outcome, GrepMode::Content, false)
             .expect("reduce stable");
         let output = render(&query, &page, &cancellation).expect("render");
-        assert!(output.contains("src/b.rs"));
+        assert!(output.contains(&native_path("src/b.rs")));
         assert!(!output.contains("replacement without"));
         assert!(output.contains("Skipped: 1 files or entries."));
     }

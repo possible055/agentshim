@@ -129,6 +129,38 @@ fn assert_version_process_call(session: &mut Session, id: u64) {
     assert!(process_text.contains("Exit code: 0"));
 }
 
+fn assert_glob_path_is_reusable(session: &mut Session, response: &Value, read_id: u64) {
+    let glob_text = response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("glob text");
+    assert!(glob_text.contains(&format!(
+        "{}src{}",
+        std::path::MAIN_SEPARATOR,
+        std::path::MAIN_SEPARATOR
+    )));
+    let glob_path = glob_text
+        .lines()
+        .find(|line| {
+            let path = std::path::Path::new(line);
+            path.is_absolute()
+                && path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
+        })
+        .expect("glob path");
+    let mut read_glob_path = empty_params();
+    read_glob_path.insert("name".to_owned(), json!("read"));
+    read_glob_path.insert(
+        "arguments".to_owned(),
+        json!({ "path": glob_path, "line_count": 1 }),
+    );
+    session.send(&modern_request(read_id, "tools/call", read_glob_path));
+    let result = session.receive();
+    assert_eq!(result["id"], read_id);
+    assert_eq!(result["result"]["isError"], false);
+}
+
 #[cfg(unix)]
 fn start_process_tree(session: &mut Session, id: u64, pid_file: &std::path::Path) {
     let mut call = empty_params();
@@ -268,14 +300,9 @@ fn modern_lifecycle_call_cancellation_and_eof_shutdown() {
     let glob_result = session.receive();
     assert_eq!(glob_result["id"], 8);
     assert_eq!(glob_result["result"]["isError"], false);
-    assert!(
-        glob_result["result"]["content"][0]["text"]
-            .as_str()
-            .expect("glob text")
-            .contains("/src/")
-    );
+    assert_glob_path_is_reusable(&mut session, &glob_result, 9);
 
-    assert_version_process_call(&mut session, 9);
+    assert_version_process_call(&mut session, 10);
 
     session.close();
 }
@@ -476,7 +503,6 @@ fn eight_parallel_process_calls_respect_admission_without_protocol_corruption() 
     session.close();
 }
 
-#[cfg(unix)]
 #[test]
 fn run_process_preserves_cargo_multicall_proxy_identity() {
     let mut session = Session::start();
@@ -499,7 +525,7 @@ fn run_process_preserves_cargo_multicall_proxy_identity() {
                 "--nocapture"
             ],
             "cwd": env!("CARGO_MANIFEST_DIR"),
-            "timeout_ms": 120_000
+            "timeout_ms": 300_000
         }),
     );
     session.send(&modern_request(2, "tools/call", process));
@@ -513,11 +539,23 @@ fn run_process_preserves_cargo_multicall_proxy_identity() {
         .lines()
         .find_map(|line| line.strip_prefix("Resolved program: "))
         .expect("resolved program line");
+    let resolved = std::path::Path::new(resolved);
     assert_eq!(
-        std::path::Path::new(resolved)
-            .file_name()
-            .and_then(|name| name.to_str()),
+        resolved.file_stem().and_then(|name| name.to_str()),
         Some("cargo")
+    );
+    assert_ne!(
+        resolved.file_stem().and_then(|name| name.to_str()),
+        Some("rustup")
+    );
+    assert!(output.contains("Launcher: native"));
+    let cwd = output
+        .lines()
+        .find_map(|line| line.strip_prefix("Cwd: "))
+        .expect("cwd line");
+    assert_eq!(
+        std::fs::canonicalize(cwd).expect("canonical output cwd"),
+        std::fs::canonicalize(env!("CARGO_MANIFEST_DIR")).expect("canonical manifest cwd")
     );
     assert!(
         output

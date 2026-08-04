@@ -13,7 +13,10 @@ jobs:
     name: Linux and Windows cross-target
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
       - name: Format
         run: cargo fmt --all -- --check
       - name: Lint

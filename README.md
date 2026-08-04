@@ -35,7 +35,7 @@ command = "/absolute/path/to/codexshim"
 args = ["serve"]
 required = true
 startup_timeout_sec = 15
-tool_timeout_sec = 300
+tool_timeout_sec = 310
 enabled_tools = ["read", "grep", "glob", "run_process"]
 default_tools_approval_mode = "writes"
 env = { CODEX_MCP_PROTOCOL_VERSION = "2026-07-28" }
@@ -50,9 +50,13 @@ mcp_2026_07_28 = true
 
 Keep `shell_tool = true` while the external release gates remain incomplete. Change it to `false` only after the full Linux/Windows, Codex integration, performance, and 24-hour soak checklist passes.
 
-On Windows, use a single-quoted TOML path such as `'C:\Users\me\AppData\Local\codexshim\codexshim.exe'` to avoid escaping backslashes.
+On Windows, use a single-quoted TOML path such as `'C:\Users\me\AppData\Local\codexshim\codexshim.exe'` to avoid escaping backslashes. Always configure the prebuilt release executable as the long-lived MCP server; do not use `cargo run` as the MCP command because nested Cargo calls may contend for build locks.
+
+Stop the active MCP server before rebuilding or replacing its Windows executable. A running `.exe` cannot be overwritten; restart Codex after the release build completes.
 
 Start Codex in the repository you want to work on. `codexshim` treats that working directory as the repository root for the lifetime of the server.
+
+Tool paths are interpreted by the platform running the server. Use Windows paths or repository-relative paths with a Windows server, and `/mnt/...` paths only with a Linux server running inside WSL. Cargo-based acceptance tests may update `target` build artifacts even when tracked source and configuration files remain unchanged.
 
 ## Process execution
 

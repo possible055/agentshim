@@ -20,7 +20,7 @@
             "type": "integer"
           },
           "path": {
-            "description": "Absolute or repository-root-relative regular file path.",
+            "description": "Platform-native absolute or repository-root-relative regular file path.",
             "minLength": 1,
             "type": "string"
           },
@@ -92,7 +92,7 @@
             "type": "integer"
           },
           "path": {
-            "description": "Optional absolute or repository-root-relative file or directory path.",
+            "description": "Optional platform-native absolute or repository-root-relative file or directory path.",
             "type": "string"
           },
           "pattern": {
@@ -134,7 +134,7 @@
           },
           "path": {
             "default": ".",
-            "description": "Absolute or repository-root-relative directory to traverse.",
+            "description": "Platform-native absolute or repository-root-relative directory to traverse.",
             "type": "string"
           },
           "pattern": {
@@ -169,7 +169,7 @@
             "type": "array"
           },
           "cwd": {
-            "description": "Optional working directory; defaults to the repository root.",
+            "description": "Optional platform-native absolute or repository-root-relative working directory; defaults to the repository root.",
             "type": "string"
           },
           "env": {
@@ -195,7 +195,7 @@
           },
           "timeout_ms": {
             "default": 120000,
-            "maximum": 290000,
+            "maximum": 300000,
             "minimum": 1,
             "type": "integer"
           },

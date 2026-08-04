@@ -788,6 +788,7 @@ mod tests {
     }
 
     #[cfg(windows)]
+    /// Requires Windows Developer Mode or symbolic-link privilege to exercise the fixture.
     #[test]
     fn windows_capability_allows_internal_symlink_and_blocks_reparse_escape() {
         use std::os::windows::fs::symlink_file;
@@ -796,12 +797,25 @@ mod tests {
         let outside = tempfile::tempdir().expect("outside fixture");
         fs::write(fixture.path().join("target.txt"), "inside\n").expect("target");
         fs::write(outside.path().join("secret.txt"), "outside\n").expect("secret");
-        symlink_file("target.txt", fixture.path().join("inside-link")).expect("inside link");
-        symlink_file(
+        match symlink_file("target.txt", fixture.path().join("inside-link")) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(1314) => {
+                eprintln!("symbolic-link fixture unavailable: {error}");
+                return;
+            }
+            Err(error) => panic!("inside link: {error}"),
+        }
+        match symlink_file(
             outside.path().join("secret.txt"),
             fixture.path().join("escape-link"),
-        )
-        .expect("escape reparse link");
+        ) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(1314) => {
+                eprintln!("symbolic-link fixture unavailable: {error}");
+                return;
+            }
+            Err(error) => panic!("escape reparse link: {error}"),
+        }
         let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
         let cancellation = CancellationToken::new();
 

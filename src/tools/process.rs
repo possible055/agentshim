@@ -19,11 +19,13 @@ use crate::{
 };
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
-const MAX_TIMEOUT_MS: u64 = 290_000;
+const MAX_TIMEOUT_MS: u64 = 300_000;
 const MAX_STDIN_BYTES: usize = 1024 * 1024;
 const CAPTURE_HEAD_BYTES: usize = 12 * 1024;
 const CAPTURE_TAIL_BYTES: usize = 12 * 1024;
 const DRAIN_CHUNK_BYTES: usize = 64 * 1024;
+const DIAGNOSTIC_PATH_BYTES: usize = 2 * 1024;
+const DIAGNOSTIC_PATH_MARKER: &str = "...[path truncated]...";
 #[cfg(unix)]
 const TERM_GRACE: Duration = Duration::from_millis(250);
 const CLEANUP_DEADLINE: Duration = Duration::from_secs(5);
@@ -84,7 +86,7 @@ impl ProcessRequest {
         }
         if !(1..=MAX_TIMEOUT_MS).contains(&self.timeout_ms()) {
             return Err(ProcessError::Validation(
-                "timeout_ms must be from 1 to 290000".to_owned(),
+                "timeout_ms must be from 1 to 300000".to_owned(),
             ));
         }
 
@@ -396,8 +398,8 @@ pub enum ProcessError {
     Resolve(String),
     #[error("failed to launch or communicate with process: {0}")]
     Io(#[from] io::Error),
-    #[error("process timed out after {timeout_ms} ms and its process tree was terminated")]
-    Timeout { timeout_ms: u64 },
+    #[error("{report}")]
+    Timeout { timeout_ms: u64, report: String },
     #[error("process timed out after {timeout_ms} ms before spawn; no child was started")]
     TimeoutBeforeSpawn { timeout_ms: u64 },
     #[error("process was cancelled and its process tree was terminated")]
@@ -654,6 +656,14 @@ struct CompletedProcess {
     stderr: Capture,
 }
 
+struct TimedOutProcess {
+    resolved: ResolvedProgram,
+    cwd: PathBuf,
+    duration: Duration,
+    stdout: Capture,
+    stderr: Capture,
+}
+
 fn render_completed(
     completed: &CompletedProcess,
     cancellation: &CancellationToken,
@@ -662,9 +672,9 @@ fn render_completed(
     let stderr = completed.stderr.render();
     let header = format!(
         "Resolved program: {}\nLauncher: {}\nCwd: {}",
-        completed.resolved.absolute.display(),
+        diagnostic_path(&completed.resolved.absolute),
         completed.resolved.launcher.label(),
-        completed.cwd.display()
+        diagnostic_path(&completed.cwd)
     );
     let tail = vec![
         format!("Exit code: {}", completed.exit),
@@ -689,6 +699,63 @@ fn render_completed(
     push_stream(&mut formatter, "stdout", &stdout.text, cancellation)?;
     push_stream(&mut formatter, "stderr", &stderr.text, cancellation)?;
     formatter.finish(cancellation).map_err(ProcessError::from)
+}
+
+fn render_timeout(timed_out: &TimedOutProcess, timeout_ms: u64) -> Result<String, ProcessError> {
+    let stdout = timed_out.stdout.render();
+    let stderr = timed_out.stderr.render();
+    let header = format!(
+        "process timed out after {timeout_ms} ms and its process tree was terminated\nResolved program: {}\nLauncher: {}\nCwd: {}\nStatus: timed out; process tree terminated",
+        diagnostic_path(&timed_out.resolved.absolute),
+        timed_out.resolved.launcher.label(),
+        diagnostic_path(&timed_out.cwd)
+    );
+    let tail = vec![
+        "Exit code: unavailable (timed out)".to_owned(),
+        format!("Duration ms: {}", timed_out.duration.as_millis()),
+        format!(
+            "Stdout bytes: read={}, retained={}, dropped={}, invalid={}",
+            timed_out.stdout.bytes_read,
+            timed_out.stdout.retained(),
+            timed_out.stdout.dropped(),
+            stdout.invalid_bytes
+        ),
+        format!(
+            "Stderr bytes: read={}, retained={}, dropped={}, invalid={}",
+            timed_out.stderr.bytes_read,
+            timed_out.stderr.retained(),
+            timed_out.stderr.dropped(),
+            stderr.invalid_bytes
+        ),
+        "Incomplete.".to_owned(),
+    ];
+    let cancellation = CancellationToken::new();
+    let mut formatter = OutputFormatter::new(header, tail, OutputLimits::default())?;
+    push_stream(&mut formatter, "stdout", &stdout.text, &cancellation)?;
+    push_stream(&mut formatter, "stderr", &stderr.text, &cancellation)?;
+    formatter.finish(&cancellation).map_err(ProcessError::from)
+}
+
+fn diagnostic_path(path: &Path) -> String {
+    let rendered = path.display().to_string();
+    if rendered.len() <= DIAGNOSTIC_PATH_BYTES {
+        return rendered;
+    }
+    let retained = DIAGNOSTIC_PATH_BYTES - DIAGNOSTIC_PATH_MARKER.len();
+    let mut head_end = retained / 2;
+    while !rendered.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = rendered.len() - (retained - head_end);
+    while !rendered.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    format!(
+        "{}{}{}",
+        &rendered[..head_end],
+        DIAGNOSTIC_PATH_MARKER,
+        &rendered[tail_start..]
+    )
 }
 
 fn push_stream(
@@ -719,8 +786,8 @@ mod platform {
 
     use super::{
         CLEANUP_DEADLINE, Capture, CompletedProcess, Path, ProcessError, ProcessRequest,
-        ResolvedProgram, TERM_GRACE, apply_environment, drain, render_completed, spawn_monitored,
-        write_stdin,
+        ResolvedProgram, TERM_GRACE, TimedOutProcess, apply_environment, drain, render_completed,
+        render_timeout, spawn_monitored, write_stdin,
     };
     use std::sync::{Arc, atomic::Ordering};
     use std::time::{Duration, Instant};
@@ -794,12 +861,21 @@ mod platform {
             }
             if started.elapsed() >= timeout {
                 terminate(process_group, &mut child)?;
-                let (stdin_result, _, _) =
+                let (stdin_result, stdout, stderr) =
                     settle_threads(stdin_thread, stdout_thread, stderr_thread)?;
                 let _ = stdin_result;
-                return Err(ProcessError::Timeout {
-                    timeout_ms: request.timeout_ms(),
-                });
+                let timeout_ms = request.timeout_ms();
+                let report = render_timeout(
+                    &TimedOutProcess {
+                        resolved: resolved.clone(),
+                        cwd: cwd.to_owned(),
+                        duration: started.elapsed(),
+                        stdout,
+                        stderr,
+                    },
+                    timeout_ms,
+                )?;
+                return Err(ProcessError::Timeout { timeout_ms, report });
             }
             if let Some(status) = child.try_wait()? {
                 if !group_exists(process_group)? {
@@ -1075,6 +1151,72 @@ mod tests {
     }
 
     #[test]
+    fn timeout_report_is_bounded_and_preserves_required_diagnostics() {
+        let mut stdout = Capture::new();
+        stdout.push(&vec![b'o'; crate::output::MODEL_BYTE_LIMIT * 2]);
+        let mut stderr = Capture::new();
+        stderr.push(b"timeout stderr evidence\n");
+        let report = render_timeout(
+            &TimedOutProcess {
+                resolved: ResolvedProgram {
+                    absolute: PathBuf::from("cargo"),
+                    executable: PathBuf::from("cargo"),
+                    launcher: Launcher::Native,
+                },
+                cwd: PathBuf::from("workspace"),
+                duration: Duration::from_millis(150),
+                stdout,
+                stderr,
+            },
+            150,
+        )
+        .expect("timeout report");
+
+        assert!(report.contains("Resolved program: cargo"));
+        assert!(report.contains("Launcher: native"));
+        assert!(report.contains("Cwd: workspace"));
+        assert!(report.contains("Exit code: unavailable (timed out)"));
+        assert!(report.contains("timeout stderr evidence"));
+        assert!(report.ends_with("Incomplete."));
+        assert!(report.len() <= crate::output::MODEL_BYTE_LIMIT);
+        assert!(crate::output::token_count(&report) <= crate::output::MODEL_TOKEN_LIMIT);
+    }
+
+    #[test]
+    fn process_reports_bound_extreme_diagnostic_paths() {
+        let path = PathBuf::from(format!(r"C:\{}\cargo.exe", "界".repeat(20_000)));
+        let report = render_timeout(
+            &TimedOutProcess {
+                resolved: ResolvedProgram {
+                    absolute: path.clone(),
+                    executable: path.clone(),
+                    launcher: Launcher::Native,
+                },
+                cwd: path,
+                duration: Duration::from_millis(150),
+                stdout: Capture::new(),
+                stderr: Capture::new(),
+            },
+            150,
+        )
+        .expect("bounded timeout report");
+
+        assert!(report.contains("[path truncated]"));
+        assert!(report.contains("Exit code: unavailable (timed out)"));
+        assert!(report.len() <= crate::output::MODEL_BYTE_LIMIT);
+        assert!(crate::output::token_count(&report) <= crate::output::MODEL_TOKEN_LIMIT);
+    }
+
+    #[test]
+    fn before_spawn_timeout_does_not_claim_process_diagnostics() {
+        let message = ProcessError::TimeoutBeforeSpawn { timeout_ms: 25 }.to_string();
+        assert!(message.contains("no child was started"));
+        for field in ["Resolved program:", "Launcher:", "Cwd:", "Exit code:"] {
+            assert!(!message.contains(field));
+        }
+    }
+
+    #[test]
     fn capture_keeps_bounded_head_and_tail_while_counting_all_bytes() {
         let bytes = vec![b'x'; CAPTURE_HEAD_BYTES + CAPTURE_TAIL_BYTES + 17];
         let mut capture = Capture::new();
@@ -1090,7 +1232,7 @@ mod tests {
         let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
         execute(
             &root,
-            &ProcessResolver::for_tests(Vec::new()),
+            &ProcessResolver::capture(),
             request,
             Duration::from_millis(request.timeout_ms()),
             &CancellationToken::new(),
@@ -1137,7 +1279,7 @@ mod tests {
         let output = execute_unix(&python).expect("Python argv probe");
         assert!(output.contains(&expected));
 
-        let mut node = request("/usr/bin/node".to_owned());
+        let mut node = request("node".to_owned());
         node.args = vec![
             "-e".to_owned(),
             "console.log(JSON.stringify(process.argv.slice(1)))".to_owned(),
@@ -1216,17 +1358,38 @@ mod tests {
         timed.timeout_ms = Some(150);
         timed.args = vec![
             "-c".to_owned(),
-            format!("sleep 30 & echo $! > '{}'; wait", pid_file.display()),
+            format!(
+                "printf 'timeout stdout evidence\\n'; printf 'timeout stderr evidence\\n' >&2; sleep 30 & echo $! > '{}'; wait",
+                pid_file.display()
+            ),
         ];
+        let resolver = ProcessResolver::for_tests(Vec::new());
+        let resolved = resolver
+            .resolve("/bin/sh", root.path())
+            .expect("resolve shell fixture");
         let error = execute(
             &root,
-            &ProcessResolver::for_tests(Vec::new()),
+            &resolver,
             &timed,
             Duration::from_millis(150),
             &CancellationToken::new(),
         )
         .expect_err("timeout");
-        assert!(matches!(error, ProcessError::Timeout { .. }));
+        assert!(
+            matches!(&error, ProcessError::Timeout { .. }),
+            "unexpected process error: {error}"
+        );
+        let report = error.to_string();
+        assert!(report.contains(&format!(
+            "Resolved program: {}",
+            resolved.absolute.display()
+        )));
+        assert!(report.contains("Cwd:"));
+        assert!(report.contains("timeout stdout evidence"));
+        assert!(report.contains("timeout stderr evidence"));
+        assert!(report.contains("Exit code: unavailable (timed out)"));
+        assert!(report.ends_with("Incomplete."));
+        assert!(report.len() <= crate::output::MODEL_BYTE_LIMIT);
         let pid = fs::read_to_string(pid_file)
             .expect("descendant pid")
             .trim()
@@ -1292,9 +1455,15 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_grandchild_parent_fixture() {
+        use std::io::Write as _;
+
         if env::var("CODEXSHIM_PROCESS_FIXTURE").as_deref() != Ok("parent") {
             return;
         }
+        writeln!(std::io::stdout(), "timeout stdout evidence").expect("write stdout evidence");
+        std::io::stdout().flush().expect("flush stdout evidence");
+        writeln!(std::io::stderr(), "timeout stderr evidence").expect("write stderr evidence");
+        std::io::stderr().flush().expect("flush stderr evidence");
         let executable = env::current_exe().expect("test executable");
         let status = Command::new(executable)
             .args([
@@ -1346,7 +1515,19 @@ mod tests {
             &CancellationToken::new(),
         )
         .expect_err("timeout");
-        assert!(matches!(error, ProcessError::Timeout { .. }));
+        assert!(
+            matches!(&error, ProcessError::Timeout { .. }),
+            "unexpected process error: {error}"
+        );
+        let report = error.to_string();
+        assert!(report.contains("Resolved program:"));
+        assert!(report.contains("Launcher: native"));
+        assert!(report.contains("Cwd:"));
+        assert!(report.contains("timeout stdout evidence"));
+        assert!(report.contains("timeout stderr evidence"));
+        assert!(report.contains("Exit code: unavailable (timed out)"));
+        assert!(report.ends_with("Incomplete."));
+        assert!(report.len() <= crate::output::MODEL_BYTE_LIMIT);
         let pid = std::fs::read_to_string(pid_file)
             .expect("grandchild pid")
             .trim()

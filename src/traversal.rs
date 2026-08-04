@@ -241,6 +241,7 @@ mod tests {
     }
 
     #[cfg(windows)]
+    /// Requires Windows Developer Mode or symbolic-link privilege to exercise the fixture.
     #[test]
     fn windows_directory_reparse_point_is_not_followed() {
         use std::os::windows::fs::symlink_dir;
@@ -248,7 +249,14 @@ mod tests {
         let fixture = tempfile::tempdir().expect("fixture");
         let outside = tempfile::tempdir().expect("outside fixture");
         fs::write(outside.path().join("secret.txt"), "outside").expect("secret");
-        symlink_dir(outside.path(), fixture.path().join("escape")).expect("directory reparse link");
+        match symlink_dir(outside.path(), fixture.path().join("escape")) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(1314) => {
+                eprintln!("directory reparse fixture unavailable: {error}");
+                return;
+            }
+            Err(error) => panic!("directory reparse link: {error}"),
+        }
         let root = RepositoryRoot::open(fixture.path()).expect("root");
         let base = root.resolve(Path::new(".")).expect("base");
         let mut paths = Vec::new();

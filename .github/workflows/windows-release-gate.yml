@@ -16,7 +16,7 @@ jobs:
   windows-11-ntfs:
     runs-on: [self-hosted, Windows, X64, codexshim-windows11-ntfs]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Capture environment
         shell: pwsh
         run: |
@@ -41,6 +41,8 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
         run: cargo test --locked
+      - name: MCP cargo proxy identity
+        run: cargo test --locked --test modern_stdio run_process_preserves_cargo_multicall_proxy_identity -- --nocapture
       - name: Performance smoke
         shell: pwsh
         run: |
