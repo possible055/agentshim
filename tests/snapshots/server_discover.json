@@ -1,0 +1,18 @@
+{
+  "resultType": "complete",
+  "supportedVersions": [
+    "2026-07-28"
+  ],
+  "capabilities": {
+    "tools": {}
+  },
+  "instructions": "Local repository tools for reading source files, searching contents, finding paths, and running programs with structured arguments without PowerShell command strings.",
+  "ttlMs": 0,
+  "cacheScope": "private",
+  "_meta": {
+    "io.modelcontextprotocol/serverInfo": {
+      "name": "codexshim",
+      "version": "0.1.0"
+    }
+  }
+}

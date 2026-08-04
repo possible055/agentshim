@@ -1,0 +1,63 @@
+name: Windows 11 release gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      full_performance:
+        description: Run the 100K and 1M manual performance corpora
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  windows-11-ntfs:
+    runs-on: [self-hosted, Windows, X64, codexshim-windows11-ntfs]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Capture environment
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force target/performance | Out-Null
+          $volume = Get-Volume -DriveLetter (Get-Location).Drive.Name
+          $defender = Get-MpComputerStatus
+          @(
+            "timestamp=$([DateTimeOffset]::Now.ToString('o'))"
+            "windows=$([System.Environment]::OSVersion.VersionString)"
+            "cpu=$((Get-CimInstance Win32_Processor).Name -join '; ')"
+            "ram_bytes=$((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory)"
+            "filesystem=$($volume.FileSystem)"
+            "volume=$($volume.DriveLetter)"
+            "defender_realtime=$($defender.RealTimeProtectionEnabled)"
+            "rustc=$(rustc --version)"
+            "cargo=$(cargo --version)"
+            "rg=$((rg --version | Select-Object -First 1))"
+          ) | Set-Content target/performance/environment.txt
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
+      - name: Performance smoke
+        shell: pwsh
+        run: |
+          cargo test --release --locked --test performance_gate scale_001_000_files -- --ignored --nocapture 2>&1 | Tee-Object target/performance/scale-001-000.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Full performance corpus
+        if: inputs.full_performance
+        shell: pwsh
+        run: |
+          cargo test --release --locked --test performance_gate scale_100_000_files -- --ignored --nocapture 2>&1 | Tee-Object target/performance/scale-100-000.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --release --locked --test performance_gate scale_1_000_000_files -- --ignored --nocapture 2>&1 | Tee-Object target/performance/scale-1-000-000.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload performance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-11-ntfs-performance
+          path: target/performance
+          if-no-files-found: error

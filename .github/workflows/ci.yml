@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validation:
+    name: Linux and Windows cross-target
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
+      - name: Cross-lint Windows
+        run: cargo clippy --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+      - name: Cross-check Windows
+        run: cargo check --locked --target x86_64-pc-windows-msvc

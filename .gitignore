@@ -1,0 +1,39 @@
+# Package managers / dependencies
+node_modules/
+.venv/
+.uv-cache/
+
+# Build / Distribution
+target/
+build/
+dist/
+*.tsbuildinfo
+
+# Testing / Coverage / Linter
+.coverage
+__pycache__/
+*.pyc
+
+# IDE / Editor / AI agent
+.vscode/
+.cursor/
+.claude/
+.codex/
+.codebuddy/
+.kilocode/
+.kiro/
+.gemini/
+.agent/
+.augment/
+.junie/
+AGENTS.md
+CLAUDE.md
+
+# Logs / Env
+*.log
+.env
+!.env.example
+
+# Project-specific
+local/
+repos/

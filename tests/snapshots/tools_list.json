@@ -1,0 +1,224 @@
+{
+  "resultType": "complete",
+  "ttlMs": 300000,
+  "cacheScope": "private",
+  "tools": [
+    {
+      "name": "read",
+      "description": "Read a local repository source file as numbered text lines. Use start_line to continue a partial result without server-side cursor state.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "encoding": {
+            "description": "Optional WHATWG encoding label. A BOM takes precedence; otherwise valid UTF-8 is used when omitted.",
+            "type": "string"
+          },
+          "line_count": {
+            "description": "Maximum number of lines to return.",
+            "maximum": 2000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "description": "Absolute or repository-root-relative regular file path.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "start_line": {
+            "default": 1,
+            "description": "One-based first line to return.",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "grep",
+      "description": "Search local repository file contents using Rust regex or fixed strings. Results are deterministic and continue with an explicit offset.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "case": {
+            "default": "smart",
+            "enum": [
+              "smart",
+              "sensitive",
+              "insensitive"
+            ],
+            "type": "string"
+          },
+          "context_lines": {
+            "default": 0,
+            "maximum": 20,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "fixed_strings": {
+            "default": false,
+            "type": "boolean"
+          },
+          "glob": {
+            "description": "Optional case-sensitive glob over root-relative paths using / separators.",
+            "type": "string"
+          },
+          "limit": {
+            "default": 200,
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "mode": {
+            "default": "content",
+            "enum": [
+              "content",
+              "files",
+              "count"
+            ],
+            "type": "string"
+          },
+          "offset": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "description": "Optional absolute or repository-root-relative file or directory path.",
+            "type": "string"
+          },
+          "pattern": {
+            "description": "Rust regex by default, or a literal string when fixed_strings is true.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "glob",
+      "description": "Find local repository file paths using a glob pattern. Results use native absolute paths and continue with an explicit offset.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "include_ignored": {
+            "default": false,
+            "type": "boolean"
+          },
+          "limit": {
+            "default": 200,
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "default": ".",
+            "description": "Absolute or repository-root-relative directory to traverse.",
+            "type": "string"
+          },
+          "pattern": {
+            "description": "Case-sensitive glob over root-relative paths using / separators.",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "run_process",
+      "description": "Run one local program with structured arguments without accepting a PowerShell or shell command string. This is an open-world, destructive operation and may require approval.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "args": {
+            "default": [],
+            "description": "Literal argv elements; do not add shell quoting.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "cwd": {
+            "description": "Optional working directory; defaults to the repository root.",
+            "type": "string"
+          },
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "description": "Environment variables to override.",
+            "type": "object"
+          },
+          "program": {
+            "description": "One program name or executable path, never a command string.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "stdin": {
+            "description": "Optional UTF-8 standard input, closed after writing.",
+            "maxLength": 1048576,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timeout_ms": {
+            "default": 120000,
+            "maximum": 290000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "unset_env": {
+            "default": [],
+            "description": "Inherited environment variables to remove.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "program"
+        ],
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      }
+    }
+  ]
+}
