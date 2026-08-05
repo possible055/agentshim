@@ -18,7 +18,7 @@ It provides four tools:
 
 Developer Mode is not required to run `codexshim`. `read` may open an existing file symbolic link only through the repository capability, so a target outside the repository remains inaccessible. Repository traversal does not follow directory symbolic links, junctions, or other reparse points.
 
-The dedicated Windows release runner must be able to create file and directory symbolic-link fixtures. Configure that test account with either Developer Mode or `SeCreateSymbolicLinkPrivilege`; this is a release-test requirement, not a runtime requirement.
+The manual Windows 11 validation runner must be able to create file and directory symbolic-link fixtures. Configure that test account with either Developer Mode or `SeCreateSymbolicLinkPrivilege`; this is a test requirement, not a runtime requirement.
 
 ## Download a release
 
@@ -44,7 +44,9 @@ The release binary is written to `target/release/codexshim` on Linux or `target/
 
 ## Publish a release
 
-Set the package version in `Cargo.toml`, commit the release state, then push a matching annotated tag such as `v0.1.0`. The release workflow rejects tags that do not exactly match the Cargo version. It runs Linux validation and the reusable Windows 11 release gate, including the full performance corpus, before building or publishing assets.
+Set the package version in `Cargo.toml`, commit the release state, then push a matching annotated tag such as `v0.1.0`. The release workflow rejects tags that do not exactly match the Cargo version. It runs Linux validation, builds the Windows and Linux archives on GitHub-hosted runners, and verifies each release binary before publishing assets.
+
+The Windows 11 workstation workflow is an independent manual runtime and performance gate. It does not block packaging because GitHub-hosted Windows runners use Windows Server, which can build the Windows binary but is outside codexshim's supported runtime boundary.
 
 Successful tag builds publish both platform archives and `SHA256SUMS` to the matching GitHub Release. Publishing does not create an installer or modify user configuration.
 

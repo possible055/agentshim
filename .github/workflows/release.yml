@@ -43,16 +43,9 @@ jobs:
       - name: Test
         run: cargo test --locked
 
-  windows-validation:
-    name: Windows 11 release gate
-    needs: validate-version
-    uses: ./.github/workflows/windows-release-gate.yml
-    with:
-      full_performance: true
-
   package:
     name: Package ${{ matrix.target }}
-    needs: [validate-version, linux-validation, windows-validation]
+    needs: [validate-version, linux-validation]
     strategy:
       fail-fast: false
       matrix:

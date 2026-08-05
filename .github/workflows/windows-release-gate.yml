@@ -1,12 +1,6 @@
 name: Windows 11 release gate
 
 on:
-  workflow_call:
-    inputs:
-      full_performance:
-        required: false
-        default: false
-        type: boolean
   workflow_dispatch:
     inputs:
       full_performance:
