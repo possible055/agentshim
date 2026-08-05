@@ -28,6 +28,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force target/performance | Out-Null
           $windows = [System.Environment]::OSVersion.Version
+          $operatingSystem = Get-CimInstance Win32_OperatingSystem
           $drive = (Get-Location).Drive.Name
           $volume = Get-Volume -DriveLetter $drive -ErrorAction Stop
           $defenderCommand = Get-Command Get-MpComputerStatus -ErrorAction SilentlyContinue
@@ -36,6 +37,8 @@ jobs:
           @(
             "timestamp=$([DateTimeOffset]::Now.ToString('o'))"
             "windows=$([System.Environment]::OSVersion.VersionString)"
+            "windows_caption=$($operatingSystem.Caption)"
+            "product_type=$($operatingSystem.ProductType)"
             "cpu=$((Get-CimInstance Win32_Processor).Name -join '; ')"
             "ram_bytes=$((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory)"
             "filesystem=$($volume.FileSystem)"
@@ -48,6 +51,9 @@ jobs:
 
           if ($windows.Build -lt 22621) {
             throw "Windows build 22621 or newer is required; found $($windows.Build)"
+          }
+          if ($operatingSystem.ProductType -ne 1) {
+            throw "A Windows workstation edition is required; found $($operatingSystem.Caption)"
           }
           if ($volume.FileSystem -ne "NTFS") {
             throw "NTFS is required; found $($volume.FileSystem) on drive $drive"

@@ -889,8 +889,31 @@ mod platform {
             thread::sleep(Duration::from_millis(10));
         };
 
-        let (stdin_result, stdout, stderr) =
-            settle_threads(stdin_thread, stdout_thread, stderr_thread)?;
+        finish_completed(
+            resolved,
+            cwd,
+            exit,
+            started,
+            (stdin_thread, stdout_thread, stderr_thread),
+            cancellation,
+        )
+    }
+
+    type PendingIo = (
+        thread::JoinHandle<io::Result<()>>,
+        thread::JoinHandle<io::Result<Capture>>,
+        thread::JoinHandle<io::Result<Capture>>,
+    );
+
+    fn finish_completed(
+        resolved: &ResolvedProgram,
+        cwd: &Path,
+        exit: String,
+        started: Instant,
+        (stdin, stdout, stderr): PendingIo,
+        cancellation: &CancellationToken,
+    ) -> Result<String, ProcessError> {
+        let (stdin_result, stdout, stderr) = settle_threads(stdin, stdout, stderr)?;
         stdin_result?;
         render_completed(
             &CompletedProcess {
@@ -1364,7 +1387,7 @@ mod tests {
             ),
         ];
         let resolver = ProcessResolver::for_tests(Vec::new());
-        let resolved = resolver
+        let resolved_shell = resolver
             .resolve("/bin/sh", root.path())
             .expect("resolve shell fixture");
         let error = execute(
@@ -1382,7 +1405,7 @@ mod tests {
         let report = error.to_string();
         assert!(report.contains(&format!(
             "Resolved program: {}",
-            resolved.absolute.display()
+            resolved_shell.absolute.display()
         )));
         assert!(report.contains("Cwd:"));
         assert!(report.contains("timeout stdout evidence"));
