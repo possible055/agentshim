@@ -499,7 +499,7 @@ fn validate_launcher_request(
     Ok(())
 }
 
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 fn is_powershell_command_evaluation_arg(argument: &str) -> bool {
     let name = argument
         .split_once([':', '='])
