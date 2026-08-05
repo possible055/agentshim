@@ -24,19 +24,20 @@ repos:
         name: cargo fmt
         entry: cargo fmt --all -- --check
         language: system
-        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|tests/.*\.rs)$'
+        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|tests/.*\.rs|benches/.*\.rs)$'
         pass_filenames: false
 
       - id: cargo-clippy
         name: cargo clippy
         entry: cargo clippy --all-targets -- -D warnings
         language: system
-        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|tests/.*\.rs)$'
+        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|tests/.*\.rs|benches/.*\.rs)$'
         pass_filenames: false
 
       - id: cargo-test
         name: cargo test
         entry: cargo test --locked
         language: system
+        stages: [pre-push]
         files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|tests/.*\.rs)$'
         pass_filenames: false

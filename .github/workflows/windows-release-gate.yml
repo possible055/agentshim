@@ -2,12 +2,6 @@ name: Windows 11 release gate
 
 on:
   workflow_dispatch:
-    inputs:
-      full_performance:
-        description: Run the 100K and 1M manual performance corpora
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -17,32 +11,13 @@ jobs:
     runs-on: [self-hosted, Windows, X64, codexshim-windows11-ntfs]
     steps:
       - uses: actions/checkout@v7
-      - name: Validate and capture environment
+      - name: Validate environment
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force target/performance | Out-Null
           $windows = [System.Environment]::OSVersion.Version
           $operatingSystem = Get-CimInstance Win32_OperatingSystem
           $drive = (Get-Location).Drive.Name
           $volume = Get-Volume -DriveLetter $drive -ErrorAction Stop
-          $defenderCommand = Get-Command Get-MpComputerStatus -ErrorAction SilentlyContinue
-          $defender = if ($null -eq $defenderCommand) { $null } else { Get-MpComputerStatus -ErrorAction SilentlyContinue }
-          $defenderRealtime = if ($null -eq $defender) { "unavailable" } else { $defender.RealTimeProtectionEnabled }
-          @(
-            "timestamp=$([DateTimeOffset]::Now.ToString('o'))"
-            "windows=$([System.Environment]::OSVersion.VersionString)"
-            "windows_caption=$($operatingSystem.Caption)"
-            "product_type=$($operatingSystem.ProductType)"
-            "cpu=$((Get-CimInstance Win32_Processor).Name -join '; ')"
-            "ram_bytes=$((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory)"
-            "filesystem=$($volume.FileSystem)"
-            "volume=$($volume.DriveLetter)"
-            "drive_type=$($volume.DriveType)"
-            "defender_realtime=$defenderRealtime"
-            "rustc=$(rustc --version)"
-            "cargo=$(cargo --version)"
-          ) | Set-Content target/performance/environment.txt
-
           if ($windows.Build -lt 22621) {
             throw "Windows build 22621 or newer is required; found $($windows.Build)"
           }
@@ -69,9 +44,7 @@ jobs:
           try {
             New-Item -ItemType SymbolicLink -Path $fileLink -Target $targetFile -ErrorAction Stop | Out-Null
             New-Item -ItemType SymbolicLink -Path $directoryLink -Target $targetDirectory -ErrorAction Stop | Out-Null
-            Add-Content target/performance/environment.txt "symlink_fixture=true"
           } catch {
-            Add-Content target/performance/environment.txt "symlink_fixture=false"
             throw "Dedicated Windows release runner must support symbolic-link fixtures through Developer Mode or SeCreateSymbolicLinkPrivilege: $($_.Exception.Message)"
           } finally {
             Remove-Item -LiteralPath $fileLink -Force -ErrorAction SilentlyContinue
@@ -86,25 +59,3 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test
         run: cargo test --locked
-      - name: MCP cargo proxy identity
-        run: cargo test --locked --test modern_stdio run_process_preserves_cargo_multicall_proxy_identity -- --nocapture
-      - name: Performance smoke
-        shell: pwsh
-        run: |
-          cargo test --release --locked --test performance_gate scale_001_000_files -- --ignored --nocapture 2>&1 | Tee-Object target/performance/scale-001-000.log
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Full performance corpus
-        if: inputs.full_performance
-        shell: pwsh
-        run: |
-          cargo test --release --locked --test performance_gate scale_100_000_files -- --ignored --nocapture 2>&1 | Tee-Object target/performance/scale-100-000.log
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --release --locked --test performance_gate scale_1_000_000_files -- --ignored --nocapture 2>&1 | Tee-Object target/performance/scale-1-000-000.log
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Upload performance evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-11-ntfs-performance
-          path: target/performance
-          if-no-files-found: error

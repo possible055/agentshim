@@ -54,11 +54,19 @@ cargo run --locked -- doctor
 
 The release binary is written to `target/release/codexshim` on Linux or `target/release/codexshim.exe` on Windows.
 
+Performance measurement is opt-in and separate from the test and release gates:
+
+```console
+cargo bench --locked --bench performance
+```
+
+The manual Performance benchmark workflow runs the same repository benchmark on the dedicated Windows 11 NTFS runner.
+
 ## Publish a release
 
 Set the package version in `Cargo.toml`, commit the release state, then push a matching annotated tag such as `v0.1.0`. The release workflow rejects tags that do not exactly match the Cargo version. It runs complete Linux and Windows validation on GitHub-hosted runners, builds both platform archives, and verifies each release binary before publishing assets.
 
-The Windows 11 workstation workflow remains available as an independent manual target-environment and performance gate. GitHub-hosted Windows Server 2025 runs the same test paths without a CI-specific platform bypass, while the supported end-user target remains Windows 11 build 22621 or newer.
+The Windows 11 workstation workflow remains available as an independent manual target-environment gate. GitHub-hosted Windows Server 2025 runs the same test paths without a CI-specific platform bypass, while the supported end-user target remains Windows 11 build 22621 or newer.
 
 Successful tag builds publish both platform archives, their checksums, `SHA256SUMS`, and the installers to the matching GitHub Release. The installers do not modify user configuration.
 

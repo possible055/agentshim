@@ -1,0 +1,15 @@
+name: Performance benchmark
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-11-ntfs:
+    runs-on: [self-hosted, Windows, X64, codexshim-windows11-ntfs]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Benchmark repository tools
+        run: cargo bench --locked --bench performance

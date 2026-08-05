@@ -475,7 +475,7 @@ mod tests {
 
         let relative = root.resolve(Path::new("src/./lib.rs")).expect("relative");
         let absolute = root
-            .resolve(&fixture.path().join("src/lib.rs"))
+            .resolve(&root.path().join("src/lib.rs"))
             .expect("absolute");
         assert_eq!(relative.key(), Path::new("src/lib.rs"));
         assert_eq!(relative, absolute);
