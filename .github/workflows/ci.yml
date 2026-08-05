@@ -26,10 +26,12 @@ jobs:
       - name: Test
         run: cargo test --locked
 
-  windows-compile:
-    name: Windows compile and lint
+  windows-validation:
+    name: Windows validation
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v7
-      - name: Compile and lint Windows targets
+      - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked

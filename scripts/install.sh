@@ -1,0 +1,115 @@
+#!/bin/sh
+set -eu
+
+version=""
+release_directory=""
+install_directory="${XDG_DATA_HOME:-$HOME/.local/share}/codexshim/bin"
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --version)
+            version=$2
+            shift 2
+            ;;
+        --install-dir)
+            install_directory=$2
+            shift 2
+            ;;
+        --release-dir)
+            release_directory=$2
+            shift 2
+            ;;
+        *)
+            echo "unknown argument: $1" >&2
+            exit 2
+            ;;
+    esac
+done
+
+if [ "$(uname -s)" != "Linux" ] || [ "$(uname -m)" != "x86_64" ]; then
+    echo "codexshim currently supports only x86_64 Linux with this installer" >&2
+    exit 1
+fi
+
+temporary_directory=$(mktemp -d "${TMPDIR:-/tmp}/codexshim-install.XXXXXX")
+trap 'rm -rf "$temporary_directory"' EXIT HUP INT TERM
+target="x86_64-unknown-linux-gnu"
+
+if [ -n "$release_directory" ]; then
+    set -- "$release_directory"/codexshim-*-$target.tar.gz
+    if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+        echo "expected exactly one Linux release archive in $release_directory" >&2
+        exit 1
+    fi
+    archive_path=$1
+    checksum_path="$archive_path.sha256"
+    if [ ! -f "$checksum_path" ]; then
+        echo "missing checksum file: $checksum_path" >&2
+        exit 1
+    fi
+else
+    command -v curl >/dev/null 2>&1 || { echo "curl is required" >&2; exit 1; }
+    if [ -n "$version" ]; then
+        case "$version" in
+            v*) tag=$version ;;
+            *) tag="v$version" ;;
+        esac
+    else
+        release_json=$(curl --proto '=https' --tlsv1.2 -fsSL \
+            -H 'Accept: application/vnd.github+json' \
+            https://api.github.com/repos/possible055/codexshim/releases/latest)
+        tag=$(printf '%s\n' "$release_json" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)
+        if [ -z "$tag" ]; then
+            echo "could not determine the latest codexshim release" >&2
+            exit 1
+        fi
+    fi
+    release_version=${tag#v}
+    archive_name="codexshim-$release_version-$target.tar.gz"
+    base_url="https://github.com/possible055/codexshim/releases/download/$tag"
+    archive_path="$temporary_directory/$archive_name"
+    checksum_path="$archive_path.sha256"
+    curl --proto '=https' --tlsv1.2 -fsSL "$base_url/$archive_name" -o "$archive_path"
+    curl --proto '=https' --tlsv1.2 -fsSL "$base_url/$archive_name.sha256" -o "$checksum_path"
+fi
+
+archive_name=$(basename "$archive_path")
+expected_hash=$(awk -v name="$archive_name" '
+    {
+        file = $2
+        sub(/^\*/, "", file)
+        if (file == name && $1 ~ /^[0-9a-fA-F]{64}$/) {
+            print tolower($1)
+            exit
+        }
+    }
+' "$checksum_path")
+if [ -z "$expected_hash" ]; then
+    echo "invalid checksum file: $checksum_path" >&2
+    exit 1
+fi
+actual_hash=$(sha256sum "$archive_path" | awk '{print tolower($1)}')
+if [ "$actual_hash" != "$expected_hash" ]; then
+    echo "checksum verification failed for $archive_name" >&2
+    exit 1
+fi
+
+extract_directory="$temporary_directory/extract"
+mkdir -p "$extract_directory"
+tar -xzf "$archive_path" -C "$extract_directory"
+binary_path=$(find "$extract_directory" -type f -name codexshim -print)
+if [ "$(printf '%s\n' "$binary_path" | sed '/^$/d' | wc -l)" -ne 1 ]; then
+    echo "the release archive does not contain exactly one codexshim executable" >&2
+    exit 1
+fi
+
+mkdir -p "$install_directory"
+staged="$install_directory/.codexshim.$$"
+cp "$binary_path" "$staged"
+chmod 755 "$staged"
+"$staged" --version >/dev/null
+destination="$install_directory/codexshim"
+mv -f "$staged" "$destination"
+
+echo "Installed codexshim at $destination"
+echo "Set command = \"$destination\" in your Codex MCP configuration."

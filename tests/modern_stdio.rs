@@ -124,7 +124,7 @@ fn assert_version_process_call(session: &mut Session, id: u64) {
     let process_text = process_result["result"]["content"][0]["text"]
         .as_str()
         .expect("process text");
-    assert!(process_text.contains("codexshim 0.1.0"));
+    assert!(process_text.contains("codexshim 0.1.1"));
     assert!(process_text.contains("Launcher: native"));
     assert!(process_text.contains("Exit code: 0"));
 }

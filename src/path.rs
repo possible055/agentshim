@@ -440,13 +440,8 @@ fn validate_platform_root(path: &Path) -> io::Result<()> {
 fn validate_windows_version() -> io::Result<()> {
     use std::mem::size_of;
     use windows_sys::{
-        Wdk::System::SystemServices::{RtlGetVersion, RtlVerifyVersionInfo},
-        Win32::System::{
-            SystemInformation::{
-                OSVERSIONINFOEXW, OSVERSIONINFOW, VER_PRODUCT_TYPE, VerSetConditionMask,
-            },
-            SystemServices::{VER_EQUAL, VER_NT_WORKSTATION},
-        },
+        Wdk::System::SystemServices::RtlGetVersion,
+        Win32::System::SystemInformation::OSVERSIONINFOW,
     };
 
     let mut version = OSVERSIONINFOW {
@@ -461,27 +456,6 @@ fn validate_windows_version() -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "codexshim requires Windows 11 build 22621 or newer",
-        ));
-    }
-
-    let workstation = OSVERSIONINFOEXW {
-        dwOSVersionInfoSize: u32::try_from(size_of::<OSVERSIONINFOEXW>())
-            .map_err(|_| io::Error::other("OSVERSIONINFOEXW size overflow"))?,
-        wProductType: u8::try_from(VER_NT_WORKSTATION)
-            .map_err(|_| io::Error::other("workstation product type overflow"))?,
-        ..OSVERSIONINFOEXW::default()
-    };
-    let condition = unsafe {
-        VerSetConditionMask(
-            0,
-            VER_PRODUCT_TYPE,
-            u8::try_from(VER_EQUAL).expect("VER_EQUAL fits u8"),
-        )
-    };
-    if unsafe { RtlVerifyVersionInfo(&raw const workstation, VER_PRODUCT_TYPE, condition) } != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "codexshim supports Windows 11 workstation editions only",
         ));
     }
     Ok(())

@@ -43,9 +43,20 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+  windows-validation:
+    name: Windows validation
+    needs: validate-version
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
+
   package:
     name: Package ${{ matrix.target }}
-    needs: [validate-version, linux-validation]
+    needs: [validate-version, linux-validation, windows-validation]
     strategy:
       fail-fast: false
       matrix:
@@ -99,16 +110,31 @@ jobs:
         run: |
           $name = "codexshim-${{ needs.validate-version.outputs.version }}-${{ matrix.target }}"
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+          $archive = "dist/$name.zip"
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $name.zip" | Out-File -FilePath "$archive.sha256" -Encoding ascii
       - name: Create Linux archive
         if: matrix.format == 'tar.gz'
         shell: bash
         run: |
           name="codexshim-${{ needs.validate-version.outputs.version }}-${{ matrix.target }}"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
+          cd dist
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+      - name: Test Windows installer
+        if: matrix.format == 'zip'
+        shell: powershell
+        run: scripts/test-install-windows.ps1 -ReleaseDirectory (Resolve-Path dist).Path
+      - name: Test Linux installer
+        if: matrix.format == 'tar.gz'
+        shell: bash
+        run: sh scripts/test-install-linux.sh "$PWD/dist"
       - uses: actions/upload-artifact@v4
         with:
           name: codexshim-${{ matrix.target }}
-          path: dist/*.${{ matrix.format }}
+          path: |
+            dist/*.${{ matrix.format }}
+            dist/*.${{ matrix.format }}.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -129,7 +155,13 @@ jobs:
         shell: bash
         run: |
           cd dist
-          sha256sum codexshim-* > SHA256SUMS
+          sha256sum codexshim-*.zip codexshim-*.tar.gz > SHA256SUMS
+      - name: Add installers
+        shell: bash
+        run: |
+          sh -n scripts/install.sh
+          cp scripts/install.sh scripts/install.ps1 dist/
+          chmod 755 dist/install.sh
       - name: Publish assets
         shell: bash
         env:

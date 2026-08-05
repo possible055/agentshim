@@ -11,7 +11,7 @@ It provides four tools:
 
 ## Requirements
 
-- Linux, or Windows 11 build 22621 or newer on a workstation edition and a local fixed NTFS drive.
+- Linux, or Windows 11 build 22621 or newer on a local fixed NTFS drive.
 - Rust 1.88 only when building from source. Prebuilt release archives do not require Rust.
 
 ## Symbolic links
@@ -22,12 +22,24 @@ The manual Windows 11 validation runner must be able to create file and director
 
 ## Download a release
 
+Install or update the latest prebuilt release without modifying `PATH` or Codex configuration:
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://github.com/possible055/codexshim/releases/latest/download/install.ps1 | iex
+```
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/possible055/codexshim/releases/latest/download/install.sh | sh
+```
+
+The installers verify the release archive checksum and install only the executable. The default location is `%LOCALAPPDATA%\codexshim\bin\codexshim.exe` on Windows and `${XDG_DATA_HOME:-$HOME/.local/share}/codexshim/bin/codexshim` on Linux. Pass `-InstallDir` to `install.ps1` or `--install-dir` to `install.sh` to choose another directory. Run the same command again to update the installation.
+
 Download the archive for your platform and `SHA256SUMS` from [GitHub Releases](https://github.com/possible055/codexshim/releases):
 
 - Windows: `codexshim-<version>-x86_64-pc-windows-msvc.zip`
 - Linux: `codexshim-<version>-x86_64-unknown-linux-gnu.tar.gz`
 
-Verify the archive against `SHA256SUMS`, extract it to a stable directory, and keep the included `codex.toml.example` next to the binary as a configuration reference. The archives also include this README, the license, and `AGENTS.codexshim.md`. There is no installer and no automatic modification of `PATH` or Codex configuration.
+Verify the archive against `SHA256SUMS`, extract it to a stable directory, and keep the included `codex.toml.example` next to the binary as a configuration reference. The archives also include this README, the license, and `AGENTS.codexshim.md`. Neither the manual archive nor the installer modifies `PATH` or Codex configuration.
 
 On Windows, `Get-FileHash <archive> -Algorithm SHA256` prints the value to compare with `SHA256SUMS`. On Linux, run `sha256sum -c SHA256SUMS --ignore-missing` in the download directory.
 
@@ -44,11 +56,11 @@ The release binary is written to `target/release/codexshim` on Linux or `target/
 
 ## Publish a release
 
-Set the package version in `Cargo.toml`, commit the release state, then push a matching annotated tag such as `v0.1.0`. The release workflow rejects tags that do not exactly match the Cargo version. It runs Linux validation, builds the Windows and Linux archives on GitHub-hosted runners, and verifies each release binary before publishing assets.
+Set the package version in `Cargo.toml`, commit the release state, then push a matching annotated tag such as `v0.1.0`. The release workflow rejects tags that do not exactly match the Cargo version. It runs complete Linux and Windows validation on GitHub-hosted runners, builds both platform archives, and verifies each release binary before publishing assets.
 
-The Windows 11 workstation workflow is an independent manual runtime and performance gate. It does not block packaging because GitHub-hosted Windows runners use Windows Server, which can build the Windows binary but is outside codexshim's supported runtime boundary.
+The Windows 11 workstation workflow remains available as an independent manual target-environment and performance gate. GitHub-hosted Windows Server 2025 runs the same test paths without a CI-specific platform bypass, while the supported end-user target remains Windows 11 build 22621 or newer.
 
-Successful tag builds publish both platform archives and `SHA256SUMS` to the matching GitHub Release. Publishing does not create an installer or modify user configuration.
+Successful tag builds publish both platform archives, their checksums, `SHA256SUMS`, and the installers to the matching GitHub Release. The installers do not modify user configuration.
 
 ## Configure Codex
 
@@ -78,7 +90,7 @@ mcp_2026_07_28 = true
 
 Keep `shell_tool = true` while the external release gates remain incomplete. Change it to `false` only after the full Linux/Windows, Codex integration, performance, and 24-hour soak checklist passes.
 
-On Windows, use a single-quoted TOML path such as `'C:\Users\me\AppData\Local\codexshim\codexshim.exe'` to avoid escaping backslashes. Always configure the prebuilt release executable as the long-lived MCP server; do not use `cargo run` as the MCP command because nested Cargo calls may contend for build locks.
+On Windows, use a single-quoted TOML path such as `'C:\Users\me\AppData\Local\codexshim\bin\codexshim.exe'` to avoid escaping backslashes. Always configure the prebuilt release executable as the long-lived MCP server; do not use `cargo run` as the MCP command because nested Cargo calls may contend for build locks.
 
 Stop the active MCP server before rebuilding or replacing its Windows executable. A running `.exe` cannot be overwritten; restart Codex after the release build completes.
 
