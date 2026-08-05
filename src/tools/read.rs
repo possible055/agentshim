@@ -788,7 +788,6 @@ mod tests {
     }
 
     #[cfg(windows)]
-    /// Requires Windows Developer Mode or symbolic-link privilege to exercise the fixture.
     #[test]
     fn windows_capability_allows_internal_symlink_and_blocks_reparse_escape() {
         use std::os::windows::fs::symlink_file;

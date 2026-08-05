@@ -11,23 +11,49 @@ It provides four tools:
 
 ## Requirements
 
-- Rust 1.88. The repository pins the exact toolchain in `rust-toolchain.toml`.
 - Linux, or Windows 11 build 22621 or newer on a workstation edition and a local fixed NTFS drive.
+- Rust 1.88 only when building from source. Prebuilt release archives do not require Rust.
 
-## Build
+## Symbolic links
+
+Developer Mode is not required to run `codexshim`. `read` may open an existing file symbolic link only through the repository capability, so a target outside the repository remains inaccessible. Repository traversal does not follow directory symbolic links, junctions, or other reparse points.
+
+The dedicated Windows release runner must be able to create file and directory symbolic-link fixtures. Configure that test account with either Developer Mode or `SeCreateSymbolicLinkPrivilege`; this is a release-test requirement, not a runtime requirement.
+
+## Download a release
+
+Download the archive for your platform and `SHA256SUMS` from [GitHub Releases](https://github.com/possible055/codexshim/releases):
+
+- Windows: `codexshim-<version>-x86_64-pc-windows-msvc.zip`
+- Linux: `codexshim-<version>-x86_64-unknown-linux-gnu.tar.gz`
+
+Verify the archive against `SHA256SUMS`, extract it to a stable directory, and keep the included `codex.toml.example` next to the binary as a configuration reference. The archives also include this README, the license, and `AGENTS.codexshim.md`. There is no installer and no automatic modification of `PATH` or Codex configuration.
+
+On Windows, `Get-FileHash <archive> -Algorithm SHA256` prints the value to compare with `SHA256SUMS`. On Linux, run `sha256sum -c SHA256SUMS --ignore-missing` in the download directory.
+
+## Build from source
 
 From the project directory:
 
 ```console
 cargo build --release --locked
-cargo run -- doctor
+cargo run --locked -- doctor
 ```
 
 The release binary is written to `target/release/codexshim` on Linux or `target/release/codexshim.exe` on Windows.
 
+## Publish a release
+
+Set the package version in `Cargo.toml`, commit the release state, then push a matching annotated tag such as `v0.1.0`. The release workflow rejects tags that do not exactly match the Cargo version. It runs Linux validation and the reusable Windows 11 release gate, including the full performance corpus, before building or publishing assets.
+
+Successful tag builds publish both platform archives and `SHA256SUMS` to the matching GitHub Release. Publishing does not create an installer or modify user configuration.
+
 ## Configure Codex
 
-Add the server to `~/.codex/config.toml` or a trusted project's `.codex/config.toml`, then replace `command` with the absolute path to the release binary:
+Copy the appropriate example into `~/.codex/config.toml` or a trusted project's `.codex/config.toml`, then replace `command` with the extracted binary's absolute path:
+
+- [Windows MCP configuration](config/codex.windows.toml.example)
+- [Linux MCP configuration](config/codex.linux.toml.example)
 
 ```toml
 [mcp_servers.codexshim]

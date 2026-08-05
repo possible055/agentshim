@@ -53,6 +53,7 @@ use std::sync::{Arc, atomic::Ordering as AtomicOrdering};
 const NATIVE_COMMAND_LINE_LIMIT: usize = 32_767;
 const BATCH_COMMAND_LINE_LIMIT: usize = 8_191;
 const TERMINATION_EXIT_CODE: u32 = 0xC0DE_CACE;
+const DESCENDANT_EXIT_GRACE: Duration = Duration::from_millis(250);
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -139,6 +140,7 @@ pub(super) fn run(
     let (io_failed, stdin_thread, stdout_thread, stderr_thread) =
         spawn_io_threads(stdin_file, stdout_file, stderr_file, input);
 
+    let mut primary_exit = None;
     let exit_code = loop {
         if io_failed.load(AtomicOrdering::Acquire) {
             return terminate_after_io_failure(
@@ -152,7 +154,13 @@ pub(super) fn run(
         let primary = lifecycle.primary_exit_code()?;
         let active = lifecycle.active_processes()?;
         if let Some(code) = primary {
+            let (code, detected_at) = primary_exit.get_or_insert((code, Instant::now()));
             if active == 0 {
+                break *code;
+            }
+            if detected_at.elapsed() >= DESCENDANT_EXIT_GRACE {
+                let code = *code;
+                lifecycle.terminate_and_wait()?;
                 break code;
             }
         }
@@ -176,19 +184,13 @@ pub(super) fn run(
         thread::sleep(Duration::from_millis(10));
     };
 
-    let (stdin_result, stdout, stderr) =
-        settle_threads(stdin_thread, stdout_thread, stderr_thread)?;
-    stdin_result?;
-    lifecycle.finish();
-    render_completed(
-        &CompletedProcess {
-            resolved: resolved.clone(),
-            cwd: cwd.to_owned(),
-            exit: exit_code.to_string(),
-            duration: started.elapsed(),
-            stdout,
-            stderr,
-        },
+    finish_completed(
+        &mut lifecycle,
+        (stdin_thread, stdout_thread, stderr_thread),
+        resolved,
+        cwd,
+        exit_code,
+        started,
         cancellation,
     )
 }
@@ -230,6 +232,31 @@ fn spawn_io_threads(stdin: File, stdout: File, stderr: File, input: Option<Strin
     let stdout = spawn_monitored(Arc::clone(&failed), move || drain(stdout));
     let stderr = spawn_monitored(Arc::clone(&failed), move || drain(stderr));
     (failed, stdin, stdout, stderr)
+}
+
+fn finish_completed(
+    lifecycle: &mut Lifecycle,
+    (stdin, stdout, stderr): PendingIo,
+    resolved: &ResolvedProgram,
+    cwd: &Path,
+    exit_code: u32,
+    started: Instant,
+    cancellation: &CancellationToken,
+) -> Result<String, ProcessError> {
+    let (stdin_result, stdout, stderr) = settle_threads(stdin, stdout, stderr)?;
+    stdin_result?;
+    lifecycle.finish();
+    render_completed(
+        &CompletedProcess {
+            resolved: resolved.clone(),
+            cwd: cwd.to_owned(),
+            exit: exit_code.to_string(),
+            duration: started.elapsed(),
+            stdout,
+            stderr,
+        },
+        cancellation,
+    )
 }
 
 fn terminate_after_timeout(

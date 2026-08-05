@@ -1,0 +1,149 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  validate-version:
+    name: Validate version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: version
+        name: Match tag to Cargo version
+        shell: bash
+        run: |
+          version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo version $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  linux-validation:
+    name: Linux validation
+    needs: validate-version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
+
+  windows-validation:
+    name: Windows 11 release gate
+    needs: validate-version
+    uses: ./.github/workflows/windows-release-gate.yml
+    with:
+      full_performance: true
+
+  package:
+    name: Package ${{ matrix.target }}
+    needs: [validate-version, linux-validation, windows-validation]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            binary: codexshim
+            config: config/codex.linux.toml.example
+            format: tar.gz
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            binary: codexshim.exe
+            config: config/codex.windows.toml.example
+            format: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Verify release binary
+        run: cargo run --release --locked --target ${{ matrix.target }} -- --version
+      - name: Stage Windows archive contents
+        if: matrix.format == 'zip'
+        shell: pwsh
+        run: |
+          $name = "codexshim-${{ needs.validate-version.outputs.version }}-${{ matrix.target }}"
+          $stage = Join-Path "dist" $name
+          $configStage = Join-Path $stage "config"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          New-Item -ItemType Directory -Force $configStage | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" $stage
+          Copy-Item README.md $stage
+          Copy-Item LICENSE $stage
+          Copy-Item config/AGENTS.codexshim.md $stage
+          Copy-Item config/codex.*.toml.example $configStage
+          Copy-Item "${{ matrix.config }}" (Join-Path $stage "codex.toml.example")
+      - name: Stage Linux archive contents
+        if: matrix.format == 'tar.gz'
+        shell: bash
+        run: |
+          name="codexshim-${{ needs.validate-version.outputs.version }}-${{ matrix.target }}"
+          stage="dist/$name"
+          mkdir -p "$stage/config"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "$stage/"
+          cp README.md LICENSE config/AGENTS.codexshim.md "$stage/"
+          cp config/codex.*.toml.example "$stage/config/"
+          cp "${{ matrix.config }}" "$stage/codex.toml.example"
+      - name: Create Windows archive
+        if: matrix.format == 'zip'
+        shell: pwsh
+        run: |
+          $name = "codexshim-${{ needs.validate-version.outputs.version }}-${{ matrix.target }}"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+      - name: Create Linux archive
+        if: matrix.format == 'tar.gz'
+        shell: bash
+        run: |
+          name="codexshim-${{ needs.validate-version.outputs.version }}-${{ matrix.target }}"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codexshim-${{ matrix.target }}
+          path: dist/*.${{ matrix.format }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub release
+    needs: [validate-version, package]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: codexshim-*
+          merge-multiple: true
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum codexshim-* > SHA256SUMS
+      - name: Publish assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
+          fi

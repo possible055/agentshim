@@ -241,7 +241,6 @@ mod tests {
     }
 
     #[cfg(windows)]
-    /// Requires Windows Developer Mode or symbolic-link privilege to exercise the fixture.
     #[test]
     fn windows_directory_reparse_point_is_not_followed() {
         use std::os::windows::fs::symlink_dir;

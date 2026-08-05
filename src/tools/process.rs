@@ -1269,7 +1269,7 @@ mod tests {
         let corpus = vec!["", "a b", "q\"r", "\\", "界", "&|<>^%!"];
         let expected = serde_json::to_string(&corpus).expect("expected JSON");
 
-        let mut python = request("/usr/bin/python3".to_owned());
+        let mut python = request("python3".to_owned());
         python.args = vec![
             "-c".to_owned(),
             "import json,sys; print(json.dumps(sys.argv[1:], ensure_ascii=False, separators=(',', ':')))"
@@ -1288,7 +1288,7 @@ mod tests {
         let output = execute_unix(&node).expect("Node argv probe");
         assert!(output.contains(&expected));
 
-        let mut git = request("/usr/bin/git".to_owned());
+        let mut git = request("git".to_owned());
         git.args = vec![
             "rev-parse".to_owned(),
             "--sq-quote".to_owned(),
@@ -1479,6 +1479,90 @@ mod tests {
             .status()
             .expect("spawn child fixture");
         assert!(status.success());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_lingering_grandchild_parent_fixture() {
+        if env::var("CODEXSHIM_PROCESS_FIXTURE").as_deref() != Ok("lingering-parent") {
+            return;
+        }
+        let pid_file = env::var_os("CODEXSHIM_PROCESS_PID_FILE").expect("pid file");
+        let executable = env::current_exe().expect("test executable");
+        let child = Command::new(executable)
+            .args([
+                "--exact",
+                "tools::process::tests::windows_grandchild_child_fixture",
+                "--nocapture",
+            ])
+            .env("CODEXSHIM_PROCESS_FIXTURE", "child")
+            .env("CODEXSHIM_PROCESS_PID_FILE", &pid_file)
+            .spawn()
+            .expect("spawn lingering child fixture");
+        let pid_file = std::path::PathBuf::from(pid_file);
+        let started = std::time::Instant::now();
+        while !pid_file.exists() && started.elapsed() < Duration::from_secs(2) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(pid_file.exists(), "lingering child did not start");
+        drop(child);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_primary_exit_terminates_lingering_grandchild() {
+        use windows_sys::Win32::{
+            Foundation::CloseHandle,
+            System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+        };
+
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+        let pid_file = fixture.path().join("lingering-grandchild.pid");
+        let executable = env::current_exe().expect("test executable");
+        let mut request = request(executable.to_string_lossy().into_owned());
+        request.args = vec![
+            "--exact".to_owned(),
+            "tools::process::tests::windows_lingering_grandchild_parent_fixture".to_owned(),
+            "--nocapture".to_owned(),
+        ];
+        request.env.insert(
+            "CODEXSHIM_PROCESS_FIXTURE".to_owned(),
+            "lingering-parent".to_owned(),
+        );
+        request.env.insert(
+            "CODEXSHIM_PROCESS_PID_FILE".to_owned(),
+            pid_file.to_string_lossy().into_owned(),
+        );
+        request.timeout_ms = Some(5_000);
+        let started = std::time::Instant::now();
+
+        let output = execute(
+            &root,
+            &ProcessResolver::capture(),
+            &request,
+            Duration::from_secs(5),
+            &CancellationToken::new(),
+        )
+        .expect("completed primary process");
+
+        assert!(output.contains("Exit code: 0"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let pid = std::fs::read_to_string(pid_file)
+            .expect("lingering child pid")
+            .trim()
+            .parse::<u32>()
+            .expect("pid integer");
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if !handle.is_null() {
+            unsafe {
+                CloseHandle(handle);
+            }
+        }
+        assert!(
+            handle.is_null(),
+            "lingering grandchild survived primary completion"
+        );
     }
 
     #[cfg(windows)]

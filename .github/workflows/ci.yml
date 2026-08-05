@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    branches:
+      - "**"
   pull_request:
   workflow_dispatch:
 
@@ -9,9 +11,9 @@ permissions:
   contents: read
 
 jobs:
-  validation:
-    name: Linux and Windows cross-target
-    runs-on: ubuntu-latest
+  linux-validation:
+    name: Linux validation
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -20,10 +22,16 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Lint
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test
         run: cargo test --locked
-      - name: Cross-lint Windows
-        run: cargo clippy --all-targets --target x86_64-pc-windows-msvc -- -D warnings
-      - name: Cross-check Windows
-        run: cargo check --locked --target x86_64-pc-windows-msvc
+
+  windows-validation:
+    name: Windows validation
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked

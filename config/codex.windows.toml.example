@@ -1,0 +1,17 @@
+[mcp_servers.codexshim]
+command = 'C:\absolute\path\to\codexshim.exe'
+args = ["serve"]
+required = true
+startup_timeout_sec = 15
+tool_timeout_sec = 310
+enabled_tools = ["read", "grep", "glob", "run_process"]
+default_tools_approval_mode = "writes"
+# Add CODEXSHIM_MCP_COMPATIBILITY = "legacy" only when Codex sends initialize/2025-06-18.
+env = { CODEX_MCP_PROTOCOL_VERSION = "2026-07-28" }
+
+[mcp_servers.codexshim.tools.run_process]
+approval_mode = "prompt"
+
+[features]
+shell_tool = true
+mcp_2026_07_28 = true
