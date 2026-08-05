@@ -1,7 +1,8 @@
 use codexshim::server::CodexShim;
 
 fn assert_snapshot(actual: impl serde::Serialize, expected: &str) {
-    let actual = serde_json::to_string_pretty(&actual).expect("serialize snapshot") + "\n";
+    let actual = serde_json::to_value(actual).expect("serialize snapshot");
+    let expected: serde_json::Value = serde_json::from_str(expected).expect("parse snapshot");
     assert_eq!(actual, expected);
 }
 

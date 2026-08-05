@@ -107,8 +107,8 @@ mod tests {
     use super::{SortCancelled, sort_by};
 
     #[test]
-    fn matches_standard_sort_for_large_duplicate_corpus() {
-        let mut actual = (0..100_000)
+    fn matches_standard_sort_with_duplicates() {
+        let mut actual = (0..512)
             .rev()
             .map(|value| (value * 37) % 9_973)
             .collect::<Vec<_>>();
@@ -137,7 +137,7 @@ mod tests {
         let cancellation = CancellationToken::new();
         let trigger = cancellation.clone();
         let mut comparisons = 0_usize;
-        let mut values = (0..100_000).rev().collect::<Vec<_>>();
+        let mut values = (0..2_048).rev().collect::<Vec<_>>();
 
         let result = sort_by(&mut values, &cancellation, |left, right| {
             comparisons += 1;

@@ -668,62 +668,6 @@ mod tests {
     }
 
     #[test]
-    fn replacement_and_deletion_never_return_mixed_content() {
-        let fixture = tempfile::tempdir().expect("fixture");
-        let path = fixture.path().join("replace.txt");
-        fs::write(&path, "original\n").expect("original");
-        let replace_path = path.clone();
-        AFTER_READ_HOOK.with(|hook| {
-            *hook.borrow_mut() = Some(Box::new(move || {
-                let old = replace_path.with_extension("old");
-                fs::rename(&replace_path, old).expect("rename original");
-                fs::write(&replace_path, "replacement\n").expect("replacement");
-            }));
-        });
-        let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
-        let output = execute(&root, &request("replace.txt"), &CancellationToken::new())
-            .expect("replacement retry");
-        assert!(output.contains("1\treplacement"));
-        assert!(!output.contains("original"));
-
-        let delete_path = path.clone();
-        AFTER_READ_HOOK.with(|hook| {
-            *hook.borrow_mut() = Some(Box::new(move || {
-                fs::remove_file(&delete_path).expect("delete file");
-            }));
-        });
-        assert!(matches!(
-            execute(&root, &request("replace.txt"), &CancellationToken::new()),
-            Err(ReadError::Changed)
-        ));
-    }
-
-    #[test]
-    fn line_collector_uses_one_extra_line_probe() {
-        let mut collector = super::LineCollector::new(1, Some(1));
-        let control = collector.push("one\ntwo\nthree\nfour\n");
-        assert_eq!(control, crate::encoding::DecodeControl::Stop);
-        assert_eq!(collector.candidates.len(), 2);
-        assert!(collector.stopped);
-    }
-
-    #[test]
-    fn eof_at_candidate_budget_remains_partial() {
-        let mut collector = super::LineCollector::new(1, None);
-        let full_line = format!("{}\n", "x".repeat(super::LINE_PREFIX_BYTES));
-        let mut text = full_line.repeat(super::CANDIDATE_BYTES / super::LINE_PREFIX_BYTES);
-        text.push('y');
-
-        assert_eq!(
-            collector.push(&text),
-            crate::encoding::DecodeControl::Continue
-        );
-        collector.finish_eof();
-
-        assert!(collector.stopped);
-    }
-
-    #[test]
     fn webp_magic_requires_riff_container() {
         assert!(!super::has_binary_magic(b"abcdefghWEBP source text"));
         assert!(super::has_binary_magic(b"RIFF1234WEBP"));

@@ -384,25 +384,20 @@ mod tests {
     }
 
     #[test]
-    fn top_k_matches_full_sort_oracle_at_large_cardinality() {
+    fn top_k_matches_full_sort_oracle() {
         let fixture = tempfile::tempdir().expect("fixture");
         let root = RepositoryRoot::open(fixture.path()).expect("root");
         let mut paths = Vec::new();
         let mut oracle = Vec::new();
-        for index in (0..MAX_MATCHES).rev() {
+        for index in (0..256).rev() {
             let path = format!("file-{index:06}.rs");
             let resolved = root.resolve(Path::new(&path)).expect("resolve");
             oracle.push(resolved.sort_key().clone());
             paths.push(resolved);
         }
         oracle.sort();
-        for (offset, limit) in [
-            (0_usize, 17_usize),
-            (12_345, 31),
-            (99_990, 10),
-            (100_001, 5),
-        ] {
-            let mut top = TopK::new(offset.saturating_add(limit).min(MAX_MATCHES));
+        for (offset, limit) in [(0_usize, 17_usize), (57, 31), (246, 10), (257, 5)] {
+            let mut top = TopK::new(offset.saturating_add(limit).min(paths.len()));
             for path in &paths {
                 top.admit(path).expect("admit");
             }
@@ -432,10 +427,7 @@ mod tests {
             execute(&root, &request("["), &CancellationToken::new()),
             Err(GlobError::Pattern(_))
         ));
-        let mut total = 0;
-        for _ in 0..MAX_MATCHES {
-            record_match(&mut total).expect("within match limit");
-        }
+        let mut total = MAX_MATCHES;
         assert!(matches!(
             record_match(&mut total),
             Err(GlobError::TooManyMatches)

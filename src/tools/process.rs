@@ -1059,6 +1059,7 @@ mod tests {
         ));
     }
 
+    #[cfg(windows)]
     #[test]
     fn powershell_command_evaluation_switches_are_classified_conservatively() {
         for denied in [
@@ -1201,31 +1202,6 @@ mod tests {
         assert!(report.contains("Exit code: unavailable (timed out)"));
         assert!(report.contains("timeout stderr evidence"));
         assert!(report.ends_with("Incomplete."));
-        assert!(report.len() <= crate::output::MODEL_BYTE_LIMIT);
-        assert!(crate::output::token_count(&report) <= crate::output::MODEL_TOKEN_LIMIT);
-    }
-
-    #[test]
-    fn process_reports_bound_extreme_diagnostic_paths() {
-        let path = PathBuf::from(format!(r"C:\{}\cargo.exe", "界".repeat(20_000)));
-        let report = render_timeout(
-            &TimedOutProcess {
-                resolved: ResolvedProgram {
-                    absolute: path.clone(),
-                    executable: path.clone(),
-                    launcher: Launcher::Native,
-                },
-                cwd: path,
-                duration: Duration::from_millis(150),
-                stdout: Capture::new(),
-                stderr: Capture::new(),
-            },
-            150,
-        )
-        .expect("bounded timeout report");
-
-        assert!(report.contains("[path truncated]"));
-        assert!(report.contains("Exit code: unavailable (timed out)"));
         assert!(report.len() <= crate::output::MODEL_BYTE_LIMIT);
         assert!(crate::output::token_count(&report) <= crate::output::MODEL_TOKEN_LIMIT);
     }

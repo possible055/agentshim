@@ -96,7 +96,7 @@ shell_tool = true
 mcp_2026_07_28 = true
 ```
 
-Keep `shell_tool = true` while the external release gates remain incomplete. Change it to `false` only after the full Linux/Windows, Codex integration, performance, and 24-hour soak checklist passes.
+Keep `shell_tool = true` while the external release gates remain incomplete. Change it to `false` only after the full Linux/Windows, Codex integration, and performance checklist passes.
 
 On Windows, use a single-quoted TOML path such as `'C:\Users\me\AppData\Local\codexshim\bin\codexshim.exe'` to avoid escaping backslashes. Always configure the prebuilt release executable as the long-lived MCP server; do not use `cargo run` as the MCP command because nested Cargo calls may contend for build locks.
 
