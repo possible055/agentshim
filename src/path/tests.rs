@@ -49,6 +49,7 @@ mod tests {
         let skills = codex.path().join("skills");
         fs::create_dir_all(skills.join("example")).expect("skill directory");
         fs::write(skills.join("example/SKILL.md"), "instructions").expect("skill file");
+        let skills = fs::canonicalize(skills).expect("canonical skill root");
         fs::write(unmanaged.path().join("secret.txt"), "secret").expect("unmanaged file");
         let access = FileAccess::with_codex_roots(
             Arc::new(RepositoryRoot::open(repository.path()).expect("root")),

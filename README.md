@@ -8,7 +8,7 @@ English | [简体中文](README.zh-CN.md)
 
 - **Bounded file access.** `read`, `grep`, and `glob` operate inside the repository by default, with optional access to Codex skill and plugin directories.
 - **No shell injection.** `run_process` takes an executable and a literal argument list — no pipes, redirections, wildcards, or variable expansion.
-- **Cross-platform.** Prebuilt binaries for Linux and Windows 11 (build 22621+).
+- **Cross-platform.** Natively supports Windows and Linux.
 
 ## Tools
 
@@ -20,8 +20,6 @@ English | [简体中文](README.zh-CN.md)
 | `run_process` | Run one program with a structured argument list. |
 
 Every tool returns a typed `structuredContent` object together with a bounded text rendering. `read` reports `next_start_line`; `grep` and `glob` report `next_offset`, total results, page limits, and skipped-entry counters. Tool failures use a stable `{ error: { code, message, retryable, details } }` envelope.
-
-The repository performance harness uses internal engine access that is excluded from the production API. Run it with `cargo bench --locked --features bench-internals --bench performance`. The harness enforces scale-aware p95 limits for read, glob, and grep; the stdio harness enforces cold-start, p95, and process limits. CI sets the accepted limits explicitly through `CODEXSHIM_BENCH_MAX_*` environment variables.
 
 ## Install
 
@@ -49,18 +47,6 @@ Default install locations:
 - Linux: `${XDG_DATA_HOME:-$HOME/.local/share}/codexshim/bin/codexshim`
 
 Override with `-InstallDir` (PowerShell) or `--install-dir` (sh). Re-run the same command to update.
-
-### Manual download
-
-Download the archive and `SHA256SUMS` from [GitHub Releases](https://github.com/possible055/codexshim/releases):
-
-- Windows: `codexshim-<version>-x86_64-pc-windows-msvc.zip`
-- Linux: `codexshim-<version>-x86_64-unknown-linux-gnu.tar.gz`
-
-Verify, then extract to a stable directory:
-
-- Windows: `Get-FileHash <archive> -Algorithm SHA256`
-- Linux: `sha256sum -c SHA256SUMS --ignore-missing`
 
 ### Build from source
 
@@ -95,7 +81,6 @@ env = { CODEX_MCP_PROTOCOL_VERSION = "2026-07-28" }
 approval_mode = "prompt"
 
 [features]
-shell_tool = true
 mcp_2026_07_28 = true
 ```
 
@@ -145,13 +130,6 @@ codexshim logs purge
 
 Records contain identifiers, phases, outcomes, timings, and error classes — never MCP arguments, grep patterns, process arguments or environment, stdin, file contents, or stdout/stderr.
 
-## Notes
-
-- Always configure the prebuilt release executable as the long-lived MCP server. Do not use `cargo run` as the MCP command — nested Cargo calls may contend for build locks.
-- On Windows, stop the active MCP server before rebuilding or replacing its executable. A running `.exe` cannot be overwritten; restart Codex afterwards.
-- Tool paths are interpreted by the platform running the server. Use Windows paths or repository-relative paths with a Windows server; `/mnt/...` paths only with a Linux server inside WSL.
-- Developer Mode is not required. Directory symbolic links, junctions, and other reparse points are never followed during traversal; explicit symlink starting paths are rejected for unrestricted external operations.
-
 ## License
 
-[Apache-2.0](LICENSE)
+[MIT](LICENSE)

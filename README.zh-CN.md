@@ -8,7 +8,7 @@
 
 - **受限的文件访问。** `read`、`grep`、`glob` 默认仅在仓库内操作，可选访问 Codex skill 和 plugin 目录。
 - **无 shell 注入。** `run_process` 接收可执行文件和字面量参数列表——不支持管道、重定向、通配符或变量展开。
-- **跨平台。** 提供 Linux 和 Windows 11（build 22621+）的预编译二进制。
+- **跨平台。** 仅原生支持 Windows 和 Linux。
 
 ## 工具
 
@@ -20,8 +20,6 @@
 | `run_process` | 以结构化参数列表运行单个程序。 |
 
 所有工具都会同时返回类型明确的 `structuredContent` 与受大小限制的文本视图。`read` 返回 `next_start_line`；`grep` 和 `glob` 返回 `next_offset`、结果总数、分页限制及跳过项目统计。工具错误统一为 `{ error: { code, message, retryable, details } }`。
-
-性能基准通过不属于生产 API 的内部入口运行：`cargo bench --locked --features bench-internals --bench performance`。该基准会检查 read、glob、grep 的按规模调整 p95 门槛；stdio 基准则检查冷启动、p95 与进程执行门槛。CI 通过 `CODEXSHIM_BENCH_MAX_*` 环境变量明确设置验收值。
 
 ## 安装
 
@@ -49,18 +47,6 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/possible055/codexshim/r
 - Linux: `${XDG_DATA_HOME:-$HOME/.local/share}/codexshim/bin/codexshim`
 
 使用 `-InstallDir`（PowerShell）或 `--install-dir`（sh）覆盖路径。再次运行同一命令即可更新。
-
-### 手动下载
-
-从 [GitHub Releases](https://github.com/possible055/codexshim/releases) 下载归档文件和 `SHA256SUMS`：
-
-- Windows: `codexshim-<version>-x86_64-pc-windows-msvc.zip`
-- Linux: `codexshim-<version>-x86_64-unknown-linux-gnu.tar.gz`
-
-校验后解压到稳定目录：
-
-- Windows: `Get-FileHash <archive> -Algorithm SHA256`
-- Linux: `sha256sum -c SHA256SUMS --ignore-missing`
 
 ### 从源码构建
 
@@ -95,7 +81,6 @@ env = { CODEX_MCP_PROTOCOL_VERSION = "2026-07-28" }
 approval_mode = "prompt"
 
 [features]
-shell_tool = true
 mcp_2026_07_28 = true
 ```
 
@@ -145,13 +130,6 @@ codexshim logs purge
 
 记录包含标识符、阶段、结果、计时和错误类别——绝不包含 MCP 参数、grep 模式、进程参数或环境、stdin、文件内容或 stdout/stderr。
 
-## 注意事项
-
-- 始终将预编译发行版可执行文件配置为长期运行的 MCP 服务。不要使用 `cargo run` 作为 MCP 命令——嵌套 Cargo 调用可能争用构建锁。
-- 在 Windows 上，重建或替换可执行文件前请先停止活动的 MCP 服务。运行中的 `.exe` 无法被覆盖；完成后重启 Codex。
-- 工具路径由运行服务的平台解释。Windows 服务使用 Windows 路径或仓库相对路径；`/mnt/...` 路径仅适用于 WSL 内的 Linux 服务。
-- 无需开发者模式。遍历过程中绝不跟随目录符号链接、junction 及其他重解析点；非受限外部操作拒绝显式符号链接起始路径。
-
 ## 许可证
 
-[Apache-2.0](LICENSE)
+[MIT](LICENSE)
