@@ -19,6 +19,10 @@
 | `glob` | 查找文件，并遵循仓库忽略规则。 |
 | `run_process` | 以结构化参数列表运行单个程序。 |
 
+所有工具都会同时返回类型明确的 `structuredContent` 与受大小限制的文本视图。`read` 返回 `next_start_line`；`grep` 和 `glob` 返回 `next_offset`、结果总数、分页限制及跳过项目统计。工具错误统一为 `{ error: { code, message, retryable, details } }`。
+
+性能基准通过不属于生产 API 的内部入口运行：`cargo bench --locked --features bench-internals --bench performance`。该基准会检查 read、glob、grep 的按规模调整 p95 门槛；stdio 基准则检查冷启动、p95 与进程执行门槛。CI 通过 `CODEXSHIM_BENCH_MAX_*` 环境变量明确设置验收值。
+
 ## 安装
 
 预编译二进制支持 Linux 和 Windows 11（build 22621+，本地固定 NTFS 驱动器）。

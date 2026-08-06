@@ -1,12 +1,10 @@
 use std::{ffi::OsString, fs, path::Path, sync::Arc, time::Instant};
 
-use codexshim::{
-    path::{FileAccess, ReadScope, RepositoryRoot},
-    tools::{
-        glob::{self, GlobRequest},
-        grep::{self, GrepMode, GrepRequest},
-        read::{self, ReadRequest},
-    },
+use codexshim::bench_support::{
+    FileAccess, ReadScope, RepositoryRoot,
+    glob::{self, GlobRequest},
+    grep::{self, GrepMode, GrepRequest},
+    read::{self, ReadRequest},
 };
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -16,6 +14,9 @@ const CONCURRENCY_LEVELS: [usize; 3] = [1, 4, 8];
 const GREP_LANES: [usize; 5] = [1, 2, 4, 8, 16];
 const BENCH_SCALES_ENV: &str = "CODEXSHIM_BENCH_SCALES";
 const BENCH_QUICK_ENV: &str = "CODEXSHIM_BENCH_QUICK";
+const GLOB_P95_ENV: &str = "CODEXSHIM_BENCH_MAX_GLOB_P95_MS_PER_1K";
+const GREP_P95_ENV: &str = "CODEXSHIM_BENCH_MAX_GREP_P95_MS_PER_1K";
+const READ_P95_ENV: &str = "CODEXSHIM_BENCH_MAX_READ_P95_MS";
 
 fn main() {
     for files in fixture_scales() {
@@ -197,6 +198,12 @@ fn measure_with(
         warm_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
     }
     warm_ms.sort_by(f64::total_cmp);
+    let p95_ms = percentile(&warm_ms, 95, 100);
+    let p95_limit_ms = p95_limit(operation, files);
+    assert!(
+        p95_ms <= p95_limit_ms,
+        "{scope} {operation} p95 {p95_ms:.3} ms exceeds {p95_limit_ms:.3} ms"
+    );
 
     let concurrent = concurrency_levels()
         .iter()
@@ -232,13 +239,38 @@ fn measure_with(
             "cold_ms": cold_ms,
             "warm_ms": warm_ms,
             "p50_ms": percentile(&warm_ms, 50, 100),
-            "p95_ms": percentile(&warm_ms, 95, 100),
+            "p95_ms": p95_ms,
+            "p95_limit_ms": p95_limit_ms,
             "p99_ms": percentile(&warm_ms, 99, 100),
             "concurrent": concurrent,
             "output_bytes": expected.len(),
             "output_equivalent": true,
         })
     );
+}
+
+fn p95_limit(operation: &str, files: usize) -> f64 {
+    if operation == "read" {
+        return configured_limit(READ_P95_ENV, 10.0);
+    }
+    let scale = files.div_ceil(1_000) as f64;
+    if operation == "glob" {
+        return configured_limit(GLOB_P95_ENV, 250.0) * scale;
+    }
+    if operation.starts_with("grep_lanes_") {
+        return configured_limit(GREP_P95_ENV, 2_000.0) * scale;
+    }
+    panic!("missing p95 limit for {operation}");
+}
+
+fn configured_limit(name: &str, default: f64) -> f64 {
+    let value = std::env::var(name).map_or(default, |value| {
+        value
+            .parse::<f64>()
+            .unwrap_or_else(|_| panic!("{name} must be a number"))
+    });
+    assert!(value.is_finite() && value > 0.0, "{name} must be positive");
+    value
 }
 
 fn quick_mode() -> bool {

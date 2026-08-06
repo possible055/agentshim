@@ -44,7 +44,7 @@
     },
     {
       "name": "grep",
-      "description": "Search local repository or Codex extension contents using Rust regex or fixed strings. Results are deterministic and continue with an explicit offset.",
+      "description": "Search local repository or Codex extension contents using Rust regex or fixed strings. Results are deterministic and expose structured numeric pagination.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -113,7 +113,7 @@
     },
     {
       "name": "glob",
-      "description": "Find local repository or Codex extension file paths using a glob pattern. Results use native absolute paths and continue with an explicit offset.",
+      "description": "Find local repository or Codex extension file paths using a glob pattern. Results use native absolute paths and expose structured numeric pagination.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

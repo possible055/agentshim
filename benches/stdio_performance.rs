@@ -7,6 +7,9 @@ use std::{
 use serde_json::{Value, json};
 
 const WARM_SAMPLES: usize = 7;
+const COLD_LIMIT_ENV: &str = "CODEXSHIM_BENCH_MAX_STDIO_COLD_MS";
+const P95_LIMIT_ENV: &str = "CODEXSHIM_BENCH_MAX_STDIO_P95_MS";
+const PROCESS_LIMIT_ENV: &str = "CODEXSHIM_BENCH_MAX_PROCESS_MS";
 
 fn main() {
     for mode in ["off", "errors", "all"] {
@@ -31,6 +34,22 @@ fn benchmark_mode(mode: &str) {
     let process_ms = process_started.elapsed().as_secs_f64() * 1_000.0;
     session.close();
     warm_ms.sort_by(f64::total_cmp);
+    let p95_ms = percentile(&warm_ms, 95, 100);
+    let cold_limit_ms = configured_limit(COLD_LIMIT_ENV, 750.0);
+    let p95_limit_ms = configured_limit(P95_LIMIT_ENV, 10.0);
+    let process_limit_ms = configured_limit(PROCESS_LIMIT_ENV, 300.0);
+    assert!(
+        cold_ms <= cold_limit_ms,
+        "stdio {mode} cold start {cold_ms:.3} ms exceeds {cold_limit_ms:.3} ms"
+    );
+    assert!(
+        p95_ms <= p95_limit_ms,
+        "stdio {mode} p95 {p95_ms:.3} ms exceeds {p95_limit_ms:.3} ms"
+    );
+    assert!(
+        process_ms <= process_limit_ms,
+        "stdio {mode} process {process_ms:.3} ms exceeds {process_limit_ms:.3} ms"
+    );
     println!(
         "{}",
         json!({
@@ -39,13 +58,26 @@ fn benchmark_mode(mode: &str) {
             "cold_ms": cold_ms,
             "warm_ms": warm_ms,
             "p50_ms": percentile(&warm_ms, 50, 100),
-            "p95_ms": percentile(&warm_ms, 95, 100),
+            "p95_ms": p95_ms,
             "p99_ms": percentile(&warm_ms, 99, 100),
+            "cold_limit_ms": cold_limit_ms,
+            "p95_limit_ms": p95_limit_ms,
+            "process_limit_ms": process_limit_ms,
             "output_equivalent": true,
             "process_ms": process_ms,
             "process_output_bytes": process_output.to_string().len(),
         })
     );
+}
+
+fn configured_limit(name: &str, default: f64) -> f64 {
+    let value = std::env::var(name).map_or(default, |value| {
+        value
+            .parse::<f64>()
+            .unwrap_or_else(|_| panic!("{name} must be a number"))
+    });
+    assert!(value.is_finite() && value > 0.0, "{name} must be positive");
+    value
 }
 
 struct Session {

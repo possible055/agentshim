@@ -1,7 +1,41 @@
+use serde::Serialize;
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 pub const MODEL_BYTE_LIMIT: usize = 32_000;
 const DIAGNOSTIC_TRUNCATION_MARKER: &str = "\n...[diagnostic truncated]";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompleteToolResult<'a> {
+    result_type: &'static str,
+    content: [TextContent<'a>; 1],
+    structured_content: &'a Value,
+    is_error: bool,
+}
+
+#[derive(Serialize)]
+struct TextContent<'a> {
+    r#type: &'static str,
+    text: &'a str,
+}
+
+pub(crate) fn tool_result_encoded_len(text: &str, structured: &Value, is_error: bool) -> usize {
+    let result = CompleteToolResult {
+        result_type: "complete",
+        content: [TextContent {
+            r#type: "text",
+            text,
+        }],
+        structured_content: structured,
+        is_error,
+    };
+    serde_json::to_vec(&result).map_or(usize::MAX, |encoded| encoded.len())
+}
+
+pub(crate) fn tool_result_fits_budget(text: &str, structured: &Value, is_error: bool) -> bool {
+    tool_result_encoded_len(text, structured, is_error) <= MODEL_BYTE_LIMIT
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OutputLimits {
@@ -144,8 +178,9 @@ fn floor_char_boundary(text: &str, mut index: usize) -> usize {
 mod tests {
     use super::{
         DIAGNOSTIC_TRUNCATION_MARKER, OutputError, OutputFormatter, OutputLimits,
-        bounded_diagnostic,
+        bounded_diagnostic, tool_result_encoded_len,
     };
+    use serde_json::json;
     use tokio_util::sync::CancellationToken;
 
     #[test]
@@ -210,5 +245,24 @@ mod tests {
     #[test]
     fn short_diagnostics_are_unchanged() {
         assert_eq!(bounded_diagnostic("short diagnostic"), "short diagnostic");
+    }
+
+    #[test]
+    fn tool_result_budget_counts_json_escaping_and_complete_result_fields() {
+        let text = "\\\"\u{1}".repeat(1_000);
+        let structured = json!({ "text": text });
+        let encoded = tool_result_encoded_len(&text, &structured, false);
+        assert!(encoded > text.len() + serde_json::to_vec(&structured).unwrap().len());
+        assert_eq!(
+            encoded,
+            serde_json::to_vec(&json!({
+                "resultType": "complete",
+                "content": [{ "type": "text", "text": text }],
+                "structuredContent": structured,
+                "isError": false
+            }))
+            .unwrap()
+            .len()
+        );
     }
 }

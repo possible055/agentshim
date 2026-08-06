@@ -1,0 +1,212 @@
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::Path, sync::Arc};
+
+    use super::{FileAccess, PathError, ReadScope, RepositoryRoot};
+
+    #[test]
+    fn read_scope_parsing_is_explicit_and_fail_closed() {
+        assert_eq!(
+            "normal".parse::<ReadScope>().expect("normal"),
+            ReadScope::Normal
+        );
+        assert_eq!(
+            "unrestricted".parse::<ReadScope>().expect("unrestricted"),
+            ReadScope::Unrestricted
+        );
+        assert!("all".parse::<ReadScope>().is_err());
+    }
+
+    #[test]
+    fn normal_rejects_unmanaged_paths_and_unrestricted_admits_them() {
+        let fixture = tempfile::tempdir().expect("root fixture");
+        let outside = tempfile::tempdir().expect("outside fixture");
+        fs::write(outside.path().join("outside.txt"), "outside").expect("outside file");
+        let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+        let normal = FileAccess::new(Arc::clone(&root), ReadScope::Normal);
+        let unrestricted = FileAccess::new(root, ReadScope::Unrestricted);
+        let outside_file = outside.path().join("outside.txt");
+
+        assert_eq!(
+            normal.resolve(&outside_file).unwrap_err(),
+            PathError::OutsideRoot
+        );
+        let resolved = unrestricted.resolve(&outside_file).expect("ambient path");
+        assert!(resolved.is_ambient());
+        assert_eq!(resolved.absolute(), outside_file);
+        assert_eq!(resolved.key(), Path::new("outside.txt"));
+        assert_eq!(
+            unrestricted.resolve(Path::new("../outside")).unwrap_err(),
+            PathError::ParentEscape
+        );
+    }
+
+    #[test]
+    fn normal_admits_only_configured_codex_roots() {
+        let repository = tempfile::tempdir().expect("repository fixture");
+        let codex = tempfile::tempdir().expect("codex fixture");
+        let unmanaged = tempfile::tempdir().expect("unmanaged fixture");
+        let skills = codex.path().join("skills");
+        fs::create_dir_all(skills.join("example")).expect("skill directory");
+        fs::write(skills.join("example/SKILL.md"), "instructions").expect("skill file");
+        fs::write(unmanaged.path().join("secret.txt"), "secret").expect("unmanaged file");
+        let access = FileAccess::with_codex_roots(
+            Arc::new(RepositoryRoot::open(repository.path()).expect("root")),
+            &[skills.as_path()],
+        )
+        .expect("normal access");
+
+        let skill_root = access.resolve(&skills).expect("skill root");
+        let skill = access
+            .resolve(&skills.join("example/SKILL.md"))
+            .expect("skill file");
+        assert!(skill.is_external());
+        assert!(!skill.is_ambient());
+        assert!(access.metadata_kind(&skill).expect("metadata").is_file);
+        assert_eq!(
+            access
+                .resolve_external_entry(&skill_root, skill.absolute())
+                .expect("skill entry")
+                .key(),
+            Path::new("example/SKILL.md")
+        );
+        assert_eq!(
+            access
+                .resolve(&unmanaged.path().join("secret.txt"))
+                .unwrap_err(),
+            PathError::OutsideRoot
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unrestricted_scope_rejects_non_disk_windows_prefixes() {
+        let fixture = tempfile::tempdir().expect("root fixture");
+        let access = FileAccess::new(
+            Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
+            ReadScope::Unrestricted,
+        );
+        for path in [r"\\server\share\file.rs", r"\\.\PhysicalDrive0"] {
+            assert_eq!(
+                access.resolve(Path::new(path)).unwrap_err(),
+                PathError::UnsupportedLocation
+            );
+        }
+        assert_eq!(
+            access.resolve(Path::new(r"C:relative.rs")).unwrap_err(),
+            PathError::AmbiguousPrefix
+        );
+    }
+
+    #[test]
+    fn resolves_relative_and_root_absolute_paths() {
+        let fixture = tempfile::tempdir().expect("create fixture");
+        fs::create_dir(fixture.path().join("src")).expect("create src");
+        let root = RepositoryRoot::open(fixture.path()).expect("open root");
+
+        let relative = root.resolve(Path::new("src/./lib.rs")).expect("relative");
+        let absolute = root
+            .resolve(&root.path().join("src/lib.rs"))
+            .expect("absolute");
+        assert_eq!(relative.key(), Path::new("src/lib.rs"));
+        assert_eq!(relative, absolute);
+        assert_eq!(relative.slash_path(), Some("src/lib.rs"));
+    }
+
+    #[test]
+    fn rejects_parent_and_absolute_escape() {
+        let fixture = tempfile::tempdir().expect("create fixture");
+        let root = RepositoryRoot::open(fixture.path()).expect("open root");
+        assert_eq!(
+            root.resolve(Path::new("../outside")).unwrap_err(),
+            PathError::ParentEscape
+        );
+        let outside = fixture
+            .path()
+            .parent()
+            .expect("fixture parent")
+            .join("outside");
+        assert_eq!(root.resolve(&outside).unwrap_err(), PathError::OutsideRoot);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_drive_relative_and_case_rules_are_explicit() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root = RepositoryRoot::open(fixture.path()).expect("open root");
+        assert_eq!(
+            root.resolve(Path::new(r"C:ambiguous"))
+                .expect_err("drive-relative path"),
+            PathError::AmbiguousPrefix
+        );
+
+        let absolute = root.path().join("CaseSensitiveName.rs");
+        let folded = absolute.to_string_lossy().to_ascii_uppercase();
+        let resolved = root
+            .resolve(Path::new(&folded))
+            .expect("Windows absolute comparison is case-insensitive");
+        assert_eq!(resolved.slash_path(), Some("CASESENSITIVENAME.RS"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_standard_and_verbatim_prefixes_are_equivalent() {
+        use std::path::PathBuf;
+
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root = RepositoryRoot::open(fixture.path()).expect("open root");
+        let canonical = root.path().to_string_lossy();
+        let standard = canonical
+            .strip_prefix(r"\\?\")
+            .expect("canonical drive path uses a verbatim prefix");
+        let resolved = root
+            .resolve(&PathBuf::from(standard).join("CaseSensitiveName.rs"))
+            .expect("standard drive path resolves under verbatim root");
+        assert_eq!(resolved.slash_path(), Some("CaseSensitiveName.rs"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_prefix_equivalence_is_narrow() {
+        use super::windows_component_eq;
+
+        fn prefix(path: &Path) -> std::path::Component<'_> {
+            path.components().next().expect("path prefix")
+        }
+
+        assert!(windows_component_eq(
+            prefix(Path::new(r"C:\repo")),
+            prefix(Path::new(r"\\?\c:\repo")),
+        ));
+        assert!(windows_component_eq(
+            prefix(Path::new(r"\\server\share\repo")),
+            prefix(Path::new(r"\\?\UNC\SERVER\SHARE\repo")),
+        ));
+        assert!(!windows_component_eq(
+            prefix(Path::new(r"C:\repo")),
+            prefix(Path::new(r"D:\repo")),
+        ));
+        assert!(!windows_component_eq(
+            prefix(Path::new(r"\\server\share\repo")),
+            prefix(Path::new(r"\\?\UNC\server\other\repo")),
+        ));
+        assert!(!windows_component_eq(
+            prefix(Path::new(r"\\.\COM1")),
+            prefix(Path::new(r"\\?\COM1")),
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_sort_keys_are_lossless_and_not_model_visible() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let fixture = tempfile::tempdir().expect("create fixture");
+        let root = RepositoryRoot::open(fixture.path()).expect("open root");
+        let path = std::path::PathBuf::from(OsString::from_vec(vec![b'a', 0xFF]));
+        let resolved = root.resolve(&path).expect("resolve raw path");
+        assert_eq!(resolved.slash_path(), None);
+        assert!(resolved.sort_key() > root.resolve(Path::new("a")).expect("a").sort_key());
+    }
+}

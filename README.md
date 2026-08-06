@@ -19,6 +19,10 @@ English | [简体中文](README.zh-CN.md)
 | `glob` | Find files while respecting repository ignore rules. |
 | `run_process` | Run one program with a structured argument list. |
 
+Every tool returns a typed `structuredContent` object together with a bounded text rendering. `read` reports `next_start_line`; `grep` and `glob` report `next_offset`, total results, page limits, and skipped-entry counters. Tool failures use a stable `{ error: { code, message, retryable, details } }` envelope.
+
+The repository performance harness uses internal engine access that is excluded from the production API. Run it with `cargo bench --locked --features bench-internals --bench performance`. The harness enforces scale-aware p95 limits for read, glob, and grep; the stdio harness enforces cold-start, p95, and process limits. CI sets the accepted limits explicitly through `CODEXSHIM_BENCH_MAX_*` environment variables.
+
 ## Install
 
 Prebuilt binaries are available for Linux and Windows 11 (build 22621+) on a local fixed NTFS drive.

@@ -1,5 +1,4 @@
-use codexshim::path::ReadScope;
-use codexshim::server::CodexShim;
+use codexshim::{CodexShim, ReadScope};
 use serde_json::{Value, json};
 
 fn assert_snapshot(actual: impl serde::Serialize, expected: &str) {
@@ -18,10 +17,32 @@ fn server_discover_snapshot() {
 
 #[test]
 fn tools_list_snapshot() {
-    assert_snapshot(
-        CodexShim::tools_result(),
-        include_str!("snapshots/tools_list.json"),
-    );
+    let mut actual = serde_json::to_value(CodexShim::tools_result()).expect("serialize tools");
+    for tool in actual["tools"].as_array_mut().expect("tools array") {
+        tool.as_object_mut()
+            .expect("tool object")
+            .remove("outputSchema");
+    }
+    assert_snapshot(actual, include_str!("snapshots/tools_list.json"));
+}
+
+#[test]
+fn tool_output_schemas_cover_structured_contracts() {
+    let result = serde_json::to_value(CodexShim::tools_result()).expect("serialize tools");
+    let tools = result["tools"].as_array().expect("tools array");
+    for name in ["read", "grep", "glob", "run_process"] {
+        let schema = &tool(tools, name)["outputSchema"];
+        assert_eq!(schema["type"], "object", "{name} output type");
+        assert!(
+            schema["required"].as_array().is_some(),
+            "{name} required fields"
+        );
+    }
+    assert!(tool(tools, "read")["outputSchema"]["properties"]["next_start_line"].is_object());
+    for name in ["grep", "glob"] {
+        assert!(tool(tools, name)["outputSchema"]["properties"]["next_offset"].is_object());
+    }
+    assert!(tool(tools, "run_process")["outputSchema"]["properties"]["stdout"].is_object());
 }
 
 #[test]

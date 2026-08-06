@@ -1,6 +1,7 @@
 use std::{borrow::Cow, io, path::Path};
 
 use ignore::{DirEntry, WalkBuilder};
+use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::path::{FileAccess, ResolvedPath};
@@ -11,7 +12,7 @@ pub enum TraversalControl {
     Stop,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct TraversalSummary {
     pub io_errors: usize,
     pub escaped_entries: usize,

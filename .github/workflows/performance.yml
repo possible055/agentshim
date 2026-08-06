@@ -20,8 +20,14 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}\codexshim-performance-target
           CODEXSHIM_BENCH_SCALES: ${{ inputs.scales }}
-        run: cargo bench --locked --bench performance
+          CODEXSHIM_BENCH_MAX_GLOB_P95_MS_PER_1K: "250"
+          CODEXSHIM_BENCH_MAX_GREP_P95_MS_PER_1K: "2000"
+          CODEXSHIM_BENCH_MAX_READ_P95_MS: "10"
+        run: cargo bench --locked --features bench-internals --bench performance
       - name: Benchmark diagnostics through stdio
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}\codexshim-performance-target
+          CODEXSHIM_BENCH_MAX_STDIO_COLD_MS: "750"
+          CODEXSHIM_BENCH_MAX_STDIO_P95_MS: "10"
+          CODEXSHIM_BENCH_MAX_PROCESS_MS: "300"
         run: cargo bench --locked --bench stdio_performance
