@@ -88,7 +88,7 @@ async fn run(config: RuntimeLimits, command: CliCommand) -> Result<(), Box<dyn E
                 .build()?;
             let (stdin, stdout) = stdio();
             let reader = ShutdownReader {
-                inner: stdin,
+                inner: ReceiveFrameReader::new(stdin),
                 shutdown: service.shutdown_token(),
                 termination_reported: false,
             };

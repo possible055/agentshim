@@ -115,7 +115,10 @@ trait DiagnosticError: Display {
     fn error_class(&self) -> &'static str;
 
     fn retryable(&self) -> bool {
-        matches!(self.error_class(), "io" | "resource_timeout")
+        matches!(
+            self.error_class(),
+            "io" | "resource_timeout" | "resource_busy"
+        )
     }
 
     fn details(&self) -> Option<Value> {
@@ -205,7 +208,7 @@ fn classified_tool_error(
     message: impl Into<String>,
 ) -> CallToolResponse {
     tracing::error!(target: "codexshim", event = "tool_error", phase = "response", outcome = "error", error_class);
-    let retryable = matches!(error_class, "io" | "resource_timeout");
+    let retryable = matches!(error_class, "io" | "resource_timeout" | "resource_busy");
     tool_error(error_class, retryable, message, None)
 }
 
@@ -251,6 +254,13 @@ fn process_queue_timeout(timeout_ms: u64) -> CallToolResponse {
     classified_tool_error(
         "resource_timeout",
         process_queue_timeout_message(timeout_ms),
+    )
+}
+
+fn resource_busy(tool: &str) -> CallToolResponse {
+    classified_tool_error(
+        "resource_busy",
+        format!("{tool} capacity is busy; retry the request later"),
     )
 }
 

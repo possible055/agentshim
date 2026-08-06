@@ -1,13 +1,19 @@
 use std::{
     collections::BTreeMap,
     env, fs, io,
-    io::{Read, Write},
     path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+
+#[cfg(windows)]
+use std::{
+    io::{Read, Write},
     sync::{
-        Arc, Condvar, Mutex,
+        Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use serde::{Deserialize, Serialize};
@@ -22,8 +28,8 @@ use crate::{
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 300_000;
 const MAX_STDIN_BYTES: usize = 1024 * 1024;
-const CAPTURE_HEAD_BYTES: usize = 12 * 1024;
-const CAPTURE_TAIL_BYTES: usize = 12 * 1024;
+const CAPTURE_HEAD_BYTES: usize = 3 * 1024;
+const CAPTURE_TAIL_BYTES: usize = 3 * 1024;
 const DRAIN_CHUNK_BYTES: usize = 64 * 1024;
 const DIAGNOSTIC_PATH_BYTES: usize = 2 * 1024;
 const DIAGNOSTIC_PATH_MARKER: &str = "...[path truncated]...";

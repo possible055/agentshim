@@ -7,6 +7,8 @@ use std::{
 
 use serde_json::{Map, Value, json};
 
+const MAX_RECEIVE_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
 struct Session {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -182,6 +184,373 @@ fn modern_lifecycle_serves_a_tool_call_and_shuts_down_at_eof() {
     );
 
     session.close();
+}
+
+#[test]
+fn oversized_valid_frame_closes_stdio_transport() {
+    let mut session = Session::start();
+    let mut params = empty_params();
+    params.insert("padding".to_owned(), json!(""));
+    let mut request = modern_request(1, "server/discover", params);
+    let base_length = serde_json::to_vec(&request).expect("base request").len();
+    let padding_length = MAX_RECEIVE_FRAME_BYTES + 1 - base_length;
+    request["params"]["padding"] = json!("x".repeat(padding_length));
+    let encoded = serde_json::to_vec(&request).expect("oversized request");
+    assert_eq!(encoded.len(), MAX_RECEIVE_FRAME_BYTES + 1);
+
+    let stdin = session.stdin.as_mut().expect("server stdin");
+    stdin.write_all(&encoded).expect("write oversized frame");
+    stdin.write_all(b"\n").expect("write frame delimiter");
+    stdin.flush().expect("flush oversized frame");
+    session.stdin.take();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = session.child.try_wait().expect("poll server") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            session.child.kill().expect("kill hung server");
+            panic!("server did not close transport after oversized frame");
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        !status.success(),
+        "oversized transport failure must be reported"
+    );
+    let mut line = String::new();
+    assert_eq!(
+        session
+            .stdout
+            .read_line(&mut line)
+            .expect("read closed stdout"),
+        0
+    );
+}
+
+#[test]
+fn eof_process_child_fixture() {
+    if std::env::var("CODEXSHIM_EOF_FIXTURE").as_deref() != Ok("child") {
+        return;
+    }
+    let pid_file = std::env::var_os("CODEXSHIM_EOF_PID_FILE").expect("fixture PID file");
+    std::fs::write(pid_file, std::process::id().to_string()).expect("write fixture PID");
+    thread::sleep(Duration::from_secs(30));
+}
+
+#[test]
+fn stdin_eof_cancels_in_flight_process_and_exits_server() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let pid_file = fixture.path().join("eof-child.pid");
+    let executable = std::env::current_exe().expect("integration test executable");
+    let mut session = Session::start();
+    session.send(&modern_request(1, "server/discover", empty_params()));
+    assert_eq!(session.receive()["id"], 1);
+
+    let mut call = empty_params();
+    call.insert("name".to_owned(), json!("run_process"));
+    call.insert(
+        "arguments".to_owned(),
+        json!({
+            "program": executable,
+            "args": ["--exact", "eof_process_child_fixture", "--nocapture"],
+            "cwd": env!("CARGO_MANIFEST_DIR"),
+            "env": {
+                "CODEXSHIM_EOF_FIXTURE": "child",
+                "CODEXSHIM_EOF_PID_FILE": pid_file,
+            },
+            "timeout_ms": 30_000,
+        }),
+    );
+    session.send(&modern_request(2, "tools/call", call));
+
+    let child_start_deadline = Instant::now() + Duration::from_secs(5);
+    while !pid_file.exists() && Instant::now() < child_start_deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(pid_file.exists(), "in-flight child did not start");
+    let child_pid = std::fs::read_to_string(&pid_file)
+        .expect("child PID")
+        .trim()
+        .parse::<u32>()
+        .expect("numeric child PID");
+
+    session.stdin.take();
+    let shutdown_deadline = Instant::now() + Duration::from_secs(12);
+    let status = loop {
+        if let Some(status) = session.child.try_wait().expect("poll server") {
+            break status;
+        }
+        if Instant::now() >= shutdown_deadline {
+            session.child.kill().expect("kill hung server");
+            panic!("server did not exit within shutdown and cleanup bounds");
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert!(status.success(), "server exited with {status}");
+
+    let child_exit_deadline = Instant::now() + Duration::from_secs(2);
+    while process_is_running(child_pid) && Instant::now() < child_exit_deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !process_is_running(child_pid),
+        "in-flight child survived server EOF shutdown"
+    );
+}
+
+#[test]
+fn process_overload_is_fail_fast_and_preserves_resource_busy_contract() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let executable = std::env::current_exe().expect("integration test executable");
+    let mut session = Session::start();
+    session.send(&modern_request(1, "server/discover", empty_params()));
+    assert_eq!(session.receive()["id"], 1);
+
+    let mut pid_files = Vec::new();
+    for id in [2_u64, 3_u64] {
+        let pid_file = fixture.path().join(format!("overload-child-{id}.pid"));
+        let mut call = empty_params();
+        call.insert("name".to_owned(), json!("run_process"));
+        call.insert(
+            "arguments".to_owned(),
+            json!({
+                "program": executable,
+                "args": ["--exact", "eof_process_child_fixture", "--nocapture"],
+                "cwd": env!("CARGO_MANIFEST_DIR"),
+                "env": {
+                    "CODEXSHIM_EOF_FIXTURE": "child",
+                    "CODEXSHIM_EOF_PID_FILE": pid_file,
+                },
+                "timeout_ms": 30_000,
+            }),
+        );
+        session.send(&modern_request(id, "tools/call", call));
+        pid_files.push(pid_file);
+    }
+    let active_deadline = Instant::now() + Duration::from_secs(5);
+    while pid_files.iter().any(|path| !path.exists()) && Instant::now() < active_deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        pid_files.iter().all(|path| path.exists()),
+        "two process calls did not occupy the documented class capacity"
+    );
+
+    let mut overflow = empty_params();
+    overflow.insert("name".to_owned(), json!("run_process"));
+    overflow.insert(
+        "arguments".to_owned(),
+        json!({
+            "program": executable,
+            "args": ["--exact", "eof_process_child_fixture", "--nocapture"],
+            "cwd": env!("CARGO_MANIFEST_DIR"),
+            "timeout_ms": 30_000,
+        }),
+    );
+    let started = Instant::now();
+    session.send(&modern_request(4, "tools/call", overflow));
+    let response = session.receive();
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "overload response waited for process capacity"
+    );
+    assert_eq!(response["id"], 4);
+    assert_eq!(response["result"]["isError"], true);
+    assert_eq!(
+        response["result"]["structuredContent"]["error"]["code"],
+        "resource_busy"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["error"]["retryable"],
+        true
+    );
+    session.close();
+
+    for pid_file in pid_files {
+        let pid = std::fs::read_to_string(pid_file)
+            .expect("child PID")
+            .trim()
+            .parse::<u32>()
+            .expect("numeric child PID");
+        assert!(
+            !process_is_running(pid),
+            "cancelled overload fixture survived"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[allow(clippy::zombie_processes)] // The fixture must exit without waiting so the helper escapes its session.
+fn unix_outcome_uncertain_parent_fixture() {
+    if std::env::var("CODEXSHIM_OUTCOME_UNCERTAIN_FIXTURE").as_deref() != Ok("parent") {
+        return;
+    }
+    let pid_file =
+        std::env::var_os("CODEXSHIM_OUTCOME_UNCERTAIN_PID_FILE").expect("fixture PID file");
+    std::process::Command::new("/usr/bin/setsid")
+        .arg(std::env::current_exe().expect("integration test executable"))
+        .args([
+            "--exact",
+            "unix_outcome_uncertain_helper_fixture",
+            "--nocapture",
+        ])
+        .env("CODEXSHIM_OUTCOME_UNCERTAIN_FIXTURE", "helper")
+        .env("CODEXSHIM_OUTCOME_UNCERTAIN_PID_FILE", &pid_file)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn session-escaped helper");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !std::path::Path::new(&pid_file).exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        std::path::Path::new(&pid_file).exists(),
+        "session-escaped helper did not record its PID"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_outcome_uncertain_helper_fixture() {
+    if std::env::var("CODEXSHIM_OUTCOME_UNCERTAIN_FIXTURE").as_deref() != Ok("helper") {
+        return;
+    }
+    let pid_file =
+        std::env::var_os("CODEXSHIM_OUTCOME_UNCERTAIN_PID_FILE").expect("fixture PID file");
+    std::fs::write(pid_file, std::process::id().to_string()).expect("write helper PID");
+    thread::sleep(Duration::from_secs(30));
+}
+
+#[cfg(unix)]
+#[test]
+fn session_escaped_descendant_preserves_outcome_uncertain_wire_contract() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let pid_file = fixture.path().join("session-escaped.pid");
+    let executable = std::env::current_exe().expect("integration test executable");
+    let mut session = Session::start();
+    session.send(&modern_request(1, "server/discover", empty_params()));
+    assert_eq!(session.receive()["id"], 1);
+
+    let mut call = empty_params();
+    call.insert("name".to_owned(), json!("run_process"));
+    call.insert(
+        "arguments".to_owned(),
+        json!({
+            "program": executable,
+            "args": ["--exact", "unix_outcome_uncertain_parent_fixture", "--nocapture"],
+            "cwd": env!("CARGO_MANIFEST_DIR"),
+            "env": {
+                "CODEXSHIM_OUTCOME_UNCERTAIN_FIXTURE": "parent",
+                "CODEXSHIM_OUTCOME_UNCERTAIN_PID_FILE": pid_file,
+            },
+            "timeout_ms": 10_000,
+        }),
+    );
+    let started = Instant::now();
+    session.send(&modern_request(2, "tools/call", call));
+    let helper_start_deadline = Instant::now() + Duration::from_secs(3);
+    while !pid_file.exists() && Instant::now() < helper_start_deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let helper_pid = std::fs::read_to_string(&pid_file)
+        .expect("helper PID")
+        .trim()
+        .parse::<u32>()
+        .expect("numeric helper PID");
+    let mut helper = EscapedHelper::new(helper_pid);
+    let response = session.receive();
+    assert!(
+        started.elapsed() < Duration::from_secs(7),
+        "uncertain cleanup exceeded the shared deadline"
+    );
+    helper.terminate();
+
+    assert_eq!(response["id"], 2);
+    assert_eq!(response["result"]["isError"], true);
+    assert_eq!(
+        response["result"]["structuredContent"]["error"]["code"],
+        "outcome_uncertain"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["error"]["retryable"],
+        false
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["error"]["details"]["termination_outcome"],
+        "uncertain"
+    );
+    assert!(
+        !process_is_running(helper_pid),
+        "fixture failed to clean up its escaped helper"
+    );
+    session.close();
+}
+
+#[cfg(unix)]
+struct EscapedHelper {
+    pid: Option<u32>,
+}
+
+#[cfg(unix)]
+impl EscapedHelper {
+    fn new(pid: u32) -> Self {
+        Self { pid: Some(pid) }
+    }
+
+    fn terminate(&mut self) {
+        let Some(pid) = self.pid.take() else {
+            return;
+        };
+        let pid_i32 = i32::try_from(pid).expect("helper PID fits pid_t");
+        // SAFETY: The PID belongs to the fixture-created escaped helper.
+        unsafe { libc::kill(pid_i32, libc::SIGKILL) };
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while process_is_running(pid) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for EscapedHelper {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+#[cfg(unix)]
+fn process_is_running(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: Signal zero performs a read-only existence check for the numeric PID.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[cfg(windows)]
+fn process_is_running(pid: u32) -> bool {
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+
+    const STILL_ACTIVE_EXIT_CODE: u32 = 259;
+    // SAFETY: OpenProcess receives a numeric PID and the returned handle is checked and closed.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return false;
+    }
+    let mut exit_code = 0_u32;
+    // SAFETY: process is valid and exit_code points to writable memory.
+    let succeeded = unsafe { GetExitCodeProcess(process, &raw mut exit_code) } != 0;
+    // SAFETY: process is an owned handle returned by OpenProcess.
+    unsafe { CloseHandle(process) };
+    succeeded && exit_code == STILL_ACTIVE_EXIT_CODE
 }
 
 #[test]

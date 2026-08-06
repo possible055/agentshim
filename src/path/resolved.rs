@@ -113,6 +113,7 @@ pub enum PathError {
     AmbiguousPrefix,
     #[error("path escapes the repository root through '..'")]
     ParentEscape,
+    #[cfg(windows)]
     #[error("path is not on a supported local filesystem")]
     UnsupportedLocation,
 }
@@ -159,11 +160,6 @@ fn normalize_absolute(path: &Path) -> Result<PathBuf, PathError> {
         }
     }
     Ok(normalized)
-}
-
-#[cfg(not(windows))]
-fn validate_ambient_path(_path: &Path) -> Result<(), PathError> {
-    Ok(())
 }
 
 #[cfg(windows)]

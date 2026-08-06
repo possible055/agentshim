@@ -289,6 +289,7 @@ fn escape_invalid_utf8(bytes: &[u8]) -> (String, usize) {
     (output, invalid)
 }
 
+#[cfg(windows)]
 fn drain(mut reader: impl Read) -> io::Result<Capture> {
     let mut capture = Capture::new();
     let mut chunk = vec![0_u8; DRAIN_CHUNK_BYTES].into_boxed_slice();
@@ -301,6 +302,7 @@ fn drain(mut reader: impl Read) -> io::Result<Capture> {
     }
 }
 
+#[cfg(windows)]
 fn write_stdin(mut writer: impl Write, input: Option<&str>) -> io::Result<()> {
     if let Some(input) = input {
         writer.write_all(input.as_bytes())?;
@@ -308,6 +310,7 @@ fn write_stdin(mut writer: impl Write, input: Option<&str>) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
 fn spawn_monitored<T: Send + 'static>(
     failed: Arc<AtomicBool>,
     completion: ThreadCompletion,
@@ -323,11 +326,13 @@ fn spawn_monitored<T: Send + 'static>(
     })
 }
 
+#[cfg(windows)]
 #[derive(Clone)]
 struct ThreadCompletion {
     state: Arc<(Mutex<usize>, Condvar)>,
 }
 
+#[cfg(windows)]
 impl ThreadCompletion {
     fn new() -> Self {
         Self {
@@ -361,8 +366,10 @@ impl ThreadCompletion {
     }
 }
 
+#[cfg(windows)]
 struct CompletionSignal(ThreadCompletion);
 
+#[cfg(windows)]
 impl Drop for CompletionSignal {
     fn drop(&mut self) {
         let (lock, changed) = &*self.0.state;

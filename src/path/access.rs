@@ -369,6 +369,7 @@ impl FileAccess {
     fn resolve_ambient(input: &Path) -> Result<ResolvedPath, PathError> {
         reject_nul(input)?;
         let absolute = normalize_absolute(input)?;
+        #[cfg(windows)]
         validate_ambient_path(&absolute)?;
         let key = absolute
             .file_name()

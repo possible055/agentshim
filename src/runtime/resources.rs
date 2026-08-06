@@ -33,16 +33,12 @@ impl RuntimeResources {
         self.shutdown.clone()
     }
 
-    /// Acquire one outer read-only call slot until request or server cancellation.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AcquireError::Cancelled`] when either cancellation token fires.
-    pub async fn acquire_read_only(
-        &self,
-        request: &CancellationToken,
-    ) -> Result<OwnedSemaphorePermit, AcquireError> {
-        acquire(&self.read_only_calls, request, &self.shutdown, 1).await
+    pub fn try_admit_read_only(&self) -> Option<OwnedSemaphorePermit> {
+        self.read_only_calls.clone().try_acquire_owned().ok()
+    }
+
+    pub fn try_admit_process(&self) -> Option<OwnedSemaphorePermit> {
+        self.process_calls.clone().try_acquire_owned().ok()
     }
 
     /// Acquire one shared blocking/search lane.
@@ -93,18 +89,6 @@ impl RuntimeResources {
         request: &CancellationToken,
     ) -> Result<OwnedSemaphorePermit, AcquireError> {
         acquire(&self.open_files, request, &self.shutdown, 1).await
-    }
-
-    /// Acquire one process slot independently from read-only worker admission.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AcquireError::Cancelled`] when either cancellation token fires.
-    pub async fn acquire_process(
-        &self,
-        request: &CancellationToken,
-    ) -> Result<OwnedSemaphorePermit, AcquireError> {
-        acquire(&self.process_calls, request, &self.shutdown, 1).await
     }
 
     /// Acquire several open-file slots as one global lease.

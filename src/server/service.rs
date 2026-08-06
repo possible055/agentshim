@@ -21,6 +21,7 @@ use rmcp::{
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use uuid::Uuid;
@@ -109,6 +110,12 @@ pub struct CodexShimBuilder {
     read_scope: ReadScope,
     runtime: RuntimeConfig,
     protocol_compatibility: ProtocolCompatibility,
+}
+
+enum ToolAdmission {
+    ReadOnly(OwnedSemaphorePermit),
+    Process(OwnedSemaphorePermit),
+    None,
 }
 
 impl CodexShimBuilder {
@@ -278,23 +285,21 @@ impl CodexShim {
         &self,
         arguments: Option<JsonObject>,
         request_cancellation: &CancellationToken,
+        admission: OwnedSemaphorePermit,
     ) -> CallToolResponse {
         let queued = Instant::now();
         let read_request = match parse_request(arguments, "read") {
             Ok(request) => request,
             Err(error) => return classified_tool_error("validation", error),
         };
-        let read_only = self.resources.acquire_read_only(request_cancellation).await;
         let worker = self.resources.acquire_worker(request_cancellation).await;
         let open_file = self.resources.acquire_open_file(request_cancellation).await;
         let memory = self
             .resources
             .reserve_memory(256 * 1024, request_cancellation)
             .await;
-        let permits = match (read_only, worker, open_file, memory) {
-            (Ok(read_only), Ok(worker), Ok(open_file), Ok(memory)) => {
-                (read_only, worker, open_file, memory)
-            }
+        let permits = match (worker, open_file, memory) {
+            (Ok(worker), Ok(open_file), Ok(memory)) => (admission, worker, open_file, memory),
             _ => {
                 return classified_tool_error(
                     cancellation_class(request_cancellation, &self.resources.shutdown_token()),
@@ -325,20 +330,20 @@ impl CodexShim {
         &self,
         arguments: Option<JsonObject>,
         request_cancellation: &CancellationToken,
+        admission: OwnedSemaphorePermit,
     ) -> CallToolResponse {
         let queued = Instant::now();
         let glob_request = match parse_request(arguments, "glob") {
             Ok(request) => request,
             Err(error) => return classified_tool_error("validation", error),
         };
-        let read_only = self.resources.acquire_read_only(request_cancellation).await;
         let worker = self.resources.acquire_worker(request_cancellation).await;
         let memory = self
             .resources
             .reserve_memory(crate::tools::glob::memory_charge(), request_cancellation)
             .await;
-        let permits = match (read_only, worker, memory) {
-            (Ok(read_only), Ok(worker), Ok(memory)) => (read_only, worker, memory),
+        let permits = match (worker, memory) {
+            (Ok(worker), Ok(memory)) => (admission, worker, memory),
             _ => {
                 return classified_tool_error(
                     cancellation_class(request_cancellation, &self.resources.shutdown_token()),
@@ -369,6 +374,7 @@ impl CodexShim {
         &self,
         arguments: Option<JsonObject>,
         request_cancellation: &CancellationToken,
+        admission: OwnedSemaphorePermit,
     ) -> CallToolResponse {
         let queued = Instant::now();
         let grep_request = match parse_request(arguments, "grep") {
@@ -376,7 +382,6 @@ impl CodexShim {
             Err(error) => return classified_tool_error("validation", error),
         };
         let requested_lanes = self.resources.config().worker_lanes;
-        let read_only = self.resources.acquire_read_only(request_cancellation).await;
         let workers = self
             .resources
             .acquire_search_lanes(requested_lanes, request_cancellation)
@@ -393,9 +398,9 @@ impl CodexShim {
                 request_cancellation,
             )
             .await;
-        let permits = match (read_only, workers, open_files, memory) {
-            (Ok(read_only), Ok(workers), Ok(open_files), Ok(memory)) => {
-                (read_only, workers, open_files, memory)
+        let permits = match (workers, open_files, memory) {
+            (Ok(workers), Ok(open_files), Ok(memory)) => {
+                (admission, workers, open_files, memory)
             }
             _ => {
                 return classified_tool_error(
@@ -431,6 +436,7 @@ impl CodexShim {
         &self,
         arguments: Option<JsonObject>,
         request_cancellation: &CancellationToken,
+        admission: OwnedSemaphorePermit,
     ) -> CallToolResponse {
         let process_request: ProcessRequest = match parse_request(arguments, "run_process") {
             Ok(request) => request,
@@ -443,12 +449,11 @@ impl CodexShim {
         let memory_charge = process_request.memory_charge();
         let queued = Instant::now();
         let permits = tokio::time::timeout(timeout, async {
-            let process = self.resources.acquire_process(request_cancellation).await?;
             let memory = self
                 .resources
                 .reserve_memory(memory_charge, request_cancellation)
                 .await?;
-            Ok::<_, crate::runtime::AcquireError>((process, memory))
+            Ok::<_, crate::runtime::AcquireError>((admission, memory))
         })
         .await;
         let permits = match permits {
@@ -504,13 +509,22 @@ impl CodexShim {
         &self,
         request: CallToolRequestParams,
         context: &RequestContext<RoleServer>,
+        admission: ToolAdmission,
     ) -> Result<CallToolResponse, McpError> {
-        match request.name.as_ref() {
-            "read" => Ok(self.call_read(request.arguments, &context.ct).await),
-            "glob" => Ok(self.call_glob(request.arguments, &context.ct).await),
-            "grep" => Ok(self.call_grep(request.arguments, &context.ct).await),
-            "run_process" => Ok(self.call_process(request.arguments, &context.ct).await),
-            _ => {
+        match (request.name.as_ref(), admission) {
+            ("read", ToolAdmission::ReadOnly(admission)) => Ok(self
+                .call_read(request.arguments, &context.ct, admission)
+                .await),
+            ("glob", ToolAdmission::ReadOnly(admission)) => Ok(self
+                .call_glob(request.arguments, &context.ct, admission)
+                .await),
+            ("grep", ToolAdmission::ReadOnly(admission)) => Ok(self
+                .call_grep(request.arguments, &context.ct, admission)
+                .await),
+            ("run_process", ToolAdmission::Process(admission)) => Ok(self
+                .call_process(request.arguments, &context.ct, admission)
+                .await),
+            (_, ToolAdmission::None) => {
                 tracing::error!(target: "codexshim", event = "tool_unknown", phase = "request", error_class = "validation");
                 Err(McpError::new(
                     ErrorCode::METHOD_NOT_FOUND,
@@ -518,6 +532,23 @@ impl CodexShim {
                     None,
                 ))
             }
+            _ => unreachable!("tool admission class must match the dispatched tool"),
+        }
+    }
+
+    fn try_admit_tool(&self, name: &str) -> Result<ToolAdmission, ()> {
+        match name {
+            "read" | "glob" | "grep" => self
+                .resources
+                .try_admit_read_only()
+                .map(ToolAdmission::ReadOnly)
+                .ok_or(()),
+            "run_process" => self
+                .resources
+                .try_admit_process()
+                .map(ToolAdmission::Process)
+                .ok_or(()),
+            _ => Ok(ToolAdmission::None),
         }
     }
 }
@@ -579,8 +610,11 @@ impl ServerHandler for CodexShim {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
+        let Ok(admission) = self.try_admit_tool(request.name.as_ref()) else {
+            return Ok(resource_busy(request.name.as_ref()));
+        };
         if !tracing::enabled!(target: "codexshim", tracing::Level::INFO) {
-            return self.dispatch_tool(request, &context).await;
+            return self.dispatch_tool(request, &context, admission).await;
         }
         let call_id = Uuid::new_v4().to_string();
         let tool = request.name.to_string();
@@ -588,7 +622,7 @@ impl ServerHandler for CodexShim {
             tracing::info_span!(target: "codexshim", "tool_call", call_id = %call_id, tool = %tool);
         async move {
             tracing::info!(target: "codexshim", event = "tool_start", phase = "request");
-            let response = self.dispatch_tool(request, &context).await?;
+            let response = self.dispatch_tool(request, &context, admission).await?;
             Ok(response)
         }
         .instrument(span)

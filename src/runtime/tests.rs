@@ -6,29 +6,6 @@ mod tests {
     };
     use tokio_util::sync::CancellationToken;
 
-    #[tokio::test]
-    async fn read_only_admission_is_bounded_and_cancellable() {
-        let resources = RuntimeResources::new(RuntimeConfig::for_tests(1));
-        let request = CancellationToken::new();
-        let mut permits = Vec::new();
-        for _ in 0..super::MAX_READ_ONLY_CALLS {
-            permits.push(
-                resources
-                    .acquire_read_only(&request)
-                    .await
-                    .expect("acquire slot"),
-            );
-        }
-
-        let cancelled = CancellationToken::new();
-        cancelled.cancel();
-        assert_eq!(
-            resources.acquire_read_only(&cancelled).await.unwrap_err(),
-            AcquireError::Cancelled
-        );
-        drop(permits);
-    }
-
     #[test]
     fn default_workers_allow_bounded_io_overlap() {
         assert_eq!(default_worker_lanes(1), 2);
@@ -69,29 +46,35 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn process_admission_is_independent_bounded_and_cancellable() {
+    #[test]
+    fn class_admission_is_fail_fast_independent_and_recovers_on_drop() {
         let resources = RuntimeResources::new(RuntimeConfig::for_tests(1));
-        let request = CancellationToken::new();
-        let mut permits = Vec::new();
-        for _ in 0..MAX_PROCESS_CALLS {
-            permits.push(
-                resources
-                    .acquire_process(&request)
-                    .await
-                    .expect("process slot"),
-            );
-        }
-        let cancelled = CancellationToken::new();
-        cancelled.cancel();
-        assert_eq!(
-            resources.acquire_process(&cancelled).await.unwrap_err(),
-            AcquireError::Cancelled
-        );
-        drop(permits);
-        let _read_only = resources
-            .acquire_read_only(&request)
-            .await
-            .expect("read-only admission remains independent");
+        let read_permits = (0..super::MAX_READ_ONLY_CALLS)
+            .map(|_| resources.try_admit_read_only().expect("read admission"))
+            .collect::<Vec<_>>();
+        let process_permits = (0..MAX_PROCESS_CALLS)
+            .map(|_| resources.try_admit_process().expect("process admission"))
+            .collect::<Vec<_>>();
+
+        assert!(resources.try_admit_read_only().is_none());
+        assert!(resources.try_admit_process().is_none());
+        drop(read_permits);
+        assert!(resources.try_admit_read_only().is_some());
+        assert!(resources.try_admit_process().is_none());
+        drop(process_permits);
+        assert!(resources.try_admit_process().is_some());
+    }
+
+    #[tokio::test]
+    async fn process_admission_recovers_after_worker_panic() {
+        let resources = RuntimeResources::new(RuntimeConfig::for_tests(1));
+        let permit = resources.try_admit_process().expect("process admission");
+        let panic = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            panic!("injected worker panic");
+        })
+        .await;
+        assert!(panic.expect_err("worker must panic").is_panic());
+        assert!(resources.try_admit_process().is_some());
     }
 }

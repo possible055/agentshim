@@ -229,6 +229,26 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn unix_setup_failures_drop_the_owned_process_group() {
+        use platform::SetupFailurePoint::{Io, Spawn, Stderr, Stdin, Stdout};
+
+        for point in [Spawn, Stdin, Stdout, Stderr, Io] {
+            platform::set_setup_failure_for_tests(point);
+            let mut failing = request("/bin/sh".to_owned());
+            failing.args = vec!["-c".to_owned(), "exec sleep 30".to_owned()];
+            let error = execute_unix(&failing).expect_err("setup failure must be returned");
+            assert!(matches!(error, ProcessError::Io(_)));
+            let process_group = platform::take_spawned_process_group_for_tests()
+                .expect("spawned process group must be recorded");
+            assert!(
+                !platform::process_group_exists_for_tests(process_group),
+                "process group {process_group} survived an injected setup failure"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn unix_native_argv_nonzero_exit_and_environment_are_reported() {
         let mut printf = request("/usr/bin/printf".to_owned());
         printf.args = vec!["[%s]\n".to_owned(), "a b".to_owned(), "&|$".to_owned()];
@@ -412,6 +432,102 @@ mod tests {
         .expect_err("cancelled");
         canceller.join().expect("canceller");
         assert!(matches!(error, ProcessError::Cancelled));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_session_escape_parent_fixture() {
+        if std::env::var("CODEXSHIM_SESSION_ESCAPE_FIXTURE").as_deref() != Ok("parent") {
+            return;
+        }
+        let pid_file =
+            std::env::var_os("CODEXSHIM_SESSION_ESCAPE_PID_FILE").expect("helper PID file");
+        let child = std::process::Command::new("/usr/bin/setsid")
+            .arg(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "tools::process::tests::unix_session_escape_helper_fixture",
+                "--nocapture",
+            ])
+            .env("CODEXSHIM_SESSION_ESCAPE_FIXTURE", "helper")
+            .env("CODEXSHIM_SESSION_ESCAPE_PID_FILE", &pid_file)
+            .spawn()
+            .expect("spawn session-escaping helper");
+        drop(child);
+        let pid_file = std::path::PathBuf::from(pid_file);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !pid_file.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(pid_file.exists(), "session-escaping helper did not start");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_session_escape_helper_fixture() {
+        if std::env::var("CODEXSHIM_SESSION_ESCAPE_FIXTURE").as_deref() != Ok("helper") {
+            return;
+        }
+        let pid_file =
+            std::env::var_os("CODEXSHIM_SESSION_ESCAPE_PID_FILE").expect("helper PID file");
+        std::fs::write(pid_file, std::process::id().to_string()).expect("write helper PID");
+        std::thread::sleep(Duration::from_secs(30));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_session_escape_does_not_detach_pipe_workers() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+        let pid_file = fixture.path().join("escaped-helper.pid");
+        let executable = std::env::current_exe().expect("test executable");
+        let mut request = request(executable.to_string_lossy().into_owned());
+        request.args = vec![
+            "--exact".to_owned(),
+            "tools::process::tests::unix_session_escape_parent_fixture".to_owned(),
+            "--nocapture".to_owned(),
+        ];
+        request.env.insert(
+            "CODEXSHIM_SESSION_ESCAPE_FIXTURE".to_owned(),
+            "parent".to_owned(),
+        );
+        request.env.insert(
+            "CODEXSHIM_SESSION_ESCAPE_PID_FILE".to_owned(),
+            pid_file.to_string_lossy().into_owned(),
+        );
+        request.timeout_ms = Some(10_000);
+        let started = std::time::Instant::now();
+
+        let error = execute(
+            &root,
+            &ProcessResolver::capture(),
+            &request,
+            Duration::from_secs(10),
+            &CancellationToken::new(),
+        )
+        .expect_err("retained pipe must make cleanup uncertain");
+
+        assert!(matches!(error, ProcessError::OutcomeUncertain));
+        assert!(started.elapsed() < Duration::from_secs(7));
+        let detached_workers = platform::active_pipe_workers_for_tests();
+        let helper_pid = std::fs::read_to_string(pid_file)
+            .expect("helper PID")
+            .trim()
+            .parse::<i32>()
+            .expect("numeric helper PID");
+        // SAFETY: The fixture owns this PID and always terminates it before asserting.
+        unsafe { libc::kill(helper_pid, libc::SIGKILL) };
+        let cleanup_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while platform::active_pipe_workers_for_tests() != 0
+            && std::time::Instant::now() < cleanup_deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(platform::active_pipe_workers_for_tests(), 0);
+        assert_eq!(
+            detached_workers, 0,
+            "completed call detached {detached_workers} pipe workers"
+        );
     }
 
     #[cfg(unix)]

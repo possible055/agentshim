@@ -2,6 +2,7 @@ use std::{
     env,
     error::Error,
     ffi::OsString,
+    io,
     pin::Pin,
     process::ExitCode,
     task::{Context, Poll},
@@ -16,6 +17,65 @@ use rmcp::{ServiceExt, transport::stdio};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::prelude::*;
+
+const MAX_RECEIVE_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
+struct ReceiveFrameReader<R> {
+    inner: R,
+    frame_bytes: usize,
+    failed: bool,
+}
+
+impl<R> ReceiveFrameReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            frame_bytes: 0,
+            failed: false,
+        }
+    }
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for ReceiveFrameReader<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.failed {
+            return Poll::Ready(Err(frame_too_large()));
+        }
+
+        let before = buffer.filled().len();
+        let result = Pin::new(&mut self.inner).poll_read(context, buffer);
+        if let Poll::Ready(Ok(())) = result {
+            let mut frame_bytes = self.frame_bytes;
+            for byte in &buffer.filled()[before..] {
+                if *byte == b'\n' {
+                    frame_bytes = 0;
+                } else {
+                    frame_bytes += 1;
+                    if frame_bytes > MAX_RECEIVE_FRAME_BYTES {
+                        buffer.set_filled(before);
+                        self.failed = true;
+                        return Poll::Ready(Err(frame_too_large()));
+                    }
+                }
+            }
+            self.frame_bytes = frame_bytes;
+        }
+        result
+    }
+}
+
+fn frame_too_large() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "encoded JSON-RPC frame exceeds {MAX_RECEIVE_FRAME_BYTES} bytes before delimiter"
+        ),
+    )
+}
 
 struct ShutdownReader<R> {
     inner: R,
