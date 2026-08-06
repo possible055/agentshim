@@ -1,6 +1,6 @@
 # codexshim
 
-`codexshim` is a local MCP server that gives Codex a small set of tools for working with a source repository. It communicates over stdio and uses its startup directory as the repository root.
+`codexshim` is a local MCP server that gives Codex a small set of tools for working with source code. It communicates over stdio and uses its startup directory as the repository root.
 
 It provides four tools:
 
@@ -16,7 +16,7 @@ It provides four tools:
 
 ## Symbolic links
 
-Developer Mode is not required to run `codexshim`. `read` may open an existing file symbolic link only through the repository capability, so a target outside the repository remains inaccessible. Repository traversal does not follow directory symbolic links, junctions, or other reparse points.
+Developer Mode is not required to run `codexshim`. Repository-scoped `read` may open an existing file symbolic link only through the repository capability, so a target outside the repository remains inaccessible. Traversal does not follow directory symbolic links, junctions, or other reparse points. Unrestricted external operations reject an explicit symbolic-link or reparse-point starting path.
 
 The manual Windows 11 validation runner must be able to create file and directory symbolic-link fixtures. Configure that test account with either Developer Mode or `SeCreateSymbolicLinkPrivilege`; this is a test requirement, not a runtime requirement.
 
@@ -96,7 +96,19 @@ shell_tool = true
 mcp_2026_07_28 = true
 ```
 
+The default read scope is `repository`. To explicitly allow `read`, `grep`, and `glob` to use absolute paths outside the startup repository, change the server arguments to:
+
+```toml
+args = ["serve", "--read-scope", "unrestricted"]
+```
+
+Relative paths and absolute paths inside the repository continue to use the repository capability in both modes. In unrestricted mode, only external absolute paths use direct operating-system file access. Linux permits any absolute path readable by the server user. Windows permits local fixed NTFS volumes and rejects UNC shares, removable volumes, device namespaces, named pipes, and drive-relative paths. External glob patterns are relative to the requested directory; a single-file grep glob matches the requested file name.
+
+The same option is accepted by diagnostics, for example `codexshim doctor --read-scope unrestricted`. Missing, repeated, or unknown options and read-scope values are rejected. `codexshim` does not read a separate configuration file or environment variable for this setting; configure it in the MCP server `args` so the elevated read scope remains an explicit process-level choice.
+
 Keep `shell_tool = true` while the external release gates remain incomplete. Change it to `false` only after the full Linux/Windows, Codex integration, and performance checklist passes.
+
+`codexshim` accepts both MCP `2026-07-28` discovery and `2025-06-18` initialize lifecycles by default. Set `CODEXSHIM_MCP_COMPATIBILITY = "strict"` in the server environment only to reject legacy clients.
 
 On Windows, use a single-quoted TOML path such as `'C:\Users\me\AppData\Local\codexshim\bin\codexshim.exe'` to avoid escaping backslashes. Always configure the prebuilt release executable as the long-lived MCP server; do not use `cargo run` as the MCP command because nested Cargo calls may contend for build locks.
 
@@ -108,4 +120,4 @@ Tool paths are interpreted by the platform running the server. Use Windows paths
 
 ## Process execution
 
-`run_process` accepts an executable and a separate list of literal arguments. It does not interpret shell syntax such as pipes, redirections, `&&`, wildcards, or variable expansion. It can modify files and access other system resources, so the configuration above requires approval before each call.
+`run_process` accepts an executable and a separate list of literal arguments. It does not interpret shell syntax such as pipes, redirections, `&&`, wildcards, or variable expansion. It can modify files and access other system resources, so the configuration above requires approval before each call. `--read-scope` does not change its schema, approval annotations, path handling, or behavior.

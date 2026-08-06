@@ -24,12 +24,14 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    path::RepositoryRoot,
+    output::bounded_diagnostic,
+    path::{FileAccess, ReadScope, RepositoryRoot},
     runtime::{RuntimeConfig, RuntimeResources},
     tools::process::{ProcessRequest, ProcessResolver},
 };
 
 pub const SERVER_INSTRUCTIONS: &str = "Local repository tools for reading source files, searching contents, finding paths, and running programs with structured arguments without PowerShell command strings.";
+pub const UNRESTRICTED_SERVER_INSTRUCTIONS: &str = "Local filesystem tools for reading files, searching contents, and finding paths, plus structured program execution without PowerShell command strings. Read scope does not affect process execution.";
 pub const MCP_COMPATIBILITY_ENV: &str = "CODEXSHIM_MCP_COMPATIBILITY";
 
 const STRICT_PROTOCOLS: &[ProtocolVersion] = &[ProtocolVersion::V_2026_07_28];
@@ -38,15 +40,15 @@ const LEGACY_PROTOCOLS: &[ProtocolVersion] =
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ProtocolCompatibility {
-    #[default]
     Strict,
+    #[default]
     Legacy,
 }
 
 impl ProtocolCompatibility {
     fn from_env() -> io::Result<Self> {
         let Some(value) = std::env::var_os(MCP_COMPATIBILITY_ENV) else {
-            return Ok(Self::Strict);
+            return Ok(Self::default());
         };
         let value = value.into_string().map_err(|_| {
             io::Error::new(
@@ -94,6 +96,7 @@ impl FromStr for ProtocolCompatibility {
 #[derive(Clone)]
 pub struct CodexShim {
     root: Arc<RepositoryRoot>,
+    file_access: Arc<FileAccess>,
     resources: RuntimeResources,
     process_resolver: ProcessResolver,
     protocol_compatibility: ProtocolCompatibility,
@@ -109,6 +112,15 @@ impl CodexShim {
         Self::from_path(std::env::current_dir()?)
     }
 
+    /// Open the current repository with an explicit read scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the current directory or repository root cannot be opened.
+    pub fn from_current_dir_with_scope(read_scope: ReadScope) -> io::Result<Self> {
+        Self::from_path_with_scope(std::env::current_dir()?, read_scope)
+    }
+
     /// Open the current repository with an already configured shared runtime budget.
     ///
     /// # Errors
@@ -116,6 +128,18 @@ impl CodexShim {
     /// Returns an I/O error when the current directory or repository root cannot be opened.
     pub fn from_current_dir_with_resources(resources: RuntimeResources) -> io::Result<Self> {
         Self::from_path_with_resources(std::env::current_dir()?, resources)
+    }
+
+    /// Open the current repository with shared runtime resources and an explicit read scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the current directory or repository root cannot be opened.
+    pub fn from_current_dir_with_resources_and_scope(
+        resources: RuntimeResources,
+        read_scope: ReadScope,
+    ) -> io::Result<Self> {
+        Self::from_path_with_resources_and_scope(std::env::current_dir()?, resources, read_scope)
     }
 
     /// Open and retain a capability for an absolute repository root.
@@ -128,12 +152,32 @@ impl CodexShim {
         Self::from_path_with_resources(path, RuntimeResources::new(config))
     }
 
+    /// Open an absolute repository root with an explicit read scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-input error for a relative path, or the root-open I/O error.
+    pub fn from_path_with_scope(path: impl AsRef<Path>, read_scope: ReadScope) -> io::Result<Self> {
+        let config = RuntimeConfig::from_env()?;
+        Self::from_path_with_resources_and_scope(path, RuntimeResources::new(config), read_scope)
+    }
+
     fn from_path_with_resources(
         path: impl AsRef<Path>,
         resources: RuntimeResources,
     ) -> io::Result<Self> {
+        Self::from_path_with_resources_and_scope(path, resources, ReadScope::Repository)
+    }
+
+    fn from_path_with_resources_and_scope(
+        path: impl AsRef<Path>,
+        resources: RuntimeResources,
+        read_scope: ReadScope,
+    ) -> io::Result<Self> {
+        let root = Arc::new(RepositoryRoot::open(path)?);
         Ok(Self {
-            root: Arc::new(RepositoryRoot::open(path)?),
+            file_access: Arc::new(FileAccess::new(Arc::clone(&root), read_scope)),
+            root,
             resources,
             process_resolver: ProcessResolver::capture(),
             protocol_compatibility: ProtocolCompatibility::from_env()?,
@@ -153,6 +197,11 @@ impl CodexShim {
     #[must_use]
     pub fn protocol_compatibility(&self) -> ProtocolCompatibility {
         self.protocol_compatibility
+    }
+
+    #[must_use]
+    pub fn read_scope(&self) -> ReadScope {
+        self.file_access.scope()
     }
 
     /// Verify that the retained repository root remains accessible.
@@ -199,19 +248,27 @@ impl CodexShim {
 
     #[must_use]
     pub fn discovery_result() -> DiscoverResult {
-        Self::discovery_result_for(ProtocolCompatibility::Strict)
+        Self::discovery_result_for(ProtocolCompatibility::default(), ReadScope::Repository)
     }
 
-    fn discovery_result_for(compatibility: ProtocolCompatibility) -> DiscoverResult {
+    fn discovery_result_for(
+        compatibility: ProtocolCompatibility,
+        read_scope: ReadScope,
+    ) -> DiscoverResult {
         DiscoverResult::from_server_info(
             compatibility.supported_protocol_versions().to_vec(),
-            Self::server_info(),
+            Self::server_info(read_scope),
         )
     }
 
     #[must_use]
     pub fn tools_result() -> ListToolsResult {
-        ListToolsResult::with_all_items(tool_catalog().to_vec())
+        Self::tools_result_for(ReadScope::Repository)
+    }
+
+    #[must_use]
+    pub fn tools_result_for(read_scope: ReadScope) -> ListToolsResult {
+        ListToolsResult::with_all_items(tool_catalog(read_scope).to_vec())
             .with_ttl_ms(300_000)
             .with_cache_scope(CacheScope::Private)
     }
@@ -240,11 +297,11 @@ impl CodexShim {
                 return tool_error("read cancelled while waiting for bounded runtime capacity");
             }
         };
-        let root = self.root.clone();
+        let access = self.file_access.clone();
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
         let result = tokio::task::spawn_blocking(move || {
-            let result = crate::tools::read::execute(&root, &read_request, &cancellation);
+            let result = crate::tools::read::execute(&access, &read_request, &cancellation);
             drop(permits);
             result
         })
@@ -266,7 +323,7 @@ impl CodexShim {
         let worker = self.resources.acquire_worker(request_cancellation).await;
         let memory = self
             .resources
-            .reserve_memory(32 * 1024 * 1024, request_cancellation)
+            .reserve_memory(crate::tools::glob::memory_charge(), request_cancellation)
             .await;
         let permits = match (read_only, worker, memory) {
             (Ok(read_only), Ok(worker), Ok(memory)) => (read_only, worker, memory),
@@ -274,11 +331,11 @@ impl CodexShim {
                 return tool_error("glob cancelled while waiting for bounded runtime capacity");
             }
         };
-        let root = self.root.clone();
+        let access = self.file_access.clone();
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
         let result = tokio::task::spawn_blocking(move || {
-            let result = crate::tools::glob::execute(&root, &glob_request, &cancellation);
+            let result = crate::tools::glob::execute(&access, &glob_request, &cancellation);
             drop(permits);
             result
         })
@@ -308,7 +365,10 @@ impl CodexShim {
             .await;
         let memory = self
             .resources
-            .reserve_memory(8 * 1024 * 1024, request_cancellation)
+            .reserve_memory(
+                crate::tools::grep::memory_charge(lanes),
+                request_cancellation,
+            )
             .await;
         let permits = match (read_only, workers, open_files, memory) {
             (Ok(read_only), Ok(workers), Ok(open_files), Ok(memory)) => {
@@ -318,11 +378,11 @@ impl CodexShim {
                 return tool_error("grep cancelled while waiting for bounded runtime capacity");
             }
         };
-        let root = self.root.clone();
+        let access = self.file_access.clone();
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
         let result = tokio::task::spawn_blocking(move || {
-            let result = crate::tools::grep::execute(&root, &grep_request, lanes, &cancellation);
+            let result = crate::tools::grep::execute(&access, &grep_request, lanes, &cancellation);
             drop(permits);
             result
         })
@@ -385,17 +445,21 @@ impl CodexShim {
         blocking_response("run_process", result)
     }
 
-    fn server_info() -> ServerInfo {
+    fn server_info(read_scope: ReadScope) -> ServerInfo {
+        let instructions = match read_scope {
+            ReadScope::Repository => SERVER_INSTRUCTIONS,
+            ReadScope::Unrestricted => UNRESTRICTED_SERVER_INSTRUCTIONS,
+        };
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("codexshim", env!("CARGO_PKG_VERSION")))
             .with_protocol_version(ProtocolVersion::V_2026_07_28)
-            .with_instructions(SERVER_INSTRUCTIONS)
+            .with_instructions(instructions)
     }
 }
 
 impl ServerHandler for CodexShim {
     fn get_info(&self) -> ServerInfo {
-        Self::server_info()
+        Self::server_info(self.read_scope())
     }
 
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
@@ -414,14 +478,18 @@ impl ServerHandler for CodexShim {
         }
 
         context.peer.set_peer_info(request);
-        Ok(Self::server_info().with_protocol_version(ProtocolVersion::V_2025_06_18))
+        Ok(Self::server_info(self.read_scope())
+            .with_protocol_version(ProtocolVersion::V_2025_06_18))
     }
 
     async fn discover(
         &self,
         _context: RequestContext<RoleServer>,
     ) -> Result<DiscoverResult, McpError> {
-        Ok(Self::discovery_result_for(self.protocol_compatibility))
+        Ok(Self::discovery_result_for(
+            self.protocol_compatibility,
+            self.read_scope(),
+        ))
     }
 
     async fn list_tools(
@@ -429,11 +497,11 @@ impl ServerHandler for CodexShim {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        Ok(Self::tools_result())
+        Ok(Self::tools_result_for(self.read_scope()))
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        tool_catalog()
+        tool_catalog(self.read_scope())
             .iter()
             .find(|tool| tool.name == name)
             .cloned()
@@ -470,7 +538,8 @@ fn parse_request<T: DeserializeOwned>(
 }
 
 fn tool_error(message: impl Into<String>) -> CallToolResponse {
-    CallToolResult::error(vec![ContentBlock::text(message.into())]).into()
+    let message = message.into();
+    CallToolResult::error(vec![ContentBlock::text(bounded_diagnostic(&message))]).into()
 }
 
 fn blocking_response<E: Display>(
@@ -511,15 +580,37 @@ fn relayed_cancellation(
     (cancellation, relay)
 }
 
-fn tool_catalog() -> &'static [Tool; 4] {
-    static TOOLS: OnceLock<[Tool; 4]> = OnceLock::new();
-    TOOLS.get_or_init(|| [read_tool(), grep_tool(), glob_tool(), run_process_tool()])
+fn tool_catalog(read_scope: ReadScope) -> &'static [Tool; 4] {
+    static REPOSITORY_TOOLS: OnceLock<[Tool; 4]> = OnceLock::new();
+    static UNRESTRICTED_TOOLS: OnceLock<[Tool; 4]> = OnceLock::new();
+    let tools = match read_scope {
+        ReadScope::Repository => &REPOSITORY_TOOLS,
+        ReadScope::Unrestricted => &UNRESTRICTED_TOOLS,
+    };
+    tools.get_or_init(|| {
+        [
+            read_tool(read_scope),
+            grep_tool(read_scope),
+            glob_tool(read_scope),
+            run_process_tool(),
+        ]
+    })
 }
 
-fn read_tool() -> Tool {
+fn read_tool(read_scope: ReadScope) -> Tool {
+    let (description, path_description) = match read_scope {
+        ReadScope::Repository => (
+            "Read a local repository source file as numbered text lines. Use start_line to continue a partial result without server-side cursor state.",
+            "Platform-native absolute or repository-root-relative regular file path.",
+        ),
+        ReadScope::Unrestricted => (
+            "Read a local filesystem source file as numbered text lines. Relative paths use the repository root; absolute paths may address supported locations outside it.",
+            "Platform-native regular file path. Relative paths use the repository root; absolute paths may address supported local filesystems.",
+        ),
+    };
     Tool::new(
         "read",
-        "Read a local repository source file as numbered text lines. Use start_line to continue a partial result without server-side cursor state.",
+        description,
         schema(json!({
             "type": "object",
             "additionalProperties": false,
@@ -537,7 +628,7 @@ fn read_tool() -> Tool {
                 "path": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Platform-native absolute or repository-root-relative regular file path."
+                    "description": path_description
                 },
                 "start_line": {
                     "type": "integer",
@@ -552,10 +643,22 @@ fn read_tool() -> Tool {
     .with_annotations(read_only_annotations())
 }
 
-fn grep_tool() -> Tool {
+fn grep_tool(read_scope: ReadScope) -> Tool {
+    let (description, path_description, glob_description) = match read_scope {
+        ReadScope::Repository => (
+            "Search local repository file contents using Rust regex or fixed strings. Results are deterministic and continue with an explicit offset.",
+            "Optional platform-native absolute or repository-root-relative file or directory path.",
+            "Optional case-sensitive glob over root-relative paths using / separators.",
+        ),
+        ReadScope::Unrestricted => (
+            "Search local filesystem contents using Rust regex or fixed strings. Relative paths use the repository root; absolute paths may address supported locations outside it.",
+            "Optional platform-native file or directory path. Relative paths use the repository root; absolute paths may address supported local filesystems.",
+            "Optional case-sensitive glob over repository-root-relative paths, or request-path-relative paths for external absolute inputs.",
+        ),
+    };
     Tool::new(
         "grep",
-        "Search local repository file contents using Rust regex or fixed strings. Results are deterministic and continue with an explicit offset.",
+        description,
         schema(json!({
             "type": "object",
             "additionalProperties": false,
@@ -577,7 +680,7 @@ fn grep_tool() -> Tool {
                 },
                 "glob": {
                     "type": "string",
-                    "description": "Optional case-sensitive glob over root-relative paths using / separators."
+                    "description": glob_description
                 },
                 "limit": {
                     "type": "integer",
@@ -597,7 +700,7 @@ fn grep_tool() -> Tool {
                 },
                 "path": {
                     "type": "string",
-                    "description": "Optional platform-native absolute or repository-root-relative file or directory path."
+                    "description": path_description
                 },
                 "pattern": {
                     "type": "string",
@@ -610,10 +713,22 @@ fn grep_tool() -> Tool {
     .with_annotations(read_only_annotations())
 }
 
-fn glob_tool() -> Tool {
+fn glob_tool(read_scope: ReadScope) -> Tool {
+    let (description, path_description, pattern_description) = match read_scope {
+        ReadScope::Repository => (
+            "Find local repository file paths using a glob pattern. Results use native absolute paths and continue with an explicit offset.",
+            "Platform-native absolute or repository-root-relative directory to traverse.",
+            "Case-sensitive glob over root-relative paths using / separators.",
+        ),
+        ReadScope::Unrestricted => (
+            "Find local filesystem paths using a glob pattern. Relative paths use the repository root; absolute paths may address supported locations outside it.",
+            "Platform-native directory to traverse. Relative paths use the repository root; absolute paths may address supported local filesystems.",
+            "Case-sensitive glob over repository-root-relative paths, or request-path-relative paths for external absolute inputs.",
+        ),
+    };
     Tool::new(
         "glob",
-        "Find local repository file paths using a glob pattern. Results use native absolute paths and continue with an explicit offset.",
+        description,
         schema(json!({
             "type": "object",
             "additionalProperties": false,
@@ -636,12 +751,12 @@ fn glob_tool() -> Tool {
                 "path": {
                     "type": "string",
                     "default": ".",
-                    "description": "Platform-native absolute or repository-root-relative directory to traverse."
+                    "description": path_description
                 },
                 "pattern": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Case-sensitive glob over root-relative paths using / separators."
+                    "description": pattern_description
                 }
             },
             "required": ["pattern"]
@@ -727,10 +842,17 @@ fn read_only_annotations() -> ToolAnnotations {
 mod tests {
     use std::fs;
 
-    use super::{CodexShim, ProtocolCompatibility, process_queue_timeout_message};
+    use rmcp::model::{CallToolResponse, ContentBlock};
+
+    use super::{CodexShim, ProtocolCompatibility, process_queue_timeout_message, tool_error};
+    use crate::output::{MODEL_BYTE_LIMIT, MODEL_TOKEN_LIMIT, token_count};
 
     #[test]
     fn protocol_compatibility_accepts_only_explicit_levels() {
+        assert_eq!(
+            ProtocolCompatibility::default(),
+            ProtocolCompatibility::Legacy
+        );
         assert_eq!(
             "strict".parse::<ProtocolCompatibility>().expect("strict"),
             ProtocolCompatibility::Strict
@@ -750,6 +872,20 @@ mod tests {
         for field in ["Resolved program:", "Launcher:", "Cwd:", "Exit code:"] {
             assert!(!message.contains(field));
         }
+    }
+
+    #[test]
+    fn tool_errors_are_bounded() {
+        let CallToolResponse::Complete(result) = tool_error("界".repeat(40_000)) else {
+            panic!("tool error must be complete");
+        };
+        let ContentBlock::Text(content) = &result.content[0] else {
+            panic!("tool error must contain text");
+        };
+        let text = &content.text;
+        assert!(text.ends_with("...[diagnostic truncated]"));
+        assert!(text.len() <= MODEL_BYTE_LIMIT);
+        assert!(token_count(text) <= MODEL_TOKEN_LIMIT);
     }
 
     #[test]

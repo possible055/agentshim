@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     output::{OutputFormatter, OutputLimits},
-    path::{PathError, PathSortKey, RepositoryRoot, ResolvedPath},
+    path::{FileAccess, PathError, PathSortKey, ResolvedPath},
     sorting,
     traversal::{TraversalControl, TraversalError, TraversalSummary, walk},
 };
@@ -15,6 +15,13 @@ const DEFAULT_LIMIT: usize = 200;
 const MAX_LIMIT: usize = 1_000;
 const MAX_MATCHES: usize = 100_000;
 const RETAINED_MEMORY_BYTES: usize = 32 * 1024 * 1024;
+const MEMORY_SAFETY_BYTES: usize = 8 * 1024 * 1024;
+const PATH_OMISSION: &str = "[glob path omitted: exceeds output budget]";
+
+#[must_use]
+pub(crate) fn memory_charge() -> usize {
+    RETAINED_MEMORY_BYTES.saturating_add(MEMORY_SAFETY_BYTES)
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -75,13 +82,13 @@ pub enum GlobError {
     Io(#[from] io::Error),
 }
 
-/// Find root-relative pattern matches with deterministic Top-K pagination.
+/// Find logical-root-relative pattern matches with deterministic Top-K pagination.
 ///
 /// # Errors
 ///
 /// Returns validation, traversal, match-limit, memory, cancellation, or output errors.
 pub fn execute(
-    root: &Arc<RepositoryRoot>,
+    access: &Arc<FileAccess>,
     request: &GlobRequest,
     cancellation: &CancellationToken,
 ) -> Result<String, GlobError> {
@@ -93,7 +100,7 @@ pub fn execute(
         .map_err(|error| GlobError::Pattern(error.to_string()))?
         .compile_matcher();
     let base_input = request.path.as_deref().unwrap_or(".");
-    let base = root.resolve(Path::new(base_input))?;
+    let base = access.resolve(Path::new(base_input))?;
     let offset = request.offset.unwrap_or(0);
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT);
     let retain = offset.saturating_add(limit).min(MAX_MATCHES);
@@ -101,26 +108,19 @@ pub fn execute(
     let mut total = 0_usize;
     let mut terminal_error = None;
     let summary = walk(
-        root,
+        access,
         &base,
         request.include_ignored.unwrap_or(false),
         cancellation,
         |entry| {
-            if !matcher.is_match(entry.key) {
+            if !matcher.is_match(entry.path.key()) {
                 return TraversalControl::Continue;
             }
             if let Err(error) = record_match(&mut total) {
                 terminal_error = Some(error);
                 return TraversalControl::Stop;
             }
-            let resolved = match root.resolve(entry.key) {
-                Ok(resolved) => resolved,
-                Err(error) => {
-                    terminal_error = Some(error.into());
-                    return TraversalControl::Stop;
-                }
-            };
-            if let Err(error) = store.admit(&resolved) {
+            if let Err(error) = store.admit(&entry.path) {
                 terminal_error = Some(error);
                 return TraversalControl::Stop;
             }
@@ -267,10 +267,17 @@ fn render(
         )?;
         let mut shown = 0_usize;
         for matched in retained.iter().skip(offset).take(cap) {
-            if !formatter.try_push_line(&matched.absolute, cancellation)? {
-                break;
+            if formatter.try_push_line(&matched.absolute, cancellation)? {
+                shown += 1;
+                continue;
             }
-            shown += 1;
+            if shown == 0 {
+                if !formatter.try_push_line(PATH_OMISSION, cancellation)? {
+                    return Err(crate::output::OutputError::NoProgress.into());
+                }
+                shown = 1;
+            }
+            break;
         }
         if shown == cap {
             return formatter.finish(cancellation).map_err(GlobError::from);
@@ -308,8 +315,22 @@ mod tests {
     use globset::GlobBuilder;
     use tokio_util::sync::CancellationToken;
 
-    use super::{GlobError, GlobRequest, MAX_MATCHES, TopK, execute, record_match};
-    use crate::path::{RepositoryRoot, slash_path};
+    use super::{
+        GlobError, GlobMatch, GlobRequest, MAX_MATCHES, PATH_OMISSION, TopK, execute,
+        memory_charge, record_match, render,
+    };
+    use crate::{
+        path::{FileAccess, ReadScope, RepositoryRoot, slash_path},
+        runtime::MEMORY_BUDGET_BYTES,
+        traversal::TraversalSummary,
+    };
+
+    fn access(path: &Path) -> Arc<FileAccess> {
+        Arc::new(FileAccess::new(
+            Arc::new(RepositoryRoot::open(path).expect("root")),
+            ReadScope::Repository,
+        ))
+    }
 
     fn request(pattern: &str) -> GlobRequest {
         GlobRequest {
@@ -331,7 +352,7 @@ mod tests {
         fs::write(fixture.path().join("ignored.rs"), "i").expect("ignored");
         fs::create_dir(fixture.path().join(".git")).expect("git");
         fs::write(fixture.path().join(".git/internal.rs"), "g").expect("git file");
-        let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+        let root = access(fixture.path());
         let mut query = request("*.rs");
         query.limit = Some(2);
         let first = execute(&root, &query, &CancellationToken::new()).expect("glob");
@@ -354,7 +375,7 @@ mod tests {
         for path in ["top.rs", "src/lib.rs", "src/nested/Unicode 界.rs"] {
             fs::write(fixture.path().join(path), "source").expect("source");
         }
-        let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+        let root = access(fixture.path());
         let mut query = request("**/*");
         query.limit = Some(100);
         let output = execute(&root, &query, &CancellationToken::new()).expect("dense glob");
@@ -422,7 +443,7 @@ mod tests {
     #[test]
     fn invalid_pattern_and_match_limit_are_explicit() {
         let fixture = tempfile::tempdir().expect("fixture");
-        let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+        let root = access(fixture.path());
         assert!(matches!(
             execute(&root, &request("["), &CancellationToken::new()),
             Err(GlobError::Pattern(_))
@@ -432,5 +453,56 @@ mod tests {
             record_match(&mut total),
             Err(GlobError::TooManyMatches)
         ));
+    }
+
+    #[test]
+    fn oversized_path_is_omitted_and_pagination_advances() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root = RepositoryRoot::open(fixture.path()).expect("root");
+        let first = root.resolve(Path::new("first")).expect("first path");
+        let second = root.resolve(Path::new("second")).expect("second path");
+        let retained = vec![
+            GlobMatch {
+                sort_key: first.sort_key().clone(),
+                absolute: "x".repeat(crate::output::MODEL_BYTE_LIMIT * 2),
+                charge: 0,
+            },
+            GlobMatch {
+                sort_key: second.sort_key().clone(),
+                absolute: "second".to_owned(),
+                charge: 0,
+            },
+        ];
+        let mut query = request("**/*");
+        query.limit = Some(1);
+
+        let first_page = render(
+            &query,
+            &retained,
+            retained.len(),
+            TraversalSummary::default(),
+            &CancellationToken::new(),
+        )
+        .expect("first page");
+        assert!(first_page.contains(PATH_OMISSION));
+        assert!(first_page.contains("\"offset\":1"));
+
+        query.offset = Some(1);
+        let second_page = render(
+            &query,
+            &retained,
+            retained.len(),
+            TraversalSummary::default(),
+            &CancellationToken::new(),
+        )
+        .expect("second page");
+        assert!(second_page.contains("second"));
+        assert!(second_page.ends_with("Complete."));
+    }
+
+    #[test]
+    fn runtime_memory_charge_includes_safety_margin() {
+        assert_eq!(memory_charge(), 40 * 1024 * 1024);
+        assert!(memory_charge() <= MEMORY_BUDGET_BYTES);
     }
 }

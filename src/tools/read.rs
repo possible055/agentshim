@@ -4,14 +4,14 @@ use std::{
     sync::Arc,
 };
 
-use cap_std::fs::{File, OpenOptions};
+use cap_std::fs::File;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     encoding::{DecodeControl, DecodeError, SourceEncoding, decode_stream},
     output::{OutputFormatter, OutputLimits},
-    path::{PathError, RepositoryRoot},
+    path::{FileAccess, PathError, ResolvedPath},
 };
 
 const PREFIX_BYTES: usize = 8 * 1024;
@@ -86,29 +86,29 @@ pub enum ReadError {
     Io(#[from] io::Error),
 }
 
-/// Read one regular source file through the retained repository capability.
+/// Read one regular source file through the configured filesystem access policy.
 ///
 /// # Errors
 ///
 /// Returns a validation, path, I/O, encoding, consistency, cancellation, or
 /// output-budget error without returning a mixed file version.
 pub fn execute(
-    root: &Arc<RepositoryRoot>,
+    access: &Arc<FileAccess>,
     request: &ReadRequest,
     cancellation: &CancellationToken,
 ) -> Result<String, ReadError> {
     request.validate()?;
-    let resolved = root.resolve(Path::new(&request.path))?;
+    let resolved = access.resolve(Path::new(&request.path))?;
     let absolute = resolved
         .absolute()
         .to_str()
         .ok_or(ReadError::NonUnicodePath)?
         .to_owned();
-    match read_once(root, resolved.key(), &absolute, request, cancellation)? {
+    match read_once(access, &resolved, &absolute, request, cancellation)? {
         Attempt::Stable(output) => return Ok(output),
         Attempt::Changed => {}
     }
-    match read_once(root, resolved.key(), &absolute, request, cancellation) {
+    match read_once(access, &resolved, &absolute, request, cancellation) {
         Ok(Attempt::Stable(output)) => Ok(output),
         Ok(Attempt::Changed) => Err(ReadError::Changed),
         Err(ReadError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
@@ -124,8 +124,8 @@ enum Attempt<T> {
 }
 
 fn read_once(
-    root: &RepositoryRoot,
-    key: &Path,
+    access: &FileAccess,
+    path: &ResolvedPath,
     absolute: &str,
     request: &ReadRequest,
     cancellation: &CancellationToken,
@@ -133,7 +133,7 @@ fn read_once(
     if cancellation.is_cancelled() {
         return Err(ReadError::Cancelled);
     }
-    let mut file = open_regular(root, key)?;
+    let mut file = open_regular(access, path)?;
     let before = FileFingerprint::from_file(&file)?;
     run_before_read_hook();
 
@@ -160,7 +160,7 @@ fn read_once(
     if before != after {
         return Ok(Attempt::Changed);
     }
-    let identity = match open_regular(root, key) {
+    let identity = match open_regular(access, path) {
         Ok(identity) => FileFingerprint::from_file(&identity)?,
         Err(ReadError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(Attempt::Changed);
@@ -181,22 +181,18 @@ fn read_once(
     .map(Attempt::Stable)
 }
 
-fn open_regular(root: &RepositoryRoot, key: &Path) -> Result<File, ReadError> {
-    let metadata = root.capability().symlink_metadata(key)?;
-    if metadata.is_dir() {
+fn open_regular(access: &FileAccess, path: &ResolvedPath) -> Result<File, ReadError> {
+    let metadata = access.symlink_metadata_kind(path)?;
+    if metadata.is_dir {
         return Err(ReadError::Directory);
     }
-    if !metadata.is_file() && !metadata.file_type().is_symlink() {
+    if path.is_ambient() && metadata.is_symlink {
         return Err(ReadError::NotRegular);
     }
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use cap_std::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NONBLOCK);
+    if !metadata.is_file && !metadata.is_symlink {
+        return Err(ReadError::NotRegular);
     }
-    let file = root.capability().open_with(key, &options)?;
+    let file = access.open_read(path)?;
     if !FileFingerprint::from_file(&file)?.regular {
         return Err(ReadError::NotRegular);
     }
@@ -545,7 +541,21 @@ mod tests {
     use super::{
         AFTER_READ_HOOK, BEFORE_READ_HOOK, MAX_LINE_COUNT, ReadError, ReadRequest, execute,
     };
-    use crate::{output::token_count, path::RepositoryRoot};
+    use crate::{
+        output::token_count,
+        path::{FileAccess, ReadScope, RepositoryRoot},
+    };
+
+    fn access(path: &std::path::Path) -> Arc<FileAccess> {
+        access_with_scope(path, ReadScope::Repository)
+    }
+
+    fn access_with_scope(path: &std::path::Path, scope: ReadScope) -> Arc<FileAccess> {
+        Arc::new(FileAccess::new(
+            Arc::new(RepositoryRoot::open(path).expect("root")),
+            scope,
+        ))
+    }
 
     fn request(path: &str) -> ReadRequest {
         ReadRequest {
@@ -573,7 +583,7 @@ mod tests {
         fs::write(fixture.path().join("utf16be.txt"), utf16be).expect("utf16be");
         fs::write(fixture.path().join("latin.txt"), [0x63, 0x61, 0x66, 0xE9])
             .expect("windows-1252");
-        let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+        let root = access(fixture.path());
         let cancellation = CancellationToken::new();
 
         let utf8 = execute(&root, &request("utf8.txt"), &cancellation).expect("read utf8");
@@ -602,7 +612,7 @@ mod tests {
         fs::write(fixture.path().join("long.txt"), "x".repeat(100_000)).expect("long");
         fs::write(fixture.path().join("binary.bin"), b"\x89PNG\r\n\x1A\nrest").expect("binary");
         fs::write(fixture.path().join("invalid.txt"), [0xFF]).expect("invalid");
-        let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+        let root = access(fixture.path());
         let cancellation = CancellationToken::new();
 
         let empty = execute(&root, &request("empty.txt"), &cancellation).expect("empty read");
@@ -637,9 +647,31 @@ mod tests {
                 fs::write(&changed, "new\n").expect("change file");
             }));
         });
-        let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+        let root = access(fixture.path());
         let output = execute(&root, &request("race.txt"), &CancellationToken::new())
             .expect("retry succeeds");
+        assert!(output.contains("1\tnew"));
+    }
+
+    #[test]
+    fn unrestricted_external_read_preserves_change_detection() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let outside = tempfile::tempdir().expect("outside fixture");
+        let path = outside.path().join("race.txt");
+        fs::write(&path, "old\n").expect("old");
+        let changed = path.clone();
+        BEFORE_READ_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::write(&changed, "new\n").expect("change file");
+            }));
+        });
+        let root = access_with_scope(fixture.path(), ReadScope::Unrestricted);
+        let output = execute(
+            &root,
+            &request(&path.to_string_lossy()),
+            &CancellationToken::new(),
+        )
+        .expect("ambient retry succeeds");
         assert!(output.contains("1\tnew"));
     }
 
@@ -660,7 +692,7 @@ mod tests {
                 });
             }));
         });
-        let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+        let root = access(fixture.path());
         assert!(matches!(
             execute(&root, &request("race.txt"), &CancellationToken::new()),
             Err(ReadError::Changed)
@@ -677,7 +709,7 @@ mod tests {
     fn validation_and_directory_fail_before_content_read() {
         let fixture = tempfile::tempdir().expect("fixture");
         fs::create_dir(fixture.path().join("directory")).expect("directory");
-        let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+        let root = access(fixture.path());
         let cancellation = CancellationToken::new();
 
         let mut invalid = request("directory");
@@ -707,13 +739,35 @@ mod tests {
             fixture.path().join("escape-link"),
         )
         .expect("escape link");
-        let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+        let root = access(fixture.path());
         let cancellation = CancellationToken::new();
 
         let inside =
             execute(&root, &request("inside-link"), &cancellation).expect("internal symlink read");
         assert!(inside.contains("1\tinside"));
         assert!(execute(&root, &request("escape-link"), &cancellation).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unrestricted_external_read_rejects_explicit_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempfile::tempdir().expect("fixture");
+        let outside = tempfile::tempdir().expect("outside fixture");
+        let target = outside.path().join("target.txt");
+        let link = outside.path().join("link.txt");
+        fs::write(&target, "outside\n").expect("target");
+        symlink(&target, &link).expect("link");
+        let root = access_with_scope(fixture.path(), ReadScope::Unrestricted);
+        assert!(matches!(
+            execute(
+                &root,
+                &request(&link.to_string_lossy()),
+                &CancellationToken::new()
+            ),
+            Err(ReadError::NotRegular)
+        ));
     }
 
     #[cfg(unix)]
@@ -725,7 +779,7 @@ mod tests {
         let fifo = fixture.path().join("source.fifo");
         let fifo_bytes = CString::new(fifo.as_os_str().as_bytes()).expect("FIFO path");
         assert_eq!(unsafe { libc::mkfifo(fifo_bytes.as_ptr(), 0o600) }, 0);
-        let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+        let root = access(fixture.path());
         let cancellation = CancellationToken::new();
         assert!(execute(&root, &request("source.fifo"), &cancellation).is_err());
         assert!(execute(&root, &request("/dev/null"), &cancellation).is_err());
@@ -759,13 +813,25 @@ mod tests {
             }
             Err(error) => panic!("escape reparse link: {error}"),
         }
-        let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+        let root = access(fixture.path());
         let cancellation = CancellationToken::new();
 
         let inside =
             execute(&root, &request("inside-link"), &cancellation).expect("internal link read");
         assert!(inside.contains("1\tinside"));
         assert!(execute(&root, &request("escape-link"), &cancellation).is_err());
+
+        let ambient_link = outside.path().join("ambient-link");
+        symlink_file(outside.path().join("secret.txt"), &ambient_link).expect("ambient link");
+        let unrestricted = access_with_scope(fixture.path(), ReadScope::Unrestricted);
+        assert!(matches!(
+            execute(
+                &unrestricted,
+                &request(&ambient_link.to_string_lossy()),
+                &cancellation
+            ),
+            Err(ReadError::NotRegular)
+        ));
     }
 
     #[cfg(windows)]
@@ -780,7 +846,7 @@ mod tests {
         relative.push("source file.rs");
         fs::write(fixture.path().join(&relative), "long path content\n").expect("long path file");
         assert!(fixture.path().join(&relative).as_os_str().len() > 260);
-        let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+        let root = access(fixture.path());
         let output = execute(
             &root,
             &request(&relative.to_string_lossy()),

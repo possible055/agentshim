@@ -1,9 +1,9 @@
-use std::{borrow::Cow, io, path::Path};
+use std::{io, path::Path};
 
 use ignore::{DirEntry, WalkBuilder};
 use tokio_util::sync::CancellationToken;
 
-use crate::path::{RepositoryRoot, ResolvedPath};
+use crate::path::{FileAccess, ResolvedPath};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TraversalControl {
@@ -40,9 +40,9 @@ impl TraversalSummary {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct TraversalEntry<'a> {
-    pub key: &'a Path,
+#[derive(Clone, Debug)]
+pub struct TraversalEntry {
+    pub path: ResolvedPath,
     pub file_type: Option<std::fs::FileType>,
 }
 
@@ -56,25 +56,24 @@ pub enum TraversalError {
     Io(#[from] io::Error),
 }
 
-/// Traverse one admitted repository directory with the fixed ignore policy.
-///
-/// Entries are ambient candidates only. Callers that open content must use the
-/// root-relative key through [`RepositoryRoot::capability`].
+/// Traverse one admitted directory with the fixed ignore policy.
 ///
 /// # Errors
 ///
 /// Returns an error when the root is unavailable, the base is not a directory,
 /// or cancellation is requested.
 pub fn walk(
-    root: &RepositoryRoot,
+    access: &FileAccess,
     base: &ResolvedPath,
     include_ignored: bool,
     cancellation: &CancellationToken,
-    mut visitor: impl FnMut(TraversalEntry<'_>) -> TraversalControl,
+    mut visitor: impl FnMut(TraversalEntry) -> TraversalControl,
 ) -> Result<TraversalSummary, TraversalError> {
-    root.verify()?;
-    let base_metadata = root.capability().metadata(base.key())?;
-    if !base_metadata.is_dir() {
+    access.root().verify()?;
+    if base.is_ambient() && access.symlink_metadata_kind(base)?.is_symlink {
+        return Err(TraversalError::NotDirectory);
+    }
+    if !access.metadata_kind(base)?.is_dir {
         return Err(TraversalError::NotDirectory);
     }
 
@@ -102,16 +101,16 @@ pub fn walk(
         if entry.depth() == 0 {
             continue;
         }
-        let Some(key) = walked_key(root, entry.path()) else {
+        let Ok(path) = walked_path(access, base, entry.path()) else {
             summary.escaped_entries = summary.escaped_entries.saturating_add(1);
             continue;
         };
-        if key.to_str().is_none() {
+        if path.key().to_str().is_none() {
             summary.non_unicode_entries = summary.non_unicode_entries.saturating_add(1);
             continue;
         }
         if visitor(TraversalEntry {
-            key: &key,
+            path,
             file_type: entry.file_type(),
         }) == TraversalControl::Stop
         {
@@ -121,20 +120,15 @@ pub fn walk(
     Ok(summary)
 }
 
-fn walked_key<'a>(root: &RepositoryRoot, path: &'a Path) -> Option<Cow<'a, Path>> {
-    if let Ok(key) = path.strip_prefix(root.path())
-        && is_relative_key(key)
-    {
-        return Some(Cow::Borrowed(key));
+fn walked_path(
+    access: &FileAccess,
+    base: &ResolvedPath,
+    path: &Path,
+) -> Result<ResolvedPath, crate::path::PathError> {
+    if base.is_ambient() {
+        return access.resolve_ambient_entry(base, path);
     }
-    root.resolve(path)
-        .ok()
-        .map(|resolved| Cow::Owned(resolved.key().to_path_buf()))
-}
-
-fn is_relative_key(path: &Path) -> bool {
-    path.components()
-        .all(|component| matches!(component, std::path::Component::Normal(_)))
+    access.resolve(path)
 }
 
 fn is_git_entry(entry: &DirEntry) -> bool {
@@ -158,7 +152,15 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{TraversalControl, walk};
-    use crate::path::RepositoryRoot;
+    use crate::path::{FileAccess, ReadScope, RepositoryRoot};
+
+    fn access(path: &Path) -> FileAccess {
+        access_with_scope(path, ReadScope::Repository)
+    }
+
+    fn access_with_scope(path: &Path, scope: ReadScope) -> FileAccess {
+        FileAccess::new(Arc::new(RepositoryRoot::open(path).expect("root")), scope)
+    }
 
     #[test]
     fn fixed_policy_includes_hidden_respects_ignores_and_excludes_git() {
@@ -169,12 +171,11 @@ mod tests {
         fs::write(fixture.path().join(".hidden"), "hidden").expect("hidden");
         fs::create_dir(fixture.path().join(".git")).expect("git");
         fs::write(fixture.path().join(".git/config"), "config").expect("git config");
-        let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+        let root = access(fixture.path());
         let base = root.resolve(Path::new(".")).expect("base");
         let mut paths = Vec::new();
         walk(&root, &base, false, &CancellationToken::new(), |entry| {
-            let resolved = root.resolve(entry.key).expect("resolve walked key");
-            paths.push(resolved.slash_path().expect("model path").to_owned());
+            paths.push(entry.path.slash_path().expect("model path").to_owned());
             TraversalControl::Continue
         })
         .expect("walk");
@@ -187,7 +188,7 @@ mod tests {
     #[test]
     fn cancellation_stops_before_enumeration() {
         let fixture = tempfile::tempdir().expect("fixture");
-        let root = RepositoryRoot::open(fixture.path()).expect("root");
+        let root = access(fixture.path());
         let base = root.resolve(Path::new(".")).expect("base");
         let cancellation = CancellationToken::new();
         cancellation.cancel();
@@ -204,15 +205,52 @@ mod tests {
         let fixture = tempfile::tempdir().expect("fixture");
         fs::create_dir(fixture.path().join("src")).expect("src");
         fs::write(fixture.path().join("src/Unicode 界.rs"), "source").expect("source");
-        let root = RepositoryRoot::open(fixture.path()).expect("root");
+        let root = access(fixture.path());
         let base = root.resolve(Path::new("src")).expect("base");
         let mut paths = Vec::new();
         walk(&root, &base, false, &CancellationToken::new(), |entry| {
-            paths.push(entry.key.to_path_buf());
+            paths.push(entry.path.key().to_path_buf());
             TraversalControl::Continue
         })
         .expect("walk");
         assert_eq!(paths, [Path::new("src/Unicode 界.rs").to_path_buf()]);
+    }
+
+    #[test]
+    fn unrestricted_entries_use_request_relative_keys() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let outside = tempfile::tempdir().expect("outside fixture");
+        fs::create_dir(outside.path().join("nested")).expect("nested");
+        fs::write(outside.path().join("nested/source.rs"), "source").expect("source");
+        let access = access_with_scope(fixture.path(), ReadScope::Unrestricted);
+        let base = access.resolve(outside.path()).expect("ambient base");
+        let mut paths = Vec::new();
+        walk(&access, &base, false, &CancellationToken::new(), |entry| {
+            paths.push(entry.path.key().to_path_buf());
+            TraversalControl::Continue
+        })
+        .expect("ambient walk");
+        assert!(paths.contains(&Path::new("nested/source.rs").to_path_buf()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unrestricted_walk_rejects_an_explicit_symlink_root() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempfile::tempdir().expect("fixture");
+        let outside = tempfile::tempdir().expect("outside fixture");
+        let target = tempfile::tempdir().expect("target fixture");
+        let link = outside.path().join("directory-link");
+        symlink(target.path(), &link).expect("directory link");
+        let access = access_with_scope(fixture.path(), ReadScope::Unrestricted);
+        let base = access.resolve(&link).expect("ambient base");
+        assert!(matches!(
+            walk(&access, &base, true, &CancellationToken::new(), |_| {
+                TraversalControl::Continue
+            }),
+            Err(super::TraversalError::NotDirectory)
+        ));
     }
 
     #[cfg(unix)]
@@ -228,7 +266,7 @@ mod tests {
             "source",
         )
         .expect("non-Unicode source");
-        let root = RepositoryRoot::open(fixture.path()).expect("root");
+        let root = access(fixture.path());
         let base = root.resolve(Path::new(".")).expect("base");
         let mut visited = 0_usize;
         let summary = walk(&root, &base, false, &CancellationToken::new(), |_| {
@@ -256,11 +294,11 @@ mod tests {
             }
             Err(error) => panic!("directory reparse link: {error}"),
         }
-        let root = RepositoryRoot::open(fixture.path()).expect("root");
+        let root = access(fixture.path());
         let base = root.resolve(Path::new(".")).expect("base");
         let mut paths = Vec::new();
         walk(&root, &base, true, &CancellationToken::new(), |entry| {
-            paths.push(entry.key.to_path_buf());
+            paths.push(entry.path.key().to_path_buf());
             TraversalControl::Continue
         })
         .expect("walk");
@@ -269,5 +307,20 @@ mod tests {
                 .iter()
                 .any(|path| path == Path::new("escape/secret.txt"))
         );
+
+        let ambient_link = outside.path().join("ambient-link");
+        match symlink_dir(fixture.path(), &ambient_link) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(1314) => return,
+            Err(error) => panic!("ambient directory link: {error}"),
+        }
+        let access = access_with_scope(fixture.path(), ReadScope::Unrestricted);
+        let base = access.resolve(&ambient_link).expect("ambient base");
+        assert!(matches!(
+            walk(&access, &base, true, &CancellationToken::new(), |_| {
+                TraversalControl::Continue
+            }),
+            Err(super::TraversalError::NotDirectory)
+        ));
     }
 }

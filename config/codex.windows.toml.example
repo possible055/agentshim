@@ -1,12 +1,13 @@
 [mcp_servers.codexshim]
 command = 'C:\absolute\path\to\codexshim.exe'
 args = ["serve"]
+# To allow external absolute read/grep/glob paths on fixed NTFS volumes, use:
+# args = ["serve", "--read-scope", "unrestricted"]
 required = true
 startup_timeout_sec = 15
 tool_timeout_sec = 310
 enabled_tools = ["read", "grep", "glob", "run_process"]
 default_tools_approval_mode = "writes"
-# Add CODEXSHIM_MCP_COMPATIBILITY = "legacy" only when Codex sends initialize/2025-06-18.
 env = { CODEX_MCP_PROTOCOL_VERSION = "2026-07-28" }
 
 [mcp_servers.codexshim.tools.run_process]

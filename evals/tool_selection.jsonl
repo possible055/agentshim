@@ -2,15 +2,18 @@
 {"id":"read-continue","prompt":"Continue the partial file read at line 81.","expected":"read","arguments":{"path":"src/server.rs","start_line":81}}
 {"id":"read-utf16","prompt":"Read fixtures/utf16.txt as source text.","expected":"read","arguments":{"path":"fixtures/utf16.txt"}}
 {"id":"read-absolute","prompt":"Inspect the repository file whose absolute path I supplied.","expected":"read","arguments":{"path":"<absolute-repository-file>"}}
+{"id":"read-external-absolute","prompt":"With unrestricted read scope enabled, inspect this absolute source path outside the repository.","expected":"read","arguments":{"path":"<absolute-external-file>"}}
 {"id":"grep-symbol","prompt":"Find every occurrence of CodexShim under src.","expected":"grep","arguments":{"pattern":"CodexShim","path":"src","fixed_strings":true}}
 {"id":"grep-regex","prompt":"Find Rust functions named validate_* and include two context lines.","expected":"grep","arguments":{"pattern":"fn validate_[A-Za-z0-9_]+","path":"src","context_lines":2}}
 {"id":"grep-files","prompt":"List files containing CancellationToken.","expected":"grep","arguments":{"pattern":"CancellationToken","mode":"files","fixed_strings":true}}
 {"id":"grep-count","prompt":"Count TODO occurrences by file.","expected":"grep","arguments":{"pattern":"TODO","mode":"count","fixed_strings":true}}
 {"id":"grep-continue","prompt":"Continue the previous grep result from offset 200.","expected":"grep","arguments":{"pattern":"Result","offset":200}}
+{"id":"grep-external","prompt":"With unrestricted read scope enabled, search this external absolute directory for Rust files containing needle.","expected":"grep","arguments":{"path":"<absolute-external-directory>","pattern":"needle","glob":"*.rs","fixed_strings":true}}
 {"id":"glob-rust","prompt":"Find all Rust source paths below src.","expected":"glob","arguments":{"pattern":"src/**/*.rs"}}
 {"id":"glob-manifests","prompt":"Find every Cargo.toml path in the repository.","expected":"glob","arguments":{"pattern":"**/Cargo.toml"}}
 {"id":"glob-hidden","prompt":"Find hidden configuration files while still respecting ignores.","expected":"glob","arguments":{"pattern":"**/.*"}}
 {"id":"glob-continue","prompt":"Continue the path listing at offset 1000.","expected":"glob","arguments":{"pattern":"**/*","offset":1000}}
+{"id":"glob-external","prompt":"With unrestricted read scope enabled, list Rust files directly in this external absolute directory.","expected":"glob","arguments":{"path":"<absolute-external-directory>","pattern":"*.rs"}}
 {"id":"process-cargo-test","prompt":"Run cargo test with the lockfile enforced.","expected":"run_process","arguments":{"program":"cargo","args":["test","--locked"]}}
 {"id":"process-git-status","prompt":"Run git status without shell parsing.","expected":"run_process","arguments":{"program":"git","args":["status","--short"]}}
 {"id":"process-env","prompt":"Run cargo check with RUST_BACKTRACE set and GIT_DIR removed.","expected":"run_process","arguments":{"program":"cargo","args":["check","--locked"],"env":{"RUST_BACKTRACE":"1"},"unset_env":["GIT_DIR"]}}

@@ -8,6 +8,9 @@
 {"id":"find-rust","legacy":"find src -name '*.rs'","category":"read-only","tool":"glob","replacement":{"pattern":"src/**/*.rs"}}
 {"id":"get-childitem","legacy":"Get-ChildItem -Recurse -Filter Cargo.toml","category":"read-only","tool":"glob","replacement":{"pattern":"**/Cargo.toml"}}
 {"id":"ls-hidden","legacy":"ls -la","category":"read-only","tool":"glob","replacement":{"pattern":"*"}}
+{"id":"cat-external-file","legacy":"cat /absolute/external/source.rs","category":"read-only-unrestricted","tool":"read","replacement":{"path":"<absolute-external-file>"}}
+{"id":"rg-external-directory","legacy":"rg needle /absolute/external","category":"read-only-unrestricted","tool":"grep","replacement":{"path":"<absolute-external-directory>","pattern":"needle","fixed_strings":true}}
+{"id":"find-external-rust","legacy":"find /absolute/external -name '*.rs'","category":"read-only-unrestricted","tool":"glob","replacement":{"path":"<absolute-external-directory>","pattern":"*.rs"}}
 {"id":"cargo-check","legacy":"cargo check --locked","category":"native","tool":"run_process","replacement":{"program":"cargo","args":["check","--locked"]}}
 {"id":"cargo-test","legacy":"cargo test --locked","category":"native","tool":"run_process","replacement":{"program":"cargo","args":["test","--locked"]}}
 {"id":"cargo-clippy","legacy":"cargo clippy --all-targets -- -D warnings","category":"native","tool":"run_process","replacement":{"program":"cargo","args":["clippy","--all-targets","--","-D","warnings"]}}

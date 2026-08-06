@@ -1508,13 +1508,30 @@ mod tests {
     }
 
     #[cfg(windows)]
-    #[test]
-    fn windows_primary_exit_terminates_lingering_grandchild() {
+    fn windows_process_is_running(pid: u32) -> bool {
         use windows_sys::Win32::{
             Foundation::CloseHandle,
-            System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+            System::Threading::{
+                GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            },
         };
 
+        const STILL_ACTIVE_EXIT_CODE: u32 = 259;
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return false;
+        }
+        let mut exit_code = 0_u32;
+        let succeeded = unsafe { GetExitCodeProcess(handle, &raw mut exit_code) } != 0;
+        unsafe {
+            CloseHandle(handle);
+        }
+        succeeded && exit_code == STILL_ACTIVE_EXIT_CODE
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_primary_exit_terminates_lingering_grandchild() {
         let fixture = tempfile::tempdir().expect("fixture");
         let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
         let pid_file = fixture.path().join("lingering-grandchild.pid");
@@ -1552,14 +1569,8 @@ mod tests {
             .trim()
             .parse::<u32>()
             .expect("pid integer");
-        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-        if !handle.is_null() {
-            unsafe {
-                CloseHandle(handle);
-            }
-        }
         assert!(
-            handle.is_null(),
+            !windows_process_is_running(pid),
             "lingering grandchild survived primary completion"
         );
     }
@@ -1567,11 +1578,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_timeout_terminates_grandchild_job_tree() {
-        use windows_sys::Win32::{
-            Foundation::CloseHandle,
-            System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
-        };
-
         let fixture = tempfile::tempdir().expect("fixture");
         let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
         let pid_file = fixture.path().join("grandchild.pid");
@@ -1616,14 +1622,8 @@ mod tests {
             .trim()
             .parse::<u32>()
             .expect("pid integer");
-        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-        if !handle.is_null() {
-            unsafe {
-                CloseHandle(handle);
-            }
-        }
         assert!(
-            handle.is_null(),
+            !windows_process_is_running(pid),
             "grandchild process survived job termination"
         );
     }

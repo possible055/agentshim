@@ -1,11 +1,51 @@
 use std::{
     cmp::Ordering,
+    fmt::Display,
     io,
     path::{Component, Path, PathBuf},
+    str::FromStr,
     sync::Arc,
 };
 
-use cap_std::{ambient_authority, fs::Dir};
+use cap_std::{
+    ambient_authority,
+    fs::{Dir, File, OpenOptions},
+};
+
+#[cfg(windows)]
+static VALIDATED_VOLUMES: std::sync::OnceLock<std::sync::Mutex<Vec<Vec<u16>>>> =
+    std::sync::OnceLock::new();
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ReadScope {
+    #[default]
+    Repository,
+    Unrestricted,
+}
+
+impl Display for ReadScope {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Repository => formatter.write_str("repository"),
+            Self::Unrestricted => formatter.write_str("unrestricted"),
+        }
+    }
+}
+
+impl FromStr for ReadScope {
+    type Err = io::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "repository" => Ok(Self::Repository),
+            "unrestricted" => Ok(Self::Unrestricted),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("read scope must be either `repository` or `unrestricted`, got `{value}`"),
+            )),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct RepositoryRoot {
@@ -73,6 +113,7 @@ impl RepositoryRoot {
             slash_path: slash_path(&key),
             key,
             absolute,
+            ambient: false,
         })
     }
 
@@ -86,12 +127,189 @@ impl RepositoryRoot {
     }
 }
 
+#[derive(Debug)]
+pub struct FileAccess {
+    root: Arc<RepositoryRoot>,
+    scope: ReadScope,
+}
+
+impl FileAccess {
+    #[must_use]
+    pub fn new(root: Arc<RepositoryRoot>, scope: ReadScope) -> Self {
+        Self { root, scope }
+    }
+
+    #[must_use]
+    pub fn root(&self) -> &Arc<RepositoryRoot> {
+        &self.root
+    }
+
+    #[must_use]
+    pub fn scope(&self) -> ReadScope {
+        self.scope
+    }
+
+    /// Resolve one input through the repository capability or the explicitly enabled ambient path.
+    ///
+    /// # Errors
+    ///
+    /// Returns a path error for malformed input, repository escape in repository mode, or an
+    /// unsupported ambient location.
+    pub fn resolve(&self, input: &Path) -> Result<ResolvedPath, PathError> {
+        match self.root.resolve(input) {
+            Ok(path) => Ok(path),
+            Err(PathError::OutsideRoot)
+                if self.scope == ReadScope::Unrestricted && input.is_absolute() =>
+            {
+                Self::resolve_ambient(input)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Resolve an ambient traversal entry relative to the request's logical root.
+    ///
+    /// # Errors
+    ///
+    /// Returns a path error when either path is malformed or the entry is outside the logical root.
+    pub fn resolve_ambient_entry(
+        &self,
+        operation_root: &ResolvedPath,
+        absolute: &Path,
+    ) -> Result<ResolvedPath, PathError> {
+        if !operation_root.is_ambient() {
+            return self.resolve(absolute);
+        }
+        reject_nul(absolute)?;
+        let absolute = normalize_absolute(absolute)?;
+        let mut key = absolute
+            .strip_prefix(operation_root.absolute())
+            .map_err(|_| PathError::OutsideRoot)?
+            .to_path_buf();
+        if key.as_os_str().is_empty() {
+            key.push(".");
+        }
+        if key
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+        {
+            return Err(PathError::OutsideRoot);
+        }
+        Ok(ResolvedPath::ambient(absolute, key))
+    }
+
+    /// Read metadata through the backend that admitted the path.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating-system or capability-relative metadata error.
+    pub fn metadata_kind(&self, path: &ResolvedPath) -> io::Result<PathKind> {
+        if path.is_ambient() {
+            let file_type = std::fs::metadata(path.absolute())?.file_type();
+            Ok(PathKind::new(
+                file_type.is_file(),
+                file_type.is_dir(),
+                file_type.is_symlink(),
+            ))
+        } else {
+            let file_type = self.root.capability().metadata(path.key())?.file_type();
+            Ok(PathKind::new(
+                file_type.is_file(),
+                file_type.is_dir(),
+                file_type.is_symlink(),
+            ))
+        }
+    }
+
+    /// Read non-following metadata through the backend that admitted the path.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating-system or capability-relative metadata error.
+    pub fn symlink_metadata_kind(&self, path: &ResolvedPath) -> io::Result<PathKind> {
+        if path.is_ambient() {
+            let file_type = std::fs::symlink_metadata(path.absolute())?.file_type();
+            Ok(PathKind::new(
+                file_type.is_file(),
+                file_type.is_dir(),
+                file_type.is_symlink(),
+            ))
+        } else {
+            let file_type = self
+                .root
+                .capability()
+                .symlink_metadata(path.key())?
+                .file_type();
+            Ok(PathKind::new(
+                file_type.is_file(),
+                file_type.is_dir(),
+                file_type.is_symlink(),
+            ))
+        }
+    }
+
+    /// Open a path for reading through the backend that admitted it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating-system or capability-relative open error.
+    pub fn open_read(&self, path: &ResolvedPath) -> io::Result<File> {
+        if !path.is_ambient() {
+            let mut options = OpenOptions::new();
+            options.read(true);
+            #[cfg(unix)]
+            {
+                use cap_std::fs::OpenOptionsExt;
+                options.custom_flags(libc::O_NONBLOCK);
+            }
+            return self.root.capability().open_with(path.key(), &options);
+        }
+
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK);
+        }
+        options.open(path.absolute()).map(File::from_std)
+    }
+
+    fn resolve_ambient(input: &Path) -> Result<ResolvedPath, PathError> {
+        reject_nul(input)?;
+        let absolute = normalize_absolute(input)?;
+        validate_ambient_path(&absolute)?;
+        let key = absolute
+            .file_name()
+            .map_or_else(|| PathBuf::from("."), PathBuf::from);
+        Ok(ResolvedPath::ambient(absolute, key))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PathKind {
+    pub is_file: bool,
+    pub is_dir: bool,
+    pub is_symlink: bool,
+}
+
+impl PathKind {
+    fn new(is_file: bool, is_dir: bool, is_symlink: bool) -> Self {
+        Self {
+            is_file,
+            is_dir,
+            is_symlink,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedPath {
     key: PathBuf,
     absolute: PathBuf,
     sort_key: PathSortKey,
     slash_path: Option<String>,
+    ambient: bool,
 }
 
 impl ResolvedPath {
@@ -113,6 +331,21 @@ impl ResolvedPath {
     #[must_use]
     pub fn slash_path(&self) -> Option<&str> {
         self.slash_path.as_deref()
+    }
+
+    #[must_use]
+    pub fn is_ambient(&self) -> bool {
+        self.ambient
+    }
+
+    fn ambient(absolute: PathBuf, key: PathBuf) -> Self {
+        Self {
+            sort_key: PathSortKey::new(&key),
+            slash_path: slash_path(&key),
+            key,
+            absolute,
+            ambient: true,
+        }
     }
 }
 
@@ -156,6 +389,8 @@ pub enum PathError {
     AmbiguousPrefix,
     #[error("path escapes the repository root through '..'")]
     ParentEscape,
+    #[error("path is not on a supported local filesystem")]
+    UnsupportedLocation,
 }
 
 fn normalize_relative(path: &Path) -> Result<PathBuf, PathError> {
@@ -200,6 +435,24 @@ fn normalize_absolute(path: &Path) -> Result<PathBuf, PathError> {
         }
     }
     Ok(normalized)
+}
+
+#[cfg(not(windows))]
+fn validate_ambient_path(_path: &Path) -> Result<(), PathError> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn validate_ambient_path(path: &Path) -> Result<(), PathError> {
+    use std::path::Prefix;
+
+    let Some(Component::Prefix(prefix)) = path.components().next() else {
+        return Err(PathError::UnsupportedLocation);
+    };
+    if !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)) {
+        return Err(PathError::UnsupportedLocation);
+    }
+    validate_platform_root(path).map_err(|_| PathError::UnsupportedLocation)
 }
 
 #[cfg(not(windows))]
@@ -395,6 +648,16 @@ fn validate_platform_root(path: &Path) -> io::Result<()> {
         })?;
     volume_path.truncate(terminator + 1);
 
+    let validated_volumes = VALIDATED_VOLUMES.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    if validated_volumes
+        .lock()
+        .map_err(|_| io::Error::other("validated volume cache is unavailable"))?
+        .iter()
+        .any(|validated| validated == &volume_path)
+    {
+        return Ok(());
+    }
+
     // SAFETY: `volume_path` is a live, NUL-terminated UTF-16 root path.
     let drive_type = unsafe { GetDriveTypeW(volume_path.as_ptr()) };
     if drive_type != DRIVE_FIXED {
@@ -426,14 +689,17 @@ fn validate_platform_root(path: &Path) -> io::Result<()> {
         .iter()
         .position(|unit| *unit == 0)
         .unwrap_or(filesystem.len());
-    if String::from_utf16_lossy(&filesystem[..length]).eq_ignore_ascii_case("NTFS") {
-        Ok(())
-    } else {
-        Err(io::Error::new(
+    if !String::from_utf16_lossy(&filesystem[..length]).eq_ignore_ascii_case("NTFS") {
+        return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "Windows repository root must use NTFS",
-        ))
+        ));
     }
+    validated_volumes
+        .lock()
+        .map_err(|_| io::Error::other("validated volume cache is unavailable"))?
+        .push(volume_path);
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -463,9 +729,66 @@ fn validate_windows_version() -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path};
+    use std::{fs, path::Path, sync::Arc};
 
-    use super::{PathError, RepositoryRoot};
+    use super::{FileAccess, PathError, ReadScope, RepositoryRoot};
+
+    #[test]
+    fn read_scope_parsing_is_explicit_and_fail_closed() {
+        assert_eq!(
+            "repository".parse::<ReadScope>().expect("repository"),
+            ReadScope::Repository
+        );
+        assert_eq!(
+            "unrestricted".parse::<ReadScope>().expect("unrestricted"),
+            ReadScope::Unrestricted
+        );
+        assert!("all".parse::<ReadScope>().is_err());
+    }
+
+    #[test]
+    fn unrestricted_scope_admits_only_external_absolute_inputs() {
+        let fixture = tempfile::tempdir().expect("root fixture");
+        let outside = tempfile::tempdir().expect("outside fixture");
+        fs::write(outside.path().join("outside.txt"), "outside").expect("outside file");
+        let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+        let repository = FileAccess::new(Arc::clone(&root), ReadScope::Repository);
+        let unrestricted = FileAccess::new(root, ReadScope::Unrestricted);
+        let outside_file = outside.path().join("outside.txt");
+
+        assert_eq!(
+            repository.resolve(&outside_file).unwrap_err(),
+            PathError::OutsideRoot
+        );
+        let resolved = unrestricted.resolve(&outside_file).expect("ambient path");
+        assert!(resolved.is_ambient());
+        assert_eq!(resolved.absolute(), outside_file);
+        assert_eq!(resolved.key(), Path::new("outside.txt"));
+        assert_eq!(
+            unrestricted.resolve(Path::new("../outside")).unwrap_err(),
+            PathError::ParentEscape
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unrestricted_scope_rejects_non_disk_windows_prefixes() {
+        let fixture = tempfile::tempdir().expect("root fixture");
+        let access = FileAccess::new(
+            Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
+            ReadScope::Unrestricted,
+        );
+        for path in [r"\\server\share\file.rs", r"\\.\PhysicalDrive0"] {
+            assert_eq!(
+                access.resolve(Path::new(path)).unwrap_err(),
+                PathError::UnsupportedLocation
+            );
+        }
+        assert_eq!(
+            access.resolve(Path::new(r"C:relative.rs")).unwrap_err(),
+            PathError::AmbiguousPrefix
+        );
+    }
 
     #[test]
     fn resolves_relative_and_root_absolute_paths() {

@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Condvar, Mutex},
 };
 
-use cap_std::fs::{File, OpenOptions};
+use cap_std::fs::File;
 use globset::GlobBuilder;
 use grep_matcher::{LineTerminator, Matcher};
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    output::{OutputFormatter, OutputLimits},
-    path::{PathError, RepositoryRoot, ResolvedPath},
+    output::{MODEL_BYTE_LIMIT, OutputFormatter, OutputLimits},
+    path::{FileAccess, PathError, ResolvedPath},
     sorting,
     tools::read::FileFingerprint,
     traversal::{TraversalControl, TraversalError, TraversalSummary, walk},
@@ -29,7 +29,21 @@ const MAX_CONTEXT: usize = 20;
 const CANDIDATE_MEMORY_BYTES: usize = 8 * 1024 * 1024;
 const SEARCH_HEAP_BYTES: usize = 1024 * 1024;
 const CAPTURE_MEMORY_BYTES: usize = 1024 * 1024;
-const ORDERED_WINDOW_FACTOR: usize = 2;
+const PAGE_MEMORY_BYTES: usize = MODEL_BYTE_LIMIT;
+const MEMORY_SAFETY_BYTES: usize = 8 * 1024 * 1024;
+const ORDERED_WINDOW_FACTOR: usize = 1;
+const GENERIC_OMISSION: &str = "[grep result omitted: exceeds output budget]";
+const CONTENT_OMISSION: &str = "[line text omitted: exceeds output budget]";
+
+#[must_use]
+pub(crate) fn memory_charge(lanes: usize) -> usize {
+    CANDIDATE_MEMORY_BYTES
+        .saturating_add(
+            lanes.saturating_mul(SEARCH_HEAP_BYTES.saturating_add(CAPTURE_MEMORY_BYTES)),
+        )
+        .saturating_add(PAGE_MEMORY_BYTES)
+        .saturating_add(MEMORY_SAFETY_BYTES)
+}
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -116,13 +130,13 @@ pub enum GrepError {
     Io(#[from] io::Error),
 }
 
-/// Search capability-opened repository files with an ordered bounded worker window.
+/// Search policy-admitted files with an ordered bounded worker window.
 ///
 /// # Errors
 ///
 /// Returns validation, regex, traversal, resource, cancellation, I/O, or output errors.
 pub fn execute(
-    root: &Arc<RepositoryRoot>,
+    access: &Arc<FileAccess>,
     request: &GrepRequest,
     lanes: usize,
     cancellation: &CancellationToken,
@@ -142,7 +156,7 @@ pub fn execute(
         })
         .transpose()?;
     let (candidates, traversal_summary, single_file) = collect_candidates(
-        root,
+        access,
         request.path.as_deref().unwrap_or("."),
         glob.as_ref(),
         cancellation,
@@ -159,10 +173,10 @@ pub fn execute(
         capture_records: needed,
     };
     let lanes = lanes.clamp(1, candidates.len().max(1));
-    let root = Arc::clone(root);
+    let access = Arc::clone(access);
     let context = OrderedSearchContext {
         cancellation,
-        root: &root,
+        access: &access,
         matcher: &matcher,
         plan,
         single_file,
@@ -208,14 +222,13 @@ struct Candidate {
 }
 
 fn collect_candidates(
-    root: &RepositoryRoot,
+    access: &FileAccess,
     input: &str,
     glob: Option<&globset::GlobMatcher>,
     cancellation: &CancellationToken,
 ) -> Result<(Vec<Candidate>, TraversalSummary, bool), GrepError> {
-    let base = root.resolve(Path::new(input))?;
-    let metadata = root.capability().metadata(base.key())?;
-    if metadata.is_file() {
+    let base = access.resolve(Path::new(input))?;
+    if access.metadata_kind(&base)?.is_file {
         let candidate = candidate(base)?;
         let matches = glob.is_none_or(|glob| {
             candidate
@@ -232,18 +245,17 @@ fn collect_candidates(
     let mut candidates = Vec::new();
     let mut charged = 0_usize;
     let mut terminal_error = None;
-    let summary = walk(root, &base, false, cancellation, |entry| {
+    let summary = walk(access, &base, false, cancellation, |entry| {
         if !entry
             .file_type
             .is_some_and(|file_type| file_type.is_file() || file_type.is_symlink())
         {
             return TraversalControl::Continue;
         }
-        if glob.is_some_and(|glob| !glob.is_match(entry.key)) {
+        if glob.is_some_and(|glob| !glob.is_match(entry.path.key())) {
             return TraversalControl::Continue;
         }
-        let resolved = root.resolve(entry.key).map_err(GrepError::from);
-        match resolved.and_then(candidate) {
+        match candidate(entry.path) {
             Ok(candidate) => {
                 charged = charged
                     .saturating_add(candidate.absolute.len())
@@ -313,7 +325,7 @@ struct FileOutcome {
 
 #[cfg(test)]
 fn search_file(
-    root: &RepositoryRoot,
+    access: &FileAccess,
     candidate: &Candidate,
     matcher: &RegexMatcher,
     plan: SearchPlan,
@@ -321,7 +333,7 @@ fn search_file(
 ) -> Result<FileOutcome, GrepError> {
     let mut searcher = build_searcher(plan);
     search_file_with_searcher(
-        root,
+        access,
         candidate,
         matcher,
         plan,
@@ -333,7 +345,7 @@ fn search_file(
 
 #[cfg(test)]
 fn search_file_with_hook(
-    root: &RepositoryRoot,
+    access: &FileAccess,
     candidate: &Candidate,
     matcher: &RegexMatcher,
     plan: SearchPlan,
@@ -342,7 +354,7 @@ fn search_file_with_hook(
 ) -> Result<FileOutcome, GrepError> {
     let mut searcher = build_searcher(plan);
     search_file_with_searcher(
-        root,
+        access,
         candidate,
         matcher,
         plan,
@@ -370,7 +382,7 @@ fn build_searcher(plan: SearchPlan) -> Searcher {
 }
 
 fn search_file_with_searcher(
-    root: &RepositoryRoot,
+    access: &FileAccess,
     candidate: &Candidate,
     matcher: &RegexMatcher,
     plan: SearchPlan,
@@ -384,7 +396,7 @@ fn search_file_with_searcher(
     let Ok(OpenedCandidate {
         mut file,
         fingerprint: before,
-    }) = open_candidate(root, candidate.path.key())
+    }) = open_candidate(access, &candidate.path)
     else {
         return Ok(FileOutcome::skipped(&candidate.absolute));
     };
@@ -397,7 +409,7 @@ fn search_file_with_searcher(
     }
     after_search();
     let after = FileFingerprint::from_file(&file)?;
-    let identity = match open_candidate(root, candidate.path.key()) {
+    let identity = match open_candidate(access, &candidate.path) {
         Ok(identity) => identity.fingerprint,
         Err(_) => return Ok(FileOutcome::skipped(&candidate.absolute)),
     };
@@ -412,15 +424,14 @@ struct OpenedCandidate {
     fingerprint: FileFingerprint,
 }
 
-fn open_candidate(root: &RepositoryRoot, key: &Path) -> io::Result<OpenedCandidate> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use cap_std::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NONBLOCK);
+fn open_candidate(access: &FileAccess, path: &ResolvedPath) -> io::Result<OpenedCandidate> {
+    if path.is_ambient() && access.symlink_metadata_kind(path)?.is_symlink {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "ambient candidate must not be a symbolic link",
+        ));
     }
-    let file = root.capability().open_with(key, &options)?;
+    let file = access.open_read(path)?;
     let fingerprint = FileFingerprint::from_file(&file)?;
     if fingerprint.regular {
         Ok(OpenedCandidate { file, fingerprint })
@@ -621,7 +632,7 @@ type SharedSearchWindow = Arc<(Mutex<WindowState<SearchResult>>, Condvar)>;
 
 struct OrderedSearchContext<'a> {
     cancellation: &'a CancellationToken,
-    root: &'a Arc<RepositoryRoot>,
+    access: &'a Arc<FileAccess>,
     matcher: &'a Arc<RegexMatcher>,
     plan: SearchPlan,
     single_file: bool,
@@ -648,7 +659,7 @@ fn ordered_search(
     std::thread::scope(|scope| -> Result<(), GrepError> {
         for _ in 0..lanes {
             let shared = Arc::clone(&shared);
-            let root = Arc::clone(context.root);
+            let access = Arc::clone(context.access);
             let matcher = Arc::clone(context.matcher);
             let cancellation = context.cancellation.clone();
             let plan = context.plan;
@@ -677,7 +688,7 @@ fn ordered_search(
                     };
                     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         search_file_with_searcher(
-                            &root,
+                            &access,
                             &candidates[index],
                             &matcher,
                             plan,
@@ -761,12 +772,27 @@ fn stop_window<T>(shared: &Arc<(Mutex<WindowState<T>>, Condvar)>) {
     changed.notify_all();
 }
 
+struct PageLine {
+    text: String,
+    fallback: Option<String>,
+}
+
+impl PageLine {
+    fn charge(&self) -> usize {
+        std::mem::size_of::<Self>()
+            .saturating_add(self.text.len())
+            .saturating_add(self.fallback.as_deref().map_or(0, str::len))
+    }
+}
+
 struct Page {
-    lines: Vec<String>,
+    lines: Vec<PageLine>,
     total: usize,
     skipped: usize,
     offset: usize,
     retain: usize,
+    charged: usize,
+    retaining: bool,
     traversal: TraversalSummary,
 }
 
@@ -778,6 +804,8 @@ impl Page {
             skipped: 0,
             offset: request.offset.unwrap_or(0),
             retain: request.limit.unwrap_or(DEFAULT_LIMIT).saturating_add(1),
+            charged: 0,
+            retaining: true,
             traversal,
         }
     }
@@ -799,10 +827,13 @@ impl Page {
         }
         match mode {
             GrepMode::Files if outcome.matched => {
-                self.push_entry(outcome.absolute);
+                self.push_entry(outcome.absolute, None);
             }
             GrepMode::Count if outcome.matched => {
-                self.push_entry(format!("{}:{}", outcome.absolute, outcome.occurrences));
+                self.push_entry(
+                    format!("{}:{}", outcome.absolute, outcome.occurrences),
+                    None,
+                );
             }
             GrepMode::Content => {
                 let entries = outcome.entries;
@@ -813,10 +844,17 @@ impl Page {
                     } else {
                         '-'
                     };
-                    self.push_entry(format!(
-                        "{}{separator}{}{separator}{}",
-                        outcome.absolute, record.line, record.text
-                    ));
+                    let fallback = format!(
+                        "{}{separator}{}{separator}{CONTENT_OMISSION}",
+                        outcome.absolute, record.line
+                    );
+                    self.push_entry(
+                        format!(
+                            "{}{separator}{}{separator}{}",
+                            outcome.absolute, record.line, record.text
+                        ),
+                        Some(fallback),
+                    );
                 }
                 self.total = self.total.saturating_add(entries.saturating_sub(captured));
             }
@@ -825,11 +863,43 @@ impl Page {
         Ok(())
     }
 
-    fn push_entry(&mut self, line: String) {
-        if self.total >= self.offset && self.lines.len() < self.retain {
-            self.lines.push(line);
+    fn push_entry(&mut self, line: String, detailed_fallback: Option<String>) {
+        if self.total >= self.offset && self.lines.len() < self.retain && self.retaining {
+            let fallback = detailed_fallback.unwrap_or_else(|| GENERIC_OMISSION.to_owned());
+            if self.can_retain(&line, Some(&fallback)) {
+                self.retain_line(PageLine {
+                    text: line,
+                    fallback: Some(fallback),
+                });
+            } else if fallback != GENERIC_OMISSION
+                && self.can_retain(&fallback, Some(GENERIC_OMISSION))
+            {
+                self.retain_line(PageLine {
+                    text: fallback,
+                    fallback: Some(GENERIC_OMISSION.to_owned()),
+                });
+            } else if self.can_retain(GENERIC_OMISSION, None) {
+                self.retain_line(PageLine {
+                    text: GENERIC_OMISSION.to_owned(),
+                    fallback: None,
+                });
+            } else {
+                self.retaining = false;
+            }
         }
         self.total = self.total.saturating_add(1);
+    }
+
+    fn can_retain(&self, text: &str, fallback: Option<&str>) -> bool {
+        let charge = std::mem::size_of::<PageLine>()
+            .saturating_add(text.len())
+            .saturating_add(fallback.map_or(0, str::len));
+        self.charged.saturating_add(charge) <= PAGE_MEMORY_BYTES
+    }
+
+    fn retain_line(&mut self, line: PageLine) {
+        self.charged = self.charged.saturating_add(line.charge());
+        self.lines.push(line);
     }
 }
 
@@ -861,10 +931,20 @@ fn render(
         )?;
         let mut shown = 0_usize;
         for line in page.lines.iter().take(cap) {
-            if !formatter.try_push_line(line, cancellation)? {
-                break;
+            if formatter.try_push_line(&line.text, cancellation)? {
+                shown += 1;
+                continue;
             }
-            shown += 1;
+            if shown == 0 {
+                let Some(fallback) = line.fallback.as_deref() else {
+                    return Err(crate::output::OutputError::NoProgress.into());
+                };
+                if !formatter.try_push_line(fallback, cancellation)? {
+                    return Err(crate::output::OutputError::NoProgress.into());
+                }
+                shown = 1;
+            }
+            break;
         }
         if shown == cap {
             return formatter.finish(cancellation).map_err(GrepError::from);
@@ -911,10 +991,14 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        CaseMode, GrepError, GrepMode, GrepRequest, Page, SearchPlan, build_matcher, candidate,
-        execute, render, search_file, search_file_with_hook,
+        CaseMode, GENERIC_OMISSION, GrepError, GrepMode, GrepRequest, PAGE_MEMORY_BYTES, Page,
+        SearchPlan, build_matcher, candidate, execute, memory_charge, render, search_file,
+        search_file_with_hook,
     };
-    use crate::path::RepositoryRoot;
+    use crate::{
+        path::{FileAccess, ReadScope, RepositoryRoot},
+        runtime::MEMORY_BUDGET_BYTES,
+    };
 
     fn request(pattern: &str) -> GrepRequest {
         GrepRequest {
@@ -930,7 +1014,7 @@ mod tests {
         }
     }
 
-    fn fixture() -> (tempfile::TempDir, Arc<RepositoryRoot>) {
+    fn fixture() -> (tempfile::TempDir, Arc<FileAccess>) {
         let fixture = tempfile::tempdir().expect("fixture");
         fs::create_dir(fixture.path().join("src")).expect("src");
         fs::write(
@@ -941,7 +1025,10 @@ mod tests {
         fs::write(fixture.path().join("src/b.rs"), "needle\nnone\nneedle\n").expect("b");
         fs::write(fixture.path().join("ignored.rs"), "needle\n").expect("ignored");
         fs::write(fixture.path().join(".gitignore"), "ignored.rs\n").expect("gitignore");
-        let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+        let root = Arc::new(FileAccess::new(
+            Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
+            ReadScope::Repository,
+        ));
         (fixture, root)
     }
 
@@ -1041,6 +1128,58 @@ mod tests {
             execute(&root, &request("needle"), 4, &CancellationToken::new()).expect("bounded grep");
         assert!(output.contains(&native_path("src/large.rs")));
         assert!(output.contains("Skipped: 1"));
+    }
+
+    #[test]
+    fn oversized_first_result_is_omitted_and_pagination_advances() {
+        let (fixture, root) = fixture();
+        fs::create_dir(fixture.path().join("paging")).expect("paging directory");
+        let mut large = String::from("needle ");
+        large.push_str(&"x".repeat(crate::output::MODEL_BYTE_LIMIT * 2));
+        large.push('\n');
+        fs::write(fixture.path().join("paging/0-large.rs"), large).expect("large match");
+        fs::write(fixture.path().join("paging/z-small.rs"), "needle small\n").expect("small match");
+        let mut query = request("needle");
+        query.path = Some("paging".to_owned());
+        query.fixed_strings = Some(true);
+        query.limit = Some(1);
+
+        let first = execute(&root, &query, 1, &CancellationToken::new()).expect("first page");
+        assert!(first.contains("[line text omitted: exceeds output budget]"));
+        assert!(first.contains("\"offset\":1"));
+
+        query.offset = Some(1);
+        let second = execute(&root, &query, 1, &CancellationToken::new()).expect("second page");
+        assert!(second.contains("z-small.rs"));
+        assert!(second.contains("needle small"));
+    }
+
+    #[test]
+    fn page_retention_stays_within_its_memory_budget() {
+        let query = request("needle");
+        let mut page = Page::new(&query, crate::traversal::TraversalSummary::default());
+        for index in 0..1_000 {
+            page.push_entry(
+                format!("{index}:{}", "x".repeat(20_000)),
+                Some(format!(
+                    "{index}:[line text omitted: exceeds output budget]"
+                )),
+            );
+        }
+
+        assert!(page.charged <= PAGE_MEMORY_BYTES);
+        assert_eq!(page.total, 1_000);
+        assert!(!page.retaining);
+        assert!(page.lines.iter().any(|line| line.text == GENERIC_OMISSION));
+        let output = render(&query, &page, &CancellationToken::new()).expect("bounded page");
+        assert!(output.contains("Partial:"));
+    }
+
+    #[test]
+    fn runtime_memory_charge_is_conservative_and_bounded() {
+        assert!(memory_charge(1) > 16 * 1024 * 1024);
+        assert!(memory_charge(16) > memory_charge(1));
+        assert!(memory_charge(16) <= MEMORY_BUDGET_BYTES);
     }
 
     #[test]

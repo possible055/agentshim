@@ -2,6 +2,7 @@ use tokio_util::sync::CancellationToken;
 
 pub const MODEL_TOKEN_LIMIT: usize = 8_000;
 pub const MODEL_BYTE_LIMIT: usize = 32_000;
+const DIAGNOSTIC_TRUNCATION_MARKER: &str = "\n...[diagnostic truncated]";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OutputLimits {
@@ -72,11 +73,12 @@ impl OutputFormatter {
         }
         let line = line.into();
         let segment = format!("\n{line}");
-        let tokens = token_count(&segment);
         let bytes = segment.len();
-        if self.bytes.saturating_add(bytes) > self.limits.bytes
-            || self.conservative_tokens.saturating_add(tokens) > self.limits.tokens
-        {
+        if self.bytes.saturating_add(bytes) > self.limits.bytes {
+            return Ok(false);
+        }
+        let tokens = token_count(&segment);
+        if self.conservative_tokens.saturating_add(tokens) > self.limits.tokens {
             return Ok(false);
         }
         self.conservative_tokens += tokens;
@@ -111,11 +113,62 @@ pub enum OutputError {
     Cancelled,
     #[error("output formatter limit invariant failed")]
     InvariantViolation,
+    #[error("output metadata leaves no room for a result entry")]
+    NoProgress,
 }
 
 #[must_use]
 pub fn token_count(text: &str) -> usize {
     bpe_openai::o200k_base().count(text)
+}
+
+#[must_use]
+pub fn bounded_diagnostic(text: &str) -> String {
+    let limits = OutputLimits::default();
+    if fits(text, limits) {
+        return text.to_owned();
+    }
+
+    let marker = DIAGNOSTIC_TRUNCATION_MARKER;
+    if !fits(marker, limits) {
+        return String::new();
+    }
+    let mut end = floor_char_boundary(
+        text,
+        text.len().min(limits.bytes.saturating_sub(marker.len())),
+    );
+    let prefix_token_limit = limits.tokens.saturating_sub(token_count(marker));
+    while token_count(&text[..end]) > prefix_token_limit {
+        let prefix_tokens = token_count(&text[..end]).max(1);
+        let next = end
+            .saturating_mul(prefix_token_limit)
+            .checked_div(prefix_tokens)
+            .unwrap_or(0)
+            .min(end.saturating_sub(1));
+        end = floor_char_boundary(text, next);
+    }
+
+    loop {
+        let truncated = format!("{}{marker}", &text[..end]);
+        if fits(&truncated, limits) {
+            return truncated;
+        }
+        if end == 0 {
+            return marker.to_owned();
+        }
+        end = floor_char_boundary(text, end.saturating_sub(1));
+    }
+}
+
+fn fits(text: &str, limits: OutputLimits) -> bool {
+    text.len() <= limits.bytes && token_count(text) <= limits.tokens
+}
+
+fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 fn independent_segment_tokens(header: &str, tail: &[String]) -> usize {
@@ -141,7 +194,10 @@ fn assemble(header: &str, body: &[String], tail: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{OutputError, OutputFormatter, OutputLimits, token_count};
+    use super::{
+        DIAGNOSTIC_TRUNCATION_MARKER, OutputError, OutputFormatter, OutputLimits,
+        bounded_diagnostic, token_count,
+    };
     use tokio_util::sync::CancellationToken;
 
     #[test]
@@ -189,5 +245,24 @@ mod tests {
             formatter.try_push_line("body", &cancellation).unwrap_err(),
             OutputError::Cancelled
         );
+    }
+
+    #[test]
+    fn diagnostics_are_bounded_by_bytes_and_tokens() {
+        for diagnostic in [
+            "界".repeat(40_000),
+            "abcdefghijklmnopqrstuvwxyz".repeat(10_000),
+        ] {
+            let bounded = bounded_diagnostic(&diagnostic);
+            assert!(bounded.ends_with(DIAGNOSTIC_TRUNCATION_MARKER));
+            assert!(bounded.len() <= super::MODEL_BYTE_LIMIT);
+            assert!(token_count(&bounded) <= super::MODEL_TOKEN_LIMIT);
+            assert!(std::str::from_utf8(bounded.as_bytes()).is_ok());
+        }
+    }
+
+    #[test]
+    fn short_diagnostics_are_unchanged() {
+        assert_eq!(bounded_diagnostic("short diagnostic"), "short diagnostic");
     }
 }
