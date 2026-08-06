@@ -1,5 +1,6 @@
 use std::{
     cmp::Ordering,
+    env,
     fmt::Display,
     io,
     path::{Component, Path, PathBuf},
@@ -19,14 +20,14 @@ static VALIDATED_VOLUMES: std::sync::OnceLock<std::sync::Mutex<Vec<Vec<u16>>>> =
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ReadScope {
     #[default]
-    Repository,
+    Normal,
     Unrestricted,
 }
 
 impl Display for ReadScope {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Repository => formatter.write_str("repository"),
+            Self::Normal => formatter.write_str("normal"),
             Self::Unrestricted => formatter.write_str("unrestricted"),
         }
     }
@@ -37,11 +38,11 @@ impl FromStr for ReadScope {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "repository" => Ok(Self::Repository),
+            "normal" => Ok(Self::Normal),
             "unrestricted" => Ok(Self::Unrestricted),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("read scope must be either `repository` or `unrestricted`, got `{value}`"),
+                format!("read scope must be either `normal` or `unrestricted`, got `{value}`"),
             )),
         }
     }
@@ -111,9 +112,10 @@ impl RepositoryRoot {
         Ok(ResolvedPath {
             sort_key: PathSortKey::new(&key),
             slash_path: slash_path(&key),
+            capability_key: key.clone(),
             key,
             absolute,
-            ambient: false,
+            backend: PathBackend::Repository,
         })
     }
 
@@ -131,12 +133,36 @@ impl RepositoryRoot {
 pub struct FileAccess {
     root: Arc<RepositoryRoot>,
     scope: ReadScope,
+    codex_roots: Vec<Arc<RepositoryRoot>>,
 }
 
 impl FileAccess {
     #[must_use]
     pub fn new(root: Arc<RepositoryRoot>, scope: ReadScope) -> Self {
-        Self { root, scope }
+        let codex_roots = if scope == ReadScope::Normal {
+            discover_codex_roots()
+        } else {
+            Vec::new()
+        };
+        Self {
+            root,
+            scope,
+            codex_roots,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_codex_roots(root: Arc<RepositoryRoot>, roots: &[&Path]) -> io::Result<Self> {
+        let codex_roots = roots
+            .iter()
+            .map(RepositoryRoot::open)
+            .map(|root| root.map(Arc::new))
+            .collect::<io::Result<Vec<_>>>()?;
+        Ok(Self {
+            root,
+            scope: ReadScope::Normal,
+            codex_roots,
+        })
     }
 
     #[must_use]
@@ -159,6 +185,11 @@ impl FileAccess {
         match self.root.resolve(input) {
             Ok(path) => Ok(path),
             Err(PathError::OutsideRoot)
+                if self.scope == ReadScope::Normal && input.is_absolute() =>
+            {
+                self.resolve_codex(input)
+            }
+            Err(PathError::OutsideRoot)
                 if self.scope == ReadScope::Unrestricted && input.is_absolute() =>
             {
                 Self::resolve_ambient(input)
@@ -172,12 +203,12 @@ impl FileAccess {
     /// # Errors
     ///
     /// Returns a path error when either path is malformed or the entry is outside the logical root.
-    pub fn resolve_ambient_entry(
+    pub fn resolve_external_entry(
         &self,
         operation_root: &ResolvedPath,
         absolute: &Path,
     ) -> Result<ResolvedPath, PathError> {
-        if !operation_root.is_ambient() {
+        if !operation_root.is_external() {
             return self.resolve(absolute);
         }
         reject_nul(absolute)?;
@@ -195,7 +226,14 @@ impl FileAccess {
         {
             return Err(PathError::OutsideRoot);
         }
-        Ok(ResolvedPath::ambient(absolute, key))
+        match operation_root.backend {
+            PathBackend::Repository => unreachable!("repository paths are not external"),
+            PathBackend::Codex(index) => {
+                let capability_key = self.codex_roots[index].resolve(&absolute)?.key.clone();
+                Ok(ResolvedPath::codex(absolute, key, capability_key, index))
+            }
+            PathBackend::Ambient => Ok(ResolvedPath::ambient(absolute, key)),
+        }
     }
 
     /// Read metadata through the backend that admitted the path.
@@ -204,20 +242,38 @@ impl FileAccess {
     ///
     /// Returns the operating-system or capability-relative metadata error.
     pub fn metadata_kind(&self, path: &ResolvedPath) -> io::Result<PathKind> {
-        if path.is_ambient() {
-            let file_type = std::fs::metadata(path.absolute())?.file_type();
-            Ok(PathKind::new(
-                file_type.is_file(),
-                file_type.is_dir(),
-                file_type.is_symlink(),
-            ))
-        } else {
-            let file_type = self.root.capability().metadata(path.key())?.file_type();
-            Ok(PathKind::new(
-                file_type.is_file(),
-                file_type.is_dir(),
-                file_type.is_symlink(),
-            ))
+        match path.backend {
+            PathBackend::Repository => {
+                let file_type = self
+                    .root
+                    .capability()
+                    .metadata(path.capability_key())?
+                    .file_type();
+                Ok(PathKind::new(
+                    file_type.is_file(),
+                    file_type.is_dir(),
+                    file_type.is_symlink(),
+                ))
+            }
+            PathBackend::Codex(index) => self.codex_roots[index]
+                .capability()
+                .metadata(path.capability_key())
+                .map(|metadata| metadata.file_type())
+                .map(|file_type| {
+                    PathKind::new(
+                        file_type.is_file(),
+                        file_type.is_dir(),
+                        file_type.is_symlink(),
+                    )
+                }),
+            PathBackend::Ambient => std::fs::metadata(path.absolute()).map(|metadata| {
+                let file_type = metadata.file_type();
+                PathKind::new(
+                    file_type.is_file(),
+                    file_type.is_dir(),
+                    file_type.is_symlink(),
+                )
+            }),
         }
     }
 
@@ -227,24 +283,38 @@ impl FileAccess {
     ///
     /// Returns the operating-system or capability-relative metadata error.
     pub fn symlink_metadata_kind(&self, path: &ResolvedPath) -> io::Result<PathKind> {
-        if path.is_ambient() {
-            let file_type = std::fs::symlink_metadata(path.absolute())?.file_type();
-            Ok(PathKind::new(
-                file_type.is_file(),
-                file_type.is_dir(),
-                file_type.is_symlink(),
-            ))
-        } else {
-            let file_type = self
+        match path.backend {
+            PathBackend::Repository => self
                 .root
                 .capability()
-                .symlink_metadata(path.key())?
-                .file_type();
-            Ok(PathKind::new(
-                file_type.is_file(),
-                file_type.is_dir(),
-                file_type.is_symlink(),
-            ))
+                .symlink_metadata(path.capability_key())
+                .map(|metadata| metadata.file_type())
+                .map(|file_type| {
+                    PathKind::new(
+                        file_type.is_file(),
+                        file_type.is_dir(),
+                        file_type.is_symlink(),
+                    )
+                }),
+            PathBackend::Codex(index) => self.codex_roots[index]
+                .capability()
+                .symlink_metadata(path.capability_key())
+                .map(|metadata| metadata.file_type())
+                .map(|file_type| {
+                    PathKind::new(
+                        file_type.is_file(),
+                        file_type.is_dir(),
+                        file_type.is_symlink(),
+                    )
+                }),
+            PathBackend::Ambient => std::fs::symlink_metadata(path.absolute()).map(|metadata| {
+                let file_type = metadata.file_type();
+                PathKind::new(
+                    file_type.is_file(),
+                    file_type.is_dir(),
+                    file_type.is_symlink(),
+                )
+            }),
         }
     }
 
@@ -254,7 +324,7 @@ impl FileAccess {
     ///
     /// Returns the operating-system or capability-relative open error.
     pub fn open_read(&self, path: &ResolvedPath) -> io::Result<File> {
-        if !path.is_ambient() {
+        if path.backend != PathBackend::Ambient {
             let mut options = OpenOptions::new();
             options.read(true);
             #[cfg(unix)]
@@ -262,7 +332,16 @@ impl FileAccess {
                 use cap_std::fs::OpenOptionsExt;
                 options.custom_flags(libc::O_NONBLOCK);
             }
-            return self.root.capability().open_with(path.key(), &options);
+            return match path.backend {
+                PathBackend::Repository => self
+                    .root
+                    .capability()
+                    .open_with(path.capability_key(), &options),
+                PathBackend::Codex(index) => self.codex_roots[index]
+                    .capability()
+                    .open_with(path.capability_key(), &options),
+                PathBackend::Ambient => unreachable!("ambient path handled below"),
+            };
         }
 
         let mut options = std::fs::OpenOptions::new();
@@ -284,6 +363,52 @@ impl FileAccess {
             .map_or_else(|| PathBuf::from("."), PathBuf::from);
         Ok(ResolvedPath::ambient(absolute, key))
     }
+
+    fn resolve_codex(&self, input: &Path) -> Result<ResolvedPath, PathError> {
+        for (index, root) in self.codex_roots.iter().enumerate() {
+            match root.resolve(input) {
+                Ok(path) => {
+                    let key = path
+                        .absolute()
+                        .file_name()
+                        .map_or_else(|| PathBuf::from("."), PathBuf::from);
+                    return Ok(ResolvedPath::codex(path.absolute, key, path.key, index));
+                }
+                Err(PathError::OutsideRoot) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(PathError::OutsideRoot)
+    }
+}
+
+fn discover_codex_roots() -> Vec<Arc<RepositoryRoot>> {
+    let mut candidates = Vec::new();
+    if let Some(codex_home) = env::var_os("CODEX_HOME").map(PathBuf::from) {
+        candidates.push(codex_home.join("skills"));
+        candidates.push(codex_home.join("plugins"));
+    }
+    let home = if cfg!(windows) {
+        env::var_os("USERPROFILE").map(PathBuf::from)
+    } else {
+        env::var_os("HOME").map(PathBuf::from)
+    };
+    if let Some(home) = home {
+        for relative in [
+            [".codex", "skills"],
+            [".codex", "plugins"],
+            [".agents", "skills"],
+            [".agents", "plugins"],
+        ] {
+            candidates.push(home.join(relative[0]).join(relative[1]));
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
+    candidates
+        .into_iter()
+        .filter_map(|path| RepositoryRoot::open(path).ok().map(Arc::new))
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -306,10 +431,18 @@ impl PathKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedPath {
     key: PathBuf,
+    capability_key: PathBuf,
     absolute: PathBuf,
     sort_key: PathSortKey,
     slash_path: Option<String>,
-    ambient: bool,
+    backend: PathBackend,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PathBackend {
+    Repository,
+    Codex(usize),
+    Ambient,
 }
 
 impl ResolvedPath {
@@ -335,16 +468,37 @@ impl ResolvedPath {
 
     #[must_use]
     pub fn is_ambient(&self) -> bool {
-        self.ambient
+        self.backend == PathBackend::Ambient
+    }
+
+    #[must_use]
+    pub fn is_external(&self) -> bool {
+        self.backend != PathBackend::Repository
+    }
+
+    fn capability_key(&self) -> &Path {
+        &self.capability_key
     }
 
     fn ambient(absolute: PathBuf, key: PathBuf) -> Self {
         Self {
             sort_key: PathSortKey::new(&key),
             slash_path: slash_path(&key),
+            capability_key: key.clone(),
             key,
             absolute,
-            ambient: true,
+            backend: PathBackend::Ambient,
+        }
+    }
+
+    fn codex(absolute: PathBuf, key: PathBuf, capability_key: PathBuf, index: usize) -> Self {
+        Self {
+            sort_key: PathSortKey::new(&key),
+            slash_path: slash_path(&key),
+            key,
+            capability_key,
+            absolute,
+            backend: PathBackend::Codex(index),
         }
     }
 }
@@ -736,8 +890,8 @@ mod tests {
     #[test]
     fn read_scope_parsing_is_explicit_and_fail_closed() {
         assert_eq!(
-            "repository".parse::<ReadScope>().expect("repository"),
-            ReadScope::Repository
+            "normal".parse::<ReadScope>().expect("normal"),
+            ReadScope::Normal
         );
         assert_eq!(
             "unrestricted".parse::<ReadScope>().expect("unrestricted"),
@@ -747,17 +901,17 @@ mod tests {
     }
 
     #[test]
-    fn unrestricted_scope_admits_only_external_absolute_inputs() {
+    fn normal_rejects_unmanaged_paths_and_unrestricted_admits_them() {
         let fixture = tempfile::tempdir().expect("root fixture");
         let outside = tempfile::tempdir().expect("outside fixture");
         fs::write(outside.path().join("outside.txt"), "outside").expect("outside file");
         let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
-        let repository = FileAccess::new(Arc::clone(&root), ReadScope::Repository);
+        let normal = FileAccess::new(Arc::clone(&root), ReadScope::Normal);
         let unrestricted = FileAccess::new(root, ReadScope::Unrestricted);
         let outside_file = outside.path().join("outside.txt");
 
         assert_eq!(
-            repository.resolve(&outside_file).unwrap_err(),
+            normal.resolve(&outside_file).unwrap_err(),
             PathError::OutsideRoot
         );
         let resolved = unrestricted.resolve(&outside_file).expect("ambient path");
@@ -767,6 +921,43 @@ mod tests {
         assert_eq!(
             unrestricted.resolve(Path::new("../outside")).unwrap_err(),
             PathError::ParentEscape
+        );
+    }
+
+    #[test]
+    fn normal_admits_only_configured_codex_roots() {
+        let repository = tempfile::tempdir().expect("repository fixture");
+        let codex = tempfile::tempdir().expect("codex fixture");
+        let unmanaged = tempfile::tempdir().expect("unmanaged fixture");
+        let skills = codex.path().join("skills");
+        fs::create_dir_all(skills.join("example")).expect("skill directory");
+        fs::write(skills.join("example/SKILL.md"), "instructions").expect("skill file");
+        fs::write(unmanaged.path().join("secret.txt"), "secret").expect("unmanaged file");
+        let access = FileAccess::with_codex_roots(
+            Arc::new(RepositoryRoot::open(repository.path()).expect("root")),
+            &[skills.as_path()],
+        )
+        .expect("normal access");
+
+        let skill_root = access.resolve(&skills).expect("skill root");
+        let skill = access
+            .resolve(&skills.join("example/SKILL.md"))
+            .expect("skill file");
+        assert!(skill.is_external());
+        assert!(!skill.is_ambient());
+        assert!(access.metadata_kind(&skill).expect("metadata").is_file);
+        assert_eq!(
+            access
+                .resolve_external_entry(&skill_root, skill.absolute())
+                .expect("skill entry")
+                .key(),
+            Path::new("example/SKILL.md")
+        );
+        assert_eq!(
+            access
+                .resolve(&unmanaged.path().join("secret.txt"))
+                .unwrap_err(),
+            PathError::OutsideRoot
         );
     }
 

@@ -1,7 +1,8 @@
 [mcp_servers.codexshim]
 command = "/absolute/path/to/codexshim"
 args = ["serve"]
-# To allow external absolute read/grep/glob paths, use:
+# Normal mode includes repository and Codex skill/plugin paths. To allow other
+# absolute read/grep/glob paths, use:
 # args = ["serve", "--read-scope", "unrestricted"]
 required = true
 startup_timeout_sec = 15

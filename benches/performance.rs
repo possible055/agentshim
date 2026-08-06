@@ -19,7 +19,7 @@ fn main() {
     let repository_root = Arc::new(RepositoryRoot::open(current_dir).expect("repository root"));
     let repository_access = Arc::new(FileAccess::new(
         Arc::clone(&repository_root),
-        ReadScope::Repository,
+        ReadScope::Normal,
     ));
     let unrestricted_access = Arc::new(FileAccess::new(repository_root, ReadScope::Unrestricted));
     let cancellation = CancellationToken::new();

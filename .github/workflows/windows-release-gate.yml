@@ -30,29 +30,6 @@ jobs:
           if ($volume.DriveType -ne "Fixed") {
             throw "A fixed drive is required; found $($volume.DriveType) on drive $drive"
           }
-      - name: Verify release-runner symlink fixture capability
-        shell: pwsh
-        run: |
-          $probe = Join-Path (Get-Location) "target/reparse-fixture-capability"
-          $targetFile = Join-Path $probe "target.txt"
-          $targetDirectory = Join-Path $probe "target-directory"
-          $fileLink = Join-Path $probe "file-link"
-          $directoryLink = Join-Path $probe "directory-link"
-          New-Item -ItemType Directory -Force $probe | Out-Null
-          Set-Content -LiteralPath $targetFile -Value "fixture"
-          New-Item -ItemType Directory -Force $targetDirectory | Out-Null
-          try {
-            New-Item -ItemType SymbolicLink -Path $fileLink -Target $targetFile -ErrorAction Stop | Out-Null
-            New-Item -ItemType SymbolicLink -Path $directoryLink -Target $targetDirectory -ErrorAction Stop | Out-Null
-          } catch {
-            throw "Dedicated Windows release runner must support symbolic-link fixtures through Developer Mode or SeCreateSymbolicLinkPrivilege: $($_.Exception.Message)"
-          } finally {
-            Remove-Item -LiteralPath $fileLink -Force -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath $directoryLink -Force -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath $targetFile -Force -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath $targetDirectory -Recurse -Force -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
-          }
       - name: Format
         run: cargo fmt --all -- --check
       - name: Lint

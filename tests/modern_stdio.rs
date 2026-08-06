@@ -177,7 +177,7 @@ fn modern_lifecycle_serves_a_tool_call_and_shuts_down_at_eof() {
 }
 
 #[test]
-fn repository_tools_reject_paths_outside_the_startup_root() {
+fn normal_tools_reject_unmanaged_paths_outside_the_startup_root() {
     let mut session = Session::start();
     session.send(&modern_request(1, "server/discover", empty_params()));
     assert_eq!(session.receive()["id"], 1);

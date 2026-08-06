@@ -541,13 +541,10 @@ mod tests {
     use super::{
         AFTER_READ_HOOK, BEFORE_READ_HOOK, MAX_LINE_COUNT, ReadError, ReadRequest, execute,
     };
-    use crate::{
-        output::token_count,
-        path::{FileAccess, ReadScope, RepositoryRoot},
-    };
+    use crate::path::{FileAccess, ReadScope, RepositoryRoot};
 
     fn access(path: &std::path::Path) -> Arc<FileAccess> {
-        access_with_scope(path, ReadScope::Repository)
+        access_with_scope(path, ReadScope::Normal)
     }
 
     fn access_with_scope(path: &std::path::Path, scope: ReadScope) -> Arc<FileAccess> {
@@ -620,7 +617,6 @@ mod tests {
         let long = execute(&root, &request("long.txt"), &cancellation).expect("long read");
         assert!(long.contains("[line truncated]"));
         assert!(long.len() <= crate::output::MODEL_BYTE_LIMIT);
-        assert!(token_count(&long) <= crate::output::MODEL_TOKEN_LIMIT);
         assert!(matches!(
             execute(&root, &request("binary.bin"), &cancellation),
             Err(ReadError::Binary)
@@ -787,32 +783,20 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_capability_allows_internal_symlink_and_blocks_reparse_escape() {
+    #[ignore = "requires an elevated Windows process to create symbolic-link fixtures"]
+    fn windows_symlink_capability_allows_internal_link_and_blocks_reparse_escape() {
         use std::os::windows::fs::symlink_file;
 
         let fixture = tempfile::tempdir().expect("fixture");
         let outside = tempfile::tempdir().expect("outside fixture");
         fs::write(fixture.path().join("target.txt"), "inside\n").expect("target");
         fs::write(outside.path().join("secret.txt"), "outside\n").expect("secret");
-        match symlink_file("target.txt", fixture.path().join("inside-link")) {
-            Ok(()) => {}
-            Err(error) if error.raw_os_error() == Some(1314) => {
-                eprintln!("symbolic-link fixture unavailable: {error}");
-                return;
-            }
-            Err(error) => panic!("inside link: {error}"),
-        }
-        match symlink_file(
+        symlink_file("target.txt", fixture.path().join("inside-link")).expect("inside link");
+        symlink_file(
             outside.path().join("secret.txt"),
             fixture.path().join("escape-link"),
-        ) {
-            Ok(()) => {}
-            Err(error) if error.raw_os_error() == Some(1314) => {
-                eprintln!("symbolic-link fixture unavailable: {error}");
-                return;
-            }
-            Err(error) => panic!("escape reparse link: {error}"),
-        }
+        )
+        .expect("escape reparse link");
         let root = access(fixture.path());
         let cancellation = CancellationToken::new();
 

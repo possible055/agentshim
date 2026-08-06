@@ -30,7 +30,7 @@ use crate::{
     tools::process::{ProcessRequest, ProcessResolver},
 };
 
-pub const SERVER_INSTRUCTIONS: &str = "Local repository tools for reading source files, searching contents, finding paths, and running programs with structured arguments without PowerShell command strings.";
+pub const SERVER_INSTRUCTIONS: &str = "Local repository and Codex extension tools for reading source files, searching contents, finding paths, and running programs with structured arguments without PowerShell command strings.";
 pub const UNRESTRICTED_SERVER_INSTRUCTIONS: &str = "Local filesystem tools for reading files, searching contents, and finding paths, plus structured program execution without PowerShell command strings. Read scope does not affect process execution.";
 pub const MCP_COMPATIBILITY_ENV: &str = "CODEXSHIM_MCP_COMPATIBILITY";
 
@@ -166,7 +166,7 @@ impl CodexShim {
         path: impl AsRef<Path>,
         resources: RuntimeResources,
     ) -> io::Result<Self> {
-        Self::from_path_with_resources_and_scope(path, resources, ReadScope::Repository)
+        Self::from_path_with_resources_and_scope(path, resources, ReadScope::default())
     }
 
     fn from_path_with_resources_and_scope(
@@ -248,7 +248,7 @@ impl CodexShim {
 
     #[must_use]
     pub fn discovery_result() -> DiscoverResult {
-        Self::discovery_result_for(ProtocolCompatibility::default(), ReadScope::Repository)
+        Self::discovery_result_for(ProtocolCompatibility::default(), ReadScope::default())
     }
 
     fn discovery_result_for(
@@ -263,7 +263,7 @@ impl CodexShim {
 
     #[must_use]
     pub fn tools_result() -> ListToolsResult {
-        Self::tools_result_for(ReadScope::Repository)
+        Self::tools_result_for(ReadScope::default())
     }
 
     #[must_use]
@@ -447,7 +447,7 @@ impl CodexShim {
 
     fn server_info(read_scope: ReadScope) -> ServerInfo {
         let instructions = match read_scope {
-            ReadScope::Repository => SERVER_INSTRUCTIONS,
+            ReadScope::Normal => SERVER_INSTRUCTIONS,
             ReadScope::Unrestricted => UNRESTRICTED_SERVER_INSTRUCTIONS,
         };
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
@@ -581,10 +581,10 @@ fn relayed_cancellation(
 }
 
 fn tool_catalog(read_scope: ReadScope) -> &'static [Tool; 4] {
-    static REPOSITORY_TOOLS: OnceLock<[Tool; 4]> = OnceLock::new();
+    static NORMAL_TOOLS: OnceLock<[Tool; 4]> = OnceLock::new();
     static UNRESTRICTED_TOOLS: OnceLock<[Tool; 4]> = OnceLock::new();
     let tools = match read_scope {
-        ReadScope::Repository => &REPOSITORY_TOOLS,
+        ReadScope::Normal => &NORMAL_TOOLS,
         ReadScope::Unrestricted => &UNRESTRICTED_TOOLS,
     };
     tools.get_or_init(|| {
@@ -599,9 +599,9 @@ fn tool_catalog(read_scope: ReadScope) -> &'static [Tool; 4] {
 
 fn read_tool(read_scope: ReadScope) -> Tool {
     let (description, path_description) = match read_scope {
-        ReadScope::Repository => (
-            "Read a local repository source file as numbered text lines. Use start_line to continue a partial result without server-side cursor state.",
-            "Platform-native absolute or repository-root-relative regular file path.",
+        ReadScope::Normal => (
+            "Read a local repository or Codex extension source file as numbered text lines. Absolute paths may address configured Codex skill and plugin directories.",
+            "Platform-native repository path or absolute path under a configured Codex skill or plugin directory.",
         ),
         ReadScope::Unrestricted => (
             "Read a local filesystem source file as numbered text lines. Relative paths use the repository root; absolute paths may address supported locations outside it.",
@@ -645,10 +645,10 @@ fn read_tool(read_scope: ReadScope) -> Tool {
 
 fn grep_tool(read_scope: ReadScope) -> Tool {
     let (description, path_description, glob_description) = match read_scope {
-        ReadScope::Repository => (
-            "Search local repository file contents using Rust regex or fixed strings. Results are deterministic and continue with an explicit offset.",
-            "Optional platform-native absolute or repository-root-relative file or directory path.",
-            "Optional case-sensitive glob over root-relative paths using / separators.",
+        ReadScope::Normal => (
+            "Search local repository or Codex extension contents using Rust regex or fixed strings. Results are deterministic and continue with an explicit offset.",
+            "Optional platform-native repository path or absolute path under a configured Codex skill or plugin directory.",
+            "Optional case-sensitive glob relative to the repository or requested Codex extension path.",
         ),
         ReadScope::Unrestricted => (
             "Search local filesystem contents using Rust regex or fixed strings. Relative paths use the repository root; absolute paths may address supported locations outside it.",
@@ -715,10 +715,10 @@ fn grep_tool(read_scope: ReadScope) -> Tool {
 
 fn glob_tool(read_scope: ReadScope) -> Tool {
     let (description, path_description, pattern_description) = match read_scope {
-        ReadScope::Repository => (
-            "Find local repository file paths using a glob pattern. Results use native absolute paths and continue with an explicit offset.",
-            "Platform-native absolute or repository-root-relative directory to traverse.",
-            "Case-sensitive glob over root-relative paths using / separators.",
+        ReadScope::Normal => (
+            "Find local repository or Codex extension file paths using a glob pattern. Results use native absolute paths and continue with an explicit offset.",
+            "Platform-native repository directory or absolute directory under a configured Codex skill or plugin root.",
+            "Case-sensitive glob relative to the repository or requested Codex extension directory.",
         ),
         ReadScope::Unrestricted => (
             "Find local filesystem paths using a glob pattern. Relative paths use the repository root; absolute paths may address supported locations outside it.",
@@ -845,7 +845,7 @@ mod tests {
     use rmcp::model::{CallToolResponse, ContentBlock};
 
     use super::{CodexShim, ProtocolCompatibility, process_queue_timeout_message, tool_error};
-    use crate::output::{MODEL_BYTE_LIMIT, MODEL_TOKEN_LIMIT, token_count};
+    use crate::output::MODEL_BYTE_LIMIT;
 
     #[test]
     fn protocol_compatibility_accepts_only_explicit_levels() {
@@ -885,7 +885,6 @@ mod tests {
         let text = &content.text;
         assert!(text.ends_with("...[diagnostic truncated]"));
         assert!(text.len() <= MODEL_BYTE_LIMIT);
-        assert!(token_count(text) <= MODEL_TOKEN_LIMIT);
     }
 
     #[test]

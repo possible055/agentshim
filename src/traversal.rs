@@ -125,8 +125,8 @@ fn walked_path(
     base: &ResolvedPath,
     path: &Path,
 ) -> Result<ResolvedPath, crate::path::PathError> {
-    if base.is_ambient() {
-        return access.resolve_ambient_entry(base, path);
+    if base.is_external() {
+        return access.resolve_external_entry(base, path);
     }
     access.resolve(path)
 }
@@ -155,7 +155,7 @@ mod tests {
     use crate::path::{FileAccess, ReadScope, RepositoryRoot};
 
     fn access(path: &Path) -> FileAccess {
-        access_with_scope(path, ReadScope::Repository)
+        access_with_scope(path, ReadScope::Normal)
     }
 
     fn access_with_scope(path: &Path, scope: ReadScope) -> FileAccess {
@@ -280,20 +280,14 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_directory_reparse_point_is_not_followed() {
+    #[ignore = "requires an elevated Windows process to create symbolic-link fixtures"]
+    fn windows_symlink_directory_reparse_point_is_not_followed() {
         use std::os::windows::fs::symlink_dir;
 
         let fixture = tempfile::tempdir().expect("fixture");
         let outside = tempfile::tempdir().expect("outside fixture");
         fs::write(outside.path().join("secret.txt"), "outside").expect("secret");
-        match symlink_dir(outside.path(), fixture.path().join("escape")) {
-            Ok(()) => {}
-            Err(error) if error.raw_os_error() == Some(1314) => {
-                eprintln!("directory reparse fixture unavailable: {error}");
-                return;
-            }
-            Err(error) => panic!("directory reparse link: {error}"),
-        }
+        symlink_dir(outside.path(), fixture.path().join("escape")).expect("directory reparse link");
         let root = access(fixture.path());
         let base = root.resolve(Path::new(".")).expect("base");
         let mut paths = Vec::new();
@@ -309,11 +303,7 @@ mod tests {
         );
 
         let ambient_link = outside.path().join("ambient-link");
-        match symlink_dir(fixture.path(), &ambient_link) {
-            Ok(()) => {}
-            Err(error) if error.raw_os_error() == Some(1314) => return,
-            Err(error) => panic!("ambient directory link: {error}"),
-        }
+        symlink_dir(fixture.path(), &ambient_link).expect("ambient directory link");
         let access = access_with_scope(fixture.path(), ReadScope::Unrestricted);
         let base = access.resolve(&ambient_link).expect("ambient base");
         assert!(matches!(

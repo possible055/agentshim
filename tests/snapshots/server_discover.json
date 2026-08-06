@@ -7,7 +7,7 @@
   "capabilities": {
     "tools": {}
   },
-  "instructions": "Local repository tools for reading source files, searching contents, finding paths, and running programs with structured arguments without PowerShell command strings.",
+  "instructions": "Local repository and Codex extension tools for reading source files, searching contents, finding paths, and running programs with structured arguments without PowerShell command strings.",
   "ttlMs": 0,
   "cacheScope": "private",
   "_meta": {

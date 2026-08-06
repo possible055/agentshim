@@ -39,9 +39,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for ShutdownReader<R> {
 }
 
 fn usage() {
-    eprintln!(
-        "Usage: codexshim <serve|doctor> [--read-scope <repository|unrestricted>] | --version"
-    );
+    eprintln!("Usage: codexshim <serve|doctor> [--read-scope <normal|unrestricted>] | --version");
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -197,17 +195,18 @@ mod tests {
 
     #[test]
     fn read_scope_defaults_and_accepts_both_argument_forms() {
+        assert_eq!(parse(&["serve"]), Ok(CliCommand::Serve(ReadScope::Normal)));
         assert_eq!(
-            parse(&["serve"]),
-            Ok(CliCommand::Serve(ReadScope::Repository))
+            parse(&["serve", "--read-scope", "normal"]),
+            Ok(CliCommand::Serve(ReadScope::Normal))
         );
         assert_eq!(
             parse(&["serve", "--read-scope", "unrestricted"]),
             Ok(CliCommand::Serve(ReadScope::Unrestricted))
         );
         assert_eq!(
-            parse(&["doctor", "--read-scope=repository"]),
-            Ok(CliCommand::Doctor(ReadScope::Repository))
+            parse(&["doctor", "--read-scope=normal"]),
+            Ok(CliCommand::Doctor(ReadScope::Normal))
         );
     }
 
@@ -220,7 +219,7 @@ mod tests {
             &[
                 "serve",
                 "--read-scope",
-                "repository",
+                "normal",
                 "--read-scope=unrestricted",
             ][..],
             &["serve", "--unknown"][..],

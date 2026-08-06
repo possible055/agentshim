@@ -5,7 +5,7 @@
   "tools": [
     {
       "name": "read",
-      "description": "Read a local repository source file as numbered text lines. Use start_line to continue a partial result without server-side cursor state.",
+      "description": "Read a local repository or Codex extension source file as numbered text lines. Absolute paths may address configured Codex skill and plugin directories.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -20,7 +20,7 @@
             "type": "integer"
           },
           "path": {
-            "description": "Platform-native absolute or repository-root-relative regular file path.",
+            "description": "Platform-native repository path or absolute path under a configured Codex skill or plugin directory.",
             "minLength": 1,
             "type": "string"
           },
@@ -44,7 +44,7 @@
     },
     {
       "name": "grep",
-      "description": "Search local repository file contents using Rust regex or fixed strings. Results are deterministic and continue with an explicit offset.",
+      "description": "Search local repository or Codex extension contents using Rust regex or fixed strings. Results are deterministic and continue with an explicit offset.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -68,7 +68,7 @@
             "type": "boolean"
           },
           "glob": {
-            "description": "Optional case-sensitive glob over root-relative paths using / separators.",
+            "description": "Optional case-sensitive glob relative to the repository or requested Codex extension path.",
             "type": "string"
           },
           "limit": {
@@ -92,7 +92,7 @@
             "type": "integer"
           },
           "path": {
-            "description": "Optional platform-native absolute or repository-root-relative file or directory path.",
+            "description": "Optional platform-native repository path or absolute path under a configured Codex skill or plugin directory.",
             "type": "string"
           },
           "pattern": {
@@ -113,7 +113,7 @@
     },
     {
       "name": "glob",
-      "description": "Find local repository file paths using a glob pattern. Results use native absolute paths and continue with an explicit offset.",
+      "description": "Find local repository or Codex extension file paths using a glob pattern. Results use native absolute paths and continue with an explicit offset.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -134,11 +134,11 @@
           },
           "path": {
             "default": ".",
-            "description": "Platform-native absolute or repository-root-relative directory to traverse.",
+            "description": "Platform-native repository directory or absolute directory under a configured Codex skill or plugin root.",
             "type": "string"
           },
           "pattern": {
-            "description": "Case-sensitive glob over root-relative paths using / separators.",
+            "description": "Case-sensitive glob relative to the repository or requested Codex extension directory.",
             "minLength": 1,
             "type": "string"
           }

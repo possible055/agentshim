@@ -18,7 +18,7 @@ It provides four tools:
 
 Developer Mode is not required to run `codexshim`. Repository-scoped `read` may open an existing file symbolic link only through the repository capability, so a target outside the repository remains inaccessible. Traversal does not follow directory symbolic links, junctions, or other reparse points. Unrestricted external operations reject an explicit symbolic-link or reparse-point starting path.
 
-The manual Windows 11 validation runner must be able to create file and directory symbolic-link fixtures. Configure that test account with either Developer Mode or `SeCreateSymbolicLinkPrivilege`; this is a test requirement, not a runtime requirement.
+Creating file and directory symbolic-link fixtures is required only by the independent Windows security tests described below. Run those tests from an administrator terminal; `codexshim` itself does not require Developer Mode or elevation.
 
 ## Download a release
 
@@ -62,11 +62,18 @@ cargo bench --locked --bench performance
 
 The manual Performance benchmark workflow runs the same repository benchmark on the dedicated Windows 11 NTFS runner.
 
+Windows symbolic-link security tests are independent because creating their fixtures requires
+an elevated process when Developer Mode is disabled. Run them from an administrator terminal:
+
+```console
+cargo test --locked --lib windows_symlink -- --ignored
+```
+
 ## Publish a release
 
-Set the package version in `Cargo.toml`, commit the release state, then push a matching annotated tag such as `v0.1.0`. The release workflow rejects tags that do not exactly match the Cargo version. It runs complete Linux and Windows validation on GitHub-hosted runners, builds both platform archives, and verifies each release binary before publishing assets.
+Set the package version in `Cargo.toml`, commit the release state, then push a matching annotated tag such as `v0.1.0`. The release workflow rejects tags that do not exactly match the Cargo version. It runs standard Linux and Windows validation on GitHub-hosted runners, builds both platform archives, and verifies each release binary before publishing assets.
 
-The Windows 11 workstation workflow remains available as an independent manual target-environment gate. GitHub-hosted Windows Server 2025 runs the same test paths without a CI-specific platform bypass, while the supported end-user target remains Windows 11 build 22621 or newer.
+The Windows 11 workstation workflow remains available as an independent manual target-environment gate. GitHub-hosted Windows Server 2025 runs the same standard test paths without a CI-specific platform bypass, while the supported end-user target remains Windows 11 build 22621 or newer.
 
 Successful tag builds publish both platform archives, their checksums, `SHA256SUMS`, and the installers to the matching GitHub Release. The installers do not modify user configuration.
 
@@ -96,15 +103,17 @@ shell_tool = true
 mcp_2026_07_28 = true
 ```
 
-The default read scope is `repository`. To explicitly allow `read`, `grep`, and `glob` to use absolute paths outside the startup repository, change the server arguments to:
+The default read scope is `normal`. It admits repository paths plus absolute paths under Codex skill and plugin directories. The managed roots are `$CODEX_HOME/{skills,plugins}` when `CODEX_HOME` is set and `{~/.codex,~/.agents}/{skills,plugins}`. Other files under `.codex`, including credentials and history, remain inaccessible.
+
+To allow `read`, `grep`, and `glob` to use other absolute paths outside the startup repository, change the server arguments to:
 
 ```toml
 args = ["serve", "--read-scope", "unrestricted"]
 ```
 
-Relative paths and absolute paths inside the repository continue to use the repository capability in both modes. In unrestricted mode, only external absolute paths use direct operating-system file access. Linux permits any absolute path readable by the server user. Windows permits local fixed NTFS volumes and rejects UNC shares, removable volumes, device namespaces, named pipes, and drive-relative paths. External glob patterns are relative to the requested directory; a single-file grep glob matches the requested file name.
+Relative paths and absolute paths inside the repository use the repository capability in both modes. Normal-mode Codex roots use separate filesystem capabilities, preserving the same boundary against symbolic-link escapes. In unrestricted mode, other external absolute paths use direct operating-system file access. Linux permits any absolute path readable by the server user. Windows permits local fixed NTFS volumes and rejects UNC shares, removable volumes, device namespaces, named pipes, and drive-relative paths. External glob patterns are relative to the requested directory; a single-file grep glob matches the requested file name.
 
-The same option is accepted by diagnostics, for example `codexshim doctor --read-scope unrestricted`. Missing, repeated, or unknown options and read-scope values are rejected. `codexshim` does not read a separate configuration file or environment variable for this setting; configure it in the MCP server `args` so the elevated read scope remains an explicit process-level choice.
+The same option is accepted by diagnostics, for example `codexshim doctor --read-scope normal`. Missing, repeated, or unknown options and read-scope values are rejected. `codexshim` does not read a separate configuration file or environment variable for this setting; configure unrestricted access in the MCP server `args` so it remains an explicit process-level choice.
 
 Keep `shell_tool = true` while the external release gates remain incomplete. Change it to `false` only after the full Linux/Windows, Codex integration, and performance checklist passes.
 

@@ -53,19 +53,17 @@ fn tool_annotations_match_codex_approval_contract() {
 
 #[test]
 fn unrestricted_catalog_changes_scope_text_without_changing_approval_annotations() {
-    let repository = serde_json::to_value(CodexShim::tools_result()).expect("repository tools");
+    let normal = serde_json::to_value(CodexShim::tools_result()).expect("normal tools");
     let unrestricted = serde_json::to_value(CodexShim::tools_result_for(ReadScope::Unrestricted))
         .expect("unrestricted tools");
-    let repository_tools = repository["tools"]
-        .as_array()
-        .expect("repository tools array");
+    let normal_tools = normal["tools"].as_array().expect("normal tools array");
     let unrestricted_tools = unrestricted["tools"]
         .as_array()
         .expect("unrestricted tools array");
 
     for name in ["read", "grep", "glob", "run_process"] {
         assert_eq!(
-            tool(repository_tools, name)["annotations"],
+            tool(normal_tools, name)["annotations"],
             tool(unrestricted_tools, name)["annotations"]
         );
     }
@@ -78,7 +76,7 @@ fn unrestricted_catalog_changes_scope_text_without_changing_approval_annotations
         );
     }
     assert_eq!(
-        tool(repository_tools, "run_process"),
+        tool(normal_tools, "run_process"),
         tool(unrestricted_tools, "run_process")
     );
 }

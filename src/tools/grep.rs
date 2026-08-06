@@ -1027,7 +1027,7 @@ mod tests {
         fs::write(fixture.path().join(".gitignore"), "ignored.rs\n").expect("gitignore");
         let root = Arc::new(FileAccess::new(
             Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
-            ReadScope::Repository,
+            ReadScope::Normal,
         ));
         (fixture, root)
     }

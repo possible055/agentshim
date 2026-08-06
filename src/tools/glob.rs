@@ -328,7 +328,7 @@ mod tests {
     fn access(path: &Path) -> Arc<FileAccess> {
         Arc::new(FileAccess::new(
             Arc::new(RepositoryRoot::open(path).expect("root")),
-            ReadScope::Repository,
+            ReadScope::Normal,
         ))
     }
 

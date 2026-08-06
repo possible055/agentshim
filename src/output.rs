@@ -1,19 +1,16 @@
 use tokio_util::sync::CancellationToken;
 
-pub const MODEL_TOKEN_LIMIT: usize = 8_000;
 pub const MODEL_BYTE_LIMIT: usize = 32_000;
 const DIAGNOSTIC_TRUNCATION_MARKER: &str = "\n...[diagnostic truncated]";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OutputLimits {
-    pub tokens: usize,
     pub bytes: usize,
 }
 
 impl Default for OutputLimits {
     fn default() -> Self {
         Self {
-            tokens: MODEL_TOKEN_LIMIT,
             bytes: MODEL_BYTE_LIMIT,
         }
     }
@@ -24,7 +21,6 @@ pub struct OutputFormatter {
     header: String,
     body: Vec<String>,
     required_tail: Vec<String>,
-    conservative_tokens: usize,
     bytes: usize,
     limits: OutputLimits,
 }
@@ -35,7 +31,7 @@ impl OutputFormatter {
     /// # Errors
     ///
     /// Returns [`OutputError::RequiredContentTooLarge`] when mandatory content alone
-    /// exceeds either hard limit.
+    /// exceeds the hard byte limit.
     pub fn new(
         header: impl Into<String>,
         required_tail: Vec<String>,
@@ -43,16 +39,14 @@ impl OutputFormatter {
     ) -> Result<Self, OutputError> {
         let header = header.into();
         let required = assemble(&header, &[], &required_tail);
-        let conservative_tokens = independent_segment_tokens(&header, &required_tail);
         let bytes = required.len();
-        if bytes > limits.bytes || conservative_tokens > limits.tokens {
+        if bytes > limits.bytes {
             return Err(OutputError::RequiredContentTooLarge);
         }
         Ok(Self {
             header,
             body: Vec::new(),
             required_tail,
-            conservative_tokens,
             bytes,
             limits,
         })
@@ -77,11 +71,6 @@ impl OutputFormatter {
         if self.bytes.saturating_add(bytes) > self.limits.bytes {
             return Ok(false);
         }
-        let tokens = token_count(&segment);
-        if self.conservative_tokens.saturating_add(tokens) > self.limits.tokens {
-            return Ok(false);
-        }
-        self.conservative_tokens += tokens;
         self.bytes += bytes;
         self.body.push(line);
         Ok(true)
@@ -98,7 +87,7 @@ impl OutputFormatter {
             return Err(OutputError::Cancelled);
         }
         let output = assemble(&self.header, &self.body, &self.required_tail);
-        if output.len() > self.limits.bytes || token_count(&output) > self.limits.tokens {
+        if output.len() > self.limits.bytes {
             return Err(OutputError::InvariantViolation);
         }
         Ok(output)
@@ -118,11 +107,6 @@ pub enum OutputError {
 }
 
 #[must_use]
-pub fn token_count(text: &str) -> usize {
-    bpe_openai::o200k_base().count(text)
-}
-
-#[must_use]
 pub fn bounded_diagnostic(text: &str) -> String {
     let limits = OutputLimits::default();
     if fits(text, limits) {
@@ -133,35 +117,15 @@ pub fn bounded_diagnostic(text: &str) -> String {
     if !fits(marker, limits) {
         return String::new();
     }
-    let mut end = floor_char_boundary(
+    let end = floor_char_boundary(
         text,
         text.len().min(limits.bytes.saturating_sub(marker.len())),
     );
-    let prefix_token_limit = limits.tokens.saturating_sub(token_count(marker));
-    while token_count(&text[..end]) > prefix_token_limit {
-        let prefix_tokens = token_count(&text[..end]).max(1);
-        let next = end
-            .saturating_mul(prefix_token_limit)
-            .checked_div(prefix_tokens)
-            .unwrap_or(0)
-            .min(end.saturating_sub(1));
-        end = floor_char_boundary(text, next);
-    }
-
-    loop {
-        let truncated = format!("{}{marker}", &text[..end]);
-        if fits(&truncated, limits) {
-            return truncated;
-        }
-        if end == 0 {
-            return marker.to_owned();
-        }
-        end = floor_char_boundary(text, end.saturating_sub(1));
-    }
+    format!("{}{marker}", &text[..end])
 }
 
 fn fits(text: &str, limits: OutputLimits) -> bool {
-    text.len() <= limits.bytes && token_count(text) <= limits.tokens
+    text.len() <= limits.bytes
 }
 
 fn floor_char_boundary(text: &str, mut index: usize) -> usize {
@@ -169,14 +133,6 @@ fn floor_char_boundary(text: &str, mut index: usize) -> usize {
         index -= 1;
     }
     index
-}
-
-fn independent_segment_tokens(header: &str, tail: &[String]) -> usize {
-    let mut tokens = token_count(header);
-    for line in tail {
-        tokens = tokens.saturating_add(token_count(&format!("\n{line}")));
-    }
-    tokens
 }
 
 fn assemble(header: &str, body: &[String], tail: &[String]) -> String {
@@ -196,16 +152,13 @@ fn assemble(header: &str, body: &[String], tail: &[String]) -> String {
 mod tests {
     use super::{
         DIAGNOSTIC_TRUNCATION_MARKER, OutputError, OutputFormatter, OutputLimits,
-        bounded_diagnostic, token_count,
+        bounded_diagnostic,
     };
     use tokio_util::sync::CancellationToken;
 
     #[test]
-    fn formatter_preserves_required_tail_at_both_limits() {
-        let limits = OutputLimits {
-            tokens: 80,
-            bytes: 180,
-        };
+    fn formatter_preserves_required_tail_at_the_byte_limit() {
+        let limits = OutputLimits { bytes: 180 };
         let cancellation = CancellationToken::new();
         let mut formatter = OutputFormatter::new(
             "Path: /repo/file.rs",
@@ -228,7 +181,6 @@ mod tests {
         assert!(output.contains("Skipped: 2 inaccessible entries."));
         assert!(output.ends_with("Partial: continue with {\"start_line\":42}."));
         assert!(output.len() <= limits.bytes);
-        assert!(token_count(&output) <= limits.tokens);
     }
 
     #[test]
@@ -248,15 +200,17 @@ mod tests {
     }
 
     #[test]
-    fn diagnostics_are_bounded_by_bytes_and_tokens() {
+    fn diagnostics_are_bounded_by_bytes_and_remain_valid_utf8() {
         for diagnostic in [
             "界".repeat(40_000),
             "abcdefghijklmnopqrstuvwxyz".repeat(10_000),
+            "fn parse<T: DeserializeOwned>(input: &[u8]) -> Result<T, Error> { todo!() }\n"
+                .repeat(2_000),
+            r#"{"path":"src/main.rs","result":"matched"}"#.repeat(2_000),
         ] {
             let bounded = bounded_diagnostic(&diagnostic);
             assert!(bounded.ends_with(DIAGNOSTIC_TRUNCATION_MARKER));
             assert!(bounded.len() <= super::MODEL_BYTE_LIMIT);
-            assert!(token_count(&bounded) <= super::MODEL_TOKEN_LIMIT);
             assert!(std::str::from_utf8(bounded.as_bytes()).is_ok());
         }
     }

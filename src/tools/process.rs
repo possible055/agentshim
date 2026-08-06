@@ -1203,7 +1203,6 @@ mod tests {
         assert!(report.contains("timeout stderr evidence"));
         assert!(report.ends_with("Incomplete."));
         assert!(report.len() <= crate::output::MODEL_BYTE_LIMIT);
-        assert!(crate::output::token_count(&report) <= crate::output::MODEL_TOKEN_LIMIT);
     }
 
     #[test]

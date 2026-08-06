@@ -3,6 +3,7 @@
 {"id":"read-utf16","prompt":"Read fixtures/utf16.txt as source text.","expected":"read","arguments":{"path":"fixtures/utf16.txt"}}
 {"id":"read-absolute","prompt":"Inspect the repository file whose absolute path I supplied.","expected":"read","arguments":{"path":"<absolute-repository-file>"}}
 {"id":"read-external-absolute","prompt":"With unrestricted read scope enabled, inspect this absolute source path outside the repository.","expected":"read","arguments":{"path":"<absolute-external-file>"}}
+{"id":"read-codex-skill","prompt":"In normal read scope, inspect this absolute SKILL.md path under a configured Codex skill directory.","expected":"read","arguments":{"path":"<absolute-codex-skill-file>"}}
 {"id":"grep-symbol","prompt":"Find every occurrence of CodexShim under src.","expected":"grep","arguments":{"pattern":"CodexShim","path":"src","fixed_strings":true}}
 {"id":"grep-regex","prompt":"Find Rust functions named validate_* and include two context lines.","expected":"grep","arguments":{"pattern":"fn validate_[A-Za-z0-9_]+","path":"src","context_lines":2}}
 {"id":"grep-files","prompt":"List files containing CancellationToken.","expected":"grep","arguments":{"pattern":"CancellationToken","mode":"files","fixed_strings":true}}
