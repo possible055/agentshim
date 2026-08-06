@@ -92,6 +92,22 @@ pub fn execute(
     request: &GlobRequest,
     cancellation: &CancellationToken,
 ) -> Result<String, GlobError> {
+    execute_detailed(access, request, cancellation).map(|result| result.output)
+}
+
+pub(crate) fn execute_detailed(
+    access: &Arc<FileAccess>,
+    request: &GlobRequest,
+    cancellation: &CancellationToken,
+) -> Result<crate::diagnostics::DetailedExecution, GlobError> {
+    crate::diagnostics::DetailedExecution::measure(|| execute_inner(access, request, cancellation))
+}
+
+fn execute_inner(
+    access: &Arc<FileAccess>,
+    request: &GlobRequest,
+    cancellation: &CancellationToken,
+) -> Result<String, GlobError> {
     request.validate()?;
     let matcher = GlobBuilder::new(&request.pattern)
         .literal_separator(true)
@@ -113,14 +129,21 @@ pub fn execute(
         request.include_ignored.unwrap_or(false),
         cancellation,
         |entry| {
-            if !matcher.is_match(entry.path.key()) {
+            if !matcher.is_match(entry.key) {
                 return TraversalControl::Continue;
             }
             if let Err(error) = record_match(&mut total) {
                 terminal_error = Some(error);
                 return TraversalControl::Stop;
             }
-            if let Err(error) = store.admit(&entry.path) {
+            let path = match access.resolve_traversal_entry(&base, entry.absolute) {
+                Ok(path) => path,
+                Err(error) => {
+                    terminal_error = Some(error.into());
+                    return TraversalControl::Stop;
+                }
+            };
+            if let Err(error) = store.admit(&path) {
                 terminal_error = Some(error);
                 return TraversalControl::Stop;
             }
@@ -129,6 +152,10 @@ pub fn execute(
     )?;
     if let Some(error) = terminal_error {
         return Err(error);
+    }
+    let skipped = summary.io_errors + summary.escaped_entries + summary.non_unicode_entries;
+    if skipped > 0 {
+        tracing::warn!(target: "codexshim", event = "traversal_skipped", phase = "execution", outcome = "degraded_success", counters = %format!("io_errors={},escaped_entries={},non_unicode_entries={}", summary.io_errors, summary.escaped_entries, summary.non_unicode_entries));
     }
     let retained = store.into_sorted(cancellation)?;
     render(request, &retained, total, summary, cancellation)
@@ -173,7 +200,7 @@ impl TopK {
     fn new(capacity: usize) -> Self {
         Self {
             capacity,
-            heap: BinaryHeap::new(),
+            heap: BinaryHeap::with_capacity(capacity),
             charged: 0,
         }
     }

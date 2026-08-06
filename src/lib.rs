@@ -1,3 +1,4 @@
+pub mod diagnostics;
 pub mod encoding;
 pub mod output;
 pub mod path;

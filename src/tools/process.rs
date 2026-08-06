@@ -1,13 +1,13 @@
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     env, fs, io,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -422,11 +422,34 @@ pub fn execute(
     timeout: Duration,
     cancellation: &CancellationToken,
 ) -> Result<String, ProcessError> {
+    execute_detailed(root, resolver, request, timeout, cancellation).map(|result| result.output)
+}
+
+pub(crate) fn execute_detailed(
+    root: &Arc<RepositoryRoot>,
+    resolver: &ProcessResolver,
+    request: &ProcessRequest,
+    timeout: Duration,
+    cancellation: &CancellationToken,
+) -> Result<crate::diagnostics::DetailedExecution, ProcessError> {
+    crate::diagnostics::DetailedExecution::measure(|| {
+        execute_inner(root, resolver, request, timeout, cancellation)
+    })
+}
+
+fn execute_inner(
+    root: &Arc<RepositoryRoot>,
+    resolver: &ProcessResolver,
+    request: &ProcessRequest,
+    timeout: Duration,
+    cancellation: &CancellationToken,
+) -> Result<String, ProcessError> {
     let started = std::time::Instant::now();
     request.validate()?;
     if cancellation.is_cancelled() {
         return Err(ProcessError::Cancelled);
     }
+    tracing::info!(target: "codexshim", event = "process_resolve", phase = "execution");
     let cwd = resolve_cwd(root, request.cwd.as_deref())?;
     let program = resolver.resolve(&request.program, &cwd)?;
     #[cfg(windows)]
@@ -437,7 +460,19 @@ pub fn execute(
             .ok_or(ProcessError::TimeoutBeforeSpawn {
                 timeout_ms: request.timeout_ms(),
             })?;
-    platform::run(&program, &cwd, request, timeout, cancellation)
+    tracing::info!(target: "codexshim", event = "process_spawn", phase = "execution");
+    let result = platform::run(&program, &cwd, request, timeout, cancellation);
+    match &result {
+        Ok(_) => tracing::info!(target: "codexshim", event = "process_exit", phase = "execution"),
+        Err(ProcessError::Timeout { .. } | ProcessError::TimeoutBeforeSpawn { .. }) => {
+            tracing::error!(target: "codexshim", event = "process_timeout", phase = "cleanup", error_class = "resource_timeout");
+        }
+        Err(ProcessError::OutcomeUncertain) => {
+            tracing::error!(target: "codexshim", event = "process_cleanup", phase = "cleanup", outcome = "uncertain", error_class = "outcome_uncertain");
+        }
+        Err(_) => {}
+    }
+    result
 }
 
 fn resolve_cwd(root: &RepositoryRoot, requested: Option<&str>) -> Result<PathBuf, ProcessError> {
@@ -529,7 +564,8 @@ fn apply_environment(command: &mut std::process::Command, request: &ProcessReque
 #[derive(Debug)]
 struct Capture {
     head: Vec<u8>,
-    tail: VecDeque<u8>,
+    tail: Vec<u8>,
+    tail_start: usize,
     bytes_read: usize,
 }
 
@@ -537,7 +573,8 @@ impl Capture {
     fn new() -> Self {
         Self {
             head: Vec::with_capacity(CAPTURE_HEAD_BYTES),
-            tail: VecDeque::with_capacity(CAPTURE_TAIL_BYTES),
+            tail: Vec::with_capacity(CAPTURE_TAIL_BYTES),
+            tail_start: 0,
             bytes_read: 0,
         }
     }
@@ -547,12 +584,34 @@ impl Capture {
         let head_remaining = CAPTURE_HEAD_BYTES.saturating_sub(self.head.len());
         let head_bytes = head_remaining.min(bytes.len());
         self.head.extend_from_slice(&bytes[..head_bytes]);
-        for byte in &bytes[head_bytes..] {
-            if self.tail.len() == CAPTURE_TAIL_BYTES {
-                self.tail.pop_front();
-            }
-            self.tail.push_back(*byte);
+        self.push_tail(&bytes[head_bytes..]);
+    }
+
+    fn push_tail(&mut self, bytes: &[u8]) {
+        if bytes.len() >= CAPTURE_TAIL_BYTES {
+            self.tail.clear();
+            self.tail
+                .extend_from_slice(&bytes[bytes.len() - CAPTURE_TAIL_BYTES..]);
+            self.tail_start = 0;
+            return;
         }
+        if self.tail.len() < CAPTURE_TAIL_BYTES {
+            let appended = bytes.len().min(CAPTURE_TAIL_BYTES - self.tail.len());
+            self.tail.extend_from_slice(&bytes[..appended]);
+            if appended == bytes.len() {
+                return;
+            }
+            self.overwrite_tail(&bytes[appended..]);
+            return;
+        }
+        self.overwrite_tail(bytes);
+    }
+
+    fn overwrite_tail(&mut self, bytes: &[u8]) {
+        let first = bytes.len().min(CAPTURE_TAIL_BYTES - self.tail_start);
+        self.tail[self.tail_start..self.tail_start + first].copy_from_slice(&bytes[..first]);
+        self.tail[..bytes.len() - first].copy_from_slice(&bytes[first..]);
+        self.tail_start = (self.tail_start + bytes.len()) % CAPTURE_TAIL_BYTES;
     }
 
     fn retained(&self) -> usize {
@@ -570,7 +629,12 @@ impl Capture {
                 format!("\n... {} bytes omitted ...\n", self.dropped()).as_bytes(),
             );
         }
-        bytes.extend(self.tail.iter());
+        if self.tail.len() < CAPTURE_TAIL_BYTES || self.tail_start == 0 {
+            bytes.extend_from_slice(&self.tail);
+        } else {
+            bytes.extend_from_slice(&self.tail[self.tail_start..]);
+            bytes.extend_from_slice(&self.tail[..self.tail_start]);
+        }
         let (text, invalid_bytes) = escape_invalid_utf8(&bytes);
         RenderedCapture {
             text,
@@ -636,15 +700,68 @@ fn write_stdin(mut writer: impl Write, input: Option<&str>) -> io::Result<()> {
 
 fn spawn_monitored<T: Send + 'static>(
     failed: Arc<AtomicBool>,
+    completion: ThreadCompletion,
     task: impl FnOnce() -> io::Result<T> + Send + 'static,
 ) -> std::thread::JoinHandle<io::Result<T>> {
     std::thread::spawn(move || {
+        let _completion = completion.signal_on_drop();
         let result = task();
         if result.is_err() {
             failed.store(true, Ordering::Release);
         }
         result
     })
+}
+
+#[derive(Clone)]
+struct ThreadCompletion {
+    state: Arc<(Mutex<usize>, Condvar)>,
+}
+
+impl ThreadCompletion {
+    fn new() -> Self {
+        Self {
+            state: Arc::new((Mutex::new(0), Condvar::new())),
+        }
+    }
+
+    fn signal_on_drop(&self) -> CompletionSignal {
+        CompletionSignal(self.clone())
+    }
+
+    fn wait_for(&self, count: usize, timeout: Duration) -> bool {
+        let (lock, changed) = &*self.state;
+        let mut completed = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let deadline = Instant::now() + timeout;
+        while *completed < count {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            let result = changed
+                .wait_timeout(completed, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            completed = result.0;
+            if result.1.timed_out() && *completed < count {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+struct CompletionSignal(ThreadCompletion);
+
+impl Drop for CompletionSignal {
+    fn drop(&mut self) {
+        let (lock, changed) = &*self.0.state;
+        let mut completed = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *completed = completed.saturating_add(1);
+        changed.notify_all();
+    }
 }
 
 struct CompletedProcess {
@@ -786,8 +903,8 @@ mod platform {
 
     use super::{
         CLEANUP_DEADLINE, Capture, CompletedProcess, Path, ProcessError, ProcessRequest,
-        ResolvedProgram, TERM_GRACE, TimedOutProcess, apply_environment, drain, render_completed,
-        render_timeout, spawn_monitored, write_stdin,
+        ResolvedProgram, TERM_GRACE, ThreadCompletion, TimedOutProcess, apply_environment, drain,
+        render_completed, render_timeout, spawn_monitored, write_stdin,
     };
     use std::sync::{Arc, atomic::Ordering};
     use std::time::{Duration, Instant};
@@ -836,17 +953,24 @@ mod platform {
             .ok_or_else(|| io::Error::other("child stderr pipe was not created"))?;
         let input = request.stdin.clone();
         let io_failed = Arc::new(super::AtomicBool::new(false));
-        let stdin_thread = spawn_monitored(Arc::clone(&io_failed), move || {
+        let completion = ThreadCompletion::new();
+        let stdin_thread = spawn_monitored(Arc::clone(&io_failed), completion.clone(), move || {
             write_stdin(stdin, input.as_deref())
         });
-        let stdout_thread = spawn_monitored(Arc::clone(&io_failed), move || drain(stdout));
-        let stderr_thread = spawn_monitored(Arc::clone(&io_failed), move || drain(stderr));
+        let stdout_thread =
+            spawn_monitored(Arc::clone(&io_failed), completion.clone(), move || {
+                drain(stdout)
+            });
+        let stderr_thread =
+            spawn_monitored(Arc::clone(&io_failed), completion.clone(), move || {
+                drain(stderr)
+            });
 
         let exit = loop {
             if io_failed.load(Ordering::Acquire) {
                 terminate(process_group, &mut child)?;
                 let (stdin_result, _, _) =
-                    settle_threads(stdin_thread, stdout_thread, stderr_thread)?;
+                    settle_threads(&completion, stdin_thread, stdout_thread, stderr_thread)?;
                 stdin_result?;
                 return Err(ProcessError::Io(io::Error::other(
                     "process I/O task failed without an error",
@@ -855,14 +979,14 @@ mod platform {
             if cancellation.is_cancelled() {
                 terminate(process_group, &mut child)?;
                 let (stdin_result, _, _) =
-                    settle_threads(stdin_thread, stdout_thread, stderr_thread)?;
+                    settle_threads(&completion, stdin_thread, stdout_thread, stderr_thread)?;
                 let _ = stdin_result;
                 return Err(ProcessError::Cancelled);
             }
             if started.elapsed() >= timeout {
                 terminate(process_group, &mut child)?;
                 let (stdin_result, stdout, stderr) =
-                    settle_threads(stdin_thread, stdout_thread, stderr_thread)?;
+                    settle_threads(&completion, stdin_thread, stdout_thread, stderr_thread)?;
                 let _ = stdin_result;
                 let timeout_ms = request.timeout_ms();
                 let report = render_timeout(
@@ -894,12 +1018,13 @@ mod platform {
             cwd,
             exit,
             started,
-            (stdin_thread, stdout_thread, stderr_thread),
+            (completion, stdin_thread, stdout_thread, stderr_thread),
             cancellation,
         )
     }
 
     type PendingIo = (
+        ThreadCompletion,
         thread::JoinHandle<io::Result<()>>,
         thread::JoinHandle<io::Result<Capture>>,
         thread::JoinHandle<io::Result<Capture>>,
@@ -910,10 +1035,10 @@ mod platform {
         cwd: &Path,
         exit: String,
         started: Instant,
-        (stdin, stdout, stderr): PendingIo,
+        (completion, stdin, stdout, stderr): PendingIo,
         cancellation: &CancellationToken,
     ) -> Result<String, ProcessError> {
-        let (stdin_result, stdout, stderr) = settle_threads(stdin, stdout, stderr)?;
+        let (stdin_result, stdout, stderr) = settle_threads(&completion, stdin, stdout, stderr)?;
         stdin_result?;
         render_completed(
             &CompletedProcess {
@@ -931,16 +1056,13 @@ mod platform {
     type ThreadResults = (io::Result<()>, Capture, Capture);
 
     fn settle_threads(
+        completion: &ThreadCompletion,
         stdin: thread::JoinHandle<io::Result<()>>,
         stdout: thread::JoinHandle<io::Result<Capture>>,
         stderr: thread::JoinHandle<io::Result<Capture>>,
     ) -> Result<ThreadResults, ProcessError> {
-        let started = Instant::now();
-        while !(stdin.is_finished() && stdout.is_finished() && stderr.is_finished()) {
-            if started.elapsed() >= CLEANUP_DEADLINE {
-                return Err(ProcessError::OutcomeUncertain);
-            }
-            thread::sleep(Duration::from_millis(10));
+        if !completion.wait_for(3, CLEANUP_DEADLINE) {
+            return Err(ProcessError::OutcomeUncertain);
         }
         let stdin = stdin
             .join()

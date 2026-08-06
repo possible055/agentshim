@@ -236,6 +236,18 @@ impl FileAccess {
         }
     }
 
+    pub(crate) fn resolve_traversal_entry(
+        &self,
+        operation_root: &ResolvedPath,
+        absolute: &Path,
+    ) -> Result<ResolvedPath, PathError> {
+        if operation_root.is_external() {
+            self.resolve_external_entry(operation_root, absolute)
+        } else {
+            self.resolve(absolute)
+        }
+    }
+
     /// Read metadata through the backend that admitted the path.
     ///
     /// # Errors

@@ -1,4 +1,4 @@
-use std::{io, path::Path};
+use std::{borrow::Cow, io, path::Path};
 
 use ignore::{DirEntry, WalkBuilder};
 use tokio_util::sync::CancellationToken;
@@ -40,9 +40,10 @@ impl TraversalSummary {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct TraversalEntry {
-    pub path: ResolvedPath,
+#[derive(Clone, Copy, Debug)]
+pub struct TraversalEntry<'a> {
+    pub key: &'a Path,
+    pub absolute: &'a Path,
     pub file_type: Option<std::fs::FileType>,
 }
 
@@ -67,7 +68,7 @@ pub fn walk(
     base: &ResolvedPath,
     include_ignored: bool,
     cancellation: &CancellationToken,
-    mut visitor: impl FnMut(TraversalEntry) -> TraversalControl,
+    mut visitor: impl for<'entry> FnMut(TraversalEntry<'entry>) -> TraversalControl,
 ) -> Result<TraversalSummary, TraversalError> {
     access.root().verify()?;
     if base.is_ambient() && access.symlink_metadata_kind(base)?.is_symlink {
@@ -101,16 +102,17 @@ pub fn walk(
         if entry.depth() == 0 {
             continue;
         }
-        let Ok(path) = walked_path(access, base, entry.path()) else {
+        let Ok(key) = walked_key(access, base, entry.path()) else {
             summary.escaped_entries = summary.escaped_entries.saturating_add(1);
             continue;
         };
-        if path.key().to_str().is_none() {
+        if key.to_str().is_none() {
             summary.non_unicode_entries = summary.non_unicode_entries.saturating_add(1);
             continue;
         }
         if visitor(TraversalEntry {
-            path,
+            key: &key,
+            absolute: entry.path(),
             file_type: entry.file_type(),
         }) == TraversalControl::Stop
         {
@@ -120,15 +122,25 @@ pub fn walk(
     Ok(summary)
 }
 
-fn walked_path(
+fn walked_key<'path>(
     access: &FileAccess,
     base: &ResolvedPath,
-    path: &Path,
-) -> Result<ResolvedPath, crate::path::PathError> {
-    if base.is_external() {
-        return access.resolve_external_entry(base, path);
+    path: &'path Path,
+) -> Result<Cow<'path, Path>, crate::path::PathError> {
+    let logical_root = if base.is_external() {
+        base.absolute()
+    } else {
+        access.root().path()
+    };
+    if let Ok(key) = path.strip_prefix(logical_root) {
+        return Ok(Cow::Borrowed(if key.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            key
+        }));
     }
-    access.resolve(path)
+    let resolved = access.resolve_traversal_entry(base, path)?;
+    Ok(Cow::Owned(resolved.key().to_path_buf()))
 }
 
 fn is_git_entry(entry: &DirEntry) -> bool {
@@ -175,7 +187,7 @@ mod tests {
         let base = root.resolve(Path::new(".")).expect("base");
         let mut paths = Vec::new();
         walk(&root, &base, false, &CancellationToken::new(), |entry| {
-            paths.push(entry.path.slash_path().expect("model path").to_owned());
+            paths.push(crate::path::slash_path(entry.key).expect("model path"));
             TraversalControl::Continue
         })
         .expect("walk");
@@ -209,7 +221,7 @@ mod tests {
         let base = root.resolve(Path::new("src")).expect("base");
         let mut paths = Vec::new();
         walk(&root, &base, false, &CancellationToken::new(), |entry| {
-            paths.push(entry.path.key().to_path_buf());
+            paths.push(entry.key.to_path_buf());
             TraversalControl::Continue
         })
         .expect("walk");
@@ -226,7 +238,7 @@ mod tests {
         let base = access.resolve(outside.path()).expect("ambient base");
         let mut paths = Vec::new();
         walk(&access, &base, false, &CancellationToken::new(), |entry| {
-            paths.push(entry.path.key().to_path_buf());
+            paths.push(entry.key.to_path_buf());
             TraversalControl::Continue
         })
         .expect("ambient walk");
@@ -292,7 +304,7 @@ mod tests {
         let base = root.resolve(Path::new(".")).expect("base");
         let mut paths = Vec::new();
         walk(&root, &base, true, &CancellationToken::new(), |entry| {
-            paths.push(entry.path.key().to_path_buf());
+            paths.push(entry.key.to_path_buf());
             TraversalControl::Continue
         })
         .expect("walk");

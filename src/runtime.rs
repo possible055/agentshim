@@ -14,6 +14,7 @@ const WORKER_ENV: &str = "CODEXSHIM_IO_WORKERS";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeConfig {
     pub worker_lanes: usize,
+    pub scheduler_threads: usize,
     pub blocking_threads: usize,
 }
 
@@ -41,6 +42,7 @@ impl RuntimeConfig {
         };
         Ok(Self {
             worker_lanes,
+            scheduler_threads: default_scheduler_threads(available),
             blocking_threads: MAX_SEARCH_LANES,
         })
     }
@@ -49,6 +51,7 @@ impl RuntimeConfig {
     pub fn for_tests(worker_lanes: usize) -> Self {
         Self {
             worker_lanes: worker_lanes.clamp(1, MAX_SEARCH_LANES),
+            scheduler_threads: 1,
             blocking_threads: MAX_SEARCH_LANES,
         }
     }
@@ -56,6 +59,26 @@ impl RuntimeConfig {
 
 fn default_worker_lanes(available: usize) -> usize {
     available.saturating_mul(2).clamp(1, 8)
+}
+
+fn default_scheduler_threads(available: usize) -> usize {
+    available.clamp(1, 2)
+}
+
+pub struct SearchLanes {
+    permits: Vec<OwnedSemaphorePermit>,
+}
+
+impl SearchLanes {
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.permits.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.permits.is_empty()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -130,6 +153,32 @@ impl RuntimeResources {
         let count = count.clamp(1, self.config.worker_lanes);
         let count = u32::try_from(count).map_err(|_| AcquireError::TooLarge)?;
         acquire(&self.worker_lanes, request, &self.shutdown, count).await
+    }
+
+    /// Acquire one required search lane and any immediately available fair-share lanes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AcquireError::Cancelled`] while waiting for the required lane.
+    pub async fn acquire_search_lanes(
+        &self,
+        count: usize,
+        request: &CancellationToken,
+    ) -> Result<SearchLanes, AcquireError> {
+        let target = count.clamp(1, self.config.worker_lanes);
+        let required = acquire(&self.worker_lanes, request, &self.shutdown, 1).await?;
+        let mut permits = Vec::with_capacity(target);
+        permits.push(required);
+        while permits.len() < target {
+            if self.config.worker_lanes > 1 && self.worker_lanes.available_permits() <= 1 {
+                break;
+            }
+            let Ok(permit) = self.worker_lanes.clone().try_acquire_owned() else {
+                break;
+            };
+            permits.push(permit);
+        }
+        Ok(SearchLanes { permits })
     }
 
     /// Acquire one open-file slot.
@@ -219,7 +268,7 @@ async fn acquire(
 mod tests {
     use super::{
         AcquireError, MAX_PROCESS_CALLS, MEMORY_BUDGET_BYTES, RuntimeConfig, RuntimeResources,
-        default_worker_lanes,
+        default_scheduler_threads, default_worker_lanes,
     };
     use tokio_util::sync::CancellationToken;
 
@@ -252,6 +301,25 @@ mod tests {
         assert_eq!(default_worker_lanes(2), 4);
         assert_eq!(default_worker_lanes(4), 8);
         assert_eq!(default_worker_lanes(64), 8);
+        assert_eq!(default_scheduler_threads(1), 1);
+        assert_eq!(default_scheduler_threads(64), 2);
+    }
+
+    #[tokio::test]
+    async fn search_lanes_preserve_global_fair_share() {
+        let resources = RuntimeResources::new(RuntimeConfig::for_tests(4));
+        let request = CancellationToken::new();
+        let lanes = resources
+            .acquire_search_lanes(4, &request)
+            .await
+            .expect("search lanes");
+        assert_eq!(lanes.len(), 3);
+        let other = resources
+            .acquire_worker(&request)
+            .await
+            .expect("reserved lane");
+        drop(other);
+        drop(lanes);
     }
 
     #[tokio::test]

@@ -1,4 +1,7 @@
-use std::io::{self, Read};
+use std::{
+    borrow::Cow,
+    io::{self, Read},
+};
 
 use encoding_rs::{Decoder, DecoderResult, Encoding, UTF_8, UTF_16BE, UTF_16LE};
 use tokio_util::sync::CancellationToken;
@@ -102,8 +105,8 @@ where
     }
 
     if first_len != 0 && !stopped {
+        let mut input = vec![0_u8; DECODE_CHUNK_BYTES];
         loop {
-            let mut input = vec![0_u8; DECODE_CHUNK_BYTES];
             let count = read_chunk(&mut reader, &mut input, cancellation)?;
             let is_last = count == 0;
             if let Some(decoded) = decoder.decode(&input[..count], is_last)? {
@@ -256,30 +259,58 @@ enum StrictDecoder {
 impl StrictDecoder {
     fn new(source: SourceEncoding) -> Self {
         if source == SourceEncoding::Utf8 {
-            Self::Utf8 { carry: Vec::new() }
+            Self::Utf8 {
+                carry: Vec::with_capacity(3),
+            }
         } else {
             Self::Other(source.encoding().new_decoder_without_bom_handling())
         }
     }
 
-    fn decode(&mut self, input: &[u8], is_last: bool) -> Result<Option<String>, DecodeError> {
+    fn decode<'input>(
+        &mut self,
+        input: &'input [u8],
+        is_last: bool,
+    ) -> Result<Option<Cow<'input, str>>, DecodeError> {
         let decoded = match self {
             Self::Utf8 { carry } => decode_utf8(carry, input, is_last)?,
-            Self::Other(decoder) => decode_other(decoder, input, is_last)?,
+            Self::Other(decoder) => Cow::Owned(decode_other(decoder, input, is_last)?),
         };
         Ok((!decoded.is_empty()).then_some(decoded))
     }
 }
 
-fn decode_utf8(carry: &mut Vec<u8>, input: &[u8], is_last: bool) -> Result<String, DecodeError> {
+fn decode_utf8<'input>(
+    carry: &mut Vec<u8>,
+    input: &'input [u8],
+    is_last: bool,
+) -> Result<Cow<'input, str>, DecodeError> {
+    if carry.is_empty() {
+        match std::str::from_utf8(input) {
+            Ok(text) => return Ok(Cow::Borrowed(text)),
+            Err(error) if error.error_len().is_none() && !is_last => {
+                let valid_up_to = error.valid_up_to();
+                carry.extend_from_slice(&input[valid_up_to..]);
+                return std::str::from_utf8(&input[..valid_up_to])
+                    .map(Cow::Borrowed)
+                    .map_err(|_| DecodeError::Malformed("UTF-8"));
+            }
+            Err(_) => return Err(DecodeError::Malformed("UTF-8")),
+        }
+    }
     let mut bytes = std::mem::take(carry);
     bytes.extend_from_slice(input);
     match std::str::from_utf8(&bytes) {
-        Ok(text) => Ok(text.to_owned()),
+        Ok(_) => String::from_utf8(bytes)
+            .map(Cow::Owned)
+            .map_err(|_| DecodeError::Malformed("UTF-8")),
         Err(error) if error.error_len().is_none() && !is_last => {
             let valid_up_to = error.valid_up_to();
-            *carry = bytes.split_off(valid_up_to);
-            String::from_utf8(bytes).map_err(|_| DecodeError::Malformed("UTF-8"))
+            carry.extend_from_slice(&bytes[valid_up_to..]);
+            bytes.truncate(valid_up_to);
+            String::from_utf8(bytes)
+                .map(Cow::Owned)
+                .map_err(|_| DecodeError::Malformed("UTF-8"))
         }
         Err(_) => Err(DecodeError::Malformed("UTF-8")),
     }

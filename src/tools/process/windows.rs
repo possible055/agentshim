@@ -45,8 +45,8 @@ use windows_sys::Win32::{
 
 use super::{
     CLEANUP_DEADLINE, Capture, CompletedProcess, ENVIRONMENT_DEFAULTS, Launcher, ProcessError,
-    ProcessRequest, ResolvedProgram, TimedOutProcess, drain, render_completed, render_timeout,
-    spawn_monitored, write_stdin,
+    ProcessRequest, ResolvedProgram, ThreadCompletion, TimedOutProcess, drain, render_completed,
+    render_timeout, spawn_monitored, write_stdin,
 };
 use std::sync::{Arc, atomic::Ordering as AtomicOrdering};
 
@@ -137,7 +137,7 @@ pub(super) fn run(
     let stdout_file = stdout_pipe.parent.into_file();
     let stderr_file = stderr_pipe.parent.into_file();
     let input = request.stdin.clone();
-    let (io_failed, stdin_thread, stdout_thread, stderr_thread) =
+    let (io_failed, completion, stdin_thread, stdout_thread, stderr_thread) =
         spawn_io_threads(stdin_file, stdout_file, stderr_file, input);
 
     let mut primary_exit = None;
@@ -145,12 +145,13 @@ pub(super) fn run(
         if io_failed.load(AtomicOrdering::Acquire) {
             return terminate_after_io_failure(
                 &mut lifecycle,
+                &completion,
                 stdin_thread,
                 stdout_thread,
                 stderr_thread,
             );
         }
-        lifecycle.poll_completion_hint();
+        lifecycle.poll_completion_hint(25);
         let primary = lifecycle.primary_exit_code()?;
         let active = lifecycle.active_processes()?;
         if let Some(code) = primary {
@@ -165,28 +166,26 @@ pub(super) fn run(
             }
         }
         if cancellation.is_cancelled() {
-            lifecycle.terminate_and_wait()?;
-            let (stdin_result, _, _) = settle_threads(stdin_thread, stdout_thread, stderr_thread)?;
-            let _ = stdin_result;
-            lifecycle.finish();
-            return Err(ProcessError::Cancelled);
+            return terminate_after_cancellation(
+                &mut lifecycle,
+                (completion, stdin_thread, stdout_thread, stderr_thread),
+            );
         }
         if started.elapsed() >= timeout {
             return terminate_after_timeout(
                 &mut lifecycle,
-                (stdin_thread, stdout_thread, stderr_thread),
+                (completion, stdin_thread, stdout_thread, stderr_thread),
                 resolved,
                 cwd,
                 request,
                 started,
             );
         }
-        thread::sleep(Duration::from_millis(10));
     };
 
     finish_completed(
         &mut lifecycle,
-        (stdin_thread, stdout_thread, stderr_thread),
+        (completion, stdin_thread, stdout_thread, stderr_thread),
         resolved,
         cwd,
         exit_code,
@@ -213,12 +212,14 @@ fn prepare_launch_inputs(
 
 type IoThreads = (
     Arc<super::AtomicBool>,
+    ThreadCompletion,
     thread::JoinHandle<io::Result<()>>,
     thread::JoinHandle<io::Result<Capture>>,
     thread::JoinHandle<io::Result<Capture>>,
 );
 
 type PendingIo = (
+    ThreadCompletion,
     thread::JoinHandle<io::Result<()>>,
     thread::JoinHandle<io::Result<Capture>>,
     thread::JoinHandle<io::Result<Capture>>,
@@ -226,24 +227,29 @@ type PendingIo = (
 
 fn spawn_io_threads(stdin: File, stdout: File, stderr: File, input: Option<String>) -> IoThreads {
     let failed = Arc::new(super::AtomicBool::new(false));
-    let stdin = spawn_monitored(Arc::clone(&failed), move || {
+    let completion = ThreadCompletion::new();
+    let stdin = spawn_monitored(Arc::clone(&failed), completion.clone(), move || {
         write_stdin(stdin, input.as_deref())
     });
-    let stdout = spawn_monitored(Arc::clone(&failed), move || drain(stdout));
-    let stderr = spawn_monitored(Arc::clone(&failed), move || drain(stderr));
-    (failed, stdin, stdout, stderr)
+    let stdout = spawn_monitored(Arc::clone(&failed), completion.clone(), move || {
+        drain(stdout)
+    });
+    let stderr = spawn_monitored(Arc::clone(&failed), completion.clone(), move || {
+        drain(stderr)
+    });
+    (failed, completion, stdin, stdout, stderr)
 }
 
 fn finish_completed(
     lifecycle: &mut Lifecycle,
-    (stdin, stdout, stderr): PendingIo,
+    (completion, stdin, stdout, stderr): PendingIo,
     resolved: &ResolvedProgram,
     cwd: &Path,
     exit_code: u32,
     started: Instant,
     cancellation: &CancellationToken,
 ) -> Result<String, ProcessError> {
-    let (stdin_result, stdout, stderr) = settle_threads(stdin, stdout, stderr)?;
+    let (stdin_result, stdout, stderr) = settle_threads(&completion, stdin, stdout, stderr)?;
     stdin_result?;
     lifecycle.finish();
     render_completed(
@@ -261,14 +267,14 @@ fn finish_completed(
 
 fn terminate_after_timeout(
     lifecycle: &mut Lifecycle,
-    (stdin, stdout, stderr): PendingIo,
+    (completion, stdin, stdout, stderr): PendingIo,
     resolved: &ResolvedProgram,
     cwd: &Path,
     request: &ProcessRequest,
     started: Instant,
 ) -> Result<String, ProcessError> {
     lifecycle.terminate_and_wait()?;
-    let (stdin_result, stdout, stderr) = settle_threads(stdin, stdout, stderr)?;
+    let (stdin_result, stdout, stderr) = settle_threads(&completion, stdin, stdout, stderr)?;
     let _ = stdin_result;
     lifecycle.finish();
     let timeout_ms = request.timeout_ms();
@@ -287,17 +293,29 @@ fn terminate_after_timeout(
 
 fn terminate_after_io_failure(
     lifecycle: &mut Lifecycle,
+    completion: &ThreadCompletion,
     stdin: thread::JoinHandle<io::Result<()>>,
     stdout: thread::JoinHandle<io::Result<Capture>>,
     stderr: thread::JoinHandle<io::Result<Capture>>,
 ) -> Result<String, ProcessError> {
     lifecycle.terminate_and_wait()?;
-    let (stdin_result, _, _) = settle_threads(stdin, stdout, stderr)?;
+    let (stdin_result, _, _) = settle_threads(completion, stdin, stdout, stderr)?;
     stdin_result?;
     lifecycle.finish();
     Err(ProcessError::Io(io::Error::other(
         "process I/O task failed without an error",
     )))
+}
+
+fn terminate_after_cancellation(
+    lifecycle: &mut Lifecycle,
+    (completion, stdin, stdout, stderr): PendingIo,
+) -> Result<String, ProcessError> {
+    lifecycle.terminate_and_wait()?;
+    let (stdin_result, _, _) = settle_threads(&completion, stdin, stdout, stderr)?;
+    let _ = stdin_result;
+    lifecycle.finish();
+    Err(ProcessError::Cancelled)
 }
 
 type PreparedStdio = (Pipe, Pipe, Pipe, AttributeList, STARTUPINFOEXW);
@@ -327,16 +345,13 @@ fn startup_info(inherited: [HANDLE; 3], attributes: &AttributeList) -> io::Resul
 type ThreadResults = (io::Result<()>, Capture, Capture);
 
 fn settle_threads(
+    completion: &ThreadCompletion,
     stdin: thread::JoinHandle<io::Result<()>>,
     stdout: thread::JoinHandle<io::Result<Capture>>,
     stderr: thread::JoinHandle<io::Result<Capture>>,
 ) -> Result<ThreadResults, ProcessError> {
-    let started = Instant::now();
-    while !(stdin.is_finished() && stdout.is_finished() && stderr.is_finished()) {
-        if started.elapsed() >= CLEANUP_DEADLINE {
-            return Err(ProcessError::OutcomeUncertain);
-        }
-        thread::sleep(Duration::from_millis(10));
+    if !completion.wait_for(3, CLEANUP_DEADLINE) {
+        return Err(ProcessError::OutcomeUncertain);
     }
     let stdin = stdin
         .join()
@@ -821,7 +836,7 @@ impl Lifecycle {
         Ok(accounting.ActiveProcesses)
     }
 
-    fn poll_completion_hint(&self) {
+    fn poll_completion_hint(&self, wait_ms: u32) {
         let Some(completion) = &self.completion else {
             return;
         };
@@ -834,7 +849,7 @@ impl Lifecycle {
                 &raw mut transferred,
                 &raw mut key,
                 &raw mut overlapped,
-                0,
+                wait_ms,
             );
         }
     }
@@ -849,11 +864,10 @@ impl Lifecycle {
         }
         let started = Instant::now();
         while started.elapsed() < CLEANUP_DEADLINE {
-            self.poll_completion_hint();
+            self.poll_completion_hint(10);
             if self.primary_exit_code()?.is_some() && self.active_processes()? == 0 {
                 return Ok(());
             }
-            thread::sleep(Duration::from_millis(10));
         }
         Err(ProcessError::OutcomeUncertain)
     }

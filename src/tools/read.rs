@@ -97,6 +97,22 @@ pub fn execute(
     request: &ReadRequest,
     cancellation: &CancellationToken,
 ) -> Result<String, ReadError> {
+    execute_detailed(access, request, cancellation).map(|result| result.output)
+}
+
+pub(crate) fn execute_detailed(
+    access: &Arc<FileAccess>,
+    request: &ReadRequest,
+    cancellation: &CancellationToken,
+) -> Result<crate::diagnostics::DetailedExecution, ReadError> {
+    crate::diagnostics::DetailedExecution::measure(|| execute_inner(access, request, cancellation))
+}
+
+fn execute_inner(
+    access: &Arc<FileAccess>,
+    request: &ReadRequest,
+    cancellation: &CancellationToken,
+) -> Result<String, ReadError> {
     request.validate()?;
     let resolved = access.resolve(Path::new(&request.path))?;
     let absolute = resolved
@@ -106,7 +122,9 @@ pub fn execute(
         .to_owned();
     match read_once(access, &resolved, &absolute, request, cancellation)? {
         Attempt::Stable(output) => return Ok(output),
-        Attempt::Changed => {}
+        Attempt::Changed => {
+            tracing::warn!(target: "codexshim", event = "read_retry", phase = "execution", outcome = "degraded_success", reason = "file_changed");
+        }
     }
     match read_once(access, &resolved, &absolute, request, cancellation) {
         Ok(Attempt::Stable(output)) => Ok(output),
@@ -251,23 +269,35 @@ impl LineCollector {
     }
 
     fn push(&mut self, text: &str) -> DecodeControl {
-        for character in text.chars() {
-            self.saw_input = true;
-            if character == '\n' {
-                self.ended_with_newline = true;
-                if !self.finish_line() {
-                    self.stopped = true;
-                    return DecodeControl::Stop;
-                }
-            } else {
-                self.ended_with_newline = false;
-                self.current_bytes = self.current_bytes.saturating_add(character.len_utf8());
-                if self.current.len() < LINE_PREFIX_BYTES {
-                    self.current.push(character);
-                }
+        self.saw_input |= !text.is_empty();
+        let mut remaining = text;
+        while let Some(newline) = remaining.as_bytes().iter().position(|byte| *byte == b'\n') {
+            self.push_segment(&remaining[..newline]);
+            self.ended_with_newline = true;
+            if !self.finish_line() {
+                self.stopped = true;
+                return DecodeControl::Stop;
             }
+            remaining = &remaining[newline + 1..];
+        }
+        self.push_segment(remaining);
+        if !remaining.is_empty() {
+            self.ended_with_newline = false;
         }
         DecodeControl::Continue
+    }
+
+    fn push_segment(&mut self, text: &str) {
+        self.current_bytes = self.current_bytes.saturating_add(text.len());
+        if self.current.len() >= LINE_PREFIX_BYTES {
+            return;
+        }
+        for character in text.chars() {
+            if self.current.len() >= LINE_PREFIX_BYTES {
+                break;
+            }
+            self.current.push(character);
+        }
     }
 
     fn finish_eof(&mut self) {

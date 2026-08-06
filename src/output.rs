@@ -18,8 +18,7 @@ impl Default for OutputLimits {
 
 #[derive(Clone, Debug)]
 pub struct OutputFormatter {
-    header: String,
-    body: Vec<String>,
+    output: String,
     required_tail: Vec<String>,
     bytes: usize,
     limits: OutputLimits,
@@ -37,15 +36,18 @@ impl OutputFormatter {
         required_tail: Vec<String>,
         limits: OutputLimits,
     ) -> Result<Self, OutputError> {
-        let header = header.into();
-        let required = assemble(&header, &[], &required_tail);
-        let bytes = required.len();
+        let output = header.into();
+        let bytes = output.len().saturating_add(
+            required_tail
+                .iter()
+                .map(|line| line.len().saturating_add(1))
+                .sum::<usize>(),
+        );
         if bytes > limits.bytes {
             return Err(OutputError::RequiredContentTooLarge);
         }
         Ok(Self {
-            header,
-            body: Vec::new(),
+            output,
             required_tail,
             bytes,
             limits,
@@ -59,20 +61,20 @@ impl OutputFormatter {
     /// Returns [`OutputError::Cancelled`] when cancellation has been requested.
     pub fn try_push_line(
         &mut self,
-        line: impl Into<String>,
+        line: impl AsRef<str>,
         cancellation: &CancellationToken,
     ) -> Result<bool, OutputError> {
         if cancellation.is_cancelled() {
             return Err(OutputError::Cancelled);
         }
-        let line = line.into();
-        let segment = format!("\n{line}");
-        let bytes = segment.len();
+        let line = line.as_ref();
+        let bytes = line.len().saturating_add(1);
         if self.bytes.saturating_add(bytes) > self.limits.bytes {
             return Ok(false);
         }
         self.bytes += bytes;
-        self.body.push(line);
+        self.output.push('\n');
+        self.output.push_str(line);
         Ok(true)
     }
 
@@ -82,15 +84,18 @@ impl OutputFormatter {
     ///
     /// Returns [`OutputError::Cancelled`] on cancellation or
     /// [`OutputError::InvariantViolation`] if the final output exceeds a hard limit.
-    pub fn finish(self, cancellation: &CancellationToken) -> Result<String, OutputError> {
+    pub fn finish(mut self, cancellation: &CancellationToken) -> Result<String, OutputError> {
         if cancellation.is_cancelled() {
             return Err(OutputError::Cancelled);
         }
-        let output = assemble(&self.header, &self.body, &self.required_tail);
-        if output.len() > self.limits.bytes {
+        for line in self.required_tail {
+            self.output.push('\n');
+            self.output.push_str(&line);
+        }
+        if self.output.len() > self.limits.bytes {
             return Err(OutputError::InvariantViolation);
         }
-        Ok(output)
+        Ok(self.output)
     }
 }
 
@@ -133,19 +138,6 @@ fn floor_char_boundary(text: &str, mut index: usize) -> usize {
         index -= 1;
     }
     index
-}
-
-fn assemble(header: &str, body: &[String], tail: &[String]) -> String {
-    let capacity = header.len()
-        + body.iter().map(|line| line.len() + 1).sum::<usize>()
-        + tail.iter().map(|line| line.len() + 1).sum::<usize>();
-    let mut output = String::with_capacity(capacity);
-    output.push_str(header);
-    for line in body.iter().chain(tail) {
-        output.push('\n');
-        output.push_str(line);
-    }
-    output
 }
 
 #[cfg(test)]

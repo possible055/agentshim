@@ -22,6 +22,8 @@ use rmcp::{
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
+use uuid::Uuid;
 
 use crate::{
     output::bounded_diagnostic,
@@ -278,9 +280,10 @@ impl CodexShim {
         arguments: Option<JsonObject>,
         request_cancellation: &CancellationToken,
     ) -> CallToolResponse {
+        let queued = Instant::now();
         let read_request = match parse_request(arguments, "read") {
             Ok(request) => request,
-            Err(error) => return tool_error(error),
+            Err(error) => return classified_tool_error("validation", error),
         };
         let read_only = self.resources.acquire_read_only(request_cancellation).await;
         let worker = self.resources.acquire_worker(request_cancellation).await;
@@ -294,16 +297,24 @@ impl CodexShim {
                 (read_only, worker, open_file, memory)
             }
             _ => {
-                return tool_error("read cancelled while waiting for bounded runtime capacity");
+                return classified_tool_error(
+                    cancellation_class(request_cancellation, &self.resources.shutdown_token()),
+                    "read cancelled while waiting for bounded runtime capacity",
+                );
             }
         };
+        tracing::info!(target: "codexshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
         let access = self.file_access.clone();
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
+        let span = tracing::Span::current();
         let result = tokio::task::spawn_blocking(move || {
-            let result = crate::tools::read::execute(&access, &read_request, &cancellation);
-            drop(permits);
-            result
+            span.in_scope(|| {
+                let result =
+                    crate::tools::read::execute_detailed(&access, &read_request, &cancellation);
+                drop(permits);
+                result
+            })
         })
         .await;
         cancellation_relay.abort();
@@ -315,9 +326,10 @@ impl CodexShim {
         arguments: Option<JsonObject>,
         request_cancellation: &CancellationToken,
     ) -> CallToolResponse {
+        let queued = Instant::now();
         let glob_request = match parse_request(arguments, "glob") {
             Ok(request) => request,
-            Err(error) => return tool_error(error),
+            Err(error) => return classified_tool_error("validation", error),
         };
         let read_only = self.resources.acquire_read_only(request_cancellation).await;
         let worker = self.resources.acquire_worker(request_cancellation).await;
@@ -328,16 +340,24 @@ impl CodexShim {
         let permits = match (read_only, worker, memory) {
             (Ok(read_only), Ok(worker), Ok(memory)) => (read_only, worker, memory),
             _ => {
-                return tool_error("glob cancelled while waiting for bounded runtime capacity");
+                return classified_tool_error(
+                    cancellation_class(request_cancellation, &self.resources.shutdown_token()),
+                    "glob cancelled while waiting for bounded runtime capacity",
+                );
             }
         };
+        tracing::info!(target: "codexshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
         let access = self.file_access.clone();
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
+        let span = tracing::Span::current();
         let result = tokio::task::spawn_blocking(move || {
-            let result = crate::tools::glob::execute(&access, &glob_request, &cancellation);
-            drop(permits);
-            result
+            span.in_scope(|| {
+                let result =
+                    crate::tools::glob::execute_detailed(&access, &glob_request, &cancellation);
+                drop(permits);
+                result
+            })
         })
         .await;
         cancellation_relay.abort();
@@ -349,16 +369,18 @@ impl CodexShim {
         arguments: Option<JsonObject>,
         request_cancellation: &CancellationToken,
     ) -> CallToolResponse {
+        let queued = Instant::now();
         let grep_request = match parse_request(arguments, "grep") {
             Ok(request) => request,
-            Err(error) => return tool_error(error),
+            Err(error) => return classified_tool_error("validation", error),
         };
-        let lanes = self.resources.config().worker_lanes;
+        let requested_lanes = self.resources.config().worker_lanes;
         let read_only = self.resources.acquire_read_only(request_cancellation).await;
         let workers = self
             .resources
-            .acquire_workers(lanes, request_cancellation)
+            .acquire_search_lanes(requested_lanes, request_cancellation)
             .await;
+        let lanes = workers.as_ref().map_or(1, crate::runtime::SearchLanes::len);
         let open_files = self
             .resources
             .acquire_open_files(lanes, request_cancellation)
@@ -375,16 +397,28 @@ impl CodexShim {
                 (read_only, workers, open_files, memory)
             }
             _ => {
-                return tool_error("grep cancelled while waiting for bounded runtime capacity");
+                return classified_tool_error(
+                    cancellation_class(request_cancellation, &self.resources.shutdown_token()),
+                    "grep cancelled while waiting for bounded runtime capacity",
+                );
             }
         };
+        tracing::info!(target: "codexshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
         let access = self.file_access.clone();
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
+        let span = tracing::Span::current();
         let result = tokio::task::spawn_blocking(move || {
-            let result = crate::tools::grep::execute(&access, &grep_request, lanes, &cancellation);
-            drop(permits);
-            result
+            span.in_scope(|| {
+                let result = crate::tools::grep::execute_detailed(
+                    &access,
+                    &grep_request,
+                    lanes,
+                    &cancellation,
+                );
+                drop(permits);
+                result
+            })
         })
         .await;
         cancellation_relay.abort();
@@ -398,10 +432,10 @@ impl CodexShim {
     ) -> CallToolResponse {
         let process_request: ProcessRequest = match parse_request(arguments, "run_process") {
             Ok(request) => request,
-            Err(error) => return tool_error(error),
+            Err(error) => return classified_tool_error("validation", error),
         };
         if let Err(error) = process_request.validate() {
-            return tool_error(error.to_string());
+            return classified_tool_error("validation", error.to_string());
         }
         let timeout = Duration::from_millis(process_request.timeout_ms());
         let memory_charge = process_request.memory_charge();
@@ -418,10 +452,14 @@ impl CodexShim {
         let permits = match permits {
             Ok(Ok(permits)) => permits,
             Ok(Err(_)) => {
-                return tool_error("run_process cancelled while waiting for process capacity");
+                return classified_tool_error(
+                    cancellation_class(request_cancellation, &self.resources.shutdown_token()),
+                    "run_process cancelled while waiting for process capacity",
+                );
             }
             Err(_) => return process_queue_timeout(process_request.timeout_ms()),
         };
+        tracing::info!(target: "codexshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
         let Some(remaining) = timeout.checked_sub(queued.elapsed()) else {
             return process_queue_timeout(process_request.timeout_ms());
         };
@@ -429,16 +467,19 @@ impl CodexShim {
         let resolver = self.process_resolver.clone();
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
+        let span = tracing::Span::current();
         let result = tokio::task::spawn_blocking(move || {
-            let result = crate::tools::process::execute(
-                &root,
-                &resolver,
-                &process_request,
-                remaining,
-                &cancellation,
-            );
-            drop(permits);
-            result
+            span.in_scope(|| {
+                let result = crate::tools::process::execute_detailed(
+                    &root,
+                    &resolver,
+                    &process_request,
+                    remaining,
+                    &cancellation,
+                );
+                drop(permits);
+                result
+            })
         })
         .await;
         cancellation_relay.abort();
@@ -454,6 +495,27 @@ impl CodexShim {
             .with_server_info(Implementation::new("codexshim", env!("CARGO_PKG_VERSION")))
             .with_protocol_version(ProtocolVersion::V_2026_07_28)
             .with_instructions(instructions)
+    }
+
+    async fn dispatch_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: &RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, McpError> {
+        match request.name.as_ref() {
+            "read" => Ok(self.call_read(request.arguments, &context.ct).await),
+            "glob" => Ok(self.call_glob(request.arguments, &context.ct).await),
+            "grep" => Ok(self.call_grep(request.arguments, &context.ct).await),
+            "run_process" => Ok(self.call_process(request.arguments, &context.ct).await),
+            _ => {
+                tracing::error!(target: "codexshim", event = "tool_unknown", phase = "request", error_class = "validation");
+                Err(McpError::new(
+                    ErrorCode::METHOD_NOT_FOUND,
+                    format!("unknown tool: {}", request.name),
+                    None,
+                ))
+            }
+        }
     }
 }
 
@@ -471,6 +533,7 @@ impl ServerHandler for CodexShim {
         request: InitializeRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
+        tracing::info!(target: "codexshim", event = "initialize", phase = "protocol", protocol = %request.protocol_version, client_name = %request.client_info.name, client_version = %request.client_info.version);
         if self.protocol_compatibility != ProtocolCompatibility::Legacy
             || request.protocol_version != ProtocolVersion::V_2025_06_18
         {
@@ -486,6 +549,7 @@ impl ServerHandler for CodexShim {
         &self,
         _context: RequestContext<RoleServer>,
     ) -> Result<DiscoverResult, McpError> {
+        tracing::info!(target: "codexshim", event = "discover", phase = "protocol");
         Ok(Self::discovery_result_for(
             self.protocol_compatibility,
             self.read_scope(),
@@ -512,20 +576,20 @@ impl ServerHandler for CodexShim {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
-        let response = match request.name.as_ref() {
-            "read" => self.call_read(request.arguments, &context.ct).await,
-            "glob" => self.call_glob(request.arguments, &context.ct).await,
-            "grep" => self.call_grep(request.arguments, &context.ct).await,
-            "run_process" => self.call_process(request.arguments, &context.ct).await,
-            _ => {
-                return Err(McpError::new(
-                    ErrorCode::METHOD_NOT_FOUND,
-                    format!("unknown tool: {}", request.name),
-                    None,
-                ));
-            }
-        };
-        Ok(response)
+        if !tracing::enabled!(target: "codexshim", tracing::Level::INFO) {
+            return self.dispatch_tool(request, &context).await;
+        }
+        let call_id = Uuid::new_v4().to_string();
+        let tool = request.name.to_string();
+        let span =
+            tracing::info_span!(target: "codexshim", "tool_call", call_id = %call_id, tool = %tool);
+        async move {
+            tracing::info!(target: "codexshim", event = "tool_start", phase = "request");
+            let response = self.dispatch_tool(request, &context).await?;
+            Ok(response)
+        }
+        .instrument(span)
+        .await
     }
 }
 
@@ -542,19 +606,122 @@ fn tool_error(message: impl Into<String>) -> CallToolResponse {
     CallToolResult::error(vec![ContentBlock::text(bounded_diagnostic(&message))]).into()
 }
 
-fn blocking_response<E: Display>(
+trait DiagnosticError: Display {
+    fn error_class(&self) -> &'static str;
+}
+
+impl DiagnosticError for crate::tools::read::ReadError {
+    fn error_class(&self) -> &'static str {
+        use crate::tools::read::ReadError;
+        match self {
+            ReadError::Validation(_) => "validation",
+            ReadError::Path(_)
+            | ReadError::NonUnicodePath
+            | ReadError::Directory
+            | ReadError::NotRegular => "path",
+            ReadError::Cancelled => "client_cancellation",
+            ReadError::Output(_) => "output_invariant",
+            ReadError::Io(_) | ReadError::Decode(_) | ReadError::Binary | ReadError::Changed => {
+                "io"
+            }
+        }
+    }
+}
+
+impl DiagnosticError for crate::tools::glob::GlobError {
+    fn error_class(&self) -> &'static str {
+        use crate::tools::glob::GlobError;
+        match self {
+            GlobError::Validation(_) | GlobError::Pattern(_) => "validation",
+            GlobError::Path(_) => "path",
+            GlobError::Output(_) => "output_invariant",
+            GlobError::TooManyMatches | GlobError::Memory => "resource_timeout",
+            GlobError::Traversal(_) | GlobError::Io(_) => "io",
+        }
+    }
+}
+
+impl DiagnosticError for crate::tools::grep::GrepError {
+    fn error_class(&self) -> &'static str {
+        use crate::tools::grep::GrepError;
+        match self {
+            GrepError::Validation(_) | GrepError::Regex(_) | GrepError::Glob(_) => "validation",
+            GrepError::Path(_) => "path",
+            GrepError::Cancelled => "client_cancellation",
+            GrepError::Output(_) => "output_invariant",
+            GrepError::CandidateMemory | GrepError::CaptureMemory => "resource_timeout",
+            GrepError::Traversal(_) | GrepError::Io(_) => "io",
+        }
+    }
+}
+
+impl DiagnosticError for crate::tools::process::ProcessError {
+    fn error_class(&self) -> &'static str {
+        use crate::tools::process::ProcessError;
+        match self {
+            ProcessError::Validation(_) => "validation",
+            ProcessError::Resolve(_) => "path",
+            ProcessError::Io(_) => "io",
+            ProcessError::Timeout { .. } | ProcessError::TimeoutBeforeSpawn { .. } => {
+                "resource_timeout"
+            }
+            ProcessError::Cancelled => "client_cancellation",
+            ProcessError::OutcomeUncertain => "outcome_uncertain",
+            ProcessError::Output(_) => "output_invariant",
+        }
+    }
+}
+
+fn classified_tool_error(
+    error_class: &'static str,
+    message: impl Into<String>,
+) -> CallToolResponse {
+    tracing::error!(target: "codexshim", event = "tool_error", phase = "response", outcome = "error", error_class);
+    tool_error(message)
+}
+
+fn blocking_response<E: DiagnosticError>(
     tool: &str,
-    result: Result<Result<String, E>, tokio::task::JoinError>,
+    result: Result<Result<crate::diagnostics::DetailedExecution, E>, tokio::task::JoinError>,
 ) -> CallToolResponse {
     match result {
-        Ok(Ok(text)) => CallToolResult::success(vec![ContentBlock::text(text)]).into(),
-        Ok(Err(error)) => tool_error(error.to_string()),
-        Err(error) => tool_error(format!("{tool} worker failed: {error}")),
+        Ok(Ok(result)) => {
+            let outcome = if tool == "run_process" && !result.output.contains("Exit code: 0") {
+                "child_nonzero"
+            } else {
+                "success"
+            };
+            if outcome == "child_nonzero" {
+                tracing::warn!(target: "codexshim", event = "tool_complete", phase = "response", outcome, error_class = "child_nonzero", run_ms = result.run_ms);
+            } else {
+                tracing::info!(target: "codexshim", event = "tool_complete", phase = "response", outcome, run_ms = result.run_ms);
+            }
+            CallToolResult::success(vec![ContentBlock::text(result.output)]).into()
+        }
+        Ok(Err(error)) => classified_tool_error(error.error_class(), error.to_string()),
+        Err(error) => {
+            classified_tool_error("worker_panic", format!("{tool} worker failed: {error}"))
+        }
     }
 }
 
 fn process_queue_timeout(timeout_ms: u64) -> CallToolResponse {
-    tool_error(process_queue_timeout_message(timeout_ms))
+    classified_tool_error(
+        "resource_timeout",
+        process_queue_timeout_message(timeout_ms),
+    )
+}
+
+fn cancellation_class(request: &CancellationToken, shutdown: &CancellationToken) -> &'static str {
+    if shutdown.is_cancelled() && !request.is_cancelled() {
+        "shutdown"
+    } else {
+        "client_cancellation"
+    }
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 fn process_queue_timeout_message(timeout_ms: u64) -> String {
@@ -572,8 +739,12 @@ fn relayed_cancellation(
     let request = request.clone();
     let relay = tokio::spawn(async move {
         tokio::select! {
-            () = request.cancelled() => {}
-            () = shutdown.cancelled() => {}
+            () = request.cancelled() => {
+                tracing::warn!(target: "codexshim", event = "tool_cancelled", phase = "execution", error_class = "client_cancellation");
+            }
+            () = shutdown.cancelled() => {
+                tracing::warn!(target: "codexshim", event = "tool_cancelled", phase = "execution", error_class = "shutdown");
+            }
         }
         signal.cancel();
     });

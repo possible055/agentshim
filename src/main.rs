@@ -8,17 +8,23 @@ use std::{
 };
 
 use codexshim::{
+    diagnostics::{
+        DiagnosticsConfig, DiagnosticsGuard, capacity_bytes, purge, retention_days, status,
+    },
+    output::bounded_diagnostic,
     path::ReadScope,
     runtime::{MAX_PROCESS_CALLS, MAX_READ_ONLY_CALLS, RuntimeConfig, RuntimeResources},
     server::CodexShim,
 };
 use rmcp::{ServiceExt, transport::stdio};
-use tokio::io::{AsyncRead, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_util::sync::CancellationToken;
+use tracing_subscriber::prelude::*;
 
 struct ShutdownReader<R> {
     inner: R,
     shutdown: CancellationToken,
+    termination_reported: bool,
 }
 
 impl<R: AsyncRead + Unpin> AsyncRead for ShutdownReader<R> {
@@ -29,23 +35,77 @@ impl<R: AsyncRead + Unpin> AsyncRead for ShutdownReader<R> {
     ) -> Poll<std::io::Result<()>> {
         let before = buffer.filled().len();
         let result = Pin::new(&mut self.inner).poll_read(context, buffer);
-        if matches!(result, Poll::Ready(Err(_)))
-            || matches!(result, Poll::Ready(Ok(()))) && buffer.filled().len() == before
-        {
-            self.shutdown.cancel();
+        match &result {
+            Poll::Ready(Err(error)) => {
+                if !self.termination_reported {
+                    tracing::error!(target: "codexshim", event = "stdin_read_error", phase = "transport", error_class = "io", io_kind = ?error.kind());
+                    self.termination_reported = true;
+                }
+                self.shutdown.cancel();
+            }
+            Poll::Ready(Ok(())) if buffer.filled().len() == before => {
+                if !self.termination_reported {
+                    tracing::info!(target: "codexshim", event = "stdin_eof", phase = "transport", outcome = "shutdown");
+                    self.termination_reported = true;
+                }
+                self.shutdown.cancel();
+            }
+            _ => {}
+        }
+        result
+    }
+}
+
+struct DiagnosticWriter<W>(W);
+
+impl<W: AsyncWrite + Unpin> AsyncWrite for DiagnosticWriter<W> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let result = Pin::new(&mut self.0).poll_write(context, buffer);
+        if let Poll::Ready(Err(error)) = &result {
+            tracing::error!(target: "codexshim", event = "stdout_write_error", phase = "transport", error_class = "io", io_kind = ?error.kind());
+        }
+        result
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let result = Pin::new(&mut self.0).poll_flush(context);
+        if let Poll::Ready(Err(error)) = &result {
+            tracing::error!(target: "codexshim", event = "stdout_write_error", phase = "transport", error_class = "io", io_kind = ?error.kind());
+        }
+        result
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let result = Pin::new(&mut self.0).poll_shutdown(context);
+        if let Poll::Ready(Err(error)) = &result {
+            tracing::error!(target: "codexshim", event = "stdout_write_error", phase = "transport", error_class = "io", io_kind = ?error.kind());
         }
         result
     }
 }
 
 fn usage() {
-    eprintln!("Usage: codexshim <serve|doctor> [--read-scope <normal|unrestricted>] | --version");
+    eprintln!(
+        "Usage: codexshim <serve|doctor> [--read-scope <normal|unrestricted>] | logs <status|purge> | --version"
+    );
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CliCommand {
     Serve(ReadScope),
     Doctor(ReadScope),
+    LogsStatus,
+    LogsPurge,
     Version,
 }
 
@@ -61,6 +121,20 @@ fn parse_command(args: impl IntoIterator<Item = OsString>) -> Result<CliCommand,
     let kind = command
         .to_str()
         .ok_or_else(|| "command must be valid Unicode".to_owned())?;
+    if kind == "logs" {
+        let action = args
+            .next()
+            .ok_or_else(|| "logs requires `status` or `purge`".to_owned())?;
+        if args.next().is_some() {
+            return Err("logs accepts exactly one action".to_owned());
+        }
+        return match action.to_str() {
+            Some("status") => Ok(CliCommand::LogsStatus),
+            Some("purge") => Ok(CliCommand::LogsPurge),
+            Some(action) => Err(format!("unknown logs action: {action}")),
+            None => Err("logs action must be valid Unicode".to_owned()),
+        };
+    }
     if !matches!(kind, "serve" | "doctor") {
         return Err(format!("unknown command: {kind}"));
     }
@@ -113,9 +187,13 @@ async fn run(config: RuntimeConfig, command: CliCommand) -> Result<(), Box<dyn E
             let reader = ShutdownReader {
                 inner: stdin,
                 shutdown: resources.shutdown_token(),
+                termination_reported: false,
             };
-            let running = service.serve((reader, stdout)).await?;
+            tracing::info!(target: "codexshim", event = "server_start", phase = "lifecycle", read_scope = %read_scope);
+            let running = service.serve((reader, DiagnosticWriter(stdout))).await?;
+            tracing::info!(target: "codexshim", event = "server_ready", phase = "lifecycle");
             running.waiting().await?;
+            tracing::info!(target: "codexshim", event = "server_stop", phase = "lifecycle");
         }
         CliCommand::Doctor(read_scope) => {
             let service = CodexShim::from_current_dir_with_resources_and_scope(
@@ -143,6 +221,9 @@ async fn run(config: RuntimeConfig, command: CliCommand) -> Result<(), Box<dyn E
         CliCommand::Version => {
             println!("codexshim {}", env!("CARGO_PKG_VERSION"));
         }
+        CliCommand::LogsStatus | CliCommand::LogsPurge => {
+            unreachable!("log management commands do not require a Tokio runtime")
+        }
     }
     Ok(())
 }
@@ -156,6 +237,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if matches!(command, CliCommand::LogsStatus | CliCommand::LogsPurge) {
+        return run_logs_command(command);
+    }
+    let _diagnostics = initialize_diagnostics();
+    install_panic_hook();
     let config = match RuntimeConfig::from_env() {
         Ok(config) => config,
         Err(error) => {
@@ -163,8 +249,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    tracing::info!(target: "codexshim", event = "runtime_config", phase = "startup", counters = %format!("worker_lanes={},blocking_threads={}", config.worker_lanes, config.blocking_threads));
     let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(config.worker_lanes)
+        .worker_threads(config.scheduler_threads)
         .max_blocking_threads(config.blocking_threads)
         .enable_all()
         .build()
@@ -175,7 +262,94 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    tracing::info!(target: "codexshim", event = "runtime_ready", phase = "startup");
     match runtime.block_on(run(config, command)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("codexshim: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn initialize_diagnostics() -> DiagnosticsGuard {
+    let config = match DiagnosticsConfig::from_env() {
+        Ok(config) => config,
+        Err(error) => {
+            diagnostics_warning(&error);
+            return DiagnosticsGuard::disabled(std::path::PathBuf::default());
+        }
+    };
+    let directory = config.directory.clone();
+    if config.mode == codexshim::diagnostics::LogMode::Off {
+        return DiagnosticsGuard::disabled(directory);
+    }
+    match DiagnosticsGuard::start(config) {
+        Ok((guard, Some(layer))) => {
+            if let Err(error) =
+                tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer))
+            {
+                diagnostics_warning(&error);
+                return DiagnosticsGuard::disabled(directory);
+            }
+            tracing::info!(target: "codexshim", event = "diagnostics_start", phase = "startup");
+            guard
+        }
+        Ok((guard, None)) => guard,
+        Err(error) => {
+            diagnostics_warning(&error);
+            DiagnosticsGuard::disabled(directory)
+        }
+    }
+}
+
+fn diagnostics_warning(error: &dyn std::fmt::Display) {
+    eprintln!(
+        "{}",
+        bounded_diagnostic(&format!("codexshim diagnostics disabled: {error}"))
+    );
+}
+
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic| {
+        tracing::error!(target: "codexshim", event = "panic", phase = "lifecycle", error_class = "worker_panic");
+        previous(panic);
+    }));
+}
+
+fn run_logs_command(command: CliCommand) -> ExitCode {
+    let config = match DiagnosticsConfig::from_env() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("codexshim: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let result = match command {
+        CliCommand::LogsStatus => status(&config).map(|report| {
+            println!("mode: {}", report.mode);
+            println!("directory: {}", report.directory.display());
+            println!("JSONL files: {}", report.files);
+            println!("total bytes: {}", report.bytes);
+            println!(
+                "date range: {}",
+                match (report.oldest, report.newest) {
+                    (Some(oldest), Some(newest)) => format!("{oldest} to {newest}"),
+                    _ => "none".to_owned(),
+                }
+            );
+            println!("retention days: {}", retention_days());
+            println!("capacity bytes: {}", capacity_bytes());
+            println!("recorded dropped batches: {}", report.dropped);
+        }),
+        CliCommand::LogsPurge => purge(&config).map(|report| {
+            println!("deleted files: {}", report.files);
+            println!("deleted bytes: {}", report.bytes);
+        }),
+        _ => unreachable!("validated logs command"),
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("codexshim: {error}");
@@ -227,5 +401,13 @@ mod tests {
         ] {
             assert!(parse(args).is_err(), "unexpectedly accepted {args:?}");
         }
+    }
+
+    #[test]
+    fn parses_log_management_commands() {
+        assert_eq!(parse(&["logs", "status"]), Ok(CliCommand::LogsStatus));
+        assert_eq!(parse(&["logs", "purge"]), Ok(CliCommand::LogsPurge));
+        assert!(parse(&["logs"]).is_err());
+        assert!(parse(&["logs", "clear"]).is_err());
     }
 }

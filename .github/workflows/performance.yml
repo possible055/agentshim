@@ -2,6 +2,11 @@ name: Performance benchmark
 
 on:
   workflow_dispatch:
+    inputs:
+      scales:
+        description: Comma-separated fixture sizes (1000, 100000, 1000000)
+        required: false
+        default: "1000"
 
 permissions:
   contents: read
@@ -12,4 +17,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Benchmark repository tools
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}\codexshim-performance-target
+          CODEXSHIM_BENCH_SCALES: ${{ inputs.scales }}
         run: cargo bench --locked --bench performance
+      - name: Benchmark diagnostics through stdio
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}\codexshim-performance-target
+        run: cargo bench --locked --bench stdio_performance

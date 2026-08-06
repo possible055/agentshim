@@ -1,8 +1,7 @@
-use std::{fs, sync::Arc, time::Instant};
+use std::{ffi::OsString, fs, path::Path, sync::Arc, time::Instant};
 
 use codexshim::{
     path::{FileAccess, ReadScope, RepositoryRoot},
-    runtime::RuntimeConfig,
     tools::{
         glob::{self, GlobRequest},
         grep::{self, GrepMode, GrepRequest},
@@ -12,161 +11,262 @@ use codexshim::{
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-const SAMPLES: usize = 5;
+const WARM_SAMPLES: usize = 7;
+const CONCURRENCY_LEVELS: [usize; 3] = [1, 4, 8];
+const GREP_LANES: [usize; 5] = [1, 2, 4, 8, 16];
+const BENCH_SCALES_ENV: &str = "CODEXSHIM_BENCH_SCALES";
+const BENCH_QUICK_ENV: &str = "CODEXSHIM_BENCH_QUICK";
 
 fn main() {
-    let current_dir = std::env::current_dir().expect("current directory");
-    let repository_root = Arc::new(RepositoryRoot::open(current_dir).expect("repository root"));
-    let repository_access = Arc::new(FileAccess::new(
-        Arc::clone(&repository_root),
-        ReadScope::Normal,
-    ));
-    let unrestricted_access = Arc::new(FileAccess::new(repository_root, ReadScope::Unrestricted));
-    let cancellation = CancellationToken::new();
-    let worker_lanes = RuntimeConfig::from_env()
-        .expect("runtime configuration")
-        .worker_lanes;
-
-    benchmark_repository(&repository_access, worker_lanes, &cancellation);
-    benchmark_unrestricted(&unrestricted_access, worker_lanes, &cancellation);
+    for files in fixture_scales() {
+        benchmark_scale(files);
+        println!(
+            "{}",
+            json!({ "benchmark": "scale_complete", "fixture_files": files })
+        );
+    }
+    std::process::exit(0);
 }
 
-fn benchmark_repository(
+fn fixture_scales() -> Vec<usize> {
+    let configured = std::env::var(BENCH_SCALES_ENV).unwrap_or_else(|_| "1000".to_owned());
+    let scales = configured
+        .split(',')
+        .map(str::trim)
+        .map(|value| value.parse::<usize>().expect("fixture scale is an integer"))
+        .collect::<Vec<_>>();
+    assert!(
+        scales
+            .iter()
+            .all(|scale| matches!(*scale, 1_000 | 100_000 | 1_000_000)),
+        "{BENCH_SCALES_ENV} accepts only 1000,100000,1000000"
+    );
+    scales
+}
+
+fn benchmark_scale(files: usize) {
+    let fixture = tempfile::tempdir().expect("performance fixture");
+    let repository_directory = fixture.path().join("repository");
+    let repository_corpus = repository_directory.join("corpus");
+    let codex_home = fixture.path().join("codex");
+    let codex_corpus = codex_home.join("skills").join("corpus");
+    create_corpus(&repository_corpus, files);
+    create_corpus(&codex_corpus, files);
+
+    let root = Arc::new(RepositoryRoot::open(&repository_directory).expect("repository root"));
+    let previous_codex_home = std::env::var_os("CODEX_HOME");
+    set_codex_home(Some(codex_home.into_os_string()));
+    let normal_access = Arc::new(FileAccess::new(Arc::clone(&root), ReadScope::Normal));
+    set_codex_home(previous_codex_home);
+    let unrestricted_access = Arc::new(FileAccess::new(Arc::clone(&root), ReadScope::Unrestricted));
+    let repository_access = Arc::new(FileAccess::new(Arc::clone(&root), ReadScope::Normal));
+
+    benchmark_tools(
+        "repository",
+        files,
+        &repository_access,
+        "corpus",
+        "corpus/shard-000000/file-000000000.rs",
+    );
+    let codex_path = codex_corpus.to_string_lossy().into_owned();
+    let codex_file = codex_corpus
+        .join("shard-000000/file-000000000.rs")
+        .to_string_lossy()
+        .into_owned();
+    benchmark_tools(
+        "normal_codex",
+        files,
+        &normal_access,
+        &codex_path,
+        &codex_file,
+    );
+    benchmark_tools(
+        "unrestricted",
+        files,
+        &unrestricted_access,
+        &codex_path,
+        &codex_file,
+    );
+}
+
+fn set_codex_home(value: Option<OsString>) {
+    match value {
+        Some(value) => unsafe { std::env::set_var("CODEX_HOME", value) },
+        None => unsafe { std::env::remove_var("CODEX_HOME") },
+    }
+}
+
+fn create_corpus(directory: &Path, files: usize) {
+    for index in 0..files {
+        let shard = directory.join(format!("shard-{:06}", index / 1_000));
+        if index % 1_000 == 0 {
+            fs::create_dir_all(&shard).expect("corpus shard");
+        }
+        fs::write(
+            shard.join(format!("file-{index:09}.rs")),
+            format!("pub fn fixture_{index}() {{}}\nneedle-{index}\n"),
+        )
+        .expect("corpus file");
+    }
+}
+
+fn benchmark_tools(
+    scope: &str,
+    files: usize,
     access: &Arc<FileAccess>,
-    worker_lanes: usize,
-    cancellation: &CancellationToken,
+    directory: &str,
+    read_path: &str,
 ) {
-    measure("glob", || {
+    let cancellation = CancellationToken::new();
+    measure(scope, "glob", files, || {
         glob::execute(
             access,
             &GlobRequest {
-                pattern: "src/**/*.rs".to_owned(),
-                path: Some("src".to_owned()),
+                pattern: "**/*.rs".to_owned(),
+                path: Some(directory.to_owned()),
                 include_ignored: None,
                 offset: None,
                 limit: Some(1_000),
             },
-            cancellation,
+            &cancellation,
         )
         .expect("glob benchmark")
     });
-    measure("grep", || {
-        grep::execute(
-            access,
-            &GrepRequest {
-                pattern: "pub".to_owned(),
-                path: Some("src".to_owned()),
-                glob: Some("src/**/*.rs".to_owned()),
-                mode: Some(GrepMode::Count),
-                fixed_strings: Some(true),
-                case: None,
-                context_lines: None,
-                offset: None,
-                limit: Some(1_000),
-            },
-            worker_lanes,
-            cancellation,
-        )
-        .expect("grep benchmark")
-    });
-    measure("read", || {
+    for &lanes in grep_lanes() {
+        measure(scope, &format!("grep_lanes_{lanes}"), files, || {
+            grep::execute(
+                access,
+                &GrepRequest {
+                    pattern: "needle-".to_owned(),
+                    path: Some(directory.to_owned()),
+                    glob: Some("**/*.rs".to_owned()),
+                    mode: Some(GrepMode::Count),
+                    fixed_strings: Some(true),
+                    case: None,
+                    context_lines: None,
+                    offset: None,
+                    limit: Some(1_000),
+                },
+                lanes,
+                &cancellation,
+            )
+            .expect("grep benchmark")
+        });
+    }
+    measure(scope, "read", files, || {
         read::execute(
             access,
             &ReadRequest {
-                path: "README.md".to_owned(),
+                path: read_path.to_owned(),
                 start_line: Some(1),
-                line_count: Some(1_000),
+                line_count: Some(2_000),
                 encoding: None,
             },
-            cancellation,
+            &cancellation,
         )
         .expect("read benchmark")
     });
 }
 
-fn benchmark_unrestricted(
-    access: &Arc<FileAccess>,
-    worker_lanes: usize,
-    cancellation: &CancellationToken,
-) {
-    let ambient_fixture = tempfile::tempdir().expect("ambient fixture");
-    let ambient_read_path = ambient_fixture.path().join("small.txt");
-    fs::write(&ambient_read_path, "small ambient file\n").expect("ambient read fixture");
-    for index in 0..128 {
-        fs::write(
-            ambient_fixture.path().join(format!("dense-{index:03}.rs")),
-            "pub fn ambient_match() {}\n",
-        )
-        .expect("ambient search fixture");
-    }
-    let ambient_directory = ambient_fixture.path().display().to_string();
-    let ambient_file = ambient_read_path.display().to_string();
-
-    measure("glob_unrestricted", || {
-        glob::execute(
-            access,
-            &GlobRequest {
-                pattern: "*.rs".to_owned(),
-                path: Some(ambient_directory.clone()),
-                include_ignored: None,
-                offset: None,
-                limit: Some(1_000),
-            },
-            cancellation,
-        )
-        .expect("unrestricted glob benchmark")
-    });
-    measure("grep_unrestricted", || {
-        grep::execute(
-            access,
-            &GrepRequest {
-                pattern: "ambient_match".to_owned(),
-                path: Some(ambient_directory.clone()),
-                glob: Some("*.rs".to_owned()),
-                mode: Some(GrepMode::Count),
-                fixed_strings: Some(true),
-                case: None,
-                context_lines: None,
-                offset: None,
-                limit: Some(1_000),
-            },
-            worker_lanes,
-            cancellation,
-        )
-        .expect("unrestricted grep benchmark")
-    });
-    measure("read_unrestricted", || {
-        read::execute(
-            access,
-            &ReadRequest {
-                path: ambient_file.clone(),
-                start_line: Some(1),
-                line_count: Some(1_000),
-                encoding: None,
-            },
-            cancellation,
-        )
-        .expect("unrestricted read benchmark")
+fn measure(scope: &str, operation: &str, files: usize, execute: impl Fn() -> String + Sync) {
+    measure_with(scope, operation, files, execute, |left, right| {
+        left == right
     });
 }
 
-fn measure(operation: &str, mut execute: impl FnMut() -> String) {
-    assert!(
-        !execute().is_empty(),
-        "{operation} benchmark returned no output"
-    );
-    let mut samples = Vec::with_capacity(SAMPLES);
-    for _ in 0..SAMPLES {
+fn measure_with(
+    scope: &str,
+    operation: &str,
+    files: usize,
+    execute: impl Fn() -> String + Sync,
+    equivalent: impl Fn(&str, &str) -> bool + Sync,
+) {
+    let cold_started = Instant::now();
+    let expected = execute();
+    let cold_ms = cold_started.elapsed().as_secs_f64() * 1_000.0;
+    assert!(!expected.is_empty(), "{operation} returned no output");
+
+    let warm_samples = if quick_mode() { 1 } else { WARM_SAMPLES };
+    let mut warm_ms = Vec::with_capacity(warm_samples);
+    for _ in 0..warm_samples {
         let started = Instant::now();
-        let output = execute();
         assert!(
-            !output.is_empty(),
-            "{operation} benchmark returned no output"
+            equivalent(&execute(), &expected),
+            "{operation} output changed"
         );
-        samples.push(started.elapsed().as_secs_f64() * 1_000.0);
+        warm_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
     }
+    warm_ms.sort_by(f64::total_cmp);
+
+    let concurrent = concurrency_levels()
+        .iter()
+        .copied()
+        .map(|calls| {
+            let started = Instant::now();
+            std::thread::scope(|scope| {
+                let workers = (0..calls)
+                    .map(|_| scope.spawn(&execute))
+                    .collect::<Vec<_>>();
+                for worker in workers {
+                    assert!(
+                        equivalent(&worker.join().expect("benchmark worker"), &expected),
+                        "{operation} concurrent output changed"
+                    );
+                }
+            });
+            let elapsed = started.elapsed().as_secs_f64();
+            json!({
+                "calls": calls,
+                "elapsed_ms": elapsed * 1_000.0,
+                "throughput_per_second": f64::from(u32::try_from(calls).expect("bounded concurrency")) / elapsed,
+            })
+        })
+        .collect::<Vec<_>>();
+
     println!(
         "{}",
-        json!({ "operation": operation, "samples_ms": samples })
+        json!({
+            "scope": scope,
+            "operation": operation,
+            "fixture_files": files,
+            "cold_ms": cold_ms,
+            "warm_ms": warm_ms,
+            "p50_ms": percentile(&warm_ms, 50, 100),
+            "p95_ms": percentile(&warm_ms, 95, 100),
+            "p99_ms": percentile(&warm_ms, 99, 100),
+            "concurrent": concurrent,
+            "output_bytes": expected.len(),
+            "output_equivalent": true,
+        })
     );
+}
+
+fn quick_mode() -> bool {
+    std::env::var_os(BENCH_QUICK_ENV).is_some_and(|value| value == "1")
+}
+
+fn grep_lanes() -> &'static [usize] {
+    if quick_mode() {
+        &GREP_LANES[4..]
+    } else {
+        &GREP_LANES
+    }
+}
+
+fn concurrency_levels() -> &'static [usize] {
+    if quick_mode() {
+        &CONCURRENCY_LEVELS[..1]
+    } else {
+        &CONCURRENCY_LEVELS
+    }
+}
+
+fn percentile(samples: &[f64], numerator: usize, denominator: usize) -> f64 {
+    let index = samples
+        .len()
+        .saturating_mul(numerator)
+        .div_ceil(denominator)
+        .saturating_sub(1)
+        .min(samples.len() - 1);
+    samples[index]
 }

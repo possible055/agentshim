@@ -141,6 +141,26 @@ pub fn execute(
     lanes: usize,
     cancellation: &CancellationToken,
 ) -> Result<String, GrepError> {
+    execute_detailed(access, request, lanes, cancellation).map(|result| result.output)
+}
+
+pub(crate) fn execute_detailed(
+    access: &Arc<FileAccess>,
+    request: &GrepRequest,
+    lanes: usize,
+    cancellation: &CancellationToken,
+) -> Result<crate::diagnostics::DetailedExecution, GrepError> {
+    crate::diagnostics::DetailedExecution::measure(|| {
+        execute_inner(access, request, lanes, cancellation)
+    })
+}
+
+fn execute_inner(
+    access: &Arc<FileAccess>,
+    request: &GrepRequest,
+    lanes: usize,
+    cancellation: &CancellationToken,
+) -> Result<String, GrepError> {
     request.validate()?;
     let matcher = Arc::new(build_matcher(request)?);
     let glob = request
@@ -162,6 +182,12 @@ pub fn execute(
         cancellation,
     )
     .map_err(normalize_cancellation)?;
+    let skipped = traversal_summary.io_errors
+        + traversal_summary.escaped_entries
+        + traversal_summary.non_unicode_entries;
+    if skipped > 0 {
+        tracing::warn!(target: "codexshim", event = "grep_skipped", phase = "execution", outcome = "degraded_success", counters = %format!("io_errors={},escaped_entries={},non_unicode_entries={}", traversal_summary.io_errors, traversal_summary.escaped_entries, traversal_summary.non_unicode_entries));
+    }
     let needed = request
         .offset
         .unwrap_or(0)
@@ -218,7 +244,6 @@ fn build_matcher(request: &GrepRequest) -> Result<RegexMatcher, GrepError> {
 #[derive(Clone, Debug)]
 struct Candidate {
     path: ResolvedPath,
-    absolute: String,
 }
 
 fn collect_candidates(
@@ -242,7 +267,7 @@ fn collect_candidates(
             true,
         ));
     }
-    let mut candidates = Vec::new();
+    let mut candidates = Vec::with_capacity(1_024);
     let mut charged = 0_usize;
     let mut terminal_error = None;
     let summary = walk(access, &base, false, cancellation, |entry| {
@@ -252,13 +277,20 @@ fn collect_candidates(
         {
             return TraversalControl::Continue;
         }
-        if glob.is_some_and(|glob| !glob.is_match(entry.path.key())) {
+        if glob.is_some_and(|glob| !glob.is_match(entry.key)) {
             return TraversalControl::Continue;
         }
-        match candidate(entry.path) {
+        let path = match access.resolve_traversal_entry(&base, entry.absolute) {
+            Ok(path) => path,
+            Err(error) => {
+                terminal_error = Some(error.into());
+                return TraversalControl::Stop;
+            }
+        };
+        match candidate(path) {
             Ok(candidate) => {
                 charged = charged
-                    .saturating_add(candidate.absolute.len())
+                    .saturating_add(candidate.path.absolute().as_os_str().len())
                     .saturating_add(std::mem::size_of::<Candidate>());
                 if charged > CANDIDATE_MEMORY_BYTES {
                     terminal_error = Some(GrepError::CandidateMemory);
@@ -284,12 +316,10 @@ fn collect_candidates(
 }
 
 fn candidate(path: ResolvedPath) -> Result<Candidate, GrepError> {
-    let absolute = path
-        .absolute()
+    path.absolute()
         .to_str()
-        .ok_or_else(|| GrepError::Validation("candidate path is not valid Unicode".to_owned()))?
-        .to_owned();
-    Ok(Candidate { path, absolute })
+        .ok_or_else(|| GrepError::Validation("candidate path is not valid Unicode".to_owned()))?;
+    Ok(Candidate { path })
 }
 
 #[derive(Clone, Copy)]
@@ -398,25 +428,31 @@ fn search_file_with_searcher(
         fingerprint: before,
     }) = open_candidate(access, &candidate.path)
     else {
-        return Ok(FileOutcome::skipped(&candidate.absolute));
+        return Ok(FileOutcome::skipped());
     };
     let mut sink = CollectSink::new(matcher, plan, cancellation);
     match searcher.search_reader(matcher, &mut file, &mut sink) {
         Ok(()) => {}
         Err(SearchError::Cancelled) => return Err(GrepError::Cancelled),
         Err(SearchError::CaptureMemory) => return Err(GrepError::CaptureMemory),
-        Err(SearchError::Io) => return Ok(FileOutcome::skipped(&candidate.absolute)),
+        Err(SearchError::Io) => return Ok(FileOutcome::skipped()),
     }
     after_search();
     let after = FileFingerprint::from_file(&file)?;
     let identity = match open_candidate(access, &candidate.path) {
         Ok(identity) => identity.fingerprint,
-        Err(_) => return Ok(FileOutcome::skipped(&candidate.absolute)),
+        Err(_) => return Ok(FileOutcome::skipped()),
     };
     if before != after || before != identity {
-        return Ok(FileOutcome::skipped(&candidate.absolute));
+        return Ok(FileOutcome::skipped());
     }
-    sink.finish(candidate.absolute.clone())
+    let absolute = candidate
+        .path
+        .absolute()
+        .to_str()
+        .expect("candidate Unicode was validated")
+        .to_owned();
+    sink.finish(absolute)
 }
 
 struct OpenedCandidate {
@@ -444,9 +480,9 @@ fn open_candidate(access: &FileAccess, path: &ResolvedPath) -> io::Result<Opened
 }
 
 impl FileOutcome {
-    fn skipped(absolute: &str) -> Self {
+    fn skipped() -> Self {
         Self {
-            absolute: absolute.to_owned(),
+            absolute: String::new(),
             records: Vec::new(),
             entries: 0,
             occurrences: 0,
@@ -495,7 +531,7 @@ impl<'a> CollectSink<'a> {
             matcher,
             plan,
             cancellation,
-            records: Vec::new(),
+            records: Vec::with_capacity(plan.capture_records.min(1_024)),
             entries: 0,
             occurrences: 0,
             matched: false,
@@ -540,7 +576,7 @@ impl<'a> CollectSink<'a> {
             return Err(GrepError::Cancelled);
         }
         if self.binary {
-            return Ok(FileOutcome::skipped(&absolute));
+            return Ok(FileOutcome::skipped());
         }
         self.records.sort_by(|left, right| {
             left.line
