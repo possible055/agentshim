@@ -219,6 +219,16 @@ pub(crate) fn slash_path(path: &Path) -> Option<String> {
     Some(output)
 }
 
+pub(crate) fn display_path(path: &Path) -> String {
+    let mut value = path.to_string_lossy().replace('\\', "/");
+    if let Some(rest) = value.strip_prefix("//?/UNC/") {
+        value = format!("//{rest}");
+    } else if let Some(rest) = value.strip_prefix("//?/") {
+        value = rest.to_string();
+    }
+    value
+}
+
 #[cfg(unix)]
 fn platform_sort_key(path: &Path) -> Vec<u8> {
     use std::os::unix::ffi::OsStrExt;

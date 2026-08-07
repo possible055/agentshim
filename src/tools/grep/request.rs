@@ -78,33 +78,6 @@ pub struct GrepRequest {
     pub limit: Option<usize>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct GrepItem {
-    pub kind: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub line_number: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub matched: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub count: Option<u64>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct GrepResult {
-    pub mode: GrepMode,
-    pub items: Vec<GrepItem>,
-    pub total: usize,
-    pub offset: usize,
-    pub limit: usize,
-    pub next_offset: Option<usize>,
-    pub skipped: usize,
-    pub traversal: TraversalSummary,
-}
-
 impl GrepRequest {
     /// Validate scalar constraints before regex compilation or filesystem I/O.
     ///

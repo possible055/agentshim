@@ -174,13 +174,9 @@ fn modern_lifecycle_serves_a_tool_call_and_shuts_down_at_eof() {
     assert!(read_text.contains("Path: "));
     assert!(read_text.contains("1\tinclude!(\"cli/transport.rs\");"));
     assert!(read_text.ends_with("Complete."));
-    let structured_path = response["result"]["structuredContent"]["path"]
-        .as_str()
-        .expect("structured read path");
-    assert!(std::path::Path::new(structured_path).ends_with("src/main.rs"));
-    assert_eq!(
-        response["result"]["structuredContent"]["lines"][0]["text"],
-        "include!(\"cli/transport.rs\");"
+    assert!(
+        response["result"].get("structuredContent").is_none(),
+        "read success must not emit structured content"
     );
 
     session.close();
@@ -763,6 +759,9 @@ fn default_compatibility_uses_native_legacy_initialize_lifecycle() {
             .expect("read text")
             .contains("1\tinclude!(\"cli/transport.rs\");")
     );
-    assert_eq!(read["result"]["structuredContent"]["lines"][0]["number"], 1);
+    assert!(
+        read["result"].get("structuredContent").is_none(),
+        "legacy read success must not emit structured content"
+    );
     session.close();
 }

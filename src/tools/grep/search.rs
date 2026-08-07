@@ -203,12 +203,7 @@ fn search_file_with_searcher(
     if before != after || before != identity {
         return Ok(FileOutcome::skipped());
     }
-    let absolute = candidate
-        .path
-        .absolute()
-        .to_str()
-        .expect("candidate Unicode was validated")
-        .to_owned();
+    let absolute = crate::path::display_path(candidate.path.absolute());
     sink.finish(absolute)
 }
 

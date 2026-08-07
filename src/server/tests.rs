@@ -60,9 +60,9 @@ mod tests {
         assert_eq!(structured["error"]["retryable"], false);
         assert_eq!(structured["error"]["message"], text.as_str());
         assert_eq!(result.is_error, Some(true));
-        assert!(crate::output::tool_result_fits_budget(text, structured, true));
+        assert!(crate::output::tool_result_fits_budget(text, Some(structured), true));
         assert!(
-            crate::output::tool_result_encoded_len(text, structured, true) <= MODEL_BYTE_LIMIT
+            crate::output::tool_result_encoded_len(text, Some(structured), true) <= MODEL_BYTE_LIMIT
         );
     }
 
@@ -91,18 +91,14 @@ mod tests {
         );
         assert!(crate::output::tool_result_fits_budget(
             &content.text,
-            structured,
+            Some(structured),
             true
         ));
     }
 
     #[test]
-    fn success_response_uses_one_typed_result_for_text_and_structured_content() {
-        let output = crate::tools::ToolOutput::new(
-            "summary".to_owned(),
-            &json!({"path": "src/lib.rs", "complete": true}),
-        )
-        .expect("create output");
+    fn read_success_response_omits_structured_content() {
+        let output = crate::tools::ToolOutput::new("summary".to_owned());
         let CallToolResponse::Complete(result) =
             blocking_response::<crate::tools::read::ReadError>("read", 3, Ok(Ok(output)))
         else {
@@ -113,10 +109,7 @@ mod tests {
             panic!("success response must contain text");
         };
         assert_eq!(content.text, "summary");
-        assert_eq!(
-            result.structured_content,
-            Some(json!({"path": "src/lib.rs", "complete": true}))
-        );
+        assert_eq!(result.structured_content, None);
         assert_eq!(result.is_error, Some(false));
     }
 

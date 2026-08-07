@@ -5,7 +5,7 @@ use std::{
 };
 
 use cap_std::fs::File;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -27,23 +27,6 @@ pub struct ReadRequest {
     pub start_line: Option<usize>,
     pub line_count: Option<usize>,
     pub encoding: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct ReadLine {
-    pub number: usize,
-    pub text: String,
-    pub truncated: bool,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct ReadResult {
-    pub path: String,
-    pub encoding: String,
-    pub start_line: usize,
-    pub lines: Vec<ReadLine>,
-    pub next_start_line: Option<usize>,
-    pub complete: bool,
 }
 
 impl ReadRequest {
@@ -85,6 +68,7 @@ pub enum ReadError {
     #[error(transparent)]
     Path(#[from] PathError),
     #[error("path cannot be represented losslessly in model-visible JSON")]
+    #[allow(dead_code)]
     NonUnicodePath,
     #[error("target is a directory; use glob to list its contents")]
     Directory,
@@ -134,11 +118,7 @@ fn execute_inner(
 ) -> Result<ToolOutput, ReadError> {
     request.validate()?;
     let resolved = access.resolve(Path::new(&request.path))?;
-    let absolute = resolved
-        .absolute()
-        .to_str()
-        .ok_or(ReadError::NonUnicodePath)?
-        .to_owned();
+    let absolute = crate::path::display_path(resolved.absolute());
     match read_once(access, &resolved, &absolute, request, cancellation)? {
         Attempt::Stable(output) => return Ok(output),
         Attempt::Changed => {

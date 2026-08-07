@@ -1,4 +1,14 @@
-use std::{cmp::Ordering, collections::BinaryHeap, io, path::Path, sync::Arc};
+use std::{
+    cmp::Ordering,
+    collections::BinaryHeap,
+    fs,
+    io,
+    path::Path,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    },
+};
 
 use globset::GlobBuilder;
 use serde::{Deserialize, Serialize};
@@ -9,7 +19,9 @@ use crate::{
     path::{FileAccess, PathError, PathSortKey, ResolvedPath},
     sorting,
     tools::ToolOutput,
-    traversal::{TraversalControl, TraversalError, TraversalSummary, walk},
+    traversal::{
+        TraversalControl, TraversalError, TraversalSummary, walk, walk_parallel_batched,
+    },
 };
 
 const DEFAULT_LIMIT: usize = 200;
@@ -18,6 +30,16 @@ const MAX_MATCHES: usize = 100_000;
 const RETAINED_MEMORY_BYTES: usize = 32 * 1024 * 1024;
 const MEMORY_SAFETY_BYTES: usize = 8 * 1024 * 1024;
 const PATH_OMISSION: &str = "[glob path omitted: exceeds output budget]";
+const PARALLEL_BATCH_SIZE: usize = 256;
+const PARALLEL_ROOT_ENTRY_THRESHOLD: usize = 8;
+static ACTIVE_ADAPTIVE_GLOBS: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Copy)]
+pub enum GlobTraversal {
+    Adaptive,
+    Serial,
+    ParallelBatched,
+}
 
 #[must_use]
 pub(crate) fn memory_charge() -> usize {
@@ -32,21 +54,6 @@ pub struct GlobRequest {
     pub include_ignored: Option<bool>,
     pub offset: Option<usize>,
     pub limit: Option<usize>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct GlobItem {
-    pub path: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct GlobResult {
-    pub items: Vec<GlobItem>,
-    pub total: usize,
-    pub offset: usize,
-    pub limit: usize,
-    pub next_offset: Option<usize>,
-    pub skipped: TraversalSummary,
 }
 
 impl GlobRequest {
@@ -125,6 +132,31 @@ fn execute_inner(
     request: &GlobRequest,
     cancellation: &CancellationToken,
 ) -> Result<ToolOutput, GlobError> {
+    execute_inner_with_traversal(
+        access,
+        request,
+        cancellation,
+        GlobTraversal::Adaptive,
+    )
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+pub fn execute_with_traversal(
+    access: &Arc<FileAccess>,
+    request: &GlobRequest,
+    cancellation: &CancellationToken,
+    traversal: GlobTraversal,
+) -> Result<String, GlobError> {
+    execute_inner_with_traversal(access, request, cancellation, traversal)
+        .map(|output| output.text)
+}
+
+fn execute_inner_with_traversal(
+    access: &Arc<FileAccess>,
+    request: &GlobRequest,
+    cancellation: &CancellationToken,
+    traversal: GlobTraversal,
+) -> Result<ToolOutput, GlobError> {
     request.validate()?;
     let matcher = GlobBuilder::new(&request.pattern)
         .literal_separator(true)
@@ -134,48 +166,193 @@ fn execute_inner(
         .compile_matcher();
     let base_input = request.path.as_deref().unwrap_or(".");
     let base = access.resolve(Path::new(base_input))?;
+    let mut activity = None;
+    let traversal = match traversal {
+        GlobTraversal::Adaptive => {
+            let guard = ActiveAdaptiveGlob::enter();
+            let selected = if guard.was_idle && prefer_parallel(access, &base) {
+                GlobTraversal::ParallelBatched
+            } else {
+                GlobTraversal::Serial
+            };
+            activity = Some(guard);
+            selected
+        }
+        selected => selected,
+    };
     let offset = request.offset.unwrap_or(0);
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT);
     let retain = offset.saturating_add(limit).min(MAX_MATCHES);
-    let mut store = TopK::new(retain);
-    let mut total = 0_usize;
-    let mut terminal_error = None;
-    let summary = walk(
-        access,
-        &base,
-        request.include_ignored.unwrap_or(false),
-        cancellation,
-        |entry| {
-            if !matcher.is_match(entry.key) {
-                return TraversalControl::Continue;
-            }
-            if let Err(error) = record_match(&mut total) {
-                terminal_error = Some(error);
-                return TraversalControl::Stop;
-            }
-            let path = match access.resolve_traversal_entry(&base, entry.absolute) {
-                Ok(path) => path,
-                Err(error) => {
-                    terminal_error = Some(error.into());
-                    return TraversalControl::Stop;
-                }
-            };
-            if let Err(error) = store.admit(&path) {
-                terminal_error = Some(error);
-                return TraversalControl::Stop;
-            }
-            TraversalControl::Continue
-        },
-    )?;
-    if let Some(error) = terminal_error {
+    let collection = GlobCollection {
+        store: TopK::new(retain),
+        total: 0,
+        terminal_error: None,
+    };
+    let (collection, summary) = match traversal {
+        GlobTraversal::Adaptive => unreachable!("adaptive traversal was resolved"),
+        GlobTraversal::Serial => collect_serial(
+            access,
+            &base,
+            request.include_ignored.unwrap_or(false),
+            cancellation,
+            &matcher,
+            collection,
+        )?,
+        GlobTraversal::ParallelBatched => collect_parallel(
+            access,
+            &base,
+            request.include_ignored.unwrap_or(false),
+            cancellation,
+            &matcher,
+            collection,
+        )?,
+    };
+    if let Some(error) = collection.terminal_error {
         return Err(error);
     }
     let skipped = summary.io_errors + summary.escaped_entries + summary.non_unicode_entries;
     if skipped > 0 {
         tracing::warn!(target: "codexshim", event = "traversal_skipped", phase = "execution", outcome = "degraded_success", counters = %format!("io_errors={},escaped_entries={},non_unicode_entries={}", summary.io_errors, summary.escaped_entries, summary.non_unicode_entries));
     }
-    let retained = store.into_sorted(cancellation)?;
-    render(request, &retained, total, summary, cancellation)
+    let retained = collection.store.into_sorted(cancellation)?;
+    let result = render(request, &retained, collection.total, summary, cancellation);
+    drop(activity);
+    result
+}
+
+fn prefer_parallel(access: &FileAccess, base: &ResolvedPath) -> bool {
+    if access.root().verify().is_err()
+        || (base.is_ambient()
+            && access
+                .symlink_metadata_kind(base)
+                .is_ok_and(|kind| kind.is_symlink))
+        || !access.metadata_kind(base).is_ok_and(|kind| kind.is_dir)
+    {
+        return false;
+    }
+    fs::read_dir(base.absolute()).is_ok_and(|entries| {
+        entries.take(PARALLEL_ROOT_ENTRY_THRESHOLD).count()
+            >= PARALLEL_ROOT_ENTRY_THRESHOLD
+    })
+}
+
+struct ActiveAdaptiveGlob {
+    was_idle: bool,
+}
+
+impl ActiveAdaptiveGlob {
+    fn enter() -> Self {
+        Self {
+            was_idle: ACTIVE_ADAPTIVE_GLOBS.fetch_add(1, AtomicOrdering::AcqRel) == 0,
+        }
+    }
+}
+
+impl Drop for ActiveAdaptiveGlob {
+    fn drop(&mut self) {
+        ACTIVE_ADAPTIVE_GLOBS.fetch_sub(1, AtomicOrdering::AcqRel);
+    }
+}
+
+struct GlobCollection {
+    store: TopK,
+    total: usize,
+    terminal_error: Option<GlobError>,
+}
+
+fn collect_serial(
+    access: &FileAccess,
+    base: &ResolvedPath,
+    include_ignored: bool,
+    cancellation: &CancellationToken,
+    matcher: &globset::GlobMatcher,
+    mut collection: GlobCollection,
+) -> Result<(GlobCollection, TraversalSummary), GlobError> {
+    let summary = walk(
+        access,
+        base,
+        include_ignored,
+        cancellation,
+        |entry| {
+            if !matcher.is_match(entry.key) {
+                return TraversalControl::Continue;
+            }
+            if let Err(error) = record_match(&mut collection.total) {
+                collection.terminal_error = Some(error);
+                return TraversalControl::Stop;
+            }
+            let path = match access.resolve_traversal_entry(base, entry.absolute) {
+                Ok(path) => path,
+                Err(error) => {
+                    collection.terminal_error = Some(error.into());
+                    return TraversalControl::Stop;
+                }
+            };
+            if let Err(error) = collection.store.admit(&path) {
+                collection.terminal_error = Some(error);
+                return TraversalControl::Stop;
+            }
+            TraversalControl::Continue
+        },
+    )?;
+    Ok((collection, summary))
+}
+
+fn collect_parallel(
+    access: &FileAccess,
+    base: &ResolvedPath,
+    include_ignored: bool,
+    cancellation: &CancellationToken,
+    matcher: &globset::GlobMatcher,
+    collection: GlobCollection,
+) -> Result<(GlobCollection, TraversalSummary), GlobError> {
+    let collection = Mutex::new(collection);
+    let summary = walk_parallel_batched(
+        access,
+        base,
+        include_ignored,
+        cancellation,
+        PARALLEL_BATCH_SIZE,
+        |batch| {
+            let mut found = Vec::new();
+            for entry in batch {
+                if !matcher.is_match(&entry.key) {
+                    continue;
+                }
+                match access.resolve_traversal_entry(base, &entry.absolute) {
+                    Ok(path) => found.push(path),
+                    Err(error) => {
+                        collection
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .terminal_error = Some(error.into());
+                        return TraversalControl::Stop;
+                    }
+                }
+            }
+            let mut collection = collection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if collection.terminal_error.is_some() {
+                return TraversalControl::Stop;
+            }
+            for path in found {
+                if let Err(error) = record_match(&mut collection.total) {
+                    collection.terminal_error = Some(error);
+                    return TraversalControl::Stop;
+                }
+                if let Err(error) = collection.store.admit(&path) {
+                    collection.terminal_error = Some(error);
+                    return TraversalControl::Stop;
+                }
+            }
+            TraversalControl::Continue
+        },
+    )?;
+    let collection = collection
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Ok((collection, summary))
 }
 
 fn record_match(total: &mut usize) -> Result<(), GlobError> {

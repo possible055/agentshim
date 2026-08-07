@@ -35,7 +35,7 @@ fn bounded_error_payload(
 ) -> (String, Value) {
     let bounded = bounded_diagnostic(message);
     let structured = error_structure(code, retryable, &bounded, details);
-    if crate::output::tool_result_fits_budget(&bounded, &structured, true) {
+    if crate::output::tool_result_fits_budget(&bounded, Some(&structured), true) {
         return (bounded, structured);
     }
     let marker = "...[truncated]";
@@ -52,7 +52,7 @@ fn bounded_error_payload(
         let end = boundaries[midpoint];
         let candidate = format!("{}{marker}", &bounded[..end]);
         let structured = error_structure(code, retryable, &candidate, details);
-        if crate::output::tool_result_fits_budget(&candidate, &structured, true) {
+        if crate::output::tool_result_fits_budget(&candidate, Some(&structured), true) {
             best = candidate;
             low = midpoint + 1;
         } else {
@@ -60,13 +60,13 @@ fn bounded_error_payload(
         }
     }
     let structured = error_structure(code, retryable, &best, details);
-    if crate::output::tool_result_fits_budget(&best, &structured, true) {
+    if crate::output::tool_result_fits_budget(&best, Some(&structured), true) {
         return (best, structured);
     }
     let structured = error_structure(code, retryable, marker, None);
     debug_assert!(crate::output::tool_result_fits_budget(
         marker,
-        &structured,
+        Some(&structured),
         true
     ));
     (marker.to_owned(), structured)
@@ -230,7 +230,7 @@ fn blocking_response<E: DiagnosticError>(
                 tracing::info!(target: "codexshim", event = "tool_complete", phase = "response", outcome, run_ms);
             }
             let mut result = CallToolResult::success(vec![ContentBlock::text(output.text)]);
-            result.structured_content = Some(output.structured);
+            result.structured_content = output.structured;
             result.into()
         }
         Ok(Err(error)) => {
@@ -363,7 +363,6 @@ fn read_tool(read_scope: ReadScope) -> Tool {
             "required": ["path"]
         })),
     )
-    .with_raw_output_schema(read_output_schema())
     .with_annotations(read_only_annotations())
 }
 
@@ -434,7 +433,6 @@ fn grep_tool(read_scope: ReadScope) -> Tool {
             "required": ["pattern"]
         })),
     )
-    .with_raw_output_schema(grep_output_schema())
     .with_annotations(read_only_annotations())
 }
 
@@ -487,7 +485,6 @@ fn glob_tool(read_scope: ReadScope) -> Tool {
             "required": ["pattern"]
         })),
     )
-    .with_raw_output_schema(glob_output_schema())
     .with_annotations(read_only_annotations())
 }
 
@@ -556,77 +553,6 @@ fn schema(value: Value) -> Arc<JsonObject> {
         panic!("tool schema must be an object");
     };
     Arc::new(object)
-}
-
-fn page_schema(item: &Value) -> Arc<JsonObject> {
-    schema(json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "items": { "type": "array", "items": item },
-            "total": { "type": "integer", "minimum": 0 },
-            "offset": { "type": "integer", "minimum": 0 },
-            "limit": { "type": "integer", "minimum": 1 },
-            "next_offset": { "type": ["integer", "null"], "minimum": 0 },
-            "skipped": { "type": ["integer", "object"] }
-        },
-        "required": ["items", "total", "offset", "limit", "next_offset", "skipped"]
-    }))
-}
-
-fn read_output_schema() -> Arc<JsonObject> {
-    schema(json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "path": { "type": "string" },
-            "encoding": { "type": "string" },
-            "start_line": { "type": "integer", "minimum": 1 },
-            "lines": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                        "number": { "type": "integer", "minimum": 1 },
-                        "text": { "type": "string" },
-                        "truncated": { "type": "boolean" }
-                    },
-                    "required": ["number", "text", "truncated"]
-                }
-            },
-            "next_start_line": { "type": ["integer", "null"], "minimum": 1 },
-            "complete": { "type": "boolean" }
-        },
-        "required": ["path", "encoding", "start_line", "lines", "next_start_line", "complete"]
-    }))
-}
-
-fn glob_output_schema() -> Arc<JsonObject> {
-    page_schema(&json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": { "path": { "type": "string" } },
-        "required": ["path"]
-    }))
-}
-
-fn grep_output_schema() -> Arc<JsonObject> {
-    let mut output = (*page_schema(&json!({ "type": "object" }))).clone();
-    output.insert("properties".to_owned(), json!({
-        "mode": { "type": "string", "enum": ["content", "files", "count"] },
-        "items": { "type": "array", "items": { "type": "object" } },
-        "total": { "type": "integer", "minimum": 0 },
-        "offset": { "type": "integer", "minimum": 0 },
-        "limit": { "type": "integer", "minimum": 1 },
-        "next_offset": { "type": ["integer", "null"], "minimum": 0 },
-        "skipped": { "type": "integer", "minimum": 0 },
-        "traversal": { "type": "object" }
-    }));
-    output.insert("required".to_owned(), json!([
-        "mode", "items", "total", "offset", "limit", "next_offset", "skipped", "traversal"
-    ]));
-    Arc::new(output)
 }
 
 fn process_output_schema() -> Arc<JsonObject> {

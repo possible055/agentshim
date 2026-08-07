@@ -38,11 +38,7 @@ impl TopK {
         if self.capacity == 0 {
             return Ok(());
         }
-        let absolute = path
-            .absolute()
-            .to_str()
-            .ok_or_else(|| GlobError::Validation("matched path is not valid Unicode".to_owned()))?
-            .to_owned();
+        let absolute = crate::path::display_path(path.absolute());
         let charge = absolute
             .len()
             .saturating_add(path.key().as_os_str().len())
@@ -115,39 +111,23 @@ fn render(
             || "Complete.".to_owned(),
             |next| format!("Partial: next_offset={next}."),
         ));
-        let mut formatter = OutputFormatter::new(
-            format!("Pattern: {}", request.pattern),
-            tail,
-            OutputLimits::default(),
-        )?;
-        let mut items = Vec::with_capacity(cap);
+        let mut formatter = OutputFormatter::new(String::new(), tail, OutputLimits::default())?;
+        let mut shown = 0_usize;
         for matched in retained.iter().skip(offset).take(cap) {
             if formatter.try_push_line(&matched.absolute, cancellation)? {
-                items.push(GlobItem {
-                    path: matched.absolute.clone(),
-                });
+                shown += 1;
                 continue;
             }
-            if items.is_empty() && formatter.try_push_line(PATH_OMISSION, cancellation)? {
-                items.push(GlobItem {
-                    path: PATH_OMISSION.to_owned(),
-                });
+            if shown == 0 && formatter.try_push_line(PATH_OMISSION, cancellation)? {
+                shown += 1;
             }
             break;
         }
-        if items.len() < cap {
-            cap = items.len();
+        if shown < cap {
+            cap = shown;
             continue;
         }
-        let result = GlobResult {
-            items,
-            total,
-            offset,
-            limit,
-            next_offset,
-            skipped: summary,
-        };
-        let output = ToolOutput::new(formatter.finish(cancellation)?, &result)?;
+        let output = ToolOutput::new(formatter.finish(cancellation)?);
         if output.fits_budget() {
             return Ok(output);
         }

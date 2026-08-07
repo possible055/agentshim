@@ -1,7 +1,7 @@
 pub use crate::path::{FileAccess, ReadScope, RepositoryRoot};
 
 pub mod glob {
-    pub use crate::tools::glob::{GlobRequest, execute};
+    pub use crate::tools::glob::{GlobRequest, GlobTraversal, execute, execute_with_traversal};
 }
 
 pub mod grep {

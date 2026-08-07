@@ -10,7 +10,8 @@ const DIAGNOSTIC_TRUNCATION_MARKER: &str = "\n...[diagnostic truncated]";
 struct CompleteToolResult<'a> {
     result_type: &'static str,
     content: [TextContent<'a>; 1],
-    structured_content: &'a Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    structured_content: Option<&'a Value>,
     is_error: bool,
 }
 
@@ -20,7 +21,11 @@ struct TextContent<'a> {
     text: &'a str,
 }
 
-pub(crate) fn tool_result_encoded_len(text: &str, structured: &Value, is_error: bool) -> usize {
+pub(crate) fn tool_result_encoded_len(
+    text: &str,
+    structured: Option<&Value>,
+    is_error: bool,
+) -> usize {
     let result = CompleteToolResult {
         result_type: "complete",
         content: [TextContent {
@@ -33,7 +38,11 @@ pub(crate) fn tool_result_encoded_len(text: &str, structured: &Value, is_error: 
     serde_json::to_vec(&result).map_or(usize::MAX, |encoded| encoded.len())
 }
 
-pub(crate) fn tool_result_fits_budget(text: &str, structured: &Value, is_error: bool) -> bool {
+pub(crate) fn tool_result_fits_budget(
+    text: &str,
+    structured: Option<&Value>,
+    is_error: bool,
+) -> bool {
     tool_result_encoded_len(text, structured, is_error) <= MODEL_BYTE_LIMIT
 }
 
@@ -102,12 +111,15 @@ impl OutputFormatter {
             return Err(OutputError::Cancelled);
         }
         let line = line.as_ref();
-        let bytes = line.len().saturating_add(1);
+        let separator = !self.output.is_empty();
+        let bytes = line.len().saturating_add(usize::from(separator));
         if self.bytes.saturating_add(bytes) > self.limits.bytes {
             return Ok(false);
         }
         self.bytes += bytes;
-        self.output.push('\n');
+        if separator {
+            self.output.push('\n');
+        }
         self.output.push_str(line);
         Ok(true)
     }
@@ -251,7 +263,7 @@ mod tests {
     fn tool_result_budget_counts_json_escaping_and_complete_result_fields() {
         let text = "\\\"\u{1}".repeat(1_000);
         let structured = json!({ "text": text });
-        let encoded = tool_result_encoded_len(&text, &structured, false);
+        let encoded = tool_result_encoded_len(&text, Some(&structured), false);
         assert!(encoded > text.len() + serde_json::to_vec(&structured).unwrap().len());
         assert_eq!(
             encoded,

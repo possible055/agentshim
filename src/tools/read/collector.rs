@@ -141,25 +141,7 @@ fn render(
             cap = shown;
             continue;
         }
-        let lines = collector
-            .candidates
-            .iter()
-            .take(cap)
-            .map(|line| ReadLine {
-                number: line.number,
-                text: line.prefix.trim_end_matches('\r').to_owned(),
-                truncated: line.truncated,
-            })
-            .collect::<Vec<_>>();
-        let result = ReadResult {
-            path: absolute.to_owned(),
-            encoding: source_encoding.name().to_owned(),
-            start_line: collector.start,
-            lines,
-            next_start_line,
-            complete: next_start_line.is_none(),
-        };
-        let output = ToolOutput::new(formatter.finish(cancellation)?, &result)?;
+        let output = ToolOutput::new(formatter.finish(cancellation)?);
         if output.fits_budget() {
             let _ = request;
             return Ok(output);

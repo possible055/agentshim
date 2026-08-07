@@ -6,8 +6,8 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        GlobError, GlobMatch, GlobRequest, MAX_MATCHES, PATH_OMISSION, TopK, execute,
-        memory_charge, record_match, render,
+        GlobError, GlobMatch, GlobRequest, GlobTraversal, MAX_MATCHES, PATH_OMISSION, TopK,
+        execute, execute_with_traversal, memory_charge, prefer_parallel, record_match, render,
     };
     use crate::{
         path::{FileAccess, ReadScope, RepositoryRoot, slash_path},
@@ -59,6 +59,22 @@ mod tests {
     }
 
     #[test]
+    fn glob_output_matches_cli_shape_without_pattern_header() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        fs::write(fixture.path().join("a.rs"), "a").expect("a");
+        fs::write(fixture.path().join("b.rs"), "b").expect("b");
+        let root = access(fixture.path());
+        let mut query = request("*.rs");
+        query.limit = Some(100);
+        let output = execute(&root, &query, &CancellationToken::new()).expect("glob");
+        assert!(!output.contains("Pattern:"));
+        assert!(output.starts_with(&crate::path::display_path(
+            root.resolve(std::path::Path::new("a.rs")).expect("a").absolute()
+        )));
+        assert!(output.ends_with("Complete."));
+    }
+
+    #[test]
     fn dense_glob_matches_native_paths_without_prebuilt_slash_strings() {
         let fixture = tempfile::tempdir().expect("fixture");
         fs::create_dir_all(fixture.path().join("src/nested")).expect("directories");
@@ -71,8 +87,61 @@ mod tests {
         let output = execute(&root, &query, &CancellationToken::new()).expect("dense glob");
         for path in ["top.rs", "src/lib.rs", "src/nested/Unicode 界.rs"] {
             let absolute = root.resolve(Path::new(path)).expect("resolved path");
-            assert!(output.contains(&absolute.absolute().to_string_lossy().into_owned()));
+            assert!(output.contains(&crate::path::display_path(absolute.absolute())));
         }
+    }
+
+    #[test]
+    fn parallel_batched_glob_matches_serial_output() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        fs::write(fixture.path().join(".gitignore"), "ignored/**\n").expect("ignore");
+        fs::create_dir_all(fixture.path().join("src/deep")).expect("source directories");
+        fs::create_dir_all(fixture.path().join("ignored")).expect("ignored directory");
+        for index in (0..513).rev() {
+            let directory = if index % 2 == 0 { "src" } else { "src/deep" };
+            fs::write(
+                fixture
+                    .path()
+                    .join(directory)
+                    .join(format!("file-{index:04}.rs")),
+                "source",
+            )
+            .expect("source");
+        }
+        fs::write(fixture.path().join("ignored/hidden.rs"), "ignored").expect("ignored");
+        let root = access(fixture.path());
+        let mut query = request("**/*.rs");
+        query.offset = Some(137);
+        query.limit = Some(71);
+        let cancellation = CancellationToken::new();
+        let serial = execute_with_traversal(
+            &root,
+            &query,
+            &cancellation,
+            GlobTraversal::Serial,
+        )
+        .expect("serial glob");
+        let parallel = execute_with_traversal(
+            &root,
+            &query,
+            &cancellation,
+            GlobTraversal::ParallelBatched,
+        )
+        .expect("parallel glob");
+        assert_eq!(parallel, serial);
+    }
+
+    #[test]
+    fn adaptive_selector_keeps_small_roots_serial_and_sharded_roots_parallel() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root = access(fixture.path());
+        let base = root.resolve(Path::new(".")).expect("base");
+        for index in 0..7 {
+            fs::create_dir(fixture.path().join(format!("shard-{index}"))).expect("small shard");
+        }
+        assert!(!prefer_parallel(&root, &base));
+        fs::create_dir(fixture.path().join("shard-7")).expect("parallel shard");
+        assert!(prefer_parallel(&root, &base));
     }
 
     #[test]

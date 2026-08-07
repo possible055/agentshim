@@ -2,7 +2,7 @@ use std::{ffi::OsString, fs, path::Path, sync::Arc, time::Instant};
 
 use codexshim::bench_support::{
     FileAccess, ReadScope, RepositoryRoot,
-    glob::{self, GlobRequest},
+    glob::{self, GlobRequest, GlobTraversal},
     grep::{self, GrepMode, GrepRequest},
     read::{self, ReadRequest},
 };
@@ -14,6 +14,7 @@ const CONCURRENCY_LEVELS: [usize; 3] = [1, 4, 8];
 const GREP_LANES: [usize; 5] = [1, 2, 4, 8, 16];
 const BENCH_SCALES_ENV: &str = "CODEXSHIM_BENCH_SCALES";
 const BENCH_QUICK_ENV: &str = "CODEXSHIM_BENCH_QUICK";
+const GLOB_VARIANTS_ONLY_ENV: &str = "CODEXSHIM_BENCH_GLOB_VARIANTS_ONLY";
 const GLOB_P95_ENV: &str = "CODEXSHIM_BENCH_MAX_GLOB_P95_MS_PER_1K";
 const GREP_P95_ENV: &str = "CODEXSHIM_BENCH_MAX_GREP_P95_MS_PER_1K";
 const READ_P95_ENV: &str = "CODEXSHIM_BENCH_MAX_READ_P95_MS";
@@ -39,8 +40,8 @@ fn fixture_scales() -> Vec<usize> {
     assert!(
         scales
             .iter()
-            .all(|scale| matches!(*scale, 1_000 | 100_000 | 1_000_000)),
-        "{BENCH_SCALES_ENV} accepts only 1000,100000,1000000"
+            .all(|scale| matches!(*scale, 1_000 | 10_000 | 100_000 | 1_000_000)),
+        "{BENCH_SCALES_ENV} accepts only 1000,10000,100000,1000000"
     );
     scales
 }
@@ -119,20 +120,30 @@ fn benchmark_tools(
     read_path: &str,
 ) {
     let cancellation = CancellationToken::new();
-    measure(scope, "glob", files, || {
-        glob::execute(
-            access,
-            &GlobRequest {
-                pattern: "**/*.rs".to_owned(),
-                path: Some(directory.to_owned()),
-                include_ignored: None,
-                offset: None,
-                limit: Some(1_000),
-            },
-            &cancellation,
-        )
-        .expect("glob benchmark")
-    });
+    for (operation, traversal) in [
+        ("glob_serial", GlobTraversal::Serial),
+        ("glob_parallel_256", GlobTraversal::ParallelBatched),
+        ("glob_adaptive", GlobTraversal::Adaptive),
+    ] {
+        measure(scope, operation, files, || {
+            glob::execute_with_traversal(
+                access,
+                &GlobRequest {
+                    pattern: "**/*.rs".to_owned(),
+                    path: Some(directory.to_owned()),
+                    include_ignored: None,
+                    offset: None,
+                    limit: Some(1_000),
+                },
+                &cancellation,
+                traversal,
+            )
+            .expect("glob benchmark")
+        });
+    }
+    if std::env::var_os(GLOB_VARIANTS_ONLY_ENV).is_some_and(|value| value == "1") {
+        return;
+    }
     for &lanes in grep_lanes() {
         measure(scope, &format!("grep_lanes_{lanes}"), files, || {
             grep::execute(
@@ -254,7 +265,7 @@ fn p95_limit(operation: &str, files: usize) -> f64 {
         return configured_limit(READ_P95_ENV, 10.0);
     }
     let scale = files.div_ceil(1_000) as f64;
-    if operation == "glob" {
+    if operation.starts_with("glob") {
         return configured_limit(GLOB_P95_ENV, 250.0) * scale;
     }
     if operation.starts_with("grep_lanes_") {

@@ -46,8 +46,8 @@ mod tests {
         (fixture, root)
     }
 
-    fn native_path(path: &str) -> String {
-        path.replace('/', std::path::MAIN_SEPARATOR_STR)
+    fn display_subpath(path: &str) -> String {
+        path.to_owned()
     }
 
     #[test]
@@ -59,7 +59,7 @@ mod tests {
         query.context_lines = Some(1);
         let cancellation = CancellationToken::new();
         let baseline = execute(&root, &query, 1, &cancellation).expect("grep");
-        assert!(baseline.contains(&native_path("src/a.rs")));
+        assert!(baseline.contains(&display_subpath("src/a.rs")));
         assert!(baseline.contains("-1-before"));
         assert!(!baseline.contains("ignored.rs"));
         for workers in [2, 4, 8, 16] {
@@ -78,8 +78,8 @@ mod tests {
         query.fixed_strings = Some(true);
         let cancellation = CancellationToken::new();
         let baseline = execute(&root, &query, 1, &cancellation).expect("grep without glob");
-        assert!(baseline.contains(&native_path("src/a.rs")));
-        assert!(baseline.contains(&native_path("src/b.rs")));
+        assert!(baseline.contains(&display_subpath("src/a.rs")));
+        assert!(baseline.contains(&display_subpath("src/b.rs")));
         assert!(!baseline.contains("ignored.rs"));
         for workers in [2, 4, 8, 16] {
             assert_eq!(
@@ -97,14 +97,32 @@ mod tests {
         files.mode = Some(GrepMode::Files);
         files.limit = Some(1);
         let output = execute(&root, &files, 4, &cancellation).expect("files");
-        assert!(output.contains(&native_path("src/a.rs")));
+        assert!(output.contains(&display_subpath("src/a.rs")));
         assert!(output.contains("next_offset=1"));
 
         let mut count = request("needle");
         count.mode = Some(GrepMode::Count);
         let output = execute(&root, &count, 4, &cancellation).expect("count");
-        assert!(output.contains(&format!("{}:2", native_path("src/a.rs"))));
-        assert!(output.contains(&format!("{}:2", native_path("src/b.rs"))));
+        assert!(output.contains(&format!("{}:2", display_subpath("src/a.rs"))));
+        assert!(output.contains(&format!("{}:2", display_subpath("src/b.rs"))));
+    }
+
+    #[test]
+    fn files_mode_output_matches_cli_shape_without_pattern_header() {
+        let (_fixture, root) = fixture();
+        let cancellation = CancellationToken::new();
+        let mut files = request("needle");
+        files.mode = Some(GrepMode::Files);
+        files.fixed_strings = Some(true);
+        let output = execute(&root, &files, 1, &cancellation).expect("files");
+        let first = crate::path::display_path(
+            root.resolve(Path::new("src/a.rs"))
+                .expect("first result")
+                .absolute(),
+        );
+        assert!(!output.contains("Pattern:"));
+        assert!(output.starts_with(&first));
+        assert!(output.ends_with("Complete."));
     }
 
     #[test]
@@ -140,7 +158,7 @@ mod tests {
 
         let output =
             execute(&root, &request("needle"), 4, &CancellationToken::new()).expect("bounded grep");
-        assert!(output.contains(&native_path("src/large.rs")));
+        assert!(output.contains(&display_subpath("src/large.rs")));
         assert!(output.contains("Skipped: 1"));
     }
 
@@ -256,7 +274,7 @@ mod tests {
         page.reduce(stable_outcome, GrepMode::Content, false)
             .expect("reduce stable");
         let output = render(&query, &page, &cancellation).expect("render");
-        assert!(output.contains(&native_path("src/b.rs")));
+        assert!(output.contains(&display_subpath("src/b.rs")));
         assert!(!output.contains("replacement without"));
         assert!(output.contains("Skipped: 1 files or entries."));
     }

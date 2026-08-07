@@ -1,6 +1,14 @@
-use std::{borrow::Cow, io, path::Path};
+use std::{
+    borrow::Cow,
+    io,
+    path::{Path, PathBuf},
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+};
 
-use ignore::{DirEntry, WalkBuilder};
+use ignore::{DirEntry, WalkBuilder, WalkState};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
@@ -46,6 +54,12 @@ pub struct TraversalEntry<'a> {
     pub key: &'a Path,
     pub absolute: &'a Path,
     pub file_type: Option<std::fs::FileType>,
+}
+
+#[derive(Clone, Debug)]
+pub struct OwnedTraversalEntry {
+    pub key: PathBuf,
+    pub absolute: PathBuf,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -123,6 +137,161 @@ pub fn walk(
     Ok(summary)
 }
 
+/// Traverse one admitted directory with parallel workers and bounded batches.
+///
+/// # Errors
+///
+/// Returns an error when the root is unavailable, the base is not a directory,
+/// or cancellation is requested.
+pub fn walk_parallel_batched(
+    access: &FileAccess,
+    base: &ResolvedPath,
+    include_ignored: bool,
+    cancellation: &CancellationToken,
+    batch_size: usize,
+    visitor: impl Fn(&[OwnedTraversalEntry]) -> TraversalControl + Send + Sync,
+) -> Result<TraversalSummary, TraversalError> {
+    access.root().verify()?;
+    if base.is_ambient() && access.symlink_metadata_kind(base)?.is_symlink {
+        return Err(TraversalError::NotDirectory);
+    }
+    if !access.metadata_kind(base)?.is_dir {
+        return Err(TraversalError::NotDirectory);
+    }
+    if cancellation.is_cancelled() {
+        return Err(TraversalError::Cancelled);
+    }
+
+    let mut builder = WalkBuilder::new(base.absolute());
+    builder.follow_links(false).hidden(false).require_git(false);
+    if include_ignored {
+        builder.standard_filters(false).hidden(false);
+    } else {
+        builder
+            .standard_filters(true)
+            .hidden(false)
+            .require_git(false);
+    }
+    builder.filter_entry(|entry| entry.depth() == 0 || !is_git_entry(entry));
+
+    let summary = AtomicTraversalSummary::default();
+    let stopped = AtomicBool::new(false);
+    let cancelled = AtomicBool::new(false);
+    let remainders = Mutex::new(Vec::new());
+    let batch_size = batch_size.max(1);
+    builder.build_parallel().run(|| {
+        let summary = &summary;
+        let stopped = &stopped;
+        let cancelled = &cancelled;
+        let visitor = &visitor;
+        let mut pending = PendingBatch::new(batch_size, &remainders);
+        Box::new(move |result| {
+            if stopped.load(Ordering::Relaxed) {
+                return WalkState::Quit;
+            }
+            if cancellation.is_cancelled() {
+                cancelled.store(true, Ordering::Relaxed);
+                stopped.store(true, Ordering::Relaxed);
+                return WalkState::Quit;
+            }
+            let Ok(entry) = result else {
+                summary.io_errors.fetch_add(1, Ordering::Relaxed);
+                return WalkState::Continue;
+            };
+            if entry.depth() == 0 {
+                return WalkState::Continue;
+            }
+            let key = if let Ok(key) = walked_key(access, base, entry.path()) {
+                key.into_owned()
+            } else {
+                summary.escaped_entries.fetch_add(1, Ordering::Relaxed);
+                return WalkState::Continue;
+            };
+            if key.to_str().is_none() {
+                summary.non_unicode_entries.fetch_add(1, Ordering::Relaxed);
+                return WalkState::Continue;
+            }
+            pending.entries.push(OwnedTraversalEntry {
+                key,
+                absolute: entry.path().to_path_buf(),
+            });
+            if pending.entries.len() < pending.capacity {
+                return WalkState::Continue;
+            }
+            if visitor(&pending.take()) == TraversalControl::Stop {
+                stopped.store(true, Ordering::Relaxed);
+                WalkState::Quit
+            } else {
+                WalkState::Continue
+            }
+        })
+    });
+
+    if cancelled.load(Ordering::Relaxed) || cancellation.is_cancelled() {
+        return Err(TraversalError::Cancelled);
+    }
+    if !stopped.load(Ordering::Relaxed) {
+        let remainders = remainders
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for batch in remainders {
+            if visitor(&batch) == TraversalControl::Stop {
+                break;
+            }
+        }
+    }
+    Ok(summary.snapshot())
+}
+
+#[derive(Default)]
+struct AtomicTraversalSummary {
+    io_errors: AtomicUsize,
+    escaped_entries: AtomicUsize,
+    non_unicode_entries: AtomicUsize,
+}
+
+impl AtomicTraversalSummary {
+    fn snapshot(&self) -> TraversalSummary {
+        TraversalSummary {
+            io_errors: self.io_errors.load(Ordering::Relaxed),
+            escaped_entries: self.escaped_entries.load(Ordering::Relaxed),
+            non_unicode_entries: self.non_unicode_entries.load(Ordering::Relaxed),
+        }
+    }
+}
+
+struct PendingBatch<'a> {
+    entries: Vec<OwnedTraversalEntry>,
+    capacity: usize,
+    remainders: &'a Mutex<Vec<Vec<OwnedTraversalEntry>>>,
+}
+
+impl<'a> PendingBatch<'a> {
+    fn new(capacity: usize, remainders: &'a Mutex<Vec<Vec<OwnedTraversalEntry>>>) -> Self {
+        Self {
+            entries: Vec::with_capacity(capacity),
+            capacity,
+            remainders,
+        }
+    }
+
+    fn take(&mut self) -> Vec<OwnedTraversalEntry> {
+        std::mem::replace(&mut self.entries, Vec::with_capacity(self.capacity))
+    }
+}
+
+impl Drop for PendingBatch<'_> {
+    fn drop(&mut self) {
+        if self.entries.is_empty() {
+            return;
+        }
+        self.remainders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(std::mem::take(&mut self.entries));
+    }
+}
+
 fn walked_key<'path>(
     access: &FileAccess,
     base: &ResolvedPath,
@@ -160,11 +329,15 @@ fn is_git_entry(entry: &DirEntry) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path, sync::Arc};
+    use std::{
+        fs,
+        path::Path,
+        sync::{Arc, Mutex},
+    };
 
     use tokio_util::sync::CancellationToken;
 
-    use super::{TraversalControl, walk};
+    use super::{TraversalControl, walk, walk_parallel_batched};
     use crate::path::{FileAccess, ReadScope, RepositoryRoot};
 
     fn access(path: &Path) -> FileAccess {
@@ -199,6 +372,47 @@ mod tests {
     }
 
     #[test]
+    fn parallel_batches_match_serial_policy_and_summary() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        fs::write(fixture.path().join(".gitignore"), "ignored/**\n").expect("ignore");
+        fs::create_dir_all(fixture.path().join("src/deep")).expect("source directories");
+        fs::create_dir_all(fixture.path().join("ignored")).expect("ignored directory");
+        fs::create_dir_all(fixture.path().join(".git")).expect("git directory");
+        for path in [
+            "src/a.rs",
+            "src/deep/Unicode 界.rs",
+            ".hidden.rs",
+            "ignored/ignored.rs",
+            ".git/internal.rs",
+        ] {
+            fs::write(fixture.path().join(path), "source").expect("fixture file");
+        }
+        let root = access(fixture.path());
+        let base = root.resolve(Path::new(".")).expect("base");
+        let mut serial = Vec::new();
+        let serial_summary = walk(&root, &base, false, &CancellationToken::new(), |entry| {
+            serial.push(entry.key.to_path_buf());
+            TraversalControl::Continue
+        })
+        .expect("serial walk");
+        let parallel = Mutex::new(Vec::new());
+        let parallel_summary =
+            walk_parallel_batched(&root, &base, false, &CancellationToken::new(), 2, |batch| {
+                parallel
+                    .lock()
+                    .expect("parallel results")
+                    .extend(batch.iter().map(|entry| entry.key.clone()));
+                TraversalControl::Continue
+            })
+            .expect("parallel walk");
+        let mut parallel = parallel.into_inner().expect("parallel results");
+        serial.sort();
+        parallel.sort();
+        assert_eq!(parallel, serial);
+        assert_eq!(parallel_summary, serial_summary);
+    }
+
+    #[test]
     fn cancellation_stops_before_enumeration() {
         let fixture = tempfile::tempdir().expect("fixture");
         let root = access(fixture.path());
@@ -207,6 +421,12 @@ mod tests {
         cancellation.cancel();
         assert!(
             walk(&root, &base, false, &cancellation, |_| {
+                TraversalControl::Continue
+            })
+            .is_err()
+        );
+        assert!(
+            walk_parallel_batched(&root, &base, false, &cancellation, 2, |_| {
                 TraversalControl::Continue
             })
             .is_err()
