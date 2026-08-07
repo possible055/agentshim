@@ -8,6 +8,39 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2.0
 
+function Get-ReplacementFailureMessage {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Destination,
+        [Parameter(Mandatory)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    $exception = $ErrorRecord.Exception
+    $errorCode = $null
+    while ($null -ne $exception) {
+        $candidate = $exception.HResult -band 0xFFFF
+        if ($candidate -in 5, 32, 33, 183) {
+            $errorCode = $candidate
+            break
+        }
+        $exception = $exception.InnerException
+    }
+    $detail = $ErrorRecord.Exception.Message
+    $reason = switch ($errorCode) {
+        5 { "Access was denied while replacing the destination." }
+        32 { "The destination is in use by another process. Stop Codex and any active codexshim process, then retry." }
+        33 { "The destination is locked by another process. Stop Codex and any active codexshim process, then retry." }
+        183 { "A file already exists at the replacement path." }
+        default { "The replacement operation failed." }
+    }
+
+    if ($errorCode -in 5, 32, 33, 183) {
+        return "Could not replace $Destination. $reason Windows error $($errorCode): $detail"
+    }
+    return "Could not replace $Destination. $reason $detail"
+}
+
 if (-not [Environment]::Is64BitOperatingSystem) {
     throw "codexshim requires 64-bit Windows."
 }
@@ -79,32 +112,41 @@ try {
     }
 
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    $destination = Join-Path (Resolve-Path -LiteralPath $InstallDir).Path "codexshim.exe"
-    $staged = Join-Path $InstallDir (".codexshim-" + [guid]::NewGuid().ToString("N") + ".exe")
+    $installPath = (Resolve-Path -LiteralPath $InstallDir).Path
+    $destination = [IO.Path]::GetFullPath((Join-Path $installPath "codexshim.exe"))
+    $staged = [IO.Path]::GetFullPath((Join-Path $installPath (".codexshim-" + [guid]::NewGuid().ToString("N") + ".exe")))
     Copy-Item -LiteralPath $binary[0].FullName -Destination $staged
-    & $staged --version | Out-Null
+    $versionOutput = (& $staged --version | Out-String).Trim()
     if ($LASTEXITCODE -ne 0) {
         throw "The downloaded codexshim executable failed verification."
+    }
+    if (-not $versionOutput) {
+        throw "The downloaded codexshim executable did not report a version."
     }
 
     $backup = "$destination.old"
     Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+    $replacementCompleted = $false
     try {
         if (Test-Path -LiteralPath $destination -PathType Leaf) {
-            Move-Item -LiteralPath $destination -Destination $backup
+            [IO.File]::Replace($staged, $destination, $backup, $true)
+        } else {
+            Move-Item -LiteralPath $staged -Destination $destination
         }
-        Move-Item -LiteralPath $staged -Destination $destination
+        $replacementCompleted = $true
         Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
     } catch {
         Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
-        if ((Test-Path -LiteralPath $backup -PathType Leaf) -and -not (Test-Path -LiteralPath $destination)) {
+        if (-not $replacementCompleted -and (Test-Path -LiteralPath $backup -PathType Leaf) -and -not (Test-Path -LiteralPath $destination)) {
             Move-Item -LiteralPath $backup -Destination $destination
         }
-        throw "Could not replace $destination. Stop Codex and any active codexshim process, then retry. $($_.Exception.Message)"
+        throw (Get-ReplacementFailureMessage -Destination $destination -ErrorRecord $_)
     }
 
-    Write-Host "Installed codexshim at $destination"
-    Write-Host "Set command = '$destination' in your Codex MCP configuration."
+    $displayDestination = $destination.Replace('/', '\')
+    Write-Host "Installed codexshim at $displayDestination"
+    Write-Host "Installed version: $versionOutput"
+    Write-Host "Set command = '$displayDestination' in your Codex MCP configuration."
 } finally {
     Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force -ErrorAction SilentlyContinue
 }

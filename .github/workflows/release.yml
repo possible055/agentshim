@@ -76,8 +76,26 @@ jobs:
       - uses: actions/checkout@v7
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
-      - name: Verify release binary
-        run: cargo run --release --locked --target ${{ matrix.target }} -- --version
+      - name: Verify Linux release binary version
+        if: matrix.format == 'tar.gz'
+        shell: bash
+        run: |
+          expected="codexshim ${{ needs.validate-version.outputs.version }}"
+          actual="$(./target/${{ matrix.target }}/release/${{ matrix.binary }} --version)"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "release binary reported '$actual'; expected '$expected'" >&2
+            exit 1
+          fi
+      - name: Verify Windows release binary version
+        if: matrix.format == 'zip'
+        shell: pwsh
+        run: |
+          $expected = "codexshim ${{ needs.validate-version.outputs.version }}"
+          $binary = (Resolve-Path "target/${{ matrix.target }}/release/${{ matrix.binary }}").Path
+          $actual = (& $binary --version | Out-String).Trim()
+          if ($actual -cne $expected) {
+            throw "Release binary reported '$actual'; expected '$expected'."
+          }
       - name: Stage Windows archive contents
         if: matrix.format == 'zip'
         shell: pwsh
@@ -123,12 +141,12 @@ jobs:
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
       - name: Test Windows installer
         if: matrix.format == 'zip'
-        shell: powershell
-        run: scripts/test-install-windows.ps1 -ReleaseDirectory (Resolve-Path dist).Path
+        shell: pwsh
+        run: ./scripts/test-install-windows.ps1 -ExpectedVersion "${{ needs.validate-version.outputs.version }}" -ReleaseDirectory (Resolve-Path dist).Path
       - name: Test Linux installer
         if: matrix.format == 'tar.gz'
         shell: bash
-        run: sh scripts/test-install-linux.sh "$PWD/dist"
+        run: sh scripts/test-install-linux.sh "$PWD/dist" "${{ needs.validate-version.outputs.version }}"
       - uses: actions/upload-artifact@v4
         with:
           name: codexshim-${{ matrix.target }}
