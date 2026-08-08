@@ -46,6 +46,32 @@ pub(crate) fn tool_result_fits_budget(
     tool_result_encoded_len(text, structured, is_error) <= MODEL_BYTE_LIMIT
 }
 
+pub(crate) fn tool_error_structure(
+    code: &'static str,
+    retryable: bool,
+    message: &str,
+    details: Option<&Value>,
+) -> Value {
+    serde_json::json!({
+        "error": {
+            "code": code,
+            "message": message,
+            "retryable": retryable,
+            "details": details,
+        }
+    })
+}
+
+pub(crate) fn tool_error_result_fits_budget(
+    code: &'static str,
+    retryable: bool,
+    message: &str,
+    details: Option<&Value>,
+) -> bool {
+    let structured = tool_error_structure(code, retryable, message, details);
+    tool_result_fits_budget(message, Some(&structured), true)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OutputLimits {
     pub bytes: usize,

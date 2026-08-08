@@ -20,7 +20,6 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    output::{OutputFormatter, OutputLimits},
     path::RepositoryRoot,
     tools::ToolOutput,
 };
@@ -28,8 +27,9 @@ use crate::{
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 300_000;
 const MAX_STDIN_BYTES: usize = 1024 * 1024;
-const CAPTURE_HEAD_BYTES: usize = 3 * 1024;
-const CAPTURE_TAIL_BYTES: usize = 3 * 1024;
+const PROCESS_MEMORY_BYTES: usize = 2 * 1024 * 1024;
+const CAPTURE_HEAD_BYTES: usize = 16 * 1024;
+const CAPTURE_TAIL_BYTES: usize = 16 * 1024;
 const DRAIN_CHUNK_BYTES: usize = 64 * 1024;
 const DIAGNOSTIC_PATH_BYTES: usize = 2 * 1024;
 const DIAGNOSTIC_PATH_MARKER: &str = "...[path truncated]...";
@@ -62,23 +62,15 @@ pub struct ProcessRequest {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct ProcessCaptureResult {
-    pub text: String,
-    pub total_bytes: usize,
-    pub retained_bytes: usize,
-    pub dropped_bytes: usize,
-    pub invalid_utf8_bytes: usize,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct ProcessResult {
-    pub program: String,
-    pub cwd: String,
-    pub launcher: String,
-    pub exit_code: String,
-    pub duration_ms: u64,
-    pub stdout: ProcessCaptureResult,
-    pub stderr: ProcessCaptureResult,
+pub(crate) struct ProcessStreamSummary {
+    #[serde(rename = "total_bytes")]
+    pub total: usize,
+    #[serde(rename = "shown_bytes")]
+    pub shown: usize,
+    #[serde(rename = "omitted_bytes")]
+    pub omitted: usize,
+    #[serde(rename = "invalid_utf8_bytes")]
+    pub invalid_utf8: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -88,8 +80,8 @@ pub(crate) struct ProcessTimeoutDetails {
     pub cwd: String,
     pub launcher: String,
     pub duration_ms: u64,
-    pub stdout: ProcessCaptureResult,
-    pub stderr: ProcessCaptureResult,
+    pub stdout: ProcessStreamSummary,
+    pub stderr: ProcessStreamSummary,
     pub termination_outcome: &'static str,
 }
 
@@ -193,8 +185,7 @@ impl ProcessRequest {
             .chain(self.env.iter().map(|(key, value)| key.len() + value.len()))
             .chain(self.unset_env.iter().map(String::len))
             .sum::<usize>();
-        256_usize
-            .saturating_mul(1024)
+        PROCESS_MEMORY_BYTES
             .saturating_add(self.program.len())
             .saturating_add(self.cwd.as_deref().map_or(0, str::len))
             .saturating_add(self.stdin.as_deref().map_or(0, str::len))

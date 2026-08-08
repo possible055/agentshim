@@ -23,6 +23,42 @@ mod tests {
         }
     }
 
+    fn completed_output(stdout: &[u8], stderr: &[u8], exit: &str) -> ToolOutput {
+        let mut stdout_capture = Capture::new();
+        stdout_capture.push(stdout);
+        let mut stderr_capture = Capture::new();
+        stderr_capture.push(stderr);
+        render_completed(
+            &CompletedProcess {
+                resolved: ResolvedProgram {
+                    absolute: PathBuf::from("tool"),
+                    executable: PathBuf::from("tool"),
+                    launcher: Launcher::Native,
+                },
+                cwd: PathBuf::from("workspace"),
+                exit: exit.to_owned(),
+                duration: Duration::from_millis(1),
+                stdout: stdout_capture,
+                stderr: stderr_capture,
+            },
+            &CancellationToken::new(),
+        )
+        .expect("render completed process")
+    }
+
+    fn shown_bytes(output: &str, stream: &str) -> usize {
+        let prefix = format!("{stream} bytes: ");
+        let line = output
+            .lines()
+            .find(|line| line.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("missing {stream} statistics"));
+        line.split("shown=")
+            .nth(1)
+            .and_then(|value| value.split(',').next())
+            .and_then(|value| value.parse().ok())
+            .expect("shown byte count")
+    }
+
     #[test]
     fn validation_rejects_conflicts_nul_and_oversized_stdin() {
         let mut invalid = request("tool".to_owned());
@@ -47,6 +83,15 @@ mod tests {
             invalid.validate(),
             Err(ProcessError::Validation(_))
         ));
+    }
+
+    #[test]
+    fn process_memory_charge_includes_the_capture_and_render_reservation() {
+        let request = request("tool".to_owned());
+        assert_eq!(
+            request.memory_charge(),
+            PROCESS_MEMORY_BYTES + "tool".len()
+        );
     }
 
     #[cfg(windows)]
@@ -162,7 +207,7 @@ mod tests {
         let mut capture = Capture::new();
         capture.push(b"a\xF0\x9F");
         capture.push(b"\x92\xA9b\xFF");
-        let rendered = capture.render();
+        let rendered = capture.render(capture.retained());
         assert_eq!(rendered.text, "a💩b\\xFF");
         assert_eq!(rendered.invalid_bytes, 1);
     }
@@ -215,6 +260,207 @@ mod tests {
         assert_eq!(capture.bytes_read, bytes.len());
         assert_eq!(capture.retained(), CAPTURE_HEAD_BYTES + CAPTURE_TAIL_BYTES);
         assert_eq!(capture.dropped(), 17);
+    }
+
+    #[test]
+    fn capture_projection_preserves_valid_utf8_at_byte_boundaries() {
+        let source = "界".repeat(CAPTURE_HEAD_BYTES + CAPTURE_TAIL_BYTES);
+        let mut capture = Capture::new();
+        capture.push(source.as_bytes());
+
+        let rendered = capture.render(capture.retained());
+
+        assert_eq!(rendered.invalid_bytes, 0);
+        assert!(rendered.omitted_bytes > 0);
+        assert_eq!(
+            rendered.shown_bytes + rendered.omitted_bytes,
+            source.len()
+        );
+    }
+
+    #[test]
+    fn line_alignment_does_not_discard_most_of_a_long_partial_line() {
+        let mut source = Vec::with_capacity(CAPTURE_HEAD_BYTES + CAPTURE_TAIL_BYTES + 17);
+        source.push(b'\n');
+        source.extend(std::iter::repeat_n(b'h', CAPTURE_HEAD_BYTES - 1));
+        source.extend(std::iter::repeat_n(b'x', 17));
+        source.extend(std::iter::repeat_n(b't', CAPTURE_TAIL_BYTES - 2));
+        source.extend_from_slice(b"\nz");
+        let mut capture = Capture::new();
+        capture.push(&source);
+
+        let rendered = capture.render(capture.retained());
+
+        assert_eq!(rendered.shown_bytes, capture.retained());
+        assert_eq!(rendered.omitted_bytes, 17);
+        assert!(rendered.text.starts_with("\nhhhh"));
+        assert!(rendered.text.contains("tttt"));
+        assert!(rendered.text.ends_with("\nz"));
+    }
+
+    #[test]
+    fn single_stream_output_that_fits_is_returned_in_full() {
+        let stdout = vec![b'x'; 8_908];
+
+        let output = completed_output(&stdout, b"", "0");
+
+        assert!(output.fits_budget());
+        let stdout_text = output
+            .text
+            .split_once("--- stdout ---\n")
+            .and_then(|(_, output)| output.split_once("\n--- stderr ---"))
+            .map(|(stdout, _)| stdout)
+            .expect("stdout section");
+        assert_eq!(stdout_text.as_bytes(), stdout);
+        assert!(output.text.contains(
+            "Stdout bytes: total=8908, shown=8908, omitted=0, invalid=0"
+        ));
+        assert!(!output.text.contains("bytes omitted"));
+    }
+
+    #[test]
+    fn dual_high_output_is_fair_and_fits_the_complete_result_budget() {
+        let stdout = vec![b'x'; 100_000];
+        let stderr = vec![b'y'; 100_000];
+
+        let output = completed_output(&stdout, &stderr, "0");
+
+        assert!(output.fits_budget());
+        assert!(output.text.matches("bytes omitted").count() >= 2);
+        let stdout_shown = shown_bytes(&output.text, "Stdout");
+        let stderr_shown = shown_bytes(&output.text, "Stderr");
+        assert_eq!(stdout_shown, stderr_shown);
+        assert!(stdout_shown > 6 * 1024);
+    }
+
+    #[test]
+    fn escaped_and_invalid_bytes_cannot_break_the_output_budget() {
+        let cases = [
+            vec![b'\\'; 100_000],
+            vec![b'"'; 100_000],
+            vec![0x01; 100_000],
+            vec![0xFF; 100_000],
+            (0..100_000)
+                .map(|index| [b'\\', b'"', 0x01, 0xFF, b'\n'][index % 5])
+                .collect(),
+        ];
+
+        for bytes in cases {
+            let output = completed_output(&bytes, &bytes, "0");
+            assert!(output.fits_budget());
+            assert!(output.text.ends_with("Complete."));
+            assert!(shown_bytes(&output.text, "Stdout") > 0);
+            assert!(shown_bytes(&output.text, "Stderr") > 0);
+        }
+    }
+
+    #[test]
+    fn small_stderr_is_preserved_before_stdout_uses_remaining_budget() {
+        let stdout = vec![b'x'; 100_000];
+        let stderr = b"critical diagnostic\n";
+
+        let output = completed_output(&stdout, stderr, "7");
+
+        assert!(output.fits_budget());
+        assert!(output.child_nonzero);
+        assert!(output.text.contains("critical diagnostic"));
+        assert!(output.text.contains(
+            "Stderr bytes: total=20, shown=20, omitted=0, invalid=0"
+        ));
+        assert!(output.text.contains("Exit code: 7"));
+    }
+
+    #[test]
+    fn timeout_projection_fits_the_complete_error_envelope() {
+        let mut stdout = Capture::new();
+        stdout.push(&vec![b'\\'; 100_000]);
+        let mut stderr = Capture::new();
+        stderr.push(&vec![0xFF; 100_000]);
+        let report = render_timeout(
+            &TimedOutProcess {
+                resolved: ResolvedProgram {
+                    absolute: PathBuf::from("tool"),
+                    executable: PathBuf::from("tool"),
+                    launcher: Launcher::Native,
+                },
+                cwd: PathBuf::from("workspace"),
+                duration: Duration::from_millis(150),
+                stdout,
+                stderr,
+            },
+            150,
+        )
+        .expect("timeout report");
+        let details = serde_json::to_value(&report.details).expect("timeout details");
+
+        assert!(crate::output::tool_error_result_fits_budget(
+            "resource_timeout",
+            true,
+            &report.text,
+            Some(&details)
+        ));
+        assert_eq!(
+            report.details.stdout.shown + report.details.stdout.omitted,
+            report.details.stdout.total
+        );
+        assert_eq!(
+            report.details.stderr.shown + report.details.stderr.omitted,
+            report.details.stderr.total
+        );
+        assert!(details["stdout"].get("text").is_none());
+        assert!(report.text.ends_with("Incomplete."));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn high_escaping_output_child_fixture() {
+        use std::io::Write as _;
+
+        if std::env::var("CODEXSHIM_OUTPUT_FIXTURE").as_deref() != Ok("child") {
+            return;
+        }
+        let bytes = [b'\\', b'"', 0x01, 0xFF, b'\n']
+            .into_iter()
+            .cycle()
+            .take(100_000)
+            .collect::<Vec<_>>();
+        std::io::stdout()
+            .write_all(&bytes)
+            .expect("write stdout fixture");
+        std::io::stderr()
+            .write_all(&bytes)
+            .expect("write stderr fixture");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn high_escaping_child_output_completes_within_the_result_budget() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+        let executable = std::env::current_exe().expect("test executable");
+        let mut high_output = request(executable.to_string_lossy().into_owned());
+        high_output.timeout_ms = Some(10_000);
+        high_output.args = vec![
+            "--exact".to_owned(),
+            "tools::process::tests::high_escaping_output_child_fixture".to_owned(),
+            "--nocapture".to_owned(),
+        ];
+        high_output
+            .env
+            .insert("CODEXSHIM_OUTPUT_FIXTURE".to_owned(), "child".to_owned());
+
+        let output = execute_output(
+            &root,
+            &ProcessResolver::capture(),
+            &high_output,
+            Duration::from_secs(10),
+            &CancellationToken::new(),
+        )
+        .expect("high escaping output");
+
+        assert!(output.fits_budget());
+        assert!(output.text.contains("bytes omitted"));
+        assert!(output.text.ends_with("Complete."));
     }
 
     #[cfg(unix)]
@@ -356,7 +602,7 @@ mod tests {
         let output = execute_unix(&high_output).expect("high output");
         assert!(output.contains("Exit code: 0"));
         assert!(output.contains("bytes omitted"));
-        assert!(output.contains("dropped="));
+        assert!(output.contains("omitted="));
         assert!(output.len() <= crate::output::MODEL_BYTE_LIMIT);
     }
 

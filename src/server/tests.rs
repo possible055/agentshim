@@ -97,10 +97,15 @@ mod tests {
     }
 
     #[test]
-    fn read_success_response_omits_structured_content() {
-        let output = crate::tools::ToolOutput::new("summary".to_owned());
+    fn successful_tool_responses_omit_structured_content() {
+        let output =
+            crate::tools::ToolOutput::with_child_nonzero("summary".to_owned(), true);
         let CallToolResponse::Complete(result) =
-            blocking_response::<crate::tools::read::ReadError>("read", 3, Ok(Ok(output)))
+            blocking_response::<crate::tools::process::ProcessError>(
+                "run_process",
+                3,
+                Ok(Ok(output)),
+            )
         else {
             panic!("tool response must be complete");
         };

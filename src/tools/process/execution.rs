@@ -232,30 +232,144 @@ impl Capture {
         self.bytes_read.saturating_sub(self.retained())
     }
 
-    fn render(&self) -> RenderedCapture {
-        let mut bytes = self.head.clone();
-        if self.dropped() > 0 {
-            bytes.extend_from_slice(
-                format!("\n... {} bytes omitted ...\n", self.dropped()).as_bytes(),
-            );
+    fn render(&self, limit: usize) -> RenderedCapture {
+        let limit = limit.min(self.retained()).min(self.bytes_read);
+        if limit == self.bytes_read && self.dropped() == 0 {
+            let mut bytes = self.head.clone();
+            bytes.extend_from_slice(&self.ordered_tail());
+            let (text, invalid_bytes) = escape_invalid_utf8(&bytes);
+            return RenderedCapture {
+                text,
+                shown_bytes: self.bytes_read,
+                omitted_bytes: 0,
+                invalid_bytes,
+            };
         }
-        if self.tail.len() < CAPTURE_TAIL_BYTES || self.tail_start == 0 {
-            bytes.extend_from_slice(&self.tail);
+
+        let ordered_tail = self.ordered_tail();
+        let contiguous;
+        let (head_source, tail_source) = if self.dropped() == 0 {
+            contiguous = {
+                let mut bytes = self.head.clone();
+                bytes.extend_from_slice(&ordered_tail);
+                bytes
+            };
+            (contiguous.as_slice(), contiguous.as_slice())
         } else {
-            bytes.extend_from_slice(&self.tail[self.tail_start..]);
-            bytes.extend_from_slice(&self.tail[..self.tail_start]);
+            (self.head.as_slice(), ordered_tail.as_slice())
+        };
+        let (head_count, tail_count) =
+            allocate_view_bytes(limit, head_source.len(), tail_source.len());
+        let head = align_head(&head_source[..head_count]);
+        let tail = align_tail(&tail_source[tail_source.len().saturating_sub(tail_count)..]);
+        let shown_bytes = head.len().saturating_add(tail.len());
+        let omitted_bytes = self.bytes_read.saturating_sub(shown_bytes);
+        let mut bytes = Vec::with_capacity(
+            shown_bytes
+                .saturating_add(64)
+                .min(crate::output::MODEL_BYTE_LIMIT),
+        );
+        bytes.extend_from_slice(head);
+        if omitted_bytes > 0 {
+            if bytes.last().is_some_and(|byte| *byte != b'\n') {
+                bytes.push(b'\n');
+            }
+            bytes.extend_from_slice(format!("... {omitted_bytes} bytes omitted ...").as_bytes());
+            if !tail.is_empty() && tail.first().is_some_and(|byte| *byte != b'\n') {
+                bytes.push(b'\n');
+            }
         }
+        bytes.extend_from_slice(tail);
         let (text, invalid_bytes) = escape_invalid_utf8(&bytes);
         RenderedCapture {
             text,
+            shown_bytes,
+            omitted_bytes,
             invalid_bytes,
         }
+    }
+
+    fn ordered_tail(&self) -> Vec<u8> {
+        if self.tail.len() < CAPTURE_TAIL_BYTES || self.tail_start == 0 {
+            return self.tail.clone();
+        }
+        let mut ordered = Vec::with_capacity(self.tail.len());
+        ordered.extend_from_slice(&self.tail[self.tail_start..]);
+        ordered.extend_from_slice(&self.tail[..self.tail_start]);
+        ordered
     }
 }
 
 struct RenderedCapture {
     text: String,
+    shown_bytes: usize,
+    omitted_bytes: usize,
     invalid_bytes: usize,
+}
+
+fn allocate_view_bytes(limit: usize, head_available: usize, tail_available: usize) -> (usize, usize) {
+    let mut head = limit.div_ceil(2).min(head_available);
+    let mut tail = (limit / 2).min(tail_available);
+    let mut remaining = limit.saturating_sub(head).saturating_sub(tail);
+    let extra_head = remaining.min(head_available.saturating_sub(head));
+    head += extra_head;
+    remaining -= extra_head;
+    tail += remaining.min(tail_available.saturating_sub(tail));
+    (head, tail)
+}
+
+fn align_head(bytes: &[u8]) -> &[u8] {
+    let clipped = &bytes[..trim_incomplete_utf8_suffix(bytes)];
+    if let Some(end) = clipped.iter().rposition(|byte| *byte == b'\n') {
+        let aligned = &clipped[..=end];
+        if aligned.len() >= clipped.len().div_ceil(2) {
+            return aligned;
+        }
+    }
+    clipped
+}
+
+fn align_tail(bytes: &[u8]) -> &[u8] {
+    let mut start = 0;
+    while start < bytes.len() && is_utf8_continuation(bytes[start]) {
+        start += 1;
+    }
+    let clipped = &bytes[start..];
+    if let Some(end) = clipped.iter().position(|byte| *byte == b'\n') {
+        let aligned = &clipped[end + 1..];
+        if aligned.len() >= clipped.len().div_ceil(2) {
+            return aligned;
+        }
+    }
+    clipped
+}
+
+fn trim_incomplete_utf8_suffix(bytes: &[u8]) -> usize {
+    let end = bytes.len();
+    let mut lead = end;
+    while lead > 0 && is_utf8_continuation(bytes[lead - 1]) && end - lead < 3 {
+        lead -= 1;
+    }
+    if lead == 0 {
+        return end;
+    }
+    let first = bytes[lead - 1];
+    let width = match first {
+        0xC2..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF4 => 4,
+        _ => return end,
+    };
+    let sequence_start = lead - 1;
+    if end - sequence_start < width {
+        sequence_start
+    } else {
+        end
+    }
+}
+
+fn is_utf8_continuation(byte: u8) -> bool {
+    byte & 0b1100_0000 == 0b1000_0000
 }
 
 fn escape_invalid_utf8(bytes: &[u8]) -> (String, usize) {
@@ -402,103 +516,126 @@ fn render_completed(
     completed: &CompletedProcess,
     cancellation: &CancellationToken,
 ) -> Result<ToolOutput, ProcessError> {
-    let stdout = completed.stdout.render();
-    let stderr = completed.stderr.render();
+    project_captures(
+        &completed.stdout,
+        &completed.stderr,
+        cancellation,
+        |stdout, stderr| completed_output(completed, stdout, stderr),
+        ToolOutput::fits_budget,
+    )
+}
+
+fn completed_output(
+    completed: &CompletedProcess,
+    stdout: &RenderedCapture,
+    stderr: &RenderedCapture,
+) -> ToolOutput {
     let header = format!(
         "Resolved program: {}\nLauncher: {}\nCwd: {}",
         diagnostic_path(&completed.resolved.absolute),
         completed.resolved.launcher.label(),
         diagnostic_path(&completed.cwd)
     );
-    let tail = vec![
+    let tail = [
         format!("Exit code: {}", completed.exit),
         format!("Duration ms: {}", completed.duration.as_millis()),
         format!(
-            "Stdout bytes: read={}, retained={}, dropped={}, invalid={}",
+            "Stdout bytes: total={}, shown={}, omitted={}, invalid={}",
             completed.stdout.bytes_read,
-            completed.stdout.retained(),
-            completed.stdout.dropped(),
+            stdout.shown_bytes,
+            stdout.omitted_bytes,
             stdout.invalid_bytes
         ),
         format!(
-            "Stderr bytes: read={}, retained={}, dropped={}, invalid={}",
+            "Stderr bytes: total={}, shown={}, omitted={}, invalid={}",
             completed.stderr.bytes_read,
-            completed.stderr.retained(),
-            completed.stderr.dropped(),
+            stderr.shown_bytes,
+            stderr.omitted_bytes,
             stderr.invalid_bytes
         ),
         "Complete.".to_owned(),
     ];
-    let mut formatter = OutputFormatter::new(header, tail, OutputLimits::default())?;
-    push_stream(&mut formatter, "stdout", &stdout.text, cancellation)?;
-    push_stream(&mut formatter, "stderr", &stderr.text, cancellation)?;
-    let rendered = formatter.finish(cancellation)?;
-    let result = ProcessResult {
-        program: diagnostic_path(&completed.resolved.absolute),
-        cwd: diagnostic_path(&completed.cwd),
-        launcher: completed.resolved.launcher.label().to_owned(),
-        exit_code: completed.exit.clone(),
-        duration_ms: u64::try_from(completed.duration.as_millis()).unwrap_or(u64::MAX),
-        stdout: ProcessCaptureResult {
-            text: stdout.text,
-            total_bytes: completed.stdout.bytes_read,
-            retained_bytes: completed.stdout.retained(),
-            dropped_bytes: completed.stdout.dropped(),
-            invalid_utf8_bytes: stdout.invalid_bytes,
-        },
-        stderr: ProcessCaptureResult {
-            text: stderr.text,
-            total_bytes: completed.stderr.bytes_read,
-            retained_bytes: completed.stderr.retained(),
-            dropped_bytes: completed.stderr.dropped(),
-            invalid_utf8_bytes: stderr.invalid_bytes,
-        },
-    };
-    let child_nonzero = result.exit_code != "0";
-    let output = ToolOutput::process(rendered, &result, child_nonzero)?;
-    if !output.fits_budget() {
-        return Err(crate::output::OutputError::InvariantViolation.into());
+    let mut rendered = String::with_capacity(
+        header
+            .len()
+            .saturating_add(stdout.text.len())
+            .saturating_add(stderr.text.len())
+            .saturating_add(256),
+    );
+    rendered.push_str(&header);
+    rendered.push_str("\n--- stdout ---\n");
+    rendered.push_str(&stdout.text);
+    rendered.push_str("\n--- stderr ---\n");
+    rendered.push_str(&stderr.text);
+    for line in tail {
+        rendered.push('\n');
+        rendered.push_str(&line);
     }
-    Ok(output)
+    ToolOutput::with_child_nonzero(rendered, completed.exit != "0")
 }
 
 fn render_timeout(
     timed_out: &TimedOutProcess,
     timeout_ms: u64,
 ) -> Result<TimeoutRender, ProcessError> {
-    let stdout = timed_out.stdout.render();
-    let stderr = timed_out.stderr.render();
+    let cancellation = CancellationToken::new();
+    project_captures(
+        &timed_out.stdout,
+        &timed_out.stderr,
+        &cancellation,
+        |stdout, stderr| timeout_output(timed_out, timeout_ms, stdout, stderr),
+        timeout_output_fits_budget,
+    )
+}
+
+fn timeout_output(
+    timed_out: &TimedOutProcess,
+    timeout_ms: u64,
+    stdout: &RenderedCapture,
+    stderr: &RenderedCapture,
+) -> TimeoutRender {
     let header = format!(
         "process timed out after {timeout_ms} ms and its process tree was terminated\nResolved program: {}\nLauncher: {}\nCwd: {}\nStatus: timed out; process tree terminated",
         diagnostic_path(&timed_out.resolved.absolute),
         timed_out.resolved.launcher.label(),
         diagnostic_path(&timed_out.cwd)
     );
-    let tail = vec![
+    let tail = [
         "Exit code: unavailable (timed out)".to_owned(),
         format!("Duration ms: {}", timed_out.duration.as_millis()),
         format!(
-            "Stdout bytes: read={}, retained={}, dropped={}, invalid={}",
+            "Stdout bytes: total={}, shown={}, omitted={}, invalid={}",
             timed_out.stdout.bytes_read,
-            timed_out.stdout.retained(),
-            timed_out.stdout.dropped(),
+            stdout.shown_bytes,
+            stdout.omitted_bytes,
             stdout.invalid_bytes
         ),
         format!(
-            "Stderr bytes: read={}, retained={}, dropped={}, invalid={}",
+            "Stderr bytes: total={}, shown={}, omitted={}, invalid={}",
             timed_out.stderr.bytes_read,
-            timed_out.stderr.retained(),
-            timed_out.stderr.dropped(),
+            stderr.shown_bytes,
+            stderr.omitted_bytes,
             stderr.invalid_bytes
         ),
         "Incomplete.".to_owned(),
     ];
-    let cancellation = CancellationToken::new();
-    let mut formatter = OutputFormatter::new(header, tail, OutputLimits::default())?;
-    push_stream(&mut formatter, "stdout", &stdout.text, &cancellation)?;
-    push_stream(&mut formatter, "stderr", &stderr.text, &cancellation)?;
-    let text = formatter.finish(&cancellation)?;
-    Ok(TimeoutRender {
+    let mut text = String::with_capacity(
+        header
+            .len()
+            .saturating_add(stdout.text.len())
+            .saturating_add(stderr.text.len())
+            .saturating_add(256),
+    );
+    text.push_str(&header);
+    text.push_str("\n--- stdout ---\n");
+    text.push_str(&stdout.text);
+    text.push_str("\n--- stderr ---\n");
+    text.push_str(&stderr.text);
+    for line in tail {
+        text.push('\n');
+        text.push_str(&line);
+    }
+    TimeoutRender {
         text,
         details: ProcessTimeoutDetails {
             timeout_ms,
@@ -506,23 +643,154 @@ fn render_timeout(
             cwd: diagnostic_path(&timed_out.cwd),
             launcher: timed_out.resolved.launcher.label().to_owned(),
             duration_ms: u64::try_from(timed_out.duration.as_millis()).unwrap_or(u64::MAX),
-            stdout: ProcessCaptureResult {
-                text: stdout.text,
-                total_bytes: timed_out.stdout.bytes_read,
-                retained_bytes: timed_out.stdout.retained(),
-                dropped_bytes: timed_out.stdout.dropped(),
-                invalid_utf8_bytes: stdout.invalid_bytes,
+            stdout: ProcessStreamSummary {
+                total: timed_out.stdout.bytes_read,
+                shown: stdout.shown_bytes,
+                omitted: stdout.omitted_bytes,
+                invalid_utf8: stdout.invalid_bytes,
             },
-            stderr: ProcessCaptureResult {
-                text: stderr.text,
-                total_bytes: timed_out.stderr.bytes_read,
-                retained_bytes: timed_out.stderr.retained(),
-                dropped_bytes: timed_out.stderr.dropped(),
-                invalid_utf8_bytes: stderr.invalid_bytes,
+            stderr: ProcessStreamSummary {
+                total: timed_out.stderr.bytes_read,
+                shown: stderr.shown_bytes,
+                omitted: stderr.omitted_bytes,
+                invalid_utf8: stderr.invalid_bytes,
             },
             termination_outcome: "terminated",
         },
+    }
+}
+
+fn timeout_output_fits_budget(output: &TimeoutRender) -> bool {
+    serde_json::to_value(&output.details).ok().is_some_and(|details| {
+        crate::output::tool_error_result_fits_budget(
+            "resource_timeout",
+            true,
+            &output.text,
+            Some(&details),
+        )
     })
+}
+
+#[derive(Clone, Copy)]
+struct CaptureQuotas {
+    stdout: usize,
+    stderr: usize,
+}
+
+fn project_captures<T>(
+    stdout: &Capture,
+    stderr: &Capture,
+    cancellation: &CancellationToken,
+    mut build: impl FnMut(&RenderedCapture, &RenderedCapture) -> T,
+    mut fits: impl FnMut(&T) -> bool,
+) -> Result<T, ProcessError> {
+    let maximum = CaptureQuotas {
+        stdout: stdout.retained(),
+        stderr: stderr.retained(),
+    };
+    let full = build_capture_candidate(stdout, stderr, maximum, &mut build);
+    if fits(&full) {
+        return Ok(full);
+    }
+    check_render_cancellation(cancellation)?;
+
+    let empty = CaptureQuotas {
+        stdout: 0,
+        stderr: 0,
+    };
+    let minimal = build_capture_candidate(stdout, stderr, empty, &mut build);
+    if !fits(&minimal) {
+        return Err(crate::output::OutputError::RequiredContentTooLarge.into());
+    }
+
+    let mut low = 0_usize;
+    let mut high = maximum.stdout.max(maximum.stderr).saturating_add(1);
+    while low + 1 < high {
+        check_render_cancellation(cancellation)?;
+        let midpoint = low + (high - low) / 2;
+        let quotas = CaptureQuotas {
+            stdout: midpoint.min(maximum.stdout),
+            stderr: midpoint.min(maximum.stderr),
+        };
+        let candidate = build_capture_candidate(stdout, stderr, quotas, &mut build);
+        if fits(&candidate) {
+            low = midpoint;
+        } else {
+            high = midpoint;
+        }
+    }
+
+    let mut quotas = CaptureQuotas {
+        stdout: low.min(maximum.stdout),
+        stderr: low.min(maximum.stderr),
+    };
+    let stdout_remaining = maximum.stdout.saturating_sub(quotas.stdout);
+    let stderr_remaining = maximum.stderr.saturating_sub(quotas.stderr);
+    let order = if stdout_remaining >= stderr_remaining {
+        [true, false]
+    } else {
+        [false, true]
+    };
+    for expand_stdout in order {
+        let (current, maximum_value) = if expand_stdout {
+            (quotas.stdout, maximum.stdout)
+        } else {
+            (quotas.stderr, maximum.stderr)
+        };
+        let mut low = current;
+        let mut high = maximum_value.saturating_add(1);
+        while low + 1 < high {
+            check_render_cancellation(cancellation)?;
+            let midpoint = low + (high - low) / 2;
+            let candidate_quotas = if expand_stdout {
+                CaptureQuotas {
+                    stdout: midpoint,
+                    ..quotas
+                }
+            } else {
+                CaptureQuotas {
+                    stderr: midpoint,
+                    ..quotas
+                }
+            };
+            let candidate =
+                build_capture_candidate(stdout, stderr, candidate_quotas, &mut build);
+            if fits(&candidate) {
+                low = midpoint;
+            } else {
+                high = midpoint;
+            }
+        }
+        if expand_stdout {
+            quotas.stdout = low;
+        } else {
+            quotas.stderr = low;
+        }
+    }
+
+    let candidate = build_capture_candidate(stdout, stderr, quotas, &mut build);
+    if fits(&candidate) {
+        return Ok(candidate);
+    }
+    Ok(minimal)
+}
+
+fn build_capture_candidate<T>(
+    stdout: &Capture,
+    stderr: &Capture,
+    quotas: CaptureQuotas,
+    build: &mut impl FnMut(&RenderedCapture, &RenderedCapture) -> T,
+) -> T {
+    let stdout = stdout.render(quotas.stdout);
+    let stderr = stderr.render(quotas.stderr);
+    build(&stdout, &stderr)
+}
+
+fn check_render_cancellation(cancellation: &CancellationToken) -> Result<(), ProcessError> {
+    if cancellation.is_cancelled() {
+        return Err(crate::output::OutputError::Cancelled.into());
+    }
+    Ok(())
 }
 
 fn diagnostic_path(path: &Path) -> String {
@@ -545,21 +813,4 @@ fn diagnostic_path(path: &Path) -> String {
         DIAGNOSTIC_PATH_MARKER,
         &rendered[tail_start..]
     )
-}
-
-fn push_stream(
-    formatter: &mut OutputFormatter,
-    name: &str,
-    text: &str,
-    cancellation: &CancellationToken,
-) -> Result<(), ProcessError> {
-    if !formatter.try_push_line(format!("--- {name} ---"), cancellation)? {
-        return Ok(());
-    }
-    for line in text.split('\n') {
-        if !formatter.try_push_line(line, cancellation)? {
-            break;
-        }
-    }
-    Ok(())
 }

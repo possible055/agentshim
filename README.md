@@ -14,12 +14,12 @@ English | [简体中文](README.zh-CN.md)
 
 | Tool | Description |
 | --- | --- |
-| `read` | Read source files with line numbers. Supports UTF-8 and UTF-16. |
+| `read` | Read source files with line numbers. Supports UTF-8, BOM-detected UTF-16, and explicitly selected WHATWG encoding labels. |
 | `grep` | Search file contents with Rust regex or literal strings. |
 | `glob` | Find files while respecting repository ignore rules. |
 | `run_process` | Run one program with a structured argument list. |
 
-Every tool returns a typed `structuredContent` object together with a bounded text rendering. `read` reports `next_start_line`; `grep` and `glob` report `next_offset`, total results, page limits, and skipped-entry counters. Tool failures use a stable `{ error: { code, message, retryable, details } }` envelope.
+Successful tools return bounded text results. Partial `read`, `grep`, and `glob` results include continuation metadata in the text rendering, while `run_process` reports its exit status and stdout/stderr byte counts. Tool failures also return a stable `{ error: { code, message, retryable, details } }` structured envelope.
 
 ## Install
 

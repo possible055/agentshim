@@ -14,12 +14,12 @@
 
 | 工具 | 说明 |
 | --- | --- |
-| `read` | 读取源文件并附带行号。支持 UTF-8 与 UTF-16。 |
+| `read` | 读取源文件并附带行号。支持 UTF-8、带 BOM 的 UTF-16，以及通过参数明确指定的 WHATWG 编码标签。 |
 | `grep` | 使用 Rust 正则或字面字符串搜索文件内容。 |
 | `glob` | 查找文件，并遵循仓库忽略规则。 |
 | `run_process` | 以结构化参数列表运行单个程序。 |
 
-所有工具都会同时返回类型明确的 `structuredContent` 与受大小限制的文本视图。`read` 返回 `next_start_line`；`grep` 和 `glob` 返回 `next_offset`、结果总数、分页限制及跳过项目统计。工具错误统一为 `{ error: { code, message, retryable, details } }`。
+工具成功时返回受大小限制的文本结果。`read`、`grep` 和 `glob` 的部分结果会在文本中提供续读信息，`run_process` 则报告退出状态及 stdout/stderr 字节统计。工具失败时还会返回统一的 `{ error: { code, message, retryable, details } }` 结构化错误。
 
 ## 安装
 

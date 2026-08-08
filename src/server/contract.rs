@@ -34,7 +34,7 @@ fn bounded_error_payload(
     details: Option<&Value>,
 ) -> (String, Value) {
     let bounded = bounded_diagnostic(message);
-    let structured = error_structure(code, retryable, &bounded, details);
+    let structured = crate::output::tool_error_structure(code, retryable, &bounded, details);
     if crate::output::tool_result_fits_budget(&bounded, Some(&structured), true) {
         return (bounded, structured);
     }
@@ -51,7 +51,8 @@ fn bounded_error_payload(
         let midpoint = low + (high - low) / 2;
         let end = boundaries[midpoint];
         let candidate = format!("{}{marker}", &bounded[..end]);
-        let structured = error_structure(code, retryable, &candidate, details);
+        let structured =
+            crate::output::tool_error_structure(code, retryable, &candidate, details);
         if crate::output::tool_result_fits_budget(&candidate, Some(&structured), true) {
             best = candidate;
             low = midpoint + 1;
@@ -59,33 +60,17 @@ fn bounded_error_payload(
             high = midpoint;
         }
     }
-    let structured = error_structure(code, retryable, &best, details);
+    let structured = crate::output::tool_error_structure(code, retryable, &best, details);
     if crate::output::tool_result_fits_budget(&best, Some(&structured), true) {
         return (best, structured);
     }
-    let structured = error_structure(code, retryable, marker, None);
+    let structured = crate::output::tool_error_structure(code, retryable, marker, None);
     debug_assert!(crate::output::tool_result_fits_budget(
         marker,
         Some(&structured),
         true
     ));
     (marker.to_owned(), structured)
-}
-
-fn error_structure(
-    code: &'static str,
-    retryable: bool,
-    message: &str,
-    details: Option<&Value>,
-) -> Value {
-    json!({
-        "error": {
-            "code": code,
-            "message": message,
-            "retryable": retryable,
-            "details": details,
-        }
-    })
 }
 
 fn bound_detail_strings(value: &mut Value) {
@@ -231,9 +216,7 @@ fn blocking_response<E: DiagnosticError>(
             } else {
                 tracing::info!(target: "codexshim", event = "tool_complete", phase = "response", outcome, run_ms);
             }
-            let mut result = CallToolResult::success(vec![ContentBlock::text(output.text)]);
-            result.structured_content = output.structured;
-            result.into()
+            CallToolResult::success(vec![ContentBlock::text(output.text)]).into()
         }
         Ok(Err(error)) => {
             let error_class = error.error_class();
@@ -540,7 +523,6 @@ fn run_process_tool() -> Tool {
             "required": ["program"]
         })),
     )
-    .with_raw_output_schema(process_output_schema())
     .with_annotations(
         ToolAnnotations::new()
             .read_only(false)
@@ -555,37 +537,6 @@ fn schema(value: Value) -> Arc<JsonObject> {
         panic!("tool schema must be an object");
     };
     Arc::new(object)
-}
-
-fn process_output_schema() -> Arc<JsonObject> {
-    schema(json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "program": { "type": "string" },
-            "cwd": { "type": "string" },
-            "launcher": { "type": "string" },
-            "exit_code": { "type": "string" },
-            "duration_ms": { "type": "integer", "minimum": 0 },
-            "stdout": { "$ref": "#/$defs/capture" },
-            "stderr": { "$ref": "#/$defs/capture" }
-        },
-        "required": ["program", "cwd", "launcher", "exit_code", "duration_ms", "stdout", "stderr"],
-        "$defs": {
-            "capture": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "text": { "type": "string" },
-                    "total_bytes": { "type": "integer", "minimum": 0 },
-                    "retained_bytes": { "type": "integer", "minimum": 0 },
-                    "dropped_bytes": { "type": "integer", "minimum": 0 },
-                    "invalid_utf8_bytes": { "type": "integer", "minimum": 0 }
-                },
-                "required": ["text", "total_bytes", "retained_bytes", "dropped_bytes", "invalid_utf8_bytes"]
-            }
-        }
-    }))
 }
 
 fn read_only_annotations() -> ToolAnnotations {

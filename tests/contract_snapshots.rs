@@ -27,22 +27,15 @@ fn tools_list_snapshot() {
 }
 
 #[test]
-fn tool_output_schemas_cover_structured_contracts() {
+fn successful_tools_do_not_advertise_output_schemas() {
     let result = serde_json::to_value(CodexShim::tools_result()).expect("serialize tools");
     let tools = result["tools"].as_array().expect("tools array");
-    for name in ["read", "grep", "glob"] {
+    for name in ["read", "grep", "glob", "run_process"] {
         assert!(
             tool(tools, name).get("outputSchema").is_none(),
             "{name} must not advertise an output schema"
         );
     }
-    let schema = &tool(tools, "run_process")["outputSchema"];
-    assert_eq!(schema["type"], "object", "run_process output type");
-    assert!(
-        schema["required"].as_array().is_some(),
-        "run_process required fields"
-    );
-    assert!(schema["properties"]["stdout"].is_object());
 }
 
 #[test]
