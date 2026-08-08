@@ -209,18 +209,6 @@ jobs:
             machine: x86_64
             runner_arch: X64
             target: aarch64-unknown-linux-gnu
-          - os: macos-15-intel
-            platform: unix
-            system: Darwin
-            machine: x86_64
-            runner_arch: X64
-            target: aarch64-apple-darwin
-          - os: macos-15
-            platform: unix
-            system: Darwin
-            machine: arm64
-            runner_arch: ARM64
-            target: x86_64-apple-darwin
           - os: windows-2025
             platform: windows
             target: aarch64-pc-windows-msvc

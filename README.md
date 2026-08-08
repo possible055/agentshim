@@ -58,7 +58,7 @@ Override with `-InstallDir` (PowerShell) or `--install-dir` (sh). Re-run the sam
 To install a specific or prerelease version, pass `-Version` (PowerShell) or `--version` (sh):
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/possible055/codexshim/releases/download/v0.1.3-alpha.2/install.sh | sh -s -- --version 0.1.3-alpha.2
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/possible055/codexshim/releases/download/v0.1.3-alpha.3/install.sh | sh -s -- --version 0.1.3-alpha.3
 ```
 
 ### Build from source

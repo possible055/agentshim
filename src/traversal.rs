@@ -694,7 +694,7 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn non_unicode_entries_remain_in_the_skip_summary() {
         use std::{ffi::OsString, os::unix::ffi::OsStringExt};

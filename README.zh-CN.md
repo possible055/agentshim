@@ -58,7 +58,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/possible055/codexshim/r
 安装指定版本或预发布版本时，传入 `-Version`（PowerShell）或 `--version`（sh）：
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/possible055/codexshim/releases/download/v0.1.3-alpha.2/install.sh | sh -s -- --version 0.1.3-alpha.2
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/possible055/codexshim/releases/download/v0.1.3-alpha.3/install.sh | sh -s -- --version 0.1.3-alpha.3
 ```
 
 ### 从源码构建

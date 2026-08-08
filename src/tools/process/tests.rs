@@ -130,7 +130,10 @@ mod tests {
         )
         .expect("multicall proxy");
 
-        assert!(output.contains(&format!("Resolved program: {}", proxy.display())));
+        let expected_proxy = fs::canonicalize(proxy.parent().expect("proxy parent"))
+            .expect("canonical proxy parent")
+            .join(proxy.file_name().expect("proxy name"));
+        assert!(output.contains(&format!("Resolved program: {}", expected_proxy.display())));
         assert!(output.contains("multicall argv0: cargo"));
         assert!(output.contains("Exit code: 0"));
     }
@@ -324,7 +327,8 @@ mod tests {
             &CancellationToken::new(),
         )
         .expect("absolute cwd outside root");
-        assert!(output.contains(&format!("Cwd: {}", outside.path().display())));
+        let expected_cwd = fs::canonicalize(outside.path()).expect("canonical outside cwd");
+        assert!(output.contains(&format!("Cwd: {}", expected_cwd.display())));
 
         absolute.cwd = Some("../outside".to_owned());
         assert!(matches!(
