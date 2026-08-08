@@ -267,6 +267,7 @@ fn record_fingerprint_query(class: i32, elapsed: std::time::Duration) {
 struct PlatformFingerprint {
     device: u64,
     inode: u64,
+    nlink: u64,
     length: u64,
     modified_seconds: i64,
     modified_nanoseconds: i64,
@@ -344,7 +345,24 @@ impl FileFingerprint {
             && self.platform.change_time == basic.ChangeTime)
     }
 
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    pub(crate) fn matches_current_state(&self, file: &File) -> io::Result<bool> {
+        let current = Self::from_file(file)?;
+        let state_unchanged = self.regular == current.regular
+            && self.platform.length == current.platform.length
+            && self.platform.modified_seconds == current.platform.modified_seconds
+            && self.platform.modified_nanoseconds == current.platform.modified_nanoseconds;
+        if !state_unchanged {
+            return Ok(false);
+        }
+
+        // Unlinking an open Unix file updates ctime while leaving the handle's contents stable.
+        Ok((self.platform.changed_seconds == current.platform.changed_seconds
+            && self.platform.changed_nanoseconds == current.platform.changed_nanoseconds)
+            || current.platform.nlink == 0)
+    }
+
+    #[cfg(not(any(unix, windows)))]
     pub(crate) fn matches_current_state(&self, file: &File) -> io::Result<bool> {
         Self::from_file(file).map(|current| current == *self)
     }
@@ -359,6 +377,7 @@ impl FileFingerprint {
             platform: PlatformFingerprint {
                 device: metadata.dev(),
                 inode: metadata.ino(),
+                nlink: metadata.nlink(),
                 length: metadata.len(),
                 modified_seconds: metadata.mtime(),
                 modified_nanoseconds: metadata.mtime_nsec(),
