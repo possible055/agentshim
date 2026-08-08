@@ -39,7 +39,7 @@ fn collect_candidates(
     let traversal = match traversal {
         GrepTraversal::Adaptive => {
             let guard = ActiveAdaptiveGrepTraversal::enter();
-            let selected = if guard.was_idle && prefer_parallel_candidate_collection(access, &base) {
+            let selected = if guard.was_idle && prefer_parallel_root(access, &base) {
                 GrepTraversal::ParallelBatched
             } else {
                 GrepTraversal::Serial
@@ -255,17 +255,29 @@ struct CandidateCollection {
     candidates: Vec<Candidate>,
     #[cfg(any(test, feature = "bench-internals"))]
     policy: CandidatePolicy,
+    #[cfg(any(test, feature = "bench-internals"))]
     estimated_retained_bytes: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
     soft_target_crossings: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
     key_bytes: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
     key_capacity: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
     capability_key_bytes: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
     capability_key_capacity: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
     absolute_bytes: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
     absolute_capacity: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
     sort_key_bytes: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
     sort_key_capacity: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
     slash_path_bytes: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
     slash_path_capacity: usize,
     terminal_error: Option<GrepError>,
 }
@@ -273,19 +285,33 @@ struct CandidateCollection {
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default)]
 struct CandidateMetrics {
+    #[cfg(any(test, feature = "bench-internals"))]
     count: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
     estimated_retained_bytes: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
     vec_capacity: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
     soft_target_crossings: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
     key_bytes: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
     key_capacity: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
     capability_key_bytes: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
     capability_key_capacity: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
     absolute_bytes: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
     absolute_capacity: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
     sort_key_bytes: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
     sort_key_capacity: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
     slash_path_bytes: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
     slash_path_capacity: usize,
 }
 
@@ -297,17 +323,29 @@ impl CandidateCollection {
             candidates: Vec::with_capacity(1_024),
             #[cfg(any(test, feature = "bench-internals"))]
             policy,
+            #[cfg(any(test, feature = "bench-internals"))]
             estimated_retained_bytes: 0,
+            #[cfg(any(test, feature = "bench-internals"))]
             soft_target_crossings: 0,
+            #[cfg(any(test, feature = "bench-internals"))]
             key_bytes: 0,
+            #[cfg(any(test, feature = "bench-internals"))]
             key_capacity: 0,
+            #[cfg(any(test, feature = "bench-internals"))]
             capability_key_bytes: 0,
+            #[cfg(any(test, feature = "bench-internals"))]
             capability_key_capacity: 0,
+            #[cfg(any(test, feature = "bench-internals"))]
             absolute_bytes: 0,
+            #[cfg(any(test, feature = "bench-internals"))]
             absolute_capacity: 0,
+            #[cfg(any(test, feature = "bench-internals"))]
             sort_key_bytes: 0,
+            #[cfg(any(test, feature = "bench-internals"))]
             sort_key_capacity: 0,
+            #[cfg(any(test, feature = "bench-internals"))]
             slash_path_bytes: 0,
+            #[cfg(any(test, feature = "bench-internals"))]
             slash_path_capacity: 0,
             terminal_error: None,
         }
@@ -315,6 +353,14 @@ impl CandidateCollection {
 
     #[allow(clippy::unnecessary_wraps)]
     fn admit(&mut self, candidate: Candidate) -> Result<(), GrepError> {
+        #[cfg(not(any(test, feature = "bench-internals")))]
+        {
+            self.candidates.push(candidate);
+            Ok(())
+        }
+
+        #[cfg(any(test, feature = "bench-internals"))]
+        {
         let components = candidate.path.memory_components();
         let retained = self
             .estimated_retained_bytes
@@ -355,9 +401,18 @@ impl CandidateCollection {
             }
         }
         Ok(())
+        }
     }
 
     fn metrics(&self) -> CandidateMetrics {
+        #[cfg(not(any(test, feature = "bench-internals")))]
+        {
+            let _ = self;
+            CandidateMetrics::default()
+        }
+
+        #[cfg(any(test, feature = "bench-internals"))]
+        {
         CandidateMetrics {
             count: self.candidates.len(),
             estimated_retained_bytes: self.estimated_retained_bytes,
@@ -374,6 +429,7 @@ impl CandidateCollection {
             slash_path_bytes: self.slash_path_bytes,
             slash_path_capacity: self.slash_path_capacity,
         }
+        }
     }
 
     fn fail(&mut self, error: GrepError) {
@@ -381,22 +437,6 @@ impl CandidateCollection {
             self.terminal_error = Some(error);
         }
     }
-}
-
-fn prefer_parallel_candidate_collection(access: &FileAccess, base: &ResolvedPath) -> bool {
-    if access.root().verify().is_err()
-        || (base.is_ambient()
-            && access
-                .symlink_metadata_kind(base)
-                .is_ok_and(|kind| kind.is_symlink))
-        || !access.metadata_kind(base).is_ok_and(|kind| kind.is_dir)
-    {
-        return false;
-    }
-    std::fs::read_dir(base.absolute()).is_ok_and(|entries| {
-        entries.take(PARALLEL_ROOT_ENTRY_THRESHOLD).count()
-            >= PARALLEL_ROOT_ENTRY_THRESHOLD
-    })
 }
 
 struct ActiveAdaptiveGrepTraversal {

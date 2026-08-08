@@ -52,6 +52,7 @@ impl ResolvedPath {
             && batch_parent(self).ok() == batch_parent(other).ok()
     }
 
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn memory_components(&self) -> ResolvedPathMemory {
         ResolvedPathMemory {
             key_bytes: self.key.as_os_str().len(),
@@ -94,6 +95,7 @@ impl ResolvedPath {
     }
 }
 
+#[cfg(any(test, feature = "bench-internals"))]
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ResolvedPathMemory {
     pub key_bytes: usize,
@@ -123,6 +125,7 @@ impl PathSortKey {
         Self(platform_sort_key(path))
     }
 
+    #[cfg(any(test, feature = "bench-internals"))]
     fn byte_len(&self) -> usize {
         #[cfg(unix)]
         {
@@ -138,6 +141,7 @@ impl PathSortKey {
         }
     }
 
+    #[cfg(any(test, feature = "bench-internals"))]
     fn capacity_bytes(&self) -> usize {
         #[cfg(unix)]
         {

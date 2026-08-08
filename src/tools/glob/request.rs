@@ -1,7 +1,6 @@
 use std::{
     cmp::Ordering,
     collections::BinaryHeap,
-    fs,
     io,
     path::Path,
     sync::{
@@ -20,7 +19,8 @@ use crate::{
     sorting,
     tools::ToolOutput,
     traversal::{
-        TraversalControl, TraversalError, TraversalSummary, walk, walk_parallel_batched,
+        TraversalControl, TraversalError, TraversalSummary, prefer_parallel_root, walk,
+        walk_parallel_batched,
         walk_parallel_batched_with_literal_prefix, walk_with_literal_prefix,
     },
 };
@@ -32,7 +32,6 @@ const RETAINED_MEMORY_BYTES: usize = 32 * 1024 * 1024;
 const MEMORY_SAFETY_BYTES: usize = 8 * 1024 * 1024;
 const PATH_OMISSION: &str = "[glob path omitted: exceeds output budget]";
 const PARALLEL_BATCH_SIZE: usize = 256;
-const PARALLEL_ROOT_ENTRY_THRESHOLD: usize = 8;
 static ACTIVE_ADAPTIVE_GLOBS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy)]
@@ -218,7 +217,7 @@ fn execute_inner_with_traversal(
     let traversal = match traversal {
         GlobTraversal::Adaptive => {
             let guard = ActiveAdaptiveGlob::enter();
-            let selected = if guard.was_idle && prefer_parallel(access, &base) {
+            let selected = if guard.was_idle && prefer_parallel_root(access, &base) {
                 GlobTraversal::ParallelBatched
             } else {
                 GlobTraversal::Serial
@@ -302,22 +301,6 @@ fn execute_inner_with_traversal(
     drop(render_span);
     drop(activity);
     result
-}
-
-fn prefer_parallel(access: &FileAccess, base: &ResolvedPath) -> bool {
-    if access.root().verify().is_err()
-        || (base.is_ambient()
-            && access
-                .symlink_metadata_kind(base)
-                .is_ok_and(|kind| kind.is_symlink))
-        || !access.metadata_kind(base).is_ok_and(|kind| kind.is_dir)
-    {
-        return false;
-    }
-    fs::read_dir(base.absolute()).is_ok_and(|entries| {
-        entries.take(PARALLEL_ROOT_ENTRY_THRESHOLD).count()
-            >= PARALLEL_ROOT_ENTRY_THRESHOLD
-    })
 }
 
 struct ActiveAdaptiveGlob {

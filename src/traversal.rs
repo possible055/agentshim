@@ -17,10 +17,27 @@ use tokio_util::sync::CancellationToken;
 
 use crate::path::{FileAccess, ResolvedPath};
 
+const PARALLEL_ROOT_ENTRY_THRESHOLD: usize = 8;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TraversalControl {
     Continue,
     Stop,
+}
+
+pub(crate) fn prefer_parallel_root(access: &FileAccess, base: &ResolvedPath) -> bool {
+    if access.root().verify().is_err()
+        || (base.is_ambient()
+            && access
+                .symlink_metadata_kind(base)
+                .is_ok_and(|kind| kind.is_symlink))
+        || !access.metadata_kind(base).is_ok_and(|kind| kind.is_dir)
+    {
+        return false;
+    }
+    std::fs::read_dir(base.absolute()).is_ok_and(|entries| {
+        entries.take(PARALLEL_ROOT_ENTRY_THRESHOLD).count() >= PARALLEL_ROOT_ENTRY_THRESHOLD
+    })
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]

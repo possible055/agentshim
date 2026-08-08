@@ -7,14 +7,14 @@ mod tests {
 
     use super::{
         GlobError, GlobMatch, GlobRequest, GlobTraversal, MAX_MATCHES, PATH_OMISSION, TopK,
-        execute, execute_with_traversal, memory_charge, prefer_parallel, record_match, render,
+        execute, execute_with_traversal, memory_charge, record_match, render,
     };
     #[cfg(feature = "bench-internals")]
     use super::execute_profiled_with_traversal;
     use crate::{
         path::{FileAccess, ReadScope, RepositoryRoot, slash_path},
         runtime::MEMORY_SOFT_TARGET_BYTES,
-        traversal::TraversalSummary,
+        traversal::{TraversalSummary, prefer_parallel_root},
     };
 
     fn access(path: &Path) -> Arc<FileAccess> {
@@ -177,9 +177,9 @@ mod tests {
         for index in 0..7 {
             fs::create_dir(fixture.path().join(format!("shard-{index}"))).expect("small shard");
         }
-        assert!(!prefer_parallel(&root, &base));
+        assert!(!prefer_parallel_root(&root, &base));
         fs::create_dir(fixture.path().join("shard-7")).expect("parallel shard");
-        assert!(prefer_parallel(&root, &base));
+        assert!(prefer_parallel_root(&root, &base));
     }
 
     #[cfg(feature = "bench-internals")]

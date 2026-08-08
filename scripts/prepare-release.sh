@@ -38,7 +38,7 @@ if [ -z "$version" ]; then
     exit 2
 fi
 
-repository=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repository=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 manifest_path=$repository/Cargo.toml
 lock_path=$repository/Cargo.lock
 

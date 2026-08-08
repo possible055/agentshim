@@ -10,13 +10,14 @@ mod tests {
         GrepError, GrepMode, GrepRequest, GrepSourcePolicy, GrepTraversal, PAGE_MEMORY_BYTES, Page,
         PathnameReopenPolicy, PlanSink, SearchPlan, build_matcher, candidate, execute,
         execute_with_traversal,
-        execute_with_variant, prefer_parallel_candidate_collection, render,
+        execute_with_variant, render,
         search_file, search_file_with_hook, search_file_with_variant_hook,
     };
     #[cfg(feature = "bench-internals")]
     use super::execute_profiled;
     use crate::{
         path::{FileAccess, ReadScope, RepositoryRoot},
+        traversal::prefer_parallel_root,
     };
 
     fn request(pattern: &str) -> GrepRequest {
@@ -165,11 +166,11 @@ mod tests {
         let (fixture, root) = fixture();
         let base = root.resolve(Path::new(".")).expect("base");
 
-        assert!(!prefer_parallel_candidate_collection(&root, &base));
+        assert!(!prefer_parallel_root(&root, &base));
         for index in 0..8 {
             fs::create_dir(fixture.path().join(format!("root-{index}"))).expect("root entry");
         }
-        assert!(prefer_parallel_candidate_collection(&root, &base));
+        assert!(prefer_parallel_root(&root, &base));
     }
 
     #[test]

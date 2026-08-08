@@ -16,6 +16,8 @@ repos:
         args: ["--maxkb=1500"]
       - id: check-merge-conflict
       - id: check-case-conflict
+      - id: check-shebang-scripts-are-executable
+        exclude: '\.rs$'
       - id: detect-private-key
 
   - repo: local

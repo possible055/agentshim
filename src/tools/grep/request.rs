@@ -26,14 +26,16 @@ use crate::{
     tools::ToolOutput,
     tools::read::FileFingerprint,
     traversal::{
-        OwnedTraversalEntry, TraversalControl, TraversalError, TraversalSummary, walk,
-        walk_parallel_batched, walk_parallel_batched_with_literal_prefix, walk_with_literal_prefix,
+        OwnedTraversalEntry, TraversalControl, TraversalError, TraversalSummary,
+        prefer_parallel_root, walk, walk_parallel_batched,
+        walk_parallel_batched_with_literal_prefix, walk_with_literal_prefix,
     },
 };
 
 const DEFAULT_LIMIT: usize = 200;
 const MAX_LIMIT: usize = 1_000;
 const MAX_CONTEXT: usize = 20;
+#[cfg(any(test, feature = "bench-internals"))]
 pub(crate) const CANDIDATE_SOFT_TARGET_BYTES: usize = 64 * 1024 * 1024;
 const MEMORY_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 const SEARCH_HEAP_BYTES: usize = 1024 * 1024;
@@ -42,7 +44,6 @@ const PAGE_MEMORY_BYTES: usize = MODEL_BYTE_LIMIT;
 const PARALLEL_BATCH_SIZE: usize = 256;
 const CONTENT_SEARCH_BATCH_SIZE: usize = 8;
 const STREAM_SEARCH_BATCH_SIZE: usize = 16;
-const PARALLEL_ROOT_ENTRY_THRESHOLD: usize = 8;
 const GENERIC_OMISSION: &str = "[grep result omitted: exceeds output budget]";
 const CONTENT_OMISSION: &str = "[line text omitted: exceeds output budget]";
 #[cfg(feature = "bench-internals")]
