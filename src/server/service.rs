@@ -303,7 +303,7 @@ impl CodexShim {
             _ => {
                 return classified_tool_error(
                     cancellation_class(request_cancellation, &self.resources.shutdown_token()),
-                    "read cancelled while waiting for bounded runtime capacity",
+                    "read cancelled while waiting for runtime capacity",
                 );
             }
         };
@@ -347,7 +347,7 @@ impl CodexShim {
             _ => {
                 return classified_tool_error(
                     cancellation_class(request_cancellation, &self.resources.shutdown_token()),
-                    "glob cancelled while waiting for bounded runtime capacity",
+                    "glob cancelled while waiting for runtime capacity",
                 );
             }
         };
@@ -377,40 +377,34 @@ impl CodexShim {
         admission: OwnedSemaphorePermit,
     ) -> CallToolResponse {
         let queued = Instant::now();
-        let grep_request = match parse_request(arguments, "grep") {
+        let grep_request: crate::tools::grep::GrepRequest = match parse_request(arguments, "grep") {
             Ok(request) => request,
             Err(error) => return classified_tool_error("validation", error),
         };
-        let requested_lanes = self.resources.config().worker_lanes;
-        let workers = self
+        let worker = self.resources.acquire_worker(request_cancellation).await;
+        let open_file = self
             .resources
-            .acquire_search_lanes(requested_lanes, request_cancellation)
-            .await;
-        let lanes = workers.as_ref().map_or(1, crate::runtime::SearchLanes::len);
-        let open_files = self
-            .resources
-            .acquire_open_files(lanes, request_cancellation)
+            .acquire_open_file(request_cancellation)
             .await;
         let memory = self
             .resources
             .reserve_memory(
-                crate::tools::grep::memory_charge(lanes),
+                crate::tools::grep::base_memory_charge(),
                 request_cancellation,
             )
             .await;
-        let permits = match (workers, open_files, memory) {
-            (Ok(workers), Ok(open_files), Ok(memory)) => {
-                (admission, workers, open_files, memory)
-            }
+        let permits = match (worker, open_file, memory) {
+            (Ok(worker), Ok(open_file), Ok(memory)) => (admission, worker, open_file, memory),
             _ => {
                 return classified_tool_error(
                     cancellation_class(request_cancellation, &self.resources.shutdown_token()),
-                    "grep cancelled while waiting for bounded runtime capacity",
+                    "grep cancelled while waiting for runtime capacity",
                 );
             }
         };
         tracing::info!(target: "codexshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
         let access = self.file_access.clone();
+        let resources = self.resources.clone();
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
         let span = tracing::Span::current();
@@ -420,7 +414,7 @@ impl CodexShim {
                 let result = crate::tools::grep::execute_output(
                     &access,
                     &grep_request,
-                    lanes,
+                    &resources,
                     &cancellation,
                 );
                 drop(permits);

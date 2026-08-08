@@ -8,7 +8,7 @@
 
 - **受限的文件访问。** `read`、`grep`、`glob` 默认仅在仓库内操作，可选访问 Codex skill 和 plugin 目录。
 - **无 shell 注入。** `run_process` 接收可执行文件和字面量参数列表——不支持管道、重定向、通配符或变量展开。
-- **跨平台。** 仅原生支持 Windows 和 Linux。
+- **跨平台。** 原生支持 Windows、Linux 和 macOS（Intel 与 Apple Silicon）。
 
 ## 工具
 
@@ -23,7 +23,7 @@
 
 ## 安装
 
-预编译二进制支持 Linux 和 Windows 11（build 22621+，本地固定 NTFS 驱动器）。
+预编译二进制支持 Linux、macOS 和 Windows 11（build 22621+）。Windows 使用本地固定 NTFS 驱动器。
 
 ### 预编译发行版（推荐）
 
@@ -41,12 +41,25 @@
 curl --proto '=https' --tlsv1.2 -fsSL https://github.com/possible055/codexshim/releases/latest/download/install.sh | sh
 ```
 
+**macOS:**
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/possible055/codexshim/releases/latest/download/install.sh | sh
+```
+
 默认安装位置：
 
 - Windows: `%LOCALAPPDATA%\codexshim\bin\codexshim.exe`
 - Linux: `${XDG_DATA_HOME:-$HOME/.local/share}/codexshim/bin/codexshim`
+- macOS: `${XDG_DATA_HOME:-$HOME/.local/share}/codexshim/bin/codexshim`
 
 使用 `-InstallDir`（PowerShell）或 `--install-dir`（sh）覆盖路径。再次运行同一命令即可更新。
+
+安装指定版本或预发布版本时，传入 `-Version`（PowerShell）或 `--version`（sh）：
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/possible055/codexshim/releases/download/v0.1.3-alpha.2/install.sh | sh -s -- --version 0.1.3-alpha.2
+```
 
 ### 从源码构建
 
@@ -57,7 +70,7 @@ cargo build --release --locked
 cargo run --locked -- doctor
 ```
 
-二进制位于 `target/release/codexshim`（Linux）或 `target/release/codexshim.exe`（Windows）。
+二进制位于 `target/release/codexshim`（Linux 与 macOS）或 `target/release/codexshim.exe`（Windows）。
 
 ## 配置 Codex
 
@@ -65,12 +78,14 @@ cargo run --locked -- doctor
 
 - [Windows 示例](config/codex.windows.toml.example)
 - [Linux 示例](config/codex.linux.toml.example)
+- [macOS 示例](config/codex.macos.toml.example)
 
 ```toml
 [mcp_servers.codexshim]
 command = "/absolute/path/to/codexshim"
 args = ["serve"]
 required = true
+supports_parallel_tool_calls = true
 startup_timeout_sec = 15
 tool_timeout_sec = 310
 enabled_tools = ["read", "grep", "glob", "run_process"]
@@ -87,6 +102,8 @@ mcp_2026_07_28 = true
 在 Windows 上，使用单引号 TOML 路径，例如 `'C:\Users\me\AppData\Local\codexshim\bin\codexshim.exe'`，以避免转义反斜杠。
 
 在你要处理的仓库中启动 Codex。`codexshim` 在服务生命周期内将该工作目录视为仓库根目录。
+
+`supports_parallel_tool_calls = true` 允许 Codex 并行调用 codexshim 的四个工具。每个 codexshim 实例独立允许最多 16 个活动中的 `run_process` 调用，以及 16 个活动中的只读调用（`read`、`grep`、`glob` 合计）。可将 `CODEXSHIM_PROCESS_CALLS` 设为 1 到 32 的整数以覆盖进程上限；无效值会阻止启动。类别满载时仍立即失败，并返回可重试的 `resource_busy` 错误。
 
 ## 选项
 
@@ -111,6 +128,7 @@ args = ["serve", "--read-scope", "unrestricted"]
 | --- | --- | --- |
 | `CODEX_MCP_PROTOCOL_VERSION` | — | 向 Codex 声明的 MCP 协议版本。 |
 | `CODEXSHIM_MCP_COMPATIBILITY` | `lenient` | 设为 `strict` 以拒绝旧版 `2025-06-18` initialize 客户端。 |
+| `CODEXSHIM_PROCESS_CALLS` | `16` | 每个实例的 `run_process` 并行上限；接受 1 到 32 的整数。 |
 | `CODEXSHIM_LOG_MODE` | `errors` | 取值 `off`、`errors`、`all` 之一。 |
 | `CODEXSHIM_LOG_DIR` | 平台默认 | 用绝对路径覆盖日志目录。 |
 

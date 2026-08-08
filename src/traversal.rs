@@ -8,6 +8,9 @@ use std::{
     },
 };
 
+#[cfg(any(test, feature = "bench-internals"))]
+use std::path::Component;
+
 use ignore::{DirEntry, WalkBuilder, WalkState};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -37,15 +40,7 @@ impl TraversalSummary {
 
     #[must_use]
     pub fn model_line(&self) -> Option<String> {
-        (self.skipped() > 0).then(|| {
-            format!(
-                "Skipped: {} entries (I/O: {}, outside root: {}, non-Unicode: {}).",
-                self.skipped(),
-                self.io_errors,
-                self.escaped_entries,
-                self.non_unicode_entries
-            )
-        })
+        (self.skipped() > 0).then(|| format!("Skipped: {} entries.", self.skipped()))
     }
 }
 
@@ -60,6 +55,7 @@ pub struct TraversalEntry<'a> {
 pub struct OwnedTraversalEntry {
     pub key: PathBuf,
     pub absolute: PathBuf,
+    pub file_type: Option<std::fs::FileType>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -83,6 +79,35 @@ pub fn walk(
     base: &ResolvedPath,
     include_ignored: bool,
     cancellation: &CancellationToken,
+    visitor: impl for<'entry> FnMut(TraversalEntry<'entry>) -> TraversalControl,
+) -> Result<TraversalSummary, TraversalError> {
+    walk_filtered(access, base, include_ignored, cancellation, None, visitor)
+}
+
+pub fn walk_with_literal_prefix(
+    access: &FileAccess,
+    base: &ResolvedPath,
+    include_ignored: bool,
+    cancellation: &CancellationToken,
+    literal_prefix: &Path,
+    visitor: impl for<'entry> FnMut(TraversalEntry<'entry>) -> TraversalControl,
+) -> Result<TraversalSummary, TraversalError> {
+    walk_filtered(
+        access,
+        base,
+        include_ignored,
+        cancellation,
+        Some(literal_prefix),
+        visitor,
+    )
+}
+
+fn walk_filtered(
+    access: &FileAccess,
+    base: &ResolvedPath,
+    include_ignored: bool,
+    cancellation: &CancellationToken,
+    literal_prefix: Option<&Path>,
     mut visitor: impl for<'entry> FnMut(TraversalEntry<'entry>) -> TraversalControl,
 ) -> Result<TraversalSummary, TraversalError> {
     access.root().verify()?;
@@ -103,7 +128,7 @@ pub fn walk(
             .hidden(false)
             .require_git(false);
     }
-    builder.filter_entry(|entry| entry.depth() == 0 || !is_git_entry(entry));
+    configure_entry_filter(&mut builder, access, base, literal_prefix);
 
     let mut summary = TraversalSummary::default();
     for result in builder.build() {
@@ -151,6 +176,46 @@ pub fn walk_parallel_batched(
     batch_size: usize,
     visitor: impl Fn(&[OwnedTraversalEntry]) -> TraversalControl + Send + Sync,
 ) -> Result<TraversalSummary, TraversalError> {
+    walk_parallel_batched_filtered(
+        access,
+        base,
+        include_ignored,
+        cancellation,
+        batch_size,
+        None,
+        visitor,
+    )
+}
+
+pub fn walk_parallel_batched_with_literal_prefix(
+    access: &FileAccess,
+    base: &ResolvedPath,
+    include_ignored: bool,
+    cancellation: &CancellationToken,
+    batch_size: usize,
+    literal_prefix: &Path,
+    visitor: impl Fn(&[OwnedTraversalEntry]) -> TraversalControl + Send + Sync,
+) -> Result<TraversalSummary, TraversalError> {
+    walk_parallel_batched_filtered(
+        access,
+        base,
+        include_ignored,
+        cancellation,
+        batch_size,
+        Some(literal_prefix),
+        visitor,
+    )
+}
+
+fn walk_parallel_batched_filtered(
+    access: &FileAccess,
+    base: &ResolvedPath,
+    include_ignored: bool,
+    cancellation: &CancellationToken,
+    batch_size: usize,
+    literal_prefix: Option<&Path>,
+    visitor: impl Fn(&[OwnedTraversalEntry]) -> TraversalControl + Send + Sync,
+) -> Result<TraversalSummary, TraversalError> {
     access.root().verify()?;
     if base.is_ambient() && access.symlink_metadata_kind(base)?.is_symlink {
         return Err(TraversalError::NotDirectory);
@@ -172,7 +237,7 @@ pub fn walk_parallel_batched(
             .hidden(false)
             .require_git(false);
     }
-    builder.filter_entry(|entry| entry.depth() == 0 || !is_git_entry(entry));
+    configure_entry_filter(&mut builder, access, base, literal_prefix);
 
     let summary = AtomicTraversalSummary::default();
     let stopped = AtomicBool::new(false);
@@ -214,6 +279,7 @@ pub fn walk_parallel_batched(
             pending.entries.push(OwnedTraversalEntry {
                 key,
                 absolute: entry.path().to_path_buf(),
+                file_type: entry.file_type(),
             });
             if pending.entries.len() < pending.capacity {
                 return WalkState::Continue;
@@ -241,6 +307,52 @@ pub fn walk_parallel_batched(
         }
     }
     Ok(summary.snapshot())
+}
+
+#[must_use]
+#[cfg(any(test, feature = "bench-internals"))]
+pub fn literal_path_prefix(pattern: &str) -> Option<PathBuf> {
+    let mut prefix = PathBuf::new();
+    for component in Path::new(pattern).components() {
+        let Component::Normal(component) = component else {
+            return None;
+        };
+        if component
+            .to_string_lossy()
+            .chars()
+            .any(|character| matches!(character, '*' | '?' | '[' | ']' | '{' | '}'))
+        {
+            break;
+        }
+        prefix.push(component);
+    }
+    (!prefix.as_os_str().is_empty()).then_some(prefix)
+}
+
+fn configure_entry_filter(
+    builder: &mut WalkBuilder,
+    access: &FileAccess,
+    base: &ResolvedPath,
+    literal_prefix: Option<&Path>,
+) {
+    let Some(literal_prefix) = literal_prefix else {
+        builder.filter_entry(|entry| entry.depth() == 0 || !is_git_entry(entry));
+        return;
+    };
+    let logical_root = traversal_logical_root(access, base).to_path_buf();
+    let literal_prefix = literal_prefix.to_path_buf();
+    builder.filter_entry(move |entry| {
+        if entry.depth() == 0 {
+            return true;
+        }
+        if is_git_entry(entry) {
+            return false;
+        }
+        let Ok(key) = entry.path().strip_prefix(&logical_root) else {
+            return true;
+        };
+        literal_prefix.starts_with(key) || key.starts_with(&literal_prefix)
+    });
 }
 
 #[derive(Default)]
@@ -297,11 +409,7 @@ fn walked_key<'path>(
     base: &ResolvedPath,
     path: &'path Path,
 ) -> Result<Cow<'path, Path>, crate::path::PathError> {
-    let logical_root = if base.is_external() {
-        base.absolute()
-    } else {
-        access.root().path()
-    };
+    let logical_root = traversal_logical_root(access, base);
     if let Ok(key) = path.strip_prefix(logical_root) {
         return Ok(Cow::Borrowed(if key.as_os_str().is_empty() {
             Path::new(".")
@@ -311,6 +419,14 @@ fn walked_key<'path>(
     }
     let resolved = access.resolve_traversal_entry(base, path)?;
     Ok(Cow::Owned(resolved.key().to_path_buf()))
+}
+
+fn traversal_logical_root<'a>(access: &'a FileAccess, base: &'a ResolvedPath) -> &'a Path {
+    if base.is_external() {
+        base.absolute()
+    } else {
+        access.root().path()
+    }
 }
 
 fn is_git_entry(entry: &DirEntry) -> bool {
@@ -337,7 +453,10 @@ mod tests {
 
     use tokio_util::sync::CancellationToken;
 
-    use super::{TraversalControl, walk, walk_parallel_batched};
+    use super::{
+        TraversalControl, literal_path_prefix, walk, walk_parallel_batched,
+        walk_parallel_batched_with_literal_prefix, walk_with_literal_prefix,
+    };
     use crate::path::{FileAccess, ReadScope, RepositoryRoot};
 
     fn access(path: &Path) -> FileAccess {
@@ -410,6 +529,78 @@ mod tests {
         parallel.sort();
         assert_eq!(parallel, serial);
         assert_eq!(parallel_summary, serial_summary);
+    }
+
+    #[test]
+    fn literal_prefix_extraction_stops_before_glob_syntax() {
+        assert_eq!(
+            literal_path_prefix("src/tools/**/*.rs"),
+            Some(Path::new("src/tools").to_path_buf())
+        );
+        assert_eq!(
+            literal_path_prefix("src/file.rs"),
+            Some(Path::new("src/file.rs").to_path_buf())
+        );
+        assert_eq!(literal_path_prefix("**/*.rs"), None);
+        assert_eq!(literal_path_prefix("{src,tests}/**/*.rs"), None);
+        assert_eq!(literal_path_prefix("../src/**/*.rs"), None);
+    }
+
+    #[test]
+    fn literal_prefix_pruning_preserves_keys_and_ancestor_ignore_rules() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        fs::create_dir_all(fixture.path().join("src/deep")).expect("deep");
+        fs::create_dir_all(fixture.path().join("src/sibling")).expect("sibling");
+        fs::create_dir_all(fixture.path().join("other")).expect("other");
+        fs::write(fixture.path().join(".gitignore"), "src/deep/ignored.rs\n").expect("ignore");
+        fs::write(fixture.path().join("src/deep/a.rs"), "source").expect("a");
+        fs::write(fixture.path().join("src/deep/ignored.rs"), "ignored").expect("ignored");
+        fs::write(fixture.path().join("src/sibling/b.rs"), "source").expect("b");
+        fs::write(fixture.path().join("other/c.rs"), "source").expect("c");
+        let root = access(fixture.path());
+        let base = root.resolve(Path::new(".")).expect("base");
+        let prefix = Path::new("src/deep");
+
+        let mut serial = Vec::new();
+        let serial_summary = walk_with_literal_prefix(
+            &root,
+            &base,
+            false,
+            &CancellationToken::new(),
+            prefix,
+            |entry| {
+                serial.push(entry.key.to_path_buf());
+                TraversalControl::Continue
+            },
+        )
+        .expect("serial prefix walk");
+        let parallel = Mutex::new(Vec::new());
+        let parallel_summary = walk_parallel_batched_with_literal_prefix(
+            &root,
+            &base,
+            false,
+            &CancellationToken::new(),
+            2,
+            prefix,
+            |batch| {
+                parallel
+                    .lock()
+                    .expect("parallel prefix results")
+                    .extend(batch.iter().map(|entry| entry.key.clone()));
+                TraversalControl::Continue
+            },
+        )
+        .expect("parallel prefix walk");
+        let mut parallel = parallel.into_inner().expect("parallel prefix results");
+        serial.sort();
+        parallel.sort();
+
+        assert_eq!(parallel, serial);
+        assert_eq!(parallel_summary, serial_summary);
+        assert!(serial.contains(&Path::new("src/deep/a.rs").to_path_buf()));
+        assert!(!serial.contains(&Path::new("src/deep/ignored.rs").to_path_buf()));
+        assert!(!serial.iter().any(|path| path.starts_with("src/sibling")));
+        assert!(!serial.iter().any(|path| path.starts_with("other")));
     }
 
     #[test]

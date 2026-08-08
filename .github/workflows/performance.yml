@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Benchmark repository tools
         env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}\codexshim-performance-target
+          CARGO_TARGET_DIR: ${{ runner.workspace }}\..\codexshim-performance-target
           CODEXSHIM_BENCH_SCALES: ${{ inputs.scales }}
           CODEXSHIM_BENCH_MAX_GLOB_P95_MS_PER_1K: "250"
           CODEXSHIM_BENCH_MAX_GREP_P95_MS_PER_1K: "2000"
@@ -26,8 +26,36 @@ jobs:
         run: cargo bench --locked --features bench-internals --bench performance
       - name: Benchmark diagnostics through stdio
         env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}\codexshim-performance-target
+          CARGO_TARGET_DIR: ${{ runner.workspace }}\..\codexshim-performance-target
           CODEXSHIM_BENCH_MAX_STDIO_COLD_MS: "750"
           CODEXSHIM_BENCH_MAX_STDIO_P95_MS: "10"
           CODEXSHIM_BENCH_MAX_PROCESS_MS: "300"
         run: cargo bench --locked --bench stdio_performance
+      - name: Four-instance aggregate process soak
+        env:
+          CARGO_TARGET_DIR: ${{ runner.workspace }}\..\codexshim-performance-target
+          CODEXSHIM_AGGREGATE_SOAK_ITERATIONS: "60"
+          CODEXSHIM_AGGREGATE_SOAK_OUTPUT: ${{ github.workspace }}\target\resource-soak\windows-four-instance.jsonl
+        run: cargo test --locked --test resource_soak four_instance_aggregate_process_soak -- --ignored --nocapture
+      - name: Upload aggregate soak evidence
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-four-instance-process-soak
+          path: target/resource-soak/windows-four-instance.jsonl
+          if-no-files-found: error
+
+  linux-aggregate-soak:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Four-instance aggregate process soak
+        env:
+          CODEXSHIM_AGGREGATE_SOAK_ITERATIONS: "60"
+          CODEXSHIM_AGGREGATE_SOAK_OUTPUT: ${{ github.workspace }}/target/resource-soak/linux-four-instance.jsonl
+        run: cargo test --locked --test resource_soak four_instance_aggregate_process_soak -- --ignored --nocapture
+      - name: Upload aggregate soak evidence
+        uses: actions/upload-artifact@v6
+        with:
+          name: linux-four-instance-process-soak
+          path: target/resource-soak/linux-four-instance.jsonl
+          if-no-files-found: error

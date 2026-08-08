@@ -5,13 +5,18 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        CaseMode, GrepError, GrepMode, GrepRequest, PAGE_MEMORY_BYTES, Page,
-        SearchPlan, build_matcher, candidate, execute, memory_charge, render, search_file,
-        search_file_with_hook,
+        CANDIDATE_SOFT_TARGET_BYTES, CandidateCollection, CandidatePolicy, CaseMode,
+        GrepBenchmarkVariant,
+        GrepError, GrepMode, GrepRequest, GrepSourcePolicy, GrepTraversal, PAGE_MEMORY_BYTES, Page,
+        PathnameReopenPolicy, PlanSink, SearchPlan, build_matcher, candidate, execute,
+        execute_with_traversal,
+        execute_with_variant, prefer_parallel_candidate_collection, render,
+        search_file, search_file_with_hook, search_file_with_variant_hook,
     };
+    #[cfg(feature = "bench-internals")]
+    use super::execute_profiled;
     use crate::{
         path::{FileAccess, ReadScope, RepositoryRoot},
-        runtime::MEMORY_BUDGET_BYTES,
     };
 
     fn request(pattern: &str) -> GrepRequest {
@@ -68,6 +73,128 @@ mod tests {
                 baseline
             );
         }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn profiled_execution_preserves_output_and_records_wall_stages() {
+        let (_fixture, root) = fixture();
+        let mut query = request("needle");
+        query.fixed_strings = Some(true);
+        query.mode = Some(GrepMode::Count);
+        let cancellation = CancellationToken::new();
+        let expected = execute(&root, &query, 4, &cancellation).expect("grep");
+        let profile =
+            execute_profiled(&root, &query, 4, &cancellation).expect("profiled grep");
+
+        assert_eq!(profile.output, expected);
+        assert_eq!(profile.timings.candidate_count, 2);
+        assert_eq!(profile.timings.lanes, 2);
+        let sequential_ns = profile
+            .timings
+            .setup_ns
+            .saturating_add(profile.timings.candidate_traversal_ns)
+            .saturating_add(profile.timings.candidate_sort_ns)
+            .saturating_add(profile.timings.search_wall_ns)
+            .saturating_add(profile.timings.render_ns);
+        assert!(profile.timings.total_ns >= sequential_ns);
+        assert!(profile.timings.candidate_traversal_ns > 0);
+        assert!(profile.timings.search_wall_ns > 0);
+    }
+
+    #[test]
+    fn serial_and_parallel_candidate_traversal_are_equivalent() {
+        let (_fixture, root) = fixture();
+        let mut query = request("needle");
+        query.fixed_strings = Some(true);
+        query.mode = Some(GrepMode::Count);
+        let cancellation = CancellationToken::new();
+        let serial = execute_with_traversal(
+            &root,
+            &query,
+            4,
+            &cancellation,
+            GrepTraversal::Serial,
+        )
+        .expect("serial grep");
+        let parallel = execute_with_traversal(
+            &root,
+            &query,
+            4,
+            &cancellation,
+            GrepTraversal::ParallelBatched,
+        )
+        .expect("parallel grep");
+
+        assert_eq!(parallel, serial);
+    }
+
+    #[test]
+    fn literal_prefix_grep_preserves_serial_and_parallel_output() {
+        let (fixture, root) = fixture();
+        fs::create_dir(fixture.path().join("other")).expect("other");
+        fs::write(fixture.path().join("other/c.rs"), "needle\n").expect("c");
+        let mut query = request("needle");
+        query.fixed_strings = Some(true);
+        query.mode = Some(GrepMode::Count);
+        query.glob = Some("src/*.rs".to_owned());
+        let cancellation = CancellationToken::new();
+        let expected = execute_with_traversal(
+            &root,
+            &query,
+            4,
+            &cancellation,
+            GrepTraversal::Serial,
+        )
+        .expect("serial grep");
+
+        for traversal in [
+            GrepTraversal::SerialLiteralPrefix,
+            GrepTraversal::ParallelBatchedLiteralPrefix,
+        ] {
+            assert_eq!(
+                execute_with_traversal(&root, &query, 4, &cancellation, traversal)
+                    .expect("literal prefix grep"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn adaptive_candidate_traversal_keeps_small_roots_serial() {
+        let (fixture, root) = fixture();
+        let base = root.resolve(Path::new(".")).expect("base");
+
+        assert!(!prefer_parallel_candidate_collection(&root, &base));
+        for index in 0..8 {
+            fs::create_dir(fixture.path().join(format!("root-{index}"))).expect("root entry");
+        }
+        assert!(prefer_parallel_candidate_collection(&root, &base));
+    }
+
+    #[test]
+    fn candidate_soft_target_records_crossing_without_failing() {
+        let (_fixture, root) = fixture();
+        let path = root.resolve(Path::new("src/a.rs")).expect("candidate path");
+        let candidate = candidate(path).expect("candidate");
+        let mut collection = CandidateCollection::new(CandidatePolicy::SoftTarget);
+        collection.estimated_retained_bytes = CANDIDATE_SOFT_TARGET_BYTES;
+
+        collection.admit(candidate).expect("soft target is not fatal");
+        assert_eq!(collection.soft_target_crossings, 1);
+        assert_eq!(collection.candidates.len(), 1);
+    }
+
+    #[test]
+    fn benchmark_fatal_candidate_policy_is_isolated_from_production() {
+        let (_fixture, root) = fixture();
+        let path = root.resolve(Path::new("src/a.rs")).expect("candidate path");
+        let candidate = candidate(path).expect("candidate");
+        let mut collection = CandidateCollection::new(CandidatePolicy::FatalCeiling);
+        collection.estimated_retained_bytes = CANDIDATE_SOFT_TARGET_BYTES;
+
+        let error = collection.admit(candidate).expect_err("fatal benchmark policy");
+        assert!(matches!(error, GrepError::CandidateMemory));
     }
 
     #[test]
@@ -207,10 +334,22 @@ mod tests {
     }
 
     #[test]
-    fn runtime_memory_charge_is_conservative_and_bounded() {
-        assert!(memory_charge(1) > 16 * 1024 * 1024);
-        assert!(memory_charge(16) > memory_charge(1));
-        assert!(memory_charge(16) <= MEMORY_BUDGET_BYTES);
+    fn non_content_sinks_do_not_preallocate_capture_records() {
+        let query = request("needle");
+        let matcher = build_matcher(&query).expect("matcher");
+        let cancellation = CancellationToken::new();
+        for mode in [GrepMode::Files, GrepMode::Count] {
+            let sink = PlanSink::new(
+                &matcher,
+                SearchPlan {
+                    mode,
+                    context: 0,
+                    capture_records: 1_000,
+                },
+                &cancellation,
+            );
+            assert_eq!(sink.capture_capacity(), 0);
+        }
     }
 
     #[test]
@@ -234,10 +373,22 @@ mod tests {
         let (_fixture, root) = fixture();
         let cancellation = CancellationToken::new();
         cancellation.cancel();
-        assert!(matches!(
-            execute(&root, &request("needle"), 1, &cancellation),
-            Err(GrepError::Cancelled)
-        ));
+        for traversal in [
+            GrepTraversal::Adaptive,
+            GrepTraversal::Serial,
+            GrepTraversal::ParallelBatched,
+        ] {
+            assert!(matches!(
+                execute_with_traversal(
+                    &root,
+                    &request("needle"),
+                    1,
+                    &cancellation,
+                    traversal
+                ),
+                Err(GrepError::Cancelled)
+            ));
+        }
     }
 
     #[test]
@@ -278,4 +429,186 @@ mod tests {
         assert!(!output.contains("replacement without"));
         assert!(output.contains("Skipped: 1 files or entries."));
     }
+
+    #[test]
+    fn benchmark_source_variants_preserve_output() {
+        let (_fixture, root) = fixture();
+        let query = request("needle");
+        let expected = execute(&root, &query, 2, &CancellationToken::new()).expect("baseline");
+        for source in [
+            GrepSourcePolicy::Reader,
+            GrepSourcePolicy::FileNever,
+            GrepSourcePolicy::MmapAlways,
+            GrepSourcePolicy::MmapThreshold(1),
+            GrepSourcePolicy::MmapThreshold(u64::MAX),
+        ] {
+            for pathname_reopen in [
+                PathnameReopenPolicy::On,
+                PathnameReopenPolicy::Off,
+                PathnameReopenPolicy::ParentBatch,
+            ] {
+                let actual = execute_with_variant(
+                    &root,
+                    &query,
+                    2,
+                    &CancellationToken::new(),
+                    GrepTraversal::Adaptive,
+                    GrepBenchmarkVariant {
+                        source,
+                        pathname_reopen,
+                    },
+                )
+                .expect("benchmark variant");
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn production_default_uses_open_time_handle_semantics() {
+        assert_eq!(
+            GrepBenchmarkVariant::default().pathname_reopen,
+            PathnameReopenPolicy::Off
+        );
+    }
+
+    #[test]
+    fn same_handle_fingerprint_rejects_rename_with_or_without_pathname_reopen() {
+        for pathname_reopen in [PathnameReopenPolicy::On, PathnameReopenPolicy::Off] {
+            let (fixture, root) = fixture();
+            let cancellation = CancellationToken::new();
+            let query = request("needle");
+            let matcher = build_matcher(&query).expect("matcher");
+            let plan = SearchPlan {
+                mode: GrepMode::Content,
+                context: 0,
+                capture_records: 10,
+            };
+            let original = fixture.path().join("src/a.rs");
+            let renamed = fixture.path().join("src/a-renamed.rs");
+            let candidate = candidate(root.resolve(Path::new("src/a.rs")).expect("candidate path"))
+                .expect("candidate");
+            let outcome = search_file_with_variant_hook(
+                &root,
+                &candidate,
+                &matcher,
+                plan,
+                &cancellation,
+                GrepBenchmarkVariant {
+                    source: GrepSourcePolicy::Reader,
+                    pathname_reopen,
+                },
+                || fs::rename(&original, &renamed).expect("rename during validation"),
+            )
+            .expect("rename outcome");
+            assert!(outcome.skipped, "{pathname_reopen:?}");
+        }
+    }
+
+    #[test]
+    fn same_handle_fingerprint_rejects_truncate_and_same_size_rewrite() {
+        for replacement in ["needle\n", "xxxxxx\nxxxxxx xxxxxx\nxxxxx\n"] {
+            let (fixture, root) = fixture();
+            let cancellation = CancellationToken::new();
+            let query = request("needle");
+            let matcher = build_matcher(&query).expect("matcher");
+            let plan = SearchPlan {
+                mode: GrepMode::Content,
+                context: 0,
+                capture_records: 10,
+            };
+            let path = fixture.path().join("src/a.rs");
+            let candidate = candidate(root.resolve(Path::new("src/a.rs")).expect("candidate path"))
+                .expect("candidate");
+            let outcome = search_file_with_variant_hook(
+                &root,
+                &candidate,
+                &matcher,
+                plan,
+                &cancellation,
+                GrepBenchmarkVariant {
+                    source: GrepSourcePolicy::Reader,
+                    pathname_reopen: PathnameReopenPolicy::Off,
+                },
+                || fs::write(&path, replacement).expect("rewrite during validation"),
+            )
+            .expect("rewrite outcome");
+            assert!(outcome.skipped);
+        }
+    }
+
+    #[test]
+    fn same_handle_fingerprint_rejects_replace_with_or_without_pathname_reopen() {
+        for pathname_reopen in [PathnameReopenPolicy::On, PathnameReopenPolicy::Off] {
+            let (fixture, root) = fixture();
+            let cancellation = CancellationToken::new();
+            let query = request("needle");
+            let matcher = build_matcher(&query).expect("matcher");
+            let plan = SearchPlan {
+                mode: GrepMode::Content,
+                context: 0,
+                capture_records: 10,
+            };
+            let original = fixture.path().join("src/a.rs");
+            let displaced = fixture.path().join("src/a-old.rs");
+            let candidate = candidate(root.resolve(Path::new("src/a.rs")).expect("candidate path"))
+                .expect("candidate");
+            let outcome = search_file_with_variant_hook(
+                &root,
+                &candidate,
+                &matcher,
+                plan,
+                &cancellation,
+                GrepBenchmarkVariant {
+                    source: GrepSourcePolicy::Reader,
+                    pathname_reopen,
+                },
+                || {
+                    fs::rename(&original, &displaced).expect("displace original");
+                    fs::write(&original, "replacement without match\n").expect("replace pathname");
+                },
+            )
+            .expect("replace outcome");
+            assert!(outcome.skipped);
+        }
+    }
+
+    #[test]
+    fn pathname_reopen_detects_delete_recreate_identity_change() {
+        for pathname_reopen in [PathnameReopenPolicy::On, PathnameReopenPolicy::Off] {
+            let (fixture, root) = fixture();
+            let cancellation = CancellationToken::new();
+            let query = request("needle");
+            let matcher = build_matcher(&query).expect("matcher");
+            let plan = SearchPlan {
+                mode: GrepMode::Content,
+                context: 0,
+                capture_records: 10,
+            };
+            let original = fixture.path().join("src/a.rs");
+            let candidate = candidate(root.resolve(Path::new("src/a.rs")).expect("candidate path"))
+                .expect("candidate");
+            let outcome = search_file_with_variant_hook(
+                &root,
+                &candidate,
+                &matcher,
+                plan,
+                &cancellation,
+                GrepBenchmarkVariant {
+                    source: GrepSourcePolicy::Reader,
+                    pathname_reopen,
+                },
+                || {
+                    fs::remove_file(&original).expect("delete original");
+                    fs::write(&original, "recreated without match\n").expect("recreate pathname");
+                },
+            )
+            .expect("delete recreate outcome");
+            assert_eq!(
+                outcome.skipped,
+                pathname_reopen == PathnameReopenPolicy::On
+            );
+        }
+    }
+
 }

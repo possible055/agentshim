@@ -11,15 +11,20 @@ $testDirectory = Join-Path ([IO.Path]::GetTempPath()) ("codexshim-installer-test
 $fixtureDirectory = $null
 
 try {
+    $target = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
+        X64 { "x86_64-pc-windows-msvc"; break }
+        Arm64 { "aarch64-pc-windows-msvc"; break }
+        default { throw "Unsupported Windows architecture: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)" }
+    }
     if (-not $ReleaseDirectory) {
         if (-not $BinaryPath) {
             throw "ReleaseDirectory or BinaryPath is required."
         }
         $fixtureDirectory = Join-Path ([IO.Path]::GetTempPath()) ("codexshim-installer-fixture-" + [guid]::NewGuid().ToString("N"))
-        $stage = Join-Path $fixtureDirectory "codexshim-$ExpectedVersion-x86_64-pc-windows-msvc"
+        $stage = Join-Path $fixtureDirectory "codexshim-$ExpectedVersion-$target"
         New-Item -ItemType Directory -Path $stage -Force | Out-Null
         Copy-Item -LiteralPath $BinaryPath -Destination (Join-Path $stage "codexshim.exe")
-        $archive = Join-Path $fixtureDirectory "codexshim-$ExpectedVersion-x86_64-pc-windows-msvc.zip"
+        $archive = Join-Path $fixtureDirectory "codexshim-$ExpectedVersion-$target.zip"
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         [IO.Compression.ZipFile]::CreateFromDirectory($stage, $archive)
         $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -41,6 +46,9 @@ try {
         }
         if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
             throw "Installer did not create $binary"
+        }
+        if (Test-Path -LiteralPath "$binary.old") {
+            throw "Installer left a replacement backup at $binary.old"
         }
         $versionOutput = (& $binary --version | Out-String).Trim()
         if ($LASTEXITCODE -ne 0 -or $versionOutput -cne $expectedBinaryVersion) {

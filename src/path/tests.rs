@@ -115,6 +115,56 @@ mod tests {
     }
 
     #[test]
+    fn same_parent_batch_does_not_retain_the_directory_after_files_close() {
+        let fixture = tempfile::tempdir().expect("create fixture");
+        let parent = fixture.path().join("parent");
+        let renamed = fixture.path().join("renamed");
+        fs::create_dir(&parent).expect("create parent");
+        fs::write(parent.join("a.txt"), "a").expect("write a");
+        fs::write(parent.join("b.txt"), "b").expect("write b");
+        let access = FileAccess::new(
+            Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
+            ReadScope::Normal,
+        );
+        let paths = ["parent/a.txt", "parent/b.txt"]
+            .map(|path| access.resolve(Path::new(path)).expect("resolved path"));
+
+        let opened = access
+            .open_read_same_parent_batch(&paths)
+            .expect("batch parent")
+            .into_iter()
+            .collect::<std::io::Result<Vec<_>>>()
+            .expect("batch files");
+        assert_eq!(opened.len(), 2);
+        drop(opened);
+        fs::rename(&parent, &renamed).expect("parent rename after files close");
+        assert!(renamed.join("a.txt").is_file());
+    }
+
+    #[test]
+    fn same_parent_batch_rejects_mixed_parents() {
+        let fixture = tempfile::tempdir().expect("create fixture");
+        fs::create_dir(fixture.path().join("a")).expect("create a");
+        fs::create_dir(fixture.path().join("b")).expect("create b");
+        fs::write(fixture.path().join("a/file.txt"), "a").expect("write a");
+        fs::write(fixture.path().join("b/file.txt"), "b").expect("write b");
+        let access = FileAccess::new(
+            Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
+            ReadScope::Normal,
+        );
+        let paths = ["a/file.txt", "b/file.txt"]
+            .map(|path| access.resolve(Path::new(path)).expect("resolved path"));
+
+        assert_eq!(
+            access
+                .open_read_same_parent_batch(&paths)
+                .expect_err("mixed parents")
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
     fn rejects_parent_and_absolute_escape() {
         let fixture = tempfile::tempdir().expect("create fixture");
         let root = RepositoryRoot::open(fixture.path()).expect("open root");

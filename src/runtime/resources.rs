@@ -6,6 +6,7 @@ pub struct RuntimeResources {
     open_files: Arc<Semaphore>,
     process_calls: Arc<Semaphore>,
     memory: Arc<Semaphore>,
+    file_work: Arc<FileWorkPool>,
     shutdown: CancellationToken,
 }
 
@@ -17,8 +18,11 @@ impl RuntimeResources {
             read_only_calls: Arc::new(Semaphore::new(MAX_READ_ONLY_CALLS)),
             worker_lanes: Arc::new(Semaphore::new(config.worker_lanes)),
             open_files: Arc::new(Semaphore::new(MAX_OPEN_FILES)),
-            process_calls: Arc::new(Semaphore::new(MAX_PROCESS_CALLS)),
-            memory: Arc::new(Semaphore::new(MEMORY_BUDGET_BYTES / MEMORY_PERMIT_BYTES)),
+            process_calls: Arc::new(Semaphore::new(config.process_calls)),
+            memory: Arc::new(Semaphore::new(
+                MEMORY_SOFT_TARGET_BYTES / MEMORY_PERMIT_BYTES,
+            )),
+            file_work: Arc::new(FileWorkPool::new(config.worker_lanes)),
             shutdown: CancellationToken::new(),
         }
     }
@@ -31,6 +35,11 @@ impl RuntimeResources {
     #[must_use]
     pub fn shutdown_token(&self) -> CancellationToken {
         self.shutdown.clone()
+    }
+
+    #[must_use]
+    pub fn file_work_pool(&self) -> Arc<FileWorkPool> {
+        Arc::clone(&self.file_work)
     }
 
     pub fn try_admit_read_only(&self) -> Option<OwnedSemaphorePermit> {
@@ -53,30 +62,10 @@ impl RuntimeResources {
         acquire(&self.worker_lanes, request, &self.shutdown, 1).await
     }
 
-    /// Acquire one required search lane and any immediately available fair-share lanes.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AcquireError::Cancelled`] while waiting for the required lane.
-    pub async fn acquire_search_lanes(
-        &self,
-        count: usize,
-        request: &CancellationToken,
-    ) -> Result<SearchLanes, AcquireError> {
-        let target = count.clamp(1, self.config.worker_lanes);
-        let required = acquire(&self.worker_lanes, request, &self.shutdown, 1).await?;
-        let mut permits = Vec::with_capacity(target);
-        permits.push(required);
-        while permits.len() < target {
-            if self.config.worker_lanes > 1 && self.worker_lanes.available_permits() <= 1 {
-                break;
-            }
-            let Ok(permit) = self.worker_lanes.clone().try_acquire_owned() else {
-                break;
-            };
-            permits.push(permit);
-        }
-        Ok(SearchLanes { permits })
+    #[must_use]
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub fn try_acquire_worker(&self) -> Option<OwnedSemaphorePermit> {
+        self.worker_lanes.clone().try_acquire_owned().ok()
     }
 
     /// Acquire one open-file slot.
@@ -91,38 +80,36 @@ impl RuntimeResources {
         acquire(&self.open_files, request, &self.shutdown, 1).await
     }
 
-    /// Acquire several open-file slots as one global lease.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AcquireError::Cancelled`] when either cancellation token fires.
-    pub async fn acquire_open_files(
-        &self,
-        count: usize,
-        request: &CancellationToken,
-    ) -> Result<OwnedSemaphorePermit, AcquireError> {
-        let count = count.clamp(1, MAX_OPEN_FILES);
-        let count = u32::try_from(count).map_err(|_| AcquireError::TooLarge)?;
-        acquire(&self.open_files, request, &self.shutdown, count).await
+    #[must_use]
+    pub fn try_acquire_open_file(&self) -> Option<OwnedSemaphorePermit> {
+        self.open_files.clone().try_acquire_owned().ok()
     }
 
-    /// Reserve bounded in-memory working space, rounded up to KiB permits.
+    /// Reserve best-effort in-memory working space, rounded up to KiB permits.
     ///
     /// # Errors
     ///
-    /// Returns [`AcquireError::TooLarge`] above the global budget, or
-    /// [`AcquireError::Cancelled`] when either cancellation token fires.
+    /// Requests above the soft target reserve at most the target and continue; callers
+    /// choose an equivalent fallback when a try-only reservation is unavailable.
     pub async fn reserve_memory(
         &self,
         bytes: usize,
         request: &CancellationToken,
     ) -> Result<OwnedSemaphorePermit, AcquireError> {
-        let permits = bytes.div_ceil(MEMORY_PERMIT_BYTES).max(1);
-        let permits = u32::try_from(permits).map_err(|_| AcquireError::TooLarge)?;
-        if permits as usize > MEMORY_BUDGET_BYTES / MEMORY_PERMIT_BYTES {
-            return Err(AcquireError::TooLarge);
-        }
+        let permits = bytes
+            .div_ceil(MEMORY_PERMIT_BYTES)
+            .clamp(1, MEMORY_SOFT_TARGET_BYTES / MEMORY_PERMIT_BYTES);
+        let permits = u32::try_from(permits).expect("soft memory target fits u32 permits");
         acquire(&self.memory, request, &self.shutdown, permits).await
+    }
+
+    #[must_use]
+    pub fn try_reserve_memory(&self, bytes: usize) -> Option<OwnedSemaphorePermit> {
+        let permits = bytes
+            .div_ceil(MEMORY_PERMIT_BYTES)
+            .clamp(1, MEMORY_SOFT_TARGET_BYTES / MEMORY_PERMIT_BYTES);
+        let permits = u32::try_from(permits).ok()?;
+        self.memory.clone().try_acquire_many_owned(permits).ok()
     }
 }
 
@@ -130,8 +117,6 @@ impl RuntimeResources {
 pub enum AcquireError {
     #[error("request cancelled")]
     Cancelled,
-    #[error("requested memory exceeds the global budget")]
-    TooLarge,
 }
 
 async fn acquire(

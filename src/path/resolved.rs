@@ -46,6 +46,27 @@ impl ResolvedPath {
         self.backend != PathBackend::Repository
     }
 
+    pub(crate) fn has_same_parent(&self, other: &Self) -> bool {
+        self.backend == other.backend
+            && batch_parent(self).ok().is_some()
+            && batch_parent(self).ok() == batch_parent(other).ok()
+    }
+
+    pub(crate) fn memory_components(&self) -> ResolvedPathMemory {
+        ResolvedPathMemory {
+            key_bytes: self.key.as_os_str().len(),
+            key_capacity: self.key.capacity(),
+            capability_key_bytes: self.capability_key.as_os_str().len(),
+            capability_key_capacity: self.capability_key.capacity(),
+            absolute_bytes: self.absolute.as_os_str().len(),
+            absolute_capacity: self.absolute.capacity(),
+            sort_key_bytes: self.sort_key.byte_len(),
+            sort_key_capacity: self.sort_key.capacity_bytes(),
+            slash_path_bytes: self.slash_path.as_ref().map_or(0, String::len),
+            slash_path_capacity: self.slash_path.as_ref().map_or(0, String::capacity),
+        }
+    }
+
     fn capability_key(&self) -> &Path {
         &self.capability_key
     }
@@ -73,6 +94,20 @@ impl ResolvedPath {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ResolvedPathMemory {
+    pub key_bytes: usize,
+    pub key_capacity: usize,
+    pub capability_key_bytes: usize,
+    pub capability_key_capacity: usize,
+    pub absolute_bytes: usize,
+    pub absolute_capacity: usize,
+    pub sort_key_bytes: usize,
+    pub sort_key_capacity: usize,
+    pub slash_path_bytes: usize,
+    pub slash_path_capacity: usize,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PathSortKey(PlatformSortKey);
 
@@ -86,6 +121,36 @@ type PlatformSortKey = String;
 impl PathSortKey {
     fn new(path: &Path) -> Self {
         Self(platform_sort_key(path))
+    }
+
+    fn byte_len(&self) -> usize {
+        #[cfg(unix)]
+        {
+            self.0.len()
+        }
+        #[cfg(windows)]
+        {
+            self.0.len().saturating_mul(std::mem::size_of::<u16>())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            self.0.len()
+        }
+    }
+
+    fn capacity_bytes(&self) -> usize {
+        #[cfg(unix)]
+        {
+            self.0.capacity()
+        }
+        #[cfg(windows)]
+        {
+            self.0.capacity().saturating_mul(std::mem::size_of::<u16>())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            self.0.capacity()
+        }
     }
 }
 

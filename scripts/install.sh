@@ -5,6 +5,9 @@ version=""
 release_directory=""
 install_directory="${XDG_DATA_HOME:-$HOME/.local/share}/codexshim/bin"
 
+# Injected by the release workflow from the release tag; empty in source.
+default_version="" # @codexshim:default-version
+
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --version)
@@ -26,19 +29,34 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-if [ "$(uname -s)" != "Linux" ] || [ "$(uname -m)" != "x86_64" ]; then
-    echo "codexshim currently supports only x86_64 Linux with this installer" >&2
-    exit 1
-fi
+operating_system=$(uname -s)
+architecture=$(uname -m)
+case "$operating_system:$architecture" in
+    Linux:x86_64)
+        target="x86_64-unknown-linux-gnu"
+        ;;
+    Linux:aarch64)
+        target="aarch64-unknown-linux-gnu"
+        ;;
+    Darwin:x86_64)
+        target="x86_64-apple-darwin"
+        ;;
+    Darwin:arm64)
+        target="aarch64-apple-darwin"
+        ;;
+    *)
+        echo "unsupported platform for codexshim installer: $operating_system/$architecture" >&2
+        exit 1
+        ;;
+esac
 
 temporary_directory=$(mktemp -d "${TMPDIR:-/tmp}/codexshim-install.XXXXXX")
 trap 'rm -rf "$temporary_directory"' EXIT HUP INT TERM
-target="x86_64-unknown-linux-gnu"
 
 if [ -n "$release_directory" ]; then
     set -- "$release_directory"/codexshim-*-$target.tar.gz
     if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
-        echo "expected exactly one Linux release archive in $release_directory" >&2
+        echo "expected exactly one $target release archive in $release_directory" >&2
         exit 1
     fi
     archive_path=$1
@@ -49,10 +67,14 @@ if [ -n "$release_directory" ]; then
     fi
 else
     command -v curl >/dev/null 2>&1 || { echo "curl is required" >&2; exit 1; }
-    if [ -n "$version" ]; then
-        case "$version" in
-            v*) tag=$version ;;
-            *) tag="v$version" ;;
+    resolved_version=$version
+    if [ -z "$resolved_version" ]; then
+        resolved_version=$default_version
+    fi
+    if [ -n "$resolved_version" ]; then
+        case "$resolved_version" in
+            v*) tag=$resolved_version ;;
+            *) tag="v$resolved_version" ;;
         esac
     else
         release_json=$(curl --proto '=https' --tlsv1.2 -fsSL \
@@ -78,7 +100,7 @@ expected_hash=$(awk -v name="$archive_name" '
     {
         file = $2
         sub(/^\*/, "", file)
-        if (file == name && $1 ~ /^[0-9a-fA-F]{64}$/) {
+        if (file == name && length($1) == 64 && $1 !~ /[^0-9a-fA-F]/) {
             print tolower($1)
             exit
         }
@@ -88,7 +110,14 @@ if [ -z "$expected_hash" ]; then
     echo "invalid checksum file: $checksum_path" >&2
     exit 1
 fi
-actual_hash=$(sha256sum "$archive_path" | awk '{print tolower($1)}')
+if command -v sha256sum >/dev/null 2>&1; then
+    actual_hash=$(sha256sum "$archive_path" | awk '{print tolower($1)}')
+elif command -v shasum >/dev/null 2>&1; then
+    actual_hash=$(shasum -a 256 "$archive_path" | awk '{print tolower($1)}')
+else
+    echo "a SHA-256 utility (sha256sum or shasum) is required" >&2
+    exit 1
+fi
 if [ "$actual_hash" != "$expected_hash" ]; then
     echo "checksum verification failed for $archive_name" >&2
     exit 1

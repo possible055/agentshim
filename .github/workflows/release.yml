@@ -16,6 +16,17 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
+      - name: Runner preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          rustc -vV
+          echo "uname -s=$(uname -s)"
+          echo "uname -m=$(uname -m)"
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = x86_64
+          test "${RUNNER_ARCH}" = X64
       - id: version
         name: Match tag to Cargo version
         shell: bash
@@ -33,15 +44,29 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
+      - name: Runner preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          rustc -vV
+          echo "uname -s=$(uname -s)"
+          echo "uname -m=$(uname -m)"
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = x86_64
+          test "${RUNNER_ARCH}" = X64
       - name: Format
         run: cargo fmt --all -- --check
       - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test
         run: cargo test --locked
+      - name: Metadata
+        run: cargo metadata --locked --no-deps --format-version 1
 
   windows-validation:
     name: Windows validation
@@ -49,24 +74,243 @@ jobs:
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - name: Runner preflight
+        shell: pwsh
+        run: |
+          rustup show active-toolchain
+          rustc -vV
+          $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+          Write-Host "RuntimeInformation.OSArchitecture=$architecture"
+          Write-Host "RUNNER_ARCH=$env:RUNNER_ARCH"
+          if ($architecture -ne "X64" -or $env:RUNNER_ARCH -ne "X64") {
+              throw "windows-2025 must report X64 architecture"
+          }
       - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test
         run: cargo test --locked
 
+  linux-arm-validation:
+    name: Linux ARM64 validation
+    needs: validate-version
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - name: Runner preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          rustc -vV
+          echo "uname -s=$(uname -s)"
+          echo "uname -m=$(uname -m)"
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = aarch64
+          test "${RUNNER_ARCH}" = ARM64
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
+
+  macos-intel-validation:
+    name: macOS Intel validation
+    needs: validate-version
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v7
+      - name: Runner preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          rustc -vV
+          echo "uname -s=$(uname -s)"
+          echo "uname -m=$(uname -m)"
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = x86_64
+          test "${RUNNER_ARCH}" = X64
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
+
+  macos-arm-validation:
+    name: macOS Apple Silicon validation
+    needs: validate-version
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Runner preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          rustc -vV
+          echo "uname -s=$(uname -s)"
+          echo "uname -m=$(uname -m)"
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          test "${RUNNER_ARCH}" = ARM64
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
+
+  windows-arm-pilot:
+    name: Windows ARM64 pilot
+    needs: validate-version
+    runs-on: windows-11-arm
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - name: Runner preflight
+        shell: pwsh
+        run: |
+          rustup show active-toolchain
+          rustc -vV
+          $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+          Write-Host "RuntimeInformation.OSArchitecture=$architecture"
+          Write-Host "RUNNER_ARCH=$env:RUNNER_ARCH"
+          if ($architecture -ne "Arm64" -or $env:RUNNER_ARCH -ne "ARM64") {
+              throw "windows-11-arm must report Arm64 architecture"
+          }
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
+      - name: Install Windows ARM target
+        run: rustup target add aarch64-pc-windows-msvc
+      - name: Build Windows ARM release binary
+        run: cargo build --release --locked --target aarch64-pc-windows-msvc
+      - name: Verify Windows ARM release binary version
+        shell: pwsh
+        run: |
+          $expected = "codexshim ${{ needs.validate-version.outputs.version }}"
+          $binary = (Resolve-Path "target/aarch64-pc-windows-msvc/release/codexshim.exe").Path
+          $actual = (& $binary --version | Out-String).Trim()
+          if ($actual -cne $expected) {
+              throw "Release binary reported '$actual'; expected '$expected'."
+          }
+      - name: Test Windows ARM installer
+        shell: pwsh
+        run: ./scripts/test-install-windows.ps1 -ExpectedVersion "${{ needs.validate-version.outputs.version }}" -BinaryPath (Resolve-Path "target/aarch64-pc-windows-msvc/release/codexshim.exe").Path
+
+  cross-check:
+    name: Cross-check ${{ matrix.target }}
+    needs: validate-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: unix
+            system: Linux
+            machine: x86_64
+            runner_arch: X64
+            target: aarch64-unknown-linux-gnu
+          - os: macos-15-intel
+            platform: unix
+            system: Darwin
+            machine: x86_64
+            runner_arch: X64
+            target: aarch64-apple-darwin
+          - os: macos-15
+            platform: unix
+            system: Darwin
+            machine: arm64
+            runner_arch: ARM64
+            target: x86_64-apple-darwin
+          - os: windows-2025
+            platform: windows
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Unix runner preflight
+        if: matrix.platform == 'unix'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          rustc -vV
+          echo "uname -s=$(uname -s)"
+          echo "uname -m=$(uname -m)"
+          test "$(uname -s)" = "${{ matrix.system }}"
+          test "$(uname -m)" = "${{ matrix.machine }}"
+          test "${RUNNER_ARCH}" = "${{ matrix.runner_arch }}"
+      - name: Windows runner preflight
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          rustup show active-toolchain
+          rustc -vV
+          $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+          Write-Host "RuntimeInformation.OSArchitecture=$architecture"
+          Write-Host "RUNNER_ARCH=$env:RUNNER_ARCH"
+          if ($architecture -ne "X64" -or $env:RUNNER_ARCH -ne "X64") {
+              throw "windows-2025 must report X64 architecture"
+          }
+      - name: Install target and cargo check (Unix)
+        if: matrix.platform == 'unix'
+        shell: bash
+        run: |
+          rustup target add "${{ matrix.target }}"
+          cargo check --locked --target "${{ matrix.target }}"
+      - name: Install target and cargo check (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          rustup target add "${{ matrix.target }}"
+          cargo check --locked --target "${{ matrix.target }}"
+
   package:
     name: Package ${{ matrix.target }}
-    needs: [validate-version, linux-validation, windows-validation]
+    needs: [validate-version, linux-validation, windows-validation, linux-arm-validation, macos-intel-validation, macos-arm-validation, cross-check]
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-22.04
+            platform: linux
+            system: Linux
+            machine: x86_64
+            runner_arch: X64
             target: x86_64-unknown-linux-gnu
             binary: codexshim
             config: config/codex.linux.toml.example
             format: tar.gz
+          - os: ubuntu-24.04-arm
+            platform: linux
+            system: Linux
+            machine: aarch64
+            runner_arch: ARM64
+            target: aarch64-unknown-linux-gnu
+            binary: codexshim
+            config: config/codex.linux.toml.example
+            format: tar.gz
+          - os: macos-15-intel
+            platform: macos
+            system: Darwin
+            machine: x86_64
+            runner_arch: X64
+            target: x86_64-apple-darwin
+            binary: codexshim
+            config: config/codex.macos.toml.example
+            format: tar.gz
+          - os: macos-15
+            platform: macos
+            system: Darwin
+            machine: arm64
+            runner_arch: ARM64
+            target: aarch64-apple-darwin
+            binary: codexshim
+            config: config/codex.macos.toml.example
+            format: tar.gz
           - os: windows-2025
+            platform: windows
+            os_architecture: X64
+            runner_arch: X64
             target: x86_64-pc-windows-msvc
             binary: codexshim.exe
             config: config/codex.windows.toml.example
@@ -74,10 +318,38 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+        if: matrix.platform != 'macos'
+      - name: Unix runner preflight
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          rustc -vV
+          echo "uname -s=$(uname -s)"
+          echo "uname -m=$(uname -m)"
+          test "$(uname -s)" = "${{ matrix.system }}"
+          test "$(uname -m)" = "${{ matrix.machine }}"
+          test "${RUNNER_ARCH}" = "${{ matrix.runner_arch }}"
+      - name: Windows runner preflight
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          rustup show active-toolchain
+          rustc -vV
+          $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+          Write-Host "RuntimeInformation.OSArchitecture=$architecture"
+          Write-Host "RUNNER_ARCH=$env:RUNNER_ARCH"
+          if ($architecture -ne "${{ matrix.os_architecture }}" -or $env:RUNNER_ARCH -ne "${{ matrix.runner_arch }}") {
+              throw "Runner architecture does not match the Windows package target"
+          }
+      - name: Install native release target
+        run: rustup target add ${{ matrix.target }}
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
-      - name: Verify Linux release binary version
-        if: matrix.format == 'tar.gz'
+      - name: Verify Unix release binary version
+        if: matrix.platform != 'windows'
         shell: bash
         run: |
           expected="codexshim ${{ needs.validate-version.outputs.version }}"
@@ -87,7 +359,7 @@ jobs:
             exit 1
           fi
       - name: Verify Windows release binary version
-        if: matrix.format == 'zip'
+        if: matrix.platform == 'windows'
         shell: pwsh
         run: |
           $expected = "codexshim ${{ needs.validate-version.outputs.version }}"
@@ -96,58 +368,124 @@ jobs:
           if ($actual -cne $expected) {
             throw "Release binary reported '$actual'; expected '$expected'."
           }
-      - name: Stage Windows archive contents
-        if: matrix.format == 'zip'
-        shell: pwsh
-        run: |
-          $name = "codexshim-${{ needs.validate-version.outputs.version }}-${{ matrix.target }}"
-          $stage = Join-Path "dist" $name
-          $configStage = Join-Path $stage "config"
-          New-Item -ItemType Directory -Force $stage | Out-Null
-          New-Item -ItemType Directory -Force $configStage | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" $stage
-          Copy-Item README.md $stage
-          Copy-Item LICENSE $stage
-          Copy-Item config/AGENTS.codexshim.md $stage
-          Copy-Item config/codex.*.toml.example $configStage
-          Copy-Item "${{ matrix.config }}" (Join-Path $stage "codex.toml.example")
-      - name: Stage Linux archive contents
-        if: matrix.format == 'tar.gz'
+      - name: Stage Unix archive contents
+        if: matrix.platform != 'windows'
         shell: bash
         run: |
+          set -euo pipefail
           name="codexshim-${{ needs.validate-version.outputs.version }}-${{ matrix.target }}"
           stage="dist/$name"
           mkdir -p "$stage/config"
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "$stage/"
           cp README.md LICENSE config/AGENTS.codexshim.md "$stage/"
-          cp config/codex.*.toml.example "$stage/config/"
+          cp config/codex.linux.toml.example config/codex.windows.toml.example "$stage/config/"
+          if [[ "${{ matrix.platform }}" == macos ]]; then
+            cp config/codex.macos.toml.example "$stage/config/"
+          fi
           cp "${{ matrix.config }}" "$stage/codex.toml.example"
+          expected_manifest="$(printf '%s\n' \
+            LICENSE \
+            README.md \
+            codex.toml.example \
+            "${{ matrix.binary }}" \
+            config/AGENTS.codexshim.md \
+            config/codex.linux.toml.example \
+            config/codex.windows.toml.example
+          )"
+          if [[ "${{ matrix.platform }}" == macos ]]; then
+            expected_manifest+=$'\nconfig/codex.macos.toml.example'
+          fi
+          expected_manifest="$(printf '%s\n' "$expected_manifest" | LC_ALL=C sort)"
+          actual_manifest="$(LC_ALL=C find "$stage" -type f -print | sed "s#^$stage/##" | LC_ALL=C sort)"
+          if [[ "$actual_manifest" != "$expected_manifest" ]]; then
+            printf 'unexpected Unix archive manifest:\n%s\n' "$actual_manifest" >&2
+            exit 1
+          fi
+      - name: Stage Windows archive contents
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $name = "codexshim-${{ needs.validate-version.outputs.version }}-${{ matrix.target }}"
+          $stage = Join-Path "dist" $name
+          $configStage = Join-Path $stage "config"
+          New-Item -ItemType Directory -Force $configStage | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" $stage
+          Copy-Item README.md, LICENSE, config/AGENTS.codexshim.md $stage
+          Copy-Item config/codex.linux.toml.example, config/codex.windows.toml.example $configStage
+          Copy-Item "${{ matrix.config }}" (Join-Path $stage "codex.toml.example")
+          $stagePath = (Resolve-Path $stage).Path
+          $expected = @(
+              "LICENSE",
+              "README.md",
+              "codex.toml.example",
+              "${{ matrix.binary }}",
+              "config/AGENTS.codexshim.md",
+              "config/codex.linux.toml.example",
+              "config/codex.windows.toml.example"
+          ) | Sort-Object
+          $actual = @(Get-ChildItem -LiteralPath $stagePath -File -Recurse | ForEach-Object {
+              $_.FullName.Substring($stagePath.Length + 1).Replace('\', '/')
+          } | Sort-Object)
+          if (@(Compare-Object $expected $actual).Count -ne 0) {
+              throw "Unexpected Windows archive manifest: $($actual -join ', ')"
+          }
       - name: Create Windows archive
-        if: matrix.format == 'zip'
+        if: matrix.platform == 'windows'
         shell: pwsh
         run: |
           $name = "codexshim-${{ needs.validate-version.outputs.version }}-${{ matrix.target }}"
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
           $archive = "dist/$name.zip"
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $archive).Path)
+          try {
+              $actual = @($zip.Entries | Where-Object { $_.Length -gt 0 } | ForEach-Object {
+                  $_.FullName.Substring($name.Length + 1)
+              } | Sort-Object)
+          } finally {
+              $zip.Dispose()
+          }
+          $expected = @(
+              "LICENSE",
+              "README.md",
+              "codex.toml.example",
+              "${{ matrix.binary }}",
+              "config/AGENTS.codexshim.md",
+              "config/codex.linux.toml.example",
+              "config/codex.windows.toml.example"
+          ) | Sort-Object
+          if (@(Compare-Object $expected $actual).Count -ne 0) {
+              throw "Unexpected Windows archive manifest: $($actual -join ', ')"
+          }
           $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $name.zip" | Out-File -FilePath "$archive.sha256" -Encoding ascii
-      - name: Create Linux archive
-        if: matrix.format == 'tar.gz'
+      - name: Create Unix archive
+        if: matrix.platform != 'windows'
         shell: bash
         run: |
+          set -euo pipefail
           name="codexshim-${{ needs.validate-version.outputs.version }}-${{ matrix.target }}"
-          tar -C dist -czf "dist/$name.tar.gz" "$name"
-          cd dist
-          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          tar -czf "dist/$name.tar.gz" -C dist "$name"
+          expected_manifest="$(tar -tzf "dist/$name.tar.gz" | sed "s#^$name/##" | sed '/\/$/d' | LC_ALL=C sort)"
+          stage_manifest="$(LC_ALL=C find "dist/$name" -type f -print | sed "s#^dist/$name/##" | LC_ALL=C sort)"
+          if [[ "$expected_manifest" != "$stage_manifest" ]]; then
+            printf 'unexpected Unix archive manifest:\n%s\n' "$expected_manifest" >&2
+            exit 1
+          fi
+          if [[ "${{ matrix.platform }}" == macos ]]; then
+            (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+          else
+            (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          fi
       - name: Test Windows installer
-        if: matrix.format == 'zip'
+        if: matrix.platform == 'windows'
         shell: pwsh
         run: ./scripts/test-install-windows.ps1 -ExpectedVersion "${{ needs.validate-version.outputs.version }}" -ReleaseDirectory (Resolve-Path dist).Path
-      - name: Test Linux installer
-        if: matrix.format == 'tar.gz'
+      - name: Test Unix installer
+        if: matrix.platform != 'windows'
         shell: bash
         run: sh scripts/test-install-linux.sh "$PWD/dist" "${{ needs.validate-version.outputs.version }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: codexshim-${{ matrix.target }}
           path: |
@@ -164,7 +502,7 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v6
         with:
           path: dist
           pattern: codexshim-*
@@ -177,9 +515,14 @@ jobs:
       - name: Add installers
         shell: bash
         run: |
+          version="${GITHUB_REF_NAME#v}"
           sh -n scripts/install.sh
-          cp scripts/install.sh scripts/install.ps1 dist/
+          sed "s|^default_version=\"\" # @codexshim:default-version|default_version=\"$version\" # @codexshim:default-version|" scripts/install.sh > dist/install.sh
+          sed "s|^\$DefaultVersion = \"\" # @codexshim:default-version|\$DefaultVersion = \"$version\" # @codexshim:default-version|" scripts/install.ps1 > dist/install.ps1
           chmod 755 dist/install.sh
+          sh -n dist/install.sh
+          grep -q "^default_version=\"$version\" # @codexshim:default-version" dist/install.sh
+          grep -q "^\\\$DefaultVersion = \"$version\" # @codexshim:default-version" dist/install.ps1
       - name: Publish assets
         shell: bash
         env:

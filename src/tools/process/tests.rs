@@ -2,7 +2,7 @@
 mod tests {
     use super::*;
     #[cfg(unix)]
-    use std::fs;
+    use std::{fs, os::unix::process::CommandExt};
     #[cfg(windows)]
     use std::{env, process::Command, thread};
     #[cfg(any(unix, windows))]
@@ -442,17 +442,26 @@ mod tests {
         }
         let pid_file =
             std::env::var_os("CODEXSHIM_SESSION_ESCAPE_PID_FILE").expect("helper PID file");
-        let child = std::process::Command::new("/usr/bin/setsid")
-            .arg(std::env::current_exe().expect("test executable"))
+        let mut command = std::process::Command::new(
+            std::env::current_exe().expect("test executable"),
+        );
+        command
             .args([
                 "--exact",
                 "tools::process::tests::unix_session_escape_helper_fixture",
                 "--nocapture",
             ])
             .env("CODEXSHIM_SESSION_ESCAPE_FIXTURE", "helper")
-            .env("CODEXSHIM_SESSION_ESCAPE_PID_FILE", &pid_file)
-            .spawn()
-            .expect("spawn session-escaping helper");
+            .env("CODEXSHIM_SESSION_ESCAPE_PID_FILE", &pid_file);
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn().expect("spawn session-escaping helper");
         drop(child);
         let pid_file = std::path::PathBuf::from(pid_file);
         let deadline = std::time::Instant::now() + Duration::from_secs(2);

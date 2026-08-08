@@ -1,8 +1,11 @@
 use std::{
-    collections::BTreeMap,
-    io::{self},
+    collections::{BTreeMap, VecDeque},
+    io::{self, Read, Seek, SeekFrom},
     path::Path,
-    sync::{Arc, Condvar, Mutex},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    },
 };
 
 use cap_std::fs::File;
@@ -18,32 +21,170 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     output::{MODEL_BYTE_LIMIT, OutputFormatter, OutputLimits},
     path::{FileAccess, PathError, ResolvedPath},
+    runtime::RuntimeResources,
     sorting,
     tools::ToolOutput,
     tools::read::FileFingerprint,
-    traversal::{TraversalControl, TraversalError, TraversalSummary, walk},
+    traversal::{
+        OwnedTraversalEntry, TraversalControl, TraversalError, TraversalSummary, walk,
+        walk_parallel_batched, walk_parallel_batched_with_literal_prefix, walk_with_literal_prefix,
+    },
 };
 
 const DEFAULT_LIMIT: usize = 200;
 const MAX_LIMIT: usize = 1_000;
 const MAX_CONTEXT: usize = 20;
-const CANDIDATE_MEMORY_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const CANDIDATE_SOFT_TARGET_BYTES: usize = 64 * 1024 * 1024;
+const MEMORY_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 const SEARCH_HEAP_BYTES: usize = 1024 * 1024;
 const CAPTURE_MEMORY_BYTES: usize = 1024 * 1024;
 const PAGE_MEMORY_BYTES: usize = MODEL_BYTE_LIMIT;
-const MEMORY_SAFETY_BYTES: usize = 8 * 1024 * 1024;
-const ORDERED_WINDOW_FACTOR: usize = 1;
+const PARALLEL_BATCH_SIZE: usize = 256;
+const CONTENT_SEARCH_BATCH_SIZE: usize = 8;
+const STREAM_SEARCH_BATCH_SIZE: usize = 16;
+const PARALLEL_ROOT_ENTRY_THRESHOLD: usize = 8;
 const GENERIC_OMISSION: &str = "[grep result omitted: exceeds output budget]";
 const CONTENT_OMISSION: &str = "[line text omitted: exceeds output budget]";
+#[cfg(feature = "bench-internals")]
+const BENCH_SOURCE_ENV: &str = "CODEXSHIM_BENCH_GREP_SOURCE";
+#[cfg(feature = "bench-internals")]
+const BENCH_PATHNAME_REOPEN_ENV: &str = "CODEXSHIM_BENCH_GREP_PATHNAME_REOPEN";
+#[cfg(feature = "bench-internals")]
+const BENCH_CANDIDATE_POLICY_ENV: &str = "CODEXSHIM_BENCH_GREP_CANDIDATE_POLICY";
+static ACTIVE_ADAPTIVE_GREP_TRAVERSALS: AtomicUsize = AtomicUsize::new(0);
 
-#[must_use]
-pub(crate) fn memory_charge(lanes: usize) -> usize {
-    CANDIDATE_MEMORY_BYTES
-        .saturating_add(
-            lanes.saturating_mul(SEARCH_HEAP_BYTES.saturating_add(CAPTURE_MEMORY_BYTES)),
-        )
-        .saturating_add(PAGE_MEMORY_BYTES)
-        .saturating_add(MEMORY_SAFETY_BYTES)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GrepTraversal {
+    Adaptive,
+    Serial,
+    ParallelBatched,
+    #[cfg(any(test, feature = "bench-internals"))]
+    SerialLiteralPrefix,
+    #[cfg(any(test, feature = "bench-internals"))]
+    ParallelBatchedLiteralPrefix,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GrepSourcePolicy {
+    Hybrid,
+    #[cfg(any(test, feature = "bench-internals"))]
+    Reader,
+    #[cfg(any(test, feature = "bench-internals"))]
+    FileNever,
+    #[cfg(any(test, feature = "bench-internals"))]
+    MmapAlways,
+    #[cfg(any(test, feature = "bench-internals"))]
+    MmapThreshold(u64),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PathnameReopenPolicy {
+    Off,
+    #[cfg(any(test, feature = "bench-internals"))]
+    On,
+    #[cfg(any(test, feature = "bench-internals"))]
+    ParentBatch,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GrepBenchmarkVariant {
+    pub source: GrepSourcePolicy,
+    pub pathname_reopen: PathnameReopenPolicy,
+}
+
+impl Default for GrepBenchmarkVariant {
+    fn default() -> Self {
+        Self {
+            source: GrepSourcePolicy::Hybrid,
+            pathname_reopen: PathnameReopenPolicy::Off,
+        }
+    }
+}
+
+impl GrepBenchmarkVariant {
+    #[cfg(feature = "bench-internals")]
+    fn from_env() -> Result<Self, GrepError> {
+        let source = match std::env::var(BENCH_SOURCE_ENV).as_deref() {
+            Ok("hybrid") | Err(std::env::VarError::NotPresent) => GrepSourcePolicy::Hybrid,
+            Ok("reader") => GrepSourcePolicy::Reader,
+            Ok("file-never") => GrepSourcePolicy::FileNever,
+            Ok("mmap-always") => GrepSourcePolicy::MmapAlways,
+            Ok(value) if value.starts_with("mmap-threshold:") => {
+                let bytes = value["mmap-threshold:".len()..]
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|bytes| *bytes > 0)
+                    .ok_or_else(|| {
+                        GrepError::Validation(format!(
+                            "{BENCH_SOURCE_ENV} mmap threshold must be a positive byte count"
+                        ))
+                    })?;
+                GrepSourcePolicy::MmapThreshold(bytes)
+            }
+            Ok(value) => {
+                return Err(GrepError::Validation(format!(
+                    "{BENCH_SOURCE_ENV} must be hybrid, reader, file-never, mmap-always, or \
+                     mmap-threshold:<bytes>; got {value}"
+                )));
+            }
+            Err(error) => {
+                return Err(GrepError::Validation(format!(
+                    "{BENCH_SOURCE_ENV} is not valid Unicode: {error}"
+                )));
+            }
+        };
+        let pathname_reopen = match std::env::var(BENCH_PATHNAME_REOPEN_ENV).as_deref() {
+            Ok("off") | Err(std::env::VarError::NotPresent) => PathnameReopenPolicy::Off,
+            Ok("on") => PathnameReopenPolicy::On,
+            Ok("parent-batch") => PathnameReopenPolicy::ParentBatch,
+            Ok(value) => {
+                return Err(GrepError::Validation(format!(
+                    "{BENCH_PATHNAME_REOPEN_ENV} must be on, off, or parent-batch; got {value}"
+                )));
+            }
+            Err(error) => {
+                return Err(GrepError::Validation(format!(
+                    "{BENCH_PATHNAME_REOPEN_ENV} is not valid Unicode: {error}"
+                )));
+            }
+        };
+        Ok(Self {
+            source,
+            pathname_reopen,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CandidatePolicy {
+    SoftTarget,
+    #[cfg(any(test, feature = "bench-internals"))]
+    FatalCeiling,
+}
+
+impl CandidatePolicy {
+    #[allow(clippy::unnecessary_wraps)]
+    pub(crate) fn from_environment() -> Result<Self, GrepError> {
+        #[cfg(feature = "bench-internals")]
+        {
+            match std::env::var(BENCH_CANDIDATE_POLICY_ENV).as_deref() {
+                Ok("soft" | "unlimited") | Err(std::env::VarError::NotPresent) => {
+                    Ok(Self::SoftTarget)
+                }
+                Ok("fatal-64m") => Ok(Self::FatalCeiling),
+                Ok(value) => Err(GrepError::Validation(format!(
+                    "{BENCH_CANDIDATE_POLICY_ENV} must be soft or fatal-64m; got {value}"
+                ))),
+                Err(error) => Err(GrepError::Validation(format!(
+                    "{BENCH_CANDIDATE_POLICY_ENV} is not valid Unicode: {error}"
+                ))),
+            }
+        }
+        #[cfg(not(feature = "bench-internals"))]
+        {
+            Ok(Self::SoftTarget)
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
@@ -115,8 +256,11 @@ pub enum GrepError {
     Regex(String),
     #[error("invalid grep glob: {0}")]
     Glob(String),
-    #[error("grep candidates exceed the bounded memory budget; narrow path or glob")]
+    #[cfg(any(test, feature = "bench-internals"))]
+    #[error("benchmark candidate policy reached its fatal 64 MiB ceiling")]
     CandidateMemory,
+    #[error("grep worker pool state was poisoned")]
+    PoolPoison,
     #[error("grep matching content exceeds the bounded capture budget; narrow the query")]
     CaptureMemory,
     #[error("grep cancelled")]
@@ -143,24 +287,209 @@ pub fn execute(
     lanes: usize,
     cancellation: &CancellationToken,
 ) -> Result<String, GrepError> {
-    execute_output(access, request, lanes, cancellation).map(|result| result.text)
+    with_benchmark_resources(lanes, |resources| {
+        execute_inner(
+            access,
+            request,
+            resources,
+            cancellation,
+            GrepTraversal::Adaptive,
+            GrepBenchmarkVariant::default(),
+            &GrepProfiler::disabled(),
+        )
+        .map(|result| result.text)
+    })
+}
+
+#[must_use]
+pub(crate) const fn base_memory_charge() -> usize {
+    SEARCH_HEAP_BYTES
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+/// Execute grep with an explicit candidate traversal strategy.
+///
+/// # Errors
+///
+/// Returns the same validation, traversal, search, cancellation, and output errors as grep.
+pub fn execute_with_traversal(
+    access: &Arc<FileAccess>,
+    request: &GrepRequest,
+    lanes: usize,
+    cancellation: &CancellationToken,
+    traversal: GrepTraversal,
+) -> Result<String, GrepError> {
+    with_benchmark_resources(lanes, |resources| {
+        execute_inner(
+            access,
+            request,
+            resources,
+            cancellation,
+            traversal,
+            GrepBenchmarkVariant::default(),
+            &GrepProfiler::disabled(),
+        )
+        .map(|result| result.text)
+    })
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+/// Execute grep with explicit traversal and benchmark source-validation policies.
+///
+/// # Errors
+///
+/// Returns the same validation, traversal, search, cancellation, and output errors as grep.
+pub fn execute_with_variant(
+    access: &Arc<FileAccess>,
+    request: &GrepRequest,
+    lanes: usize,
+    cancellation: &CancellationToken,
+    traversal: GrepTraversal,
+    variant: GrepBenchmarkVariant,
+) -> Result<String, GrepError> {
+    with_benchmark_resources(lanes, |resources| {
+        execute_inner(
+            access,
+            request,
+            resources,
+            cancellation,
+            traversal,
+            variant,
+            &GrepProfiler::disabled(),
+        )
+        .map(|result| result.text)
+    })
+}
+
+#[cfg(feature = "bench-internals")]
+/// Execute grep and return benchmark-only stage timings.
+///
+/// # Errors
+///
+/// Returns the same validation, traversal, search, cancellation, and output errors as grep.
+pub fn execute_profiled(
+    access: &Arc<FileAccess>,
+    request: &GrepRequest,
+    lanes: usize,
+    cancellation: &CancellationToken,
+) -> Result<ProfiledGrep, GrepError> {
+    execute_profiled_with_traversal(
+        access,
+        request,
+        lanes,
+        cancellation,
+        GrepTraversal::Adaptive,
+    )
+}
+
+#[cfg(feature = "bench-internals")]
+/// Execute profiled grep with an explicit candidate traversal strategy.
+///
+/// # Errors
+///
+/// Returns the same validation, traversal, search, cancellation, and output errors as grep.
+pub fn execute_profiled_with_traversal(
+    access: &Arc<FileAccess>,
+    request: &GrepRequest,
+    lanes: usize,
+    cancellation: &CancellationToken,
+    traversal: GrepTraversal,
+) -> Result<ProfiledGrep, GrepError> {
+    execute_profiled_with_variant(
+        access,
+        request,
+        lanes,
+        cancellation,
+        traversal,
+        GrepBenchmarkVariant::default(),
+    )
+}
+
+#[cfg(feature = "bench-internals")]
+/// Execute profiled grep with explicit traversal and source-validation policies.
+///
+/// # Errors
+///
+/// Returns the same validation, traversal, search, cancellation, and output errors as grep.
+pub fn execute_profiled_with_variant(
+    access: &Arc<FileAccess>,
+    request: &GrepRequest,
+    lanes: usize,
+    cancellation: &CancellationToken,
+    traversal: GrepTraversal,
+    variant: GrepBenchmarkVariant,
+) -> Result<ProfiledGrep, GrepError> {
+    with_benchmark_resources(lanes, |resources| {
+        let profiler = GrepProfiler::enabled();
+        let total_span = profiler.span(GrepStage::Total);
+        let output = execute_inner(
+            access,
+            request,
+            resources,
+            cancellation,
+            traversal,
+            variant,
+            &profiler,
+        )?
+        .text;
+        drop(total_span);
+        Ok(ProfiledGrep {
+            output,
+            timings: profiler.snapshot(),
+        })
+    })
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+fn with_benchmark_resources<T>(
+    lanes: usize,
+    execute: impl FnOnce(&RuntimeResources) -> Result<T, GrepError>,
+) -> Result<T, GrepError> {
+    let resources = RuntimeResources::new(crate::runtime::RuntimeConfig::for_tests(lanes));
+    let _worker = resources
+        .try_acquire_worker()
+        .ok_or_else(|| io::Error::other("benchmark base worker permit unavailable"))?;
+    let _open_file = resources
+        .try_acquire_open_file()
+        .ok_or_else(|| io::Error::other("benchmark base open-file permit unavailable"))?;
+    let _memory = resources
+        .try_reserve_memory(base_memory_charge())
+        .ok_or_else(|| io::Error::other("benchmark base memory permit unavailable"))?;
+    execute(&resources)
 }
 
 pub(crate) fn execute_output(
     access: &Arc<FileAccess>,
     request: &GrepRequest,
-    lanes: usize,
+    resources: &RuntimeResources,
     cancellation: &CancellationToken,
 ) -> Result<ToolOutput, GrepError> {
-    execute_inner(access, request, lanes, cancellation)
+    #[cfg(feature = "bench-internals")]
+    let variant = GrepBenchmarkVariant::from_env()?;
+    #[cfg(not(feature = "bench-internals"))]
+    let variant = GrepBenchmarkVariant::default();
+    execute_inner(
+        access,
+        request,
+        resources,
+        cancellation,
+        GrepTraversal::Adaptive,
+        variant,
+        &GrepProfiler::disabled(),
+    )
 }
 
 fn execute_inner(
     access: &Arc<FileAccess>,
     request: &GrepRequest,
-    lanes: usize,
+    resources: &RuntimeResources,
     cancellation: &CancellationToken,
+    traversal: GrepTraversal,
+    variant: GrepBenchmarkVariant,
+    profiler: &GrepProfiler,
 ) -> Result<ToolOutput, GrepError> {
+    let candidate_policy = CandidatePolicy::from_environment()?;
+    let setup_span = profiler.span(GrepStage::Setup);
     request.validate()?;
     let matcher = Arc::new(build_matcher(request)?);
     let glob = request
@@ -175,11 +504,22 @@ fn execute_inner(
                 .map_err(|error| GrepError::Glob(error.to_string()))
         })
         .transpose()?;
+    #[cfg(any(test, feature = "bench-internals"))]
+    let literal_prefix = request
+        .glob
+        .as_deref()
+        .and_then(crate::traversal::literal_path_prefix);
+    drop(setup_span);
     let (candidates, traversal_summary, single_file) = collect_candidates(
         access,
         request.path.as_deref().unwrap_or("."),
         glob.as_ref(),
         cancellation,
+        traversal,
+        #[cfg(any(test, feature = "bench-internals"))]
+        literal_prefix.as_deref(),
+        candidate_policy,
+        profiler,
     )
     .map_err(normalize_cancellation)?;
     let skipped = traversal_summary.io_errors
@@ -198,7 +538,13 @@ fn execute_inner(
         context: request.context_lines.unwrap_or(0),
         capture_records: needed,
     };
-    let lanes = lanes.clamp(1, candidates.len().max(1));
+    let lanes = resources
+        .file_work_pool()
+        .extra_capacity()
+        .saturating_add(1)
+        .clamp(1, candidates.len().max(1));
+    profiler.set_workload(candidates.len(), lanes);
+    let candidates: Arc<[Candidate]> = candidates.into();
     let access = Arc::clone(access);
     let context = OrderedSearchContext {
         cancellation,
@@ -206,9 +552,20 @@ fn execute_inner(
         matcher: &matcher,
         plan,
         single_file,
+        variant,
+        profiler,
+        resources,
     };
+    let search_span = profiler.span(GrepStage::SearchWall);
     let page = ordered_search(&candidates, lanes, request, traversal_summary, &context)?;
-    render(request, &page, cancellation)
+    drop(search_span);
+    let render_span = profiler.span(GrepStage::Render);
+    let output = render(request, &page, cancellation);
+    drop(render_span);
+    if let Ok(output) = &output {
+        profiler.add_render_copy_bytes(output.text.len());
+    }
+    output
 }
 
 fn normalize_cancellation(error: GrepError) -> GrepError {

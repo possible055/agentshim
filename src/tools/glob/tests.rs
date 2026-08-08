@@ -9,9 +9,11 @@ mod tests {
         GlobError, GlobMatch, GlobRequest, GlobTraversal, MAX_MATCHES, PATH_OMISSION, TopK,
         execute, execute_with_traversal, memory_charge, prefer_parallel, record_match, render,
     };
+    #[cfg(feature = "bench-internals")]
+    use super::execute_profiled_with_traversal;
     use crate::{
         path::{FileAccess, ReadScope, RepositoryRoot, slash_path},
-        runtime::MEMORY_BUDGET_BYTES,
+        runtime::MEMORY_SOFT_TARGET_BYTES,
         traversal::TraversalSummary,
     };
 
@@ -132,6 +134,42 @@ mod tests {
     }
 
     #[test]
+    fn literal_prefix_glob_preserves_serial_and_parallel_output() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        fs::write(
+            fixture.path().join(".gitignore"),
+            "src/deep/ignored.rs\n",
+        )
+        .expect("ignore");
+        fs::create_dir_all(fixture.path().join("src/deep")).expect("deep");
+        fs::create_dir_all(fixture.path().join("src/sibling")).expect("sibling");
+        fs::write(fixture.path().join("src/deep/a.rs"), "source").expect("a");
+        fs::write(fixture.path().join("src/deep/ignored.rs"), "ignored").expect("ignored");
+        fs::write(fixture.path().join("src/sibling/b.rs"), "source").expect("b");
+        let root = access(fixture.path());
+        let query = request("src/deep/*.rs");
+        let cancellation = CancellationToken::new();
+        let expected = execute_with_traversal(
+            &root,
+            &query,
+            &cancellation,
+            GlobTraversal::Serial,
+        )
+        .expect("serial glob");
+
+        for traversal in [
+            GlobTraversal::SerialLiteralPrefix,
+            GlobTraversal::ParallelBatchedLiteralPrefix,
+        ] {
+            assert_eq!(
+                execute_with_traversal(&root, &query, &cancellation, traversal)
+                    .expect("literal prefix glob"),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn adaptive_selector_keeps_small_roots_serial_and_sharded_roots_parallel() {
         let fixture = tempfile::tempdir().expect("fixture");
         let root = access(fixture.path());
@@ -142,6 +180,39 @@ mod tests {
         assert!(!prefer_parallel(&root, &base));
         fs::create_dir(fixture.path().join("shard-7")).expect("parallel shard");
         assert!(prefer_parallel(&root, &base));
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn profiled_parallel_glob_preserves_output_and_records_batches() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        for index in 0..16 {
+            let shard = fixture.path().join(format!("shard-{index}"));
+            fs::create_dir(&shard).expect("shard");
+            fs::write(shard.join(format!("file-{index}.rs")), "source").expect("source");
+        }
+        let root = access(fixture.path());
+        let query = request("**/*.rs");
+        let cancellation = CancellationToken::new();
+        let expected = execute_with_traversal(
+            &root,
+            &query,
+            &cancellation,
+            GlobTraversal::Serial,
+        )
+        .expect("serial glob");
+        let profile = execute_profiled_with_traversal(
+            &root,
+            &query,
+            &cancellation,
+            GlobTraversal::ParallelBatched,
+        )
+        .expect("profiled glob");
+
+        assert_eq!(profile.output, expected);
+        assert!(profile.timings.total_ns >= profile.timings.traversal_wall_ns);
+        assert!(profile.timings.batches > 0);
+        assert_eq!(profile.timings.matched_entries, 16);
     }
 
     #[test]
@@ -262,6 +333,6 @@ mod tests {
     #[test]
     fn runtime_memory_charge_includes_safety_margin() {
         assert_eq!(memory_charge(), 40 * 1024 * 1024);
-        assert!(memory_charge() <= MEMORY_BUDGET_BYTES);
+        assert!(memory_charge() <= MEMORY_SOFT_TARGET_BYTES);
     }
 }

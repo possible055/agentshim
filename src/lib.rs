@@ -14,7 +14,10 @@ pub use diagnostics::{
 };
 pub use output::bounded_diagnostic;
 pub use path::ReadScope;
-pub use runtime::{MAX_PROCESS_CALLS, MAX_READ_ONLY_CALLS, RuntimeConfig as RuntimeLimits};
+pub use runtime::{
+    DEFAULT_PROCESS_CALLS, MAX_CONFIGURED_PROCESS_CALLS, MAX_READ_ONLY_CALLS,
+    RuntimeConfig as RuntimeLimits,
+};
 pub use server::{CodexShim, CodexShimBuilder, ProtocolCompatibility};
 
 #[cfg(feature = "bench-internals")]

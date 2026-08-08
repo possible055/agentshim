@@ -9,9 +9,8 @@ use std::{
 };
 
 use codexshim::{
-    CodexShim, DiagnosticsConfig, DiagnosticsGuard, LogMode, MAX_PROCESS_CALLS,
-    MAX_READ_ONLY_CALLS, ReadScope, RuntimeLimits, bounded_diagnostic, capacity_bytes, purge,
-    retention_days, status,
+    CodexShim, DiagnosticsConfig, DiagnosticsGuard, LogMode, MAX_READ_ONLY_CALLS, ReadScope,
+    RuntimeLimits, bounded_diagnostic, capacity_bytes, purge, retention_days, status,
 };
 use rmcp::{ServiceExt, transport::stdio};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};

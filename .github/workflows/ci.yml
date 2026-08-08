@@ -16,22 +16,200 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
+      - name: Runner preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          rustc -vV
+          echo "uname -s=$(uname -s)"
+          echo "uname -m=$(uname -m)"
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = x86_64
+          test "${RUNNER_ARCH}" = X64
       - name: Format
         run: cargo fmt --all -- --check
       - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test
         run: cargo test --locked
+      - name: Metadata
+        run: cargo metadata --locked --no-deps --format-version 1
 
   windows-validation:
     name: Windows validation
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - name: Runner preflight
+        shell: pwsh
+        run: |
+          rustup show active-toolchain
+          rustc -vV
+          $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+          Write-Host "RuntimeInformation.OSArchitecture=$architecture"
+          Write-Host "RUNNER_ARCH=$env:RUNNER_ARCH"
+          if ($architecture -ne "X64" -or $env:RUNNER_ARCH -ne "X64") {
+              throw "windows-2025 must report X64 architecture"
+          }
       - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test
         run: cargo test --locked
+
+  linux-arm-validation:
+    name: Linux ARM64 validation
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - name: Runner preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          rustc -vV
+          echo "uname -s=$(uname -s)"
+          echo "uname -m=$(uname -m)"
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = aarch64
+          test "${RUNNER_ARCH}" = ARM64
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
+
+  macos-intel-validation:
+    name: macOS Intel validation
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v7
+      - name: Runner preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          rustc -vV
+          echo "uname -s=$(uname -s)"
+          echo "uname -m=$(uname -m)"
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = x86_64
+          test "${RUNNER_ARCH}" = X64
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
+
+  macos-arm-validation:
+    name: macOS Apple Silicon validation
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Runner preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          rustc -vV
+          echo "uname -s=$(uname -s)"
+          echo "uname -m=$(uname -m)"
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          test "${RUNNER_ARCH}" = ARM64
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
+
+  windows-arm-pilot:
+    name: Windows ARM64 pilot
+    runs-on: windows-11-arm
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - name: Runner preflight
+        shell: pwsh
+        run: |
+          rustup show active-toolchain
+          rustc -vV
+          $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+          Write-Host "RuntimeInformation.OSArchitecture=$architecture"
+          Write-Host "RUNNER_ARCH=$env:RUNNER_ARCH"
+          if ($architecture -ne "Arm64" -or $env:RUNNER_ARCH -ne "ARM64") {
+              throw "windows-11-arm must report Arm64 architecture"
+          }
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
+
+  cross-check:
+    name: Cross-check ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: unix
+            system: Linux
+            machine: x86_64
+            runner_arch: X64
+            target: aarch64-unknown-linux-gnu
+          - os: macos-15-intel
+            platform: unix
+            system: Darwin
+            machine: x86_64
+            runner_arch: X64
+            target: aarch64-apple-darwin
+          - os: macos-15
+            platform: unix
+            system: Darwin
+            machine: arm64
+            runner_arch: ARM64
+            target: x86_64-apple-darwin
+          - os: windows-2025
+            platform: windows
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Unix runner preflight
+        if: matrix.platform == 'unix'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          rustc -vV
+          echo "uname -s=$(uname -s)"
+          echo "uname -m=$(uname -m)"
+          test "$(uname -s)" = "${{ matrix.system }}"
+          test "$(uname -m)" = "${{ matrix.machine }}"
+          test "${RUNNER_ARCH}" = "${{ matrix.runner_arch }}"
+      - name: Windows runner preflight
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          rustup show active-toolchain
+          rustc -vV
+          $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+          Write-Host "RuntimeInformation.OSArchitecture=$architecture"
+          Write-Host "RUNNER_ARCH=$env:RUNNER_ARCH"
+          if ($architecture -ne "X64" -or $env:RUNNER_ARCH -ne "X64") {
+              throw "windows-2025 must report X64 architecture"
+          }
+      - name: Install target and cargo check (Unix)
+        if: matrix.platform == 'unix'
+        shell: bash
+        run: |
+          rustup target add "${{ matrix.target }}"
+          cargo check --locked --target "${{ matrix.target }}"
+      - name: Install target and cargo check (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          rustup target add "${{ matrix.target }}"
+          cargo check --locked --target "${{ matrix.target }}"

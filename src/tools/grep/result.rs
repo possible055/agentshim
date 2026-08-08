@@ -42,7 +42,15 @@ impl Page {
         mode: GrepMode,
         single_file: bool,
     ) -> Result<(), GrepError> {
-        if outcome.skipped {
+        let FileOutcome {
+            path,
+            records,
+            entries,
+            occurrences,
+            matched,
+            skipped,
+        } = outcome;
+        if skipped {
             self.skipped = self.skipped.saturating_add(1);
             if single_file {
                 return Err(GrepError::Io(io::Error::other(
@@ -52,35 +60,41 @@ impl Page {
             return Ok(());
         }
         match mode {
-            GrepMode::Files if outcome.matched => {
-                let path = outcome.absolute;
-                self.push_entry(path, None);
+            GrepMode::Files if matched => {
+                self.push_entry_lazy(|| (display_outcome_path(path.as_deref()), None));
             }
-            GrepMode::Count if outcome.matched => {
-                let path = outcome.absolute;
-                let count = outcome.occurrences;
-                self.push_entry(format!("{path}:{count}"), None);
+            GrepMode::Count if matched => {
+                self.push_entry_lazy(|| {
+                    (
+                        format!("{}:{occurrences}", display_outcome_path(path.as_deref())),
+                        None,
+                    )
+                });
             }
             GrepMode::Content => {
-                let entries = outcome.entries;
-                let captured = outcome.records.len();
-                for record in outcome.records {
+                let captured = records.len();
+                let mut absolute = None;
+                for record in records {
                     let separator = if record.kind == RecordKind::Match {
                         ':'
                     } else {
                         '-'
                     };
-                    let fallback = format!(
-                        "{}{separator}{}{separator}{CONTENT_OMISSION}",
-                        outcome.absolute, record.line
-                    );
-                    self.push_entry(
-                        format!(
-                            "{}{separator}{}{separator}{}",
-                            outcome.absolute, record.line, record.text
-                        ),
-                        Some(fallback),
-                    );
+                    self.push_entry_lazy(|| {
+                        let absolute = absolute
+                            .get_or_insert_with(|| display_outcome_path(path.as_deref()));
+                        let fallback = format!(
+                            "{absolute}{separator}{}{separator}{CONTENT_OMISSION}",
+                            record.line
+                        );
+                        (
+                            format!(
+                                "{absolute}{separator}{}{separator}{}",
+                                record.line, record.text
+                            ),
+                            Some(fallback),
+                        )
+                    });
                 }
                 self.total = self.total.saturating_add(entries.saturating_sub(captured));
             }
@@ -89,8 +103,14 @@ impl Page {
         Ok(())
     }
 
+    #[cfg(test)]
     fn push_entry(&mut self, line: String, detailed_fallback: Option<String>) {
+        self.push_entry_lazy(|| (line, detailed_fallback));
+    }
+
+    fn push_entry_lazy(&mut self, build: impl FnOnce() -> (String, Option<String>)) {
         if self.total >= self.offset && self.lines.len() < self.retain && self.retaining {
+            let (line, detailed_fallback) = build();
             let fallback = detailed_fallback.unwrap_or_else(|| GENERIC_OMISSION.to_owned());
             if self.can_retain(&line, Some(&fallback)) {
                 self.retain_line(PageLine {
@@ -127,6 +147,13 @@ impl Page {
         self.charged = self.charged.saturating_add(line.charge());
         self.lines.push(line);
     }
+}
+
+fn display_outcome_path(path: Option<&ResolvedPath>) -> String {
+    crate::path::display_path(
+        path.expect("matched grep outcome retains its admitted path")
+            .absolute(),
+    )
 }
 
 fn pagination_tail(total_skipped: usize, next_offset: Option<usize>) -> Vec<String> {

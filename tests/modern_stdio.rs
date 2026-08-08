@@ -1,9 +1,13 @@
 use std::{
+    collections::BTreeSet,
     io::{BufRead, BufReader, Write},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use serde_json::{Map, Value, json};
 
@@ -18,23 +22,32 @@ struct Session {
 
 impl Session {
     fn start() -> Self {
-        Self::start_with_options(None, None)
+        Self::start_with_options(None, None, None)
     }
 
     fn start_strict() -> Self {
-        Self::start_with_options(Some("strict"), None)
+        Self::start_with_options(Some("strict"), None, None)
     }
 
     fn start_unrestricted() -> Self {
-        Self::start_with_options(None, Some("unrestricted"))
+        Self::start_with_options(None, Some("unrestricted"), None)
     }
 
-    fn start_with_options(compatibility: Option<&str>, read_scope: Option<&str>) -> Self {
+    fn start_with_process_calls(process_calls: usize) -> Self {
+        Self::start_with_options(None, None, Some(process_calls))
+    }
+
+    fn start_with_options(
+        compatibility: Option<&str>,
+        read_scope: Option<&str>,
+        process_calls: Option<usize>,
+    ) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_codexshim"));
         command
             .arg("serve")
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .env_remove("CODEXSHIM_MCP_COMPATIBILITY")
+            .env_remove("CODEXSHIM_PROCESS_CALLS")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -43,6 +56,9 @@ impl Session {
         }
         if let Some(compatibility) = compatibility {
             command.env("CODEXSHIM_MCP_COMPATIBILITY", compatibility);
+        }
+        if let Some(process_calls) = process_calls {
+            command.env("CODEXSHIM_PROCESS_CALLS", process_calls.to_string());
         }
         let mut child = command.spawn().expect("start codexshim");
         let stdin = child.stdin.take().expect("child stdin");
@@ -300,7 +316,7 @@ fn stdin_eof_cancels_in_flight_process_and_exits_server() {
 fn process_overload_is_fail_fast_and_preserves_resource_busy_contract() {
     let fixture = tempfile::tempdir().expect("fixture");
     let executable = std::env::current_exe().expect("integration test executable");
-    let mut session = Session::start();
+    let mut session = Session::start_with_process_calls(2);
     session.send(&modern_request(1, "server/discover", empty_params()));
     assert_eq!(session.receive()["id"], 1);
 
@@ -377,6 +393,102 @@ fn process_overload_is_fail_fast_and_preserves_resource_busy_contract() {
     }
 }
 
+#[test]
+fn default_process_and_read_only_capacity_can_progress_together() {
+    const CAPACITY: u64 = 16;
+
+    let fixture = tempfile::tempdir().expect("fixture");
+    let executable = std::env::current_exe().expect("integration test executable");
+    let mut session = Session::start();
+    session.send(&modern_request(1, "server/discover", empty_params()));
+    assert_eq!(session.receive()["id"], 1);
+
+    let mut pid_files = Vec::new();
+    for id in 2..2 + CAPACITY {
+        let pid_file = fixture.path().join(format!("parallel-child-{id}.pid"));
+        let mut call = empty_params();
+        call.insert("name".to_owned(), json!("run_process"));
+        call.insert(
+            "arguments".to_owned(),
+            json!({
+                "program": executable,
+                "args": ["--exact", "eof_process_child_fixture", "--nocapture"],
+                "cwd": env!("CARGO_MANIFEST_DIR"),
+                "env": {
+                    "CODEXSHIM_EOF_FIXTURE": "child",
+                    "CODEXSHIM_EOF_PID_FILE": pid_file,
+                },
+                "timeout_ms": 30_000,
+            }),
+        );
+        session.send(&modern_request(id, "tools/call", call));
+        pid_files.push(pid_file);
+    }
+    let active_deadline = Instant::now() + Duration::from_secs(10);
+    while pid_files.iter().any(|path| !path.exists()) && Instant::now() < active_deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        pid_files.iter().all(|path| path.exists()),
+        "sixteen process calls did not start concurrently"
+    );
+
+    let read_ids = (100..100 + CAPACITY).collect::<BTreeSet<_>>();
+    for id in &read_ids {
+        let mut call = empty_params();
+        call.insert("name".to_owned(), json!("read"));
+        call.insert(
+            "arguments".to_owned(),
+            json!({ "path": "Cargo.toml", "line_count": 1 }),
+        );
+        session.send(&modern_request(*id, "tools/call", call));
+    }
+    let mut completed_read_ids = BTreeSet::new();
+    for _ in 0..CAPACITY {
+        let response = session.receive();
+        let id = response["id"].as_u64().expect("response id");
+        assert!(read_ids.contains(&id), "unexpected response id {id}");
+        assert_eq!(response["result"]["isError"], false);
+        completed_read_ids.insert(id);
+    }
+    assert_eq!(completed_read_ids, read_ids);
+
+    let mut overflow = empty_params();
+    overflow.insert("name".to_owned(), json!("run_process"));
+    overflow.insert(
+        "arguments".to_owned(),
+        json!({
+            "program": executable,
+            "args": ["--version"],
+            "cwd": env!("CARGO_MANIFEST_DIR"),
+        }),
+    );
+    session.send(&modern_request(200, "tools/call", overflow));
+    let response = session.receive();
+    assert_eq!(response["id"], 200);
+    assert_eq!(
+        response["result"]["structuredContent"]["error"]["code"],
+        "resource_busy"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["error"]["retryable"],
+        true
+    );
+
+    session.close();
+    for pid_file in pid_files {
+        let pid = std::fs::read_to_string(pid_file)
+            .expect("child PID")
+            .trim()
+            .parse::<u32>()
+            .expect("numeric child PID");
+        assert!(
+            !process_is_running(pid),
+            "parallel fixture survived server shutdown"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 #[allow(clippy::zombie_processes)] // The fixture must exit without waiting so the helper escapes its session.
@@ -386,8 +498,9 @@ fn unix_outcome_uncertain_parent_fixture() {
     }
     let pid_file =
         std::env::var_os("CODEXSHIM_OUTCOME_UNCERTAIN_PID_FILE").expect("fixture PID file");
-    std::process::Command::new("/usr/bin/setsid")
-        .arg(std::env::current_exe().expect("integration test executable"))
+    let mut command =
+        std::process::Command::new(std::env::current_exe().expect("integration test executable"));
+    command
         .args([
             "--exact",
             "unix_outcome_uncertain_helper_fixture",
@@ -397,9 +510,16 @@ fn unix_outcome_uncertain_parent_fixture() {
         .env("CODEXSHIM_OUTCOME_UNCERTAIN_PID_FILE", &pid_file)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("spawn session-escaped helper");
+        .stderr(Stdio::inherit());
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command.spawn().expect("spawn session-escaped helper");
     let deadline = Instant::now() + Duration::from_secs(2);
     while !std::path::Path::new(&pid_file).exists() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(10));

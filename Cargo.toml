@@ -15,6 +15,7 @@ grep-matcher = "0.1.9"
 grep-regex = "0.1.14"
 grep-searcher = "=0.1.17"
 ignore = "0.4.23"
+rayon = "=1.11.0"
 rmcp = { version = "=3.1.0", default-features = false, features = ["server", "transport-io"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.142"
@@ -32,6 +33,7 @@ windows-sys = { version = "0.61.0", features = ["Wdk_System_SystemServices", "Wi
 libc = "0.2.172"
 
 [dev-dependencies]
+log = "0.4.27"
 tempfile = "3.20.0"
 
 [features]

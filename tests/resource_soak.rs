@@ -27,6 +27,7 @@ impl Session {
             .arg("serve")
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .env_remove("CODEXSHIM_MCP_COMPATIBILITY")
+            .env_remove("CODEXSHIM_PROCESS_CALLS")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -94,15 +95,19 @@ impl Session {
     }
 
     fn receive(&mut self, id: u64) -> Value {
+        let response = self.receive_any();
+        assert_eq!(response["id"], id);
+        response
+    }
+
+    fn receive_any(&mut self) -> Value {
         let mut line = String::new();
         assert_ne!(
             self.stdout.read_line(&mut line).expect("read response"),
             0,
             "server closed stdout before responding"
         );
-        let response: Value = serde_json::from_str(&line).expect("response JSON");
-        assert_eq!(response["id"], id);
-        response
+        serde_json::from_str(&line).expect("response JSON")
     }
 
     fn close(mut self) -> String {
@@ -136,6 +141,7 @@ impl Drop for Session {
 #[derive(Clone, Copy)]
 struct ResourceSample {
     memory_bytes: u64,
+    virtual_memory_bytes: Option<u64>,
     resource_count: u64,
     threads: u64,
 }
@@ -403,6 +409,7 @@ fn mixed_workload_resource_soak() {
             "elapsed_ms": started.elapsed().as_millis(),
             "memory_kind": platform::MEMORY_KIND,
             "memory_bytes": sample.resources.memory_bytes,
+            "virtual_memory_bytes": sample.resources.virtual_memory_bytes,
             "resource_kind": platform::RESOURCE_KIND,
             "resource_count": sample.resources.resource_count,
             "threads": sample.resources.threads,
@@ -440,7 +447,197 @@ fn pending_process_child_fixture() {
     if env::var("CODEXSHIM_PENDING_FIXTURE").as_deref() != Ok("child") {
         return;
     }
-    thread::sleep(Duration::from_secs(30));
+    let duration =
+        env::var("CODEXSHIM_PENDING_FIXTURE_MS").map_or(Duration::from_secs(30), |value| {
+            Duration::from_millis(
+                value
+                    .parse()
+                    .expect("CODEXSHIM_PENDING_FIXTURE_MS must be an integer"),
+            )
+        });
+    thread::sleep(duration);
+}
+
+#[test]
+#[ignore = "manual four-instance aggregate process soak; run with --ignored --nocapture"]
+#[allow(clippy::too_many_lines)] // The ignored fixture records one complete aggregate soak scenario.
+fn four_instance_aggregate_process_soak() {
+    const INSTANCE_COUNT: usize = 4;
+    const CALLS_PER_INSTANCE: usize = 16;
+
+    let iterations = env::var("CODEXSHIM_AGGREGATE_SOAK_ITERATIONS").map_or(5, |value| {
+        value
+            .parse::<usize>()
+            .expect("CODEXSHIM_AGGREGATE_SOAK_ITERATIONS must be a positive integer")
+    });
+    assert!(iterations > 0, "aggregate soak requires an iteration");
+    let output = env::var_os("CODEXSHIM_AGGREGATE_SOAK_OUTPUT").map_or_else(
+        || {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("resource-soak")
+                .join(format!("{}-four-instance.jsonl", env::consts::OS))
+        },
+        PathBuf::from,
+    );
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent).expect("create aggregate soak artifact directory");
+    }
+    let mut artifact = Artifact {
+        writer: BufWriter::new(File::create(&output).expect("create aggregate soak artifact")),
+        path: output,
+    };
+    artifact.write(&json!({
+        "record_type": "metadata",
+        "schema_version": 1,
+        "scenario": "four_instance_process_aggregate",
+        "platform": env::consts::OS,
+        "architecture": env::consts::ARCH,
+        "commit": command_output("git", &["rev-parse", "HEAD"]),
+        "worktree_status": command_output("git", &["status", "--short"]),
+        "toolchain": command_output("cargo", &["--version", "--verbose"]),
+        "runner_image": runner_image(),
+        "instances": INSTANCE_COUNT,
+        "process_calls_per_instance": CALLS_PER_INSTANCE,
+        "aggregate_process_calls": INSTANCE_COUNT * CALLS_PER_INSTANCE,
+        "iterations": iterations,
+        "started_unix_ms": SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_millis(),
+    }));
+
+    let executable = env::current_exe().expect("integration test executable");
+    let mut sessions = (0..INSTANCE_COUNT)
+        .map(|_| {
+            let mut session = Session::start();
+            session.discover();
+            session
+        })
+        .collect::<Vec<_>>();
+    let mut samples = Vec::new();
+
+    for iteration in 1..=iterations {
+        for session in &mut sessions {
+            for _ in 0..CALLS_PER_INSTANCE {
+                session.send_tool(
+                    "run_process",
+                    json!({
+                        "program": executable,
+                        "args": ["--exact", "pending_process_child_fixture", "--nocapture"],
+                        "cwd": env!("CARGO_MANIFEST_DIR"),
+                        "env": {
+                            "CODEXSHIM_PENDING_FIXTURE": "child",
+                            "CODEXSHIM_PENDING_FIXTURE_MS": "750",
+                        },
+                        "timeout_ms": 30_000,
+                    }),
+                );
+            }
+        }
+
+        let peak_deadline = Instant::now() + Duration::from_secs(10);
+        let peak = loop {
+            let current = sessions
+                .iter()
+                .map(|session| platform::sample(session.pid()).expect("sample aggregate server"))
+                .collect::<Vec<_>>();
+            if current
+                .iter()
+                .all(|sample| sample.descendants.len() >= CALLS_PER_INSTANCE)
+            {
+                break current;
+            }
+            assert!(
+                Instant::now() < peak_deadline,
+                "aggregate children did not reach expected peak"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+        let peak_descendant_count = peak
+            .iter()
+            .map(|sample| sample.descendants.len())
+            .sum::<usize>();
+        assert!(
+            peak_descendant_count >= INSTANCE_COUNT * CALLS_PER_INSTANCE,
+            "aggregate process tree did not contain every direct child"
+        );
+
+        for session in &mut sessions {
+            for _ in 0..CALLS_PER_INSTANCE {
+                let response = session.receive_any();
+                assert_eq!(
+                    response["result"]["isError"], false,
+                    "aggregate process failed: {response}"
+                );
+            }
+        }
+        let settled = sessions
+            .iter()
+            .map(|session| platform::sample(session.pid()).expect("sample settled server"))
+            .collect::<Vec<_>>();
+        assert!(
+            settled.iter().all(|sample| sample.descendants.is_empty()),
+            "aggregate descendants survived completion"
+        );
+        let memory_bytes = settled
+            .iter()
+            .map(|sample| sample.resources.memory_bytes)
+            .sum::<u64>();
+        let virtual_memory_bytes = settled.iter().try_fold(0_u64, |total, sample| {
+            sample
+                .resources
+                .virtual_memory_bytes
+                .map(|value| total + value)
+        });
+        let resource_count = settled
+            .iter()
+            .map(|sample| sample.resources.resource_count)
+            .sum::<u64>();
+        let threads = settled
+            .iter()
+            .map(|sample| sample.resources.threads)
+            .sum::<u64>();
+        samples.push((iteration, memory_bytes));
+        artifact.write(&json!({
+            "record_type": "sample",
+            "iteration": iteration,
+            "aggregate_memory_bytes": memory_bytes,
+            "aggregate_virtual_memory_bytes": virtual_memory_bytes,
+            "aggregate_resource_count": resource_count,
+            "aggregate_threads": threads,
+            "peak_descendant_count": peak_descendant_count,
+            "settled_descendant_count": 0,
+        }));
+    }
+
+    let server_exit_statuses = sessions.into_iter().map(Session::close).collect::<Vec<_>>();
+    let initial_memory = samples.first().expect("initial aggregate sample").1;
+    let final_memory = samples.last().expect("final aggregate sample").1;
+    let tail_sample_count = samples.len().min(10);
+    let tail_samples = &samples[samples.len() - tail_sample_count..];
+    let tail_initial_memory = tail_samples.first().expect("initial tail sample").1;
+    let tail_final_memory = tail_samples.last().expect("final tail sample").1;
+    artifact.write(&json!({
+        "record_type": "result",
+        "outcome": "measured",
+        "server_exit_statuses": server_exit_statuses,
+        "initial_memory_bytes": initial_memory,
+        "final_memory_bytes": final_memory,
+        "retained_growth_bytes": final_memory.saturating_sub(initial_memory),
+        "least_squares_bytes_per_iteration": request_slope(&samples),
+        "tail_sample_count": tail_sample_count,
+        "tail_net_growth_bytes": i64::try_from(tail_final_memory).expect("memory fits i64")
+            - i64::try_from(tail_initial_memory).expect("memory fits i64"),
+        "tail_least_squares_bytes_per_iteration": request_slope(tail_samples),
+        "surviving_descendants": [],
+        "threshold_policy": "zero surviving descendants is blocking; full and tail growth slopes are release evidence",
+        "finished_unix_ms": SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_millis(),
+    }));
+    println!("aggregate soak artifact: {}", artifact.path.display());
 }
 
 #[test]
@@ -483,8 +680,10 @@ fn pending_request_growth_probe() {
         "runner_image": runner_image(),
         "request_count": request_count,
         "encoded_payload_bytes_per_request": STDIN_BYTES,
-        "active_process_limit": 2,
-        "admission_mode": "class_aware_fail_fast_8_2",
+        "active_process_limit": 16,
+        "active_read_only_limit": 16,
+        "blocking_thread_limit": 34,
+        "admission_mode": "class_aware_fail_fast_16_16",
         "started_unix_ms": SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time")
@@ -555,6 +754,7 @@ fn pending_sample(request_count: usize, sample: &Sample) -> Value {
         "queued_request_count": request_count,
         "memory_kind": platform::MEMORY_KIND,
         "memory_bytes": sample.resources.memory_bytes,
+        "virtual_memory_bytes": sample.resources.virtual_memory_bytes,
         "resource_kind": platform::RESOURCE_KIND,
         "resource_count": sample.resources.resource_count,
         "threads": sample.resources.threads,
@@ -603,12 +803,14 @@ mod platform {
     pub fn sample(server_pid: u32) -> io::Result<Sample> {
         let status = fs::read_to_string(format!("/proc/{server_pid}/status"))?;
         let memory_bytes = status_value(&status, "VmRSS:")? * 1_024;
+        let virtual_memory_bytes = status_value(&status, "VmSize:")? * 1_024;
         let threads = status_value(&status, "Threads:")?;
         let resource_count = fs::read_dir(format!("/proc/{server_pid}/fd"))?.count() as u64;
         let descendants = descendant_pids(server_pid)?;
         Ok(Sample {
             resources: ResourceSample {
                 memory_bytes,
+                virtual_memory_bytes: Some(virtual_memory_bytes),
                 resource_count,
                 threads,
             },
@@ -740,6 +942,7 @@ mod platform {
             Ok(Sample {
                 resources: ResourceSample {
                     memory_bytes,
+                    virtual_memory_bytes: None,
                     resource_count,
                     threads,
                 },

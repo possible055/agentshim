@@ -8,7 +8,7 @@ English | [简体中文](README.zh-CN.md)
 
 - **Bounded file access.** `read`, `grep`, and `glob` operate inside the repository by default, with optional access to Codex skill and plugin directories.
 - **No shell injection.** `run_process` takes an executable and a literal argument list — no pipes, redirections, wildcards, or variable expansion.
-- **Cross-platform.** Natively supports Windows and Linux.
+- **Cross-platform.** Natively supports Windows, Linux, and macOS (Intel and Apple Silicon).
 
 ## Tools
 
@@ -23,7 +23,7 @@ Every tool returns a typed `structuredContent` object together with a bounded te
 
 ## Install
 
-Prebuilt binaries are available for Linux and Windows 11 (build 22621+) on a local fixed NTFS drive.
+Prebuilt binaries are available for Linux, macOS, and Windows 11 (build 22621+). Windows uses a local fixed NTFS drive.
 
 ### Prebuilt release (recommended)
 
@@ -41,12 +41,25 @@ Install or update the latest release without modifying `PATH` or Codex configura
 curl --proto '=https' --tlsv1.2 -fsSL https://github.com/possible055/codexshim/releases/latest/download/install.sh | sh
 ```
 
+**macOS:**
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/possible055/codexshim/releases/latest/download/install.sh | sh
+```
+
 Default install locations:
 
 - Windows: `%LOCALAPPDATA%\codexshim\bin\codexshim.exe`
 - Linux: `${XDG_DATA_HOME:-$HOME/.local/share}/codexshim/bin/codexshim`
+- macOS: `${XDG_DATA_HOME:-$HOME/.local/share}/codexshim/bin/codexshim`
 
 Override with `-InstallDir` (PowerShell) or `--install-dir` (sh). Re-run the same command to update.
+
+To install a specific or prerelease version, pass `-Version` (PowerShell) or `--version` (sh):
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/possible055/codexshim/releases/download/v0.1.3-alpha.2/install.sh | sh -s -- --version 0.1.3-alpha.2
+```
 
 ### Build from source
 
@@ -57,7 +70,7 @@ cargo build --release --locked
 cargo run --locked -- doctor
 ```
 
-The binary is at `target/release/codexshim` (Linux) or `target/release/codexshim.exe` (Windows).
+The binary is at `target/release/codexshim` (Linux and macOS) or `target/release/codexshim.exe` (Windows).
 
 ## Configure Codex
 
@@ -65,12 +78,14 @@ Copy the matching example into `~/.codex/config.toml` (user-level) or a project'
 
 - [Windows example](config/codex.windows.toml.example)
 - [Linux example](config/codex.linux.toml.example)
+- [macOS example](config/codex.macos.toml.example)
 
 ```toml
 [mcp_servers.codexshim]
 command = "/absolute/path/to/codexshim"
 args = ["serve"]
 required = true
+supports_parallel_tool_calls = true
 startup_timeout_sec = 15
 tool_timeout_sec = 310
 enabled_tools = ["read", "grep", "glob", "run_process"]
@@ -87,6 +102,8 @@ mcp_2026_07_28 = true
 On Windows, use a single-quoted TOML path such as `'C:\Users\me\AppData\Local\codexshim\bin\codexshim.exe'` to avoid escaping backslashes.
 
 Start Codex in the repository you want to work on. `codexshim` treats that working directory as the repository root for the lifetime of the server.
+
+`supports_parallel_tool_calls = true` allows Codex to issue all four codexshim tools concurrently. Each codexshim instance independently admits up to 16 active `run_process` calls and 16 active read-only calls (`read`, `grep`, and `glob` combined). Set `CODEXSHIM_PROCESS_CALLS` to an integer from 1 through 32 to override the process limit; invalid values prevent startup. Admission remains fail-fast and returns a retryable `resource_busy` error when a class is full.
 
 ## Options
 
@@ -111,6 +128,7 @@ Relative paths and absolute paths inside the repository always use the repositor
 | --- | --- | --- |
 | `CODEX_MCP_PROTOCOL_VERSION` | — | MCP protocol version advertised to Codex. |
 | `CODEXSHIM_MCP_COMPATIBILITY` | `lenient` | Set to `strict` to reject legacy `2025-06-18` initialize clients. |
+| `CODEXSHIM_PROCESS_CALLS` | `16` | Per-instance concurrent `run_process` limit; accepts integers from 1 through 32. |
 | `CODEXSHIM_LOG_MODE` | `errors` | One of `off`, `errors`, `all`. |
 | `CODEXSHIM_LOG_DIR` | platform default | Override the log directory with an absolute path. |
 

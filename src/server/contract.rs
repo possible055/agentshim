@@ -165,7 +165,9 @@ impl DiagnosticError for crate::tools::grep::GrepError {
             GrepError::Path(_) => "path",
             GrepError::Cancelled => "client_cancellation",
             GrepError::Output(_) => "output_invariant",
-            GrepError::CandidateMemory | GrepError::CaptureMemory => "resource_timeout",
+            #[cfg(any(test, feature = "bench-internals"))]
+            GrepError::CandidateMemory => "resource_timeout",
+            GrepError::PoolPoison | GrepError::CaptureMemory => "resource_timeout",
             GrepError::Traversal(_) | GrepError::Io(_) => "io",
         }
     }

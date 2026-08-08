@@ -18,7 +18,7 @@ for attempt in 1 2; do
     case "$installer_output" in
         *"Installed codexshim at $expected_path"*) ;;
         *)
-            echo "installer did not report the expected Linux path on attempt $attempt" >&2
+            echo "installer did not report the expected Unix path on attempt $attempt" >&2
             exit 1
             ;;
     esac
@@ -29,3 +29,25 @@ for attempt in 1 2; do
         exit 1
     fi
 done
+
+expect_unsupported_platform() {
+    fake_uname_directory="$test_directory/fake-uname-$1-$2"
+    mkdir -p "$fake_uname_directory"
+    cat > "$fake_uname_directory/uname" <<EOF
+#!/bin/sh
+case "\$1" in
+    -s) printf '%s\n' "$1" ;;
+    -m) printf '%s\n' "$2" ;;
+    *) exit 1 ;;
+esac
+EOF
+    chmod 755 "$fake_uname_directory/uname"
+    if PATH="$fake_uname_directory:$PATH" sh "$(dirname "$0")/install.sh" \
+        --release-dir "$release_directory" --install-dir "$test_directory" >/dev/null 2>&1; then
+        echo "installer unexpectedly accepted unsupported platform $1/$2" >&2
+        exit 1
+    fi
+}
+
+expect_unsupported_platform Plan9 x86_64
+expect_unsupported_platform Linux mips64

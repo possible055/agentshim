@@ -8,6 +8,9 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2.0
 
+# Injected by the release workflow from the release tag; empty in source.
+$DefaultVersion = "" # @codexshim:default-version
+
 function Get-ReplacementFailureMessage {
     param(
         [Parameter(Mandatory)]
@@ -49,7 +52,11 @@ if (-not $InstallDir) {
 }
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$target = "x86_64-pc-windows-msvc"
+$target = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
+    X64 { "x86_64-pc-windows-msvc"; break }
+    Arm64 { "aarch64-pc-windows-msvc"; break }
+    default { throw "Unsupported Windows architecture: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)" }
+}
 $temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ("codexshim-install-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $temporaryDirectory | Out-Null
 
@@ -65,8 +72,10 @@ try {
             throw "Missing checksum file: $checksumPath"
         }
     } else {
-        if ($Version) {
-            $tag = if ($Version.StartsWith("v")) { $Version } else { "v$Version" }
+        $resolvedVersion = $Version
+        if (-not $resolvedVersion) { $resolvedVersion = $DefaultVersion }
+        if ($resolvedVersion) {
+            $tag = if ($resolvedVersion.StartsWith("v")) { $resolvedVersion } else { "v$resolvedVersion" }
             $releaseUrl = "https://api.github.com/repos/possible055/codexshim/releases/tags/$tag"
         } else {
             $releaseUrl = "https://api.github.com/repos/possible055/codexshim/releases/latest"

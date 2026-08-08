@@ -136,6 +136,13 @@ pub struct FileAccess {
     codex_roots: Vec<Arc<RepositoryRoot>>,
 }
 
+pub(crate) struct SameParentReader<'a> {
+    access: &'a FileAccess,
+    backend: PathBackend,
+    parent: PathBuf,
+    directory: Option<Dir>,
+}
+
 impl FileAccess {
     #[must_use]
     pub fn new(root: Arc<RepositoryRoot>, scope: ReadScope) -> Self {
@@ -337,13 +344,7 @@ impl FileAccess {
     /// Returns the operating-system or capability-relative open error.
     pub fn open_read(&self, path: &ResolvedPath) -> io::Result<File> {
         if path.backend != PathBackend::Ambient {
-            let mut options = OpenOptions::new();
-            options.read(true);
-            #[cfg(unix)]
-            {
-                use cap_std::fs::OpenOptionsExt;
-                options.custom_flags(libc::O_NONBLOCK);
-            }
+            let options = capability_read_options();
             return match path.backend {
                 PathBackend::Repository => self
                     .root
@@ -364,6 +365,77 @@ impl FileAccess {
             options.custom_flags(libc::O_NONBLOCK);
         }
         options.open(path.absolute()).map(File::from_std)
+    }
+
+    #[cfg(all(any(test, feature = "bench-internals"), windows))]
+    pub(crate) fn open_file_identity(&self, path: &ResolvedPath) -> io::Result<File> {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
+
+        if path.backend != PathBackend::Ambient {
+            let options = capability_identity_options();
+            return match path.backend {
+                PathBackend::Repository => self
+                    .root
+                    .capability()
+                    .open_with(path.capability_key(), &options),
+                PathBackend::Codex(index) => self.codex_roots[index]
+                    .capability()
+                    .open_with(path.capability_key(), &options),
+                PathBackend::Ambient => unreachable!("ambient path handled below"),
+            };
+        }
+
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).access_mode(FILE_READ_ATTRIBUTES);
+        options.open(path.absolute()).map(File::from_std)
+    }
+
+    #[cfg(all(any(test, feature = "bench-internals"), not(windows)))]
+    pub(crate) fn open_file_identity(&self, path: &ResolvedPath) -> io::Result<File> {
+        self.open_read(path)
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn open_read_same_parent_batch(
+        &self,
+        paths: &[ResolvedPath],
+    ) -> io::Result<Vec<io::Result<File>>> {
+        let Some(first) = paths.first() else {
+            return Ok(Vec::new());
+        };
+        if paths.iter().any(|path| !first.has_same_parent(path)) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "batch paths must use the same backend and parent directory",
+            ));
+        }
+        let reader = self.open_same_parent_reader(first)?;
+        Ok(paths.iter().map(|path| reader.open(path)).collect())
+    }
+
+    pub(crate) fn open_same_parent_reader(
+        &self,
+        first: &ResolvedPath,
+    ) -> io::Result<SameParentReader<'_>> {
+        let parent = batch_parent(first)?.to_path_buf();
+        let directory = match first.backend {
+            PathBackend::Repository => Some(self.root.capability().open_dir(batch_parent_key(
+                &parent,
+            ))?),
+            PathBackend::Codex(index) => Some(
+                self.codex_roots[index]
+                    .capability()
+                    .open_dir(batch_parent_key(&parent))?,
+            ),
+            PathBackend::Ambient => None,
+        };
+        Ok(SameParentReader {
+            access: self,
+            backend: first.backend,
+            parent,
+            directory,
+        })
     }
 
     fn resolve_ambient(input: &Path) -> Result<ResolvedPath, PathError> {
@@ -392,6 +464,118 @@ impl FileAccess {
             }
         }
         Err(PathError::OutsideRoot)
+    }
+}
+
+fn capability_read_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    options
+}
+
+#[cfg(all(any(test, feature = "bench-internals"), windows))]
+fn capability_identity_options() -> OpenOptions {
+    use cap_std::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
+
+    let mut options = OpenOptions::new();
+    options.read(true).access_mode(FILE_READ_ATTRIBUTES);
+    options
+}
+
+fn batch_parent(path: &ResolvedPath) -> io::Result<&Path> {
+    let path = if path.backend == PathBackend::Ambient {
+        path.absolute()
+    } else {
+        path.capability_key()
+    };
+    path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "batch path must have a parent directory",
+        )
+    })
+}
+
+fn batch_parent_key(parent: &Path) -> &Path {
+    if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    }
+}
+
+impl SameParentReader<'_> {
+    pub(crate) fn open(&self, path: &ResolvedPath) -> io::Result<File> {
+        if path.backend != self.backend || batch_parent(path)? != self.parent {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "batch paths must use the same backend and parent directory",
+            ));
+        }
+        let Some(directory) = &self.directory else {
+            return self.access.open_read(path);
+        };
+        let name = path.capability_key().file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "batch path must name a child entry",
+            )
+        })?;
+        directory.open_with(name, &capability_read_options())
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn open_identity(&self, path: &ResolvedPath) -> io::Result<File> {
+        if path.backend != self.backend || batch_parent(path)? != self.parent {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "batch paths must use the same backend and parent directory",
+            ));
+        }
+        let Some(directory) = &self.directory else {
+            return self.access.open_file_identity(path);
+        };
+        let name = path.capability_key().file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "batch path must name a child entry",
+            )
+        })?;
+        #[cfg(windows)]
+        let options = capability_identity_options();
+        #[cfg(not(windows))]
+        let options = capability_read_options();
+        directory.open_with(name, &options)
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn directory(&self) -> Option<&Dir> {
+        self.directory.as_ref()
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn reopen_parent(&self) -> io::Result<Option<Dir>> {
+        let directory = match self.backend {
+            PathBackend::Repository => Some(
+                self.access
+                    .root
+                    .capability()
+                    .open_dir(batch_parent_key(&self.parent))?,
+            ),
+            PathBackend::Codex(index) => Some(
+                self.access.codex_roots[index]
+                    .capability()
+                    .open_dir(batch_parent_key(&self.parent))?,
+            ),
+            PathBackend::Ambient => None,
+        };
+        Ok(directory)
     }
 }
 

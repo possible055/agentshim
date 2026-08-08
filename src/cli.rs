@@ -114,11 +114,18 @@ async fn run(config: RuntimeLimits, command: CliCommand) -> Result<(), Box<dyn E
             );
             println!("read scope: {}", service.read_scope());
             println!("read-only calls: {MAX_READ_ONLY_CALLS}");
-            println!("process calls: {MAX_PROCESS_CALLS}");
+            println!(
+                "process calls: {}",
+                service.runtime_limits().process_calls
+            );
             println!("process lifecycle: ok");
             println!(
                 "worker lanes: {}",
                 service.runtime_limits().worker_lanes
+            );
+            println!(
+                "blocking threads: {}",
+                service.runtime_limits().blocking_threads
             );
         }
         CliCommand::Version => {

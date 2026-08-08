@@ -21,6 +21,7 @@ use crate::{
     tools::ToolOutput,
     traversal::{
         TraversalControl, TraversalError, TraversalSummary, walk, walk_parallel_batched,
+        walk_parallel_batched_with_literal_prefix, walk_with_literal_prefix,
     },
 };
 
@@ -39,6 +40,10 @@ pub enum GlobTraversal {
     Adaptive,
     Serial,
     ParallelBatched,
+    #[cfg(any(test, feature = "bench-internals"))]
+    SerialLiteralPrefix,
+    #[cfg(any(test, feature = "bench-internals"))]
+    ParallelBatchedLiteralPrefix,
 }
 
 #[must_use]
@@ -132,23 +137,62 @@ fn execute_inner(
     request: &GlobRequest,
     cancellation: &CancellationToken,
 ) -> Result<ToolOutput, GlobError> {
+    let profiler = GlobProfiler::disabled();
     execute_inner_with_traversal(
         access,
         request,
         cancellation,
         GlobTraversal::Adaptive,
+        &profiler,
     )
 }
 
 #[cfg(any(test, feature = "bench-internals"))]
+/// Execute glob with an explicit traversal strategy for tests and benchmarks.
+///
+/// # Errors
+///
+/// Returns the same validation, path, traversal, cancellation, and formatting
+/// errors as the production glob path.
 pub fn execute_with_traversal(
     access: &Arc<FileAccess>,
     request: &GlobRequest,
     cancellation: &CancellationToken,
     traversal: GlobTraversal,
 ) -> Result<String, GlobError> {
-    execute_inner_with_traversal(access, request, cancellation, traversal)
+    execute_inner_with_traversal(
+        access,
+        request,
+        cancellation,
+        traversal,
+        &GlobProfiler::disabled(),
+    )
         .map(|output| output.text)
+}
+
+#[cfg(feature = "bench-internals")]
+/// Execute one explicitly selected glob traversal and return stage timings.
+///
+/// # Errors
+///
+/// Returns the same validation, traversal, cancellation, and output errors as
+/// [`execute_with_traversal`].
+pub fn execute_profiled_with_traversal(
+    access: &Arc<FileAccess>,
+    request: &GlobRequest,
+    cancellation: &CancellationToken,
+    traversal: GlobTraversal,
+) -> Result<ProfiledGlob, GlobError> {
+    let profiler = GlobProfiler::enabled();
+    let total_span = profiler.span(GlobStage::Total);
+    let result =
+        execute_inner_with_traversal(access, request, cancellation, traversal, &profiler);
+    drop(total_span);
+    let output = result?;
+    Ok(ProfiledGlob {
+        output: output.text,
+        timings: profiler.snapshot(),
+    })
 }
 
 fn execute_inner_with_traversal(
@@ -156,7 +200,9 @@ fn execute_inner_with_traversal(
     request: &GlobRequest,
     cancellation: &CancellationToken,
     traversal: GlobTraversal,
+    profiler: &GlobProfiler,
 ) -> Result<ToolOutput, GlobError> {
+    let setup_span = profiler.span(GlobStage::Setup);
     request.validate()?;
     let matcher = GlobBuilder::new(&request.pattern)
         .literal_separator(true)
@@ -164,6 +210,8 @@ fn execute_inner_with_traversal(
         .build()
         .map_err(|error| GlobError::Pattern(error.to_string()))?
         .compile_matcher();
+    #[cfg(any(test, feature = "bench-internals"))]
+    let literal_prefix = crate::traversal::literal_path_prefix(&request.pattern);
     let base_input = request.path.as_deref().unwrap_or(".");
     let base = access.resolve(Path::new(base_input))?;
     let mut activity = None;
@@ -188,25 +236,57 @@ fn execute_inner_with_traversal(
         total: 0,
         terminal_error: None,
     };
+    let regular_plan = GlobCollectPlan {
+        include_ignored: request.include_ignored.unwrap_or(false),
+        literal_prefix: None,
+    };
+    #[cfg(any(test, feature = "bench-internals"))]
+    let prefix_plan = GlobCollectPlan {
+        include_ignored: regular_plan.include_ignored,
+        literal_prefix: literal_prefix.as_deref(),
+    };
+    drop(setup_span);
+    let traversal_span = profiler.span(GlobStage::TraversalWall);
     let (collection, summary) = match traversal {
         GlobTraversal::Adaptive => unreachable!("adaptive traversal was resolved"),
         GlobTraversal::Serial => collect_serial(
             access,
             &base,
-            request.include_ignored.unwrap_or(false),
             cancellation,
             &matcher,
             collection,
+            regular_plan,
         )?,
         GlobTraversal::ParallelBatched => collect_parallel(
             access,
             &base,
-            request.include_ignored.unwrap_or(false),
             cancellation,
             &matcher,
             collection,
+            profiler,
+            regular_plan,
+        )?,
+        #[cfg(any(test, feature = "bench-internals"))]
+        GlobTraversal::SerialLiteralPrefix => collect_serial(
+            access,
+            &base,
+            cancellation,
+            &matcher,
+            collection,
+            prefix_plan,
+        )?,
+        #[cfg(any(test, feature = "bench-internals"))]
+        GlobTraversal::ParallelBatchedLiteralPrefix => collect_parallel(
+            access,
+            &base,
+            cancellation,
+            &matcher,
+            collection,
+            profiler,
+            prefix_plan,
         )?,
     };
+    drop(traversal_span);
     if let Some(error) = collection.terminal_error {
         return Err(error);
     }
@@ -214,8 +294,12 @@ fn execute_inner_with_traversal(
     if skipped > 0 {
         tracing::warn!(target: "codexshim", event = "traversal_skipped", phase = "execution", outcome = "degraded_success", counters = %format!("io_errors={},escaped_entries={},non_unicode_entries={}", summary.io_errors, summary.escaped_entries, summary.non_unicode_entries));
     }
+    let sort_span = profiler.span(GlobStage::FinalSort);
     let retained = collection.store.into_sorted(cancellation)?;
+    drop(sort_span);
+    let render_span = profiler.span(GlobStage::Render);
     let result = render(request, &retained, collection.total, summary, cancellation);
+    drop(render_span);
     drop(activity);
     result
 }
@@ -260,20 +344,21 @@ struct GlobCollection {
     terminal_error: Option<GlobError>,
 }
 
+#[derive(Clone, Copy)]
+struct GlobCollectPlan<'a> {
+    include_ignored: bool,
+    literal_prefix: Option<&'a Path>,
+}
+
 fn collect_serial(
     access: &FileAccess,
     base: &ResolvedPath,
-    include_ignored: bool,
     cancellation: &CancellationToken,
     matcher: &globset::GlobMatcher,
     mut collection: GlobCollection,
+    plan: GlobCollectPlan<'_>,
 ) -> Result<(GlobCollection, TraversalSummary), GlobError> {
-    let summary = walk(
-        access,
-        base,
-        include_ignored,
-        cancellation,
-        |entry| {
+    let mut visit = |entry: crate::traversal::TraversalEntry<'_>| {
             if !matcher.is_match(entry.key) {
                 return TraversalControl::Continue;
             }
@@ -293,27 +378,39 @@ fn collect_serial(
                 return TraversalControl::Stop;
             }
             TraversalControl::Continue
-        },
-    )?;
+        };
+    let summary = if let Some(literal_prefix) = plan.literal_prefix {
+        walk_with_literal_prefix(
+            access,
+            base,
+            plan.include_ignored,
+            cancellation,
+            literal_prefix,
+            &mut visit,
+        )?
+    } else {
+        walk(
+            access,
+            base,
+            plan.include_ignored,
+            cancellation,
+            &mut visit,
+        )?
+    };
     Ok((collection, summary))
 }
 
 fn collect_parallel(
     access: &FileAccess,
     base: &ResolvedPath,
-    include_ignored: bool,
     cancellation: &CancellationToken,
     matcher: &globset::GlobMatcher,
     collection: GlobCollection,
+    profiler: &GlobProfiler,
+    plan: GlobCollectPlan<'_>,
 ) -> Result<(GlobCollection, TraversalSummary), GlobError> {
     let collection = Mutex::new(collection);
-    let summary = walk_parallel_batched(
-        access,
-        base,
-        include_ignored,
-        cancellation,
-        PARALLEL_BATCH_SIZE,
-        |batch| {
+    let visit = |batch: &[crate::traversal::OwnedTraversalEntry]| {
             let mut found = Vec::new();
             for entry in batch {
                 if !matcher.is_match(&entry.key) {
@@ -322,17 +419,25 @@ fn collect_parallel(
                 match access.resolve_traversal_entry(base, &entry.absolute) {
                     Ok(path) => found.push(path),
                     Err(error) => {
-                        collection
+                        let wait_span = profiler.span(GlobStage::MergeWaitWorker);
+                        let mut collection = collection
                             .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .terminal_error = Some(error.into());
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        drop(wait_span);
+                        let hold_span = profiler.span(GlobStage::MergeWorkWorker);
+                        collection.terminal_error = Some(error.into());
+                        drop(hold_span);
                         return TraversalControl::Stop;
                     }
                 }
             }
+            profiler.record_batch(found.len());
+            let wait_span = profiler.span(GlobStage::MergeWaitWorker);
             let mut collection = collection
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            drop(wait_span);
+            let hold_span = profiler.span(GlobStage::MergeWorkWorker);
             if collection.terminal_error.is_some() {
                 return TraversalControl::Stop;
             }
@@ -346,9 +451,29 @@ fn collect_parallel(
                     return TraversalControl::Stop;
                 }
             }
+            drop(hold_span);
             TraversalControl::Continue
-        },
-    )?;
+        };
+    let summary = if let Some(literal_prefix) = plan.literal_prefix {
+        walk_parallel_batched_with_literal_prefix(
+            access,
+            base,
+            plan.include_ignored,
+            cancellation,
+            PARALLEL_BATCH_SIZE,
+            literal_prefix,
+            visit,
+        )?
+    } else {
+        walk_parallel_batched(
+            access,
+            base,
+            plan.include_ignored,
+            cancellation,
+            PARALLEL_BATCH_SIZE,
+            visit,
+        )?
+    };
     let collection = collection
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner);

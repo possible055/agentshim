@@ -5,6 +5,7 @@ args = ["serve"]
 # absolute read/grep/glob paths on fixed NTFS volumes, use:
 # args = ["serve", "--read-scope", "unrestricted"]
 required = true
+supports_parallel_tool_calls = true
 startup_timeout_sec = 15
 tool_timeout_sec = 310
 enabled_tools = ["read", "grep", "glob", "run_process"]
