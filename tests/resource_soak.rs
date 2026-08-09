@@ -27,6 +27,7 @@ impl Session {
             .arg("serve")
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .env_remove("CODEXSHIM_MCP_COMPATIBILITY")
+            .env("CODEXSHIM_ALLOW_PROGRAMS", allowed_programs())
             .env_remove("CODEXSHIM_PROCESS_CALLS")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -266,7 +267,7 @@ fn run_mixed_cycle(session: &mut Session) -> Value {
         }),
     );
     let process = session.call_tool(
-        "run_process",
+        "run_program",
         json!({
             "program": "cargo",
             "args": ["--version"],
@@ -283,7 +284,7 @@ fn run_mixed_cycle(session: &mut Session) -> Value {
         "read": outcome(&read),
         "glob": outcome(&glob),
         "grep": outcome(&grep),
-        "run_process": outcome(&process),
+        "run_program": outcome(&process),
     })
 }
 
@@ -384,7 +385,7 @@ fn mixed_workload_resource_soak() {
         "runner_image": runner_image(),
         "iterations": iterations,
         "warm_up_iterations": warm_up,
-        "sample_unit": "one sequential read, glob, grep, and run_process cycle",
+        "sample_unit": "one sequential read, glob, grep, and run_program cycle",
         "started_unix_ms": SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time")
@@ -521,7 +522,7 @@ fn four_instance_aggregate_process_soak() {
         for session in &mut sessions {
             for _ in 0..CALLS_PER_INSTANCE {
                 session.send_tool(
-                    "run_process",
+                    "run_program",
                     json!({
                         "program": executable,
                         "args": ["--exact", "pending_process_child_fixture", "--nocapture"],
@@ -709,7 +710,7 @@ fn pending_request_growth_probe() {
     for checkpoint in checkpoints {
         while sent < checkpoint {
             session.send_tool(
-                "run_process",
+                "run_program",
                 json!({
                     "program": executable,
                     "args": ["--exact", "pending_process_child_fixture", "--nocapture"],
@@ -1011,4 +1012,9 @@ mod platform {
         descendants.sort_unstable();
         Ok(descendants)
     }
+}
+
+fn allowed_programs() -> String {
+    let executable = std::env::current_exe().expect("integration test executable");
+    format!("cargo,{}", executable.display())
 }

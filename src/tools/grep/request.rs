@@ -1,11 +1,9 @@
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, VecDeque},
     io::{self, Read, Seek, SeekFrom},
     path::Path,
-    sync::{
-        Arc, Condvar, Mutex,
-        atomic::{AtomicUsize, Ordering as AtomicOrdering},
-    },
+    sync::{Arc, Condvar, Mutex},
 };
 
 use cap_std::fs::File;
@@ -19,14 +17,14 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    output::{MODEL_BYTE_LIMIT, OutputFormatter, OutputLimits},
+    output::{OutputFormatter, OutputLimits},
     path::{FileAccess, PathError, ResolvedPath},
     runtime::RuntimeResources,
     sorting,
     tools::ToolOutput,
     tools::read::FileFingerprint,
     traversal::{
-        OwnedTraversalEntry, TraversalControl, TraversalError, TraversalSummary,
+        OwnedTraversalEntry, ParallelTraversal, TraversalControl, TraversalError, TraversalSummary,
         prefer_parallel_root, walk, walk_parallel_batched,
         walk_parallel_batched_with_literal_prefix, walk_with_literal_prefix,
     },
@@ -40,10 +38,11 @@ pub(crate) const CANDIDATE_SOFT_TARGET_BYTES: usize = 64 * 1024 * 1024;
 const MEMORY_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 const SEARCH_HEAP_BYTES: usize = 1024 * 1024;
 const CAPTURE_MEMORY_BYTES: usize = 1024 * 1024;
-const PAGE_MEMORY_BYTES: usize = MODEL_BYTE_LIMIT;
+const PAGE_MEMORY_BYTES: usize = 48 * 1024;
 const PARALLEL_BATCH_SIZE: usize = 256;
 const CONTENT_SEARCH_BATCH_SIZE: usize = 8;
 const STREAM_SEARCH_BATCH_SIZE: usize = 16;
+const UNSTABLE_SORT_MIN_CANDIDATES: usize = 10_000;
 const GENERIC_OMISSION: &str = "[grep result omitted: exceeds output budget]";
 const CONTENT_OMISSION: &str = "[line text omitted: exceeds output budget]";
 #[cfg(feature = "bench-internals")]
@@ -52,8 +51,8 @@ const BENCH_SOURCE_ENV: &str = "CODEXSHIM_BENCH_GREP_SOURCE";
 const BENCH_PATHNAME_REOPEN_ENV: &str = "CODEXSHIM_BENCH_GREP_PATHNAME_REOPEN";
 #[cfg(feature = "bench-internals")]
 const BENCH_CANDIDATE_POLICY_ENV: &str = "CODEXSHIM_BENCH_GREP_CANDIDATE_POLICY";
-static ACTIVE_ADAPTIVE_GREP_TRAVERSALS: AtomicUsize = AtomicUsize::new(0);
-
+#[cfg(feature = "bench-internals")]
+const BENCH_SORT_ENV: &str = "CODEXSHIM_BENCH_GREP_SORT";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GrepTraversal {
     Adaptive,
@@ -490,6 +489,8 @@ fn execute_inner(
     profiler: &GrepProfiler,
 ) -> Result<ToolOutput, GrepError> {
     let candidate_policy = CandidatePolicy::from_environment()?;
+    let file_work_pool = resources.file_work_pool();
+    let _file_work_request = file_work_pool.begin_request();
     let setup_span = profiler.span(GrepStage::Setup);
     request.validate()?;
     let matcher = Arc::new(build_matcher(request)?);
@@ -517,6 +518,7 @@ fn execute_inner(
         glob.as_ref(),
         cancellation,
         traversal,
+        resources,
         #[cfg(any(test, feature = "bench-internals"))]
         literal_prefix.as_deref(),
         candidate_policy,

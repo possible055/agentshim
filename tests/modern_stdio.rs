@@ -42,15 +42,7 @@ impl Session {
         read_scope: Option<&str>,
         process_calls: Option<usize>,
     ) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_codexshim"));
-        command
-            .arg("serve")
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .env_remove("CODEXSHIM_MCP_COMPATIBILITY")
-            .env_remove("CODEXSHIM_PROCESS_CALLS")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+        let mut command = Self::base_command(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
         if let Some(read_scope) = read_scope {
             command.args(["--read-scope", read_scope]);
         }
@@ -60,6 +52,39 @@ impl Session {
         if let Some(process_calls) = process_calls {
             command.env("CODEXSHIM_PROCESS_CALLS", process_calls.to_string());
         }
+        Self::spawn(command)
+    }
+
+    fn start_for_bash(
+        root: &std::path::Path,
+        detached_calls: usize,
+        bash_override: Option<&std::path::Path>,
+    ) -> Self {
+        let mut command = Self::base_command(root);
+        command.env("CODEXSHIM_DETACHED_CALLS", detached_calls.to_string());
+        if let Some(bash_override) = bash_override {
+            command.env("CODEXSHIM_BASH", bash_override);
+        }
+        Self::spawn(command)
+    }
+
+    fn base_command(root: &std::path::Path) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_codexshim"));
+        command
+            .arg("serve")
+            .current_dir(root)
+            .env_remove("CODEXSHIM_MCP_COMPATIBILITY")
+            .env("CODEXSHIM_ALLOW_PROGRAMS", allowed_programs())
+            .env_remove("CODEXSHIM_PROCESS_CALLS")
+            .env_remove("CODEXSHIM_DETACHED_CALLS")
+            .env_remove("CODEXSHIM_BASH")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        command
+    }
+
+    fn spawn(mut command: Command) -> Self {
         let mut child = command.spawn().expect("start codexshim");
         let stdin = child.stdin.take().expect("child stdin");
         let stdout = BufReader::new(child.stdout.take().expect("child stdout"));
@@ -150,6 +175,103 @@ fn call_tool(session: &mut Session, id: u64, name: &str, arguments: Value) -> Va
     session.receive()
 }
 
+fn response_text(response: &Value) -> &str {
+    response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("tool response text")
+}
+
+#[test]
+fn bash_toolchain_commands_work_over_real_stdio() {
+    if codexshim::bash_report().is_err() {
+        return;
+    }
+    let mut session = Session::start();
+    session.send(&modern_request(1, "server/discover", empty_params()));
+    assert_eq!(session.receive()["id"], 1);
+
+    let response = call_tool(
+        &mut session,
+        2,
+        "bash",
+        json!({
+            "command": "sleep 0.05; printf 'needle\\n' | grep needle | sed 's/needle/toolchain-ok/'; locale >/dev/null"
+        }),
+    );
+
+    assert_eq!(response["result"]["isError"], false);
+    assert!(response_text(&response).contains("toolchain-ok"));
+    assert!(response_text(&response).contains("Exit code: 0"));
+    session.close();
+}
+
+#[test]
+fn detached_roster_saturation_fails_before_blocking_scheduling_over_stdio() {
+    if codexshim::bash_report().is_err() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("fixture");
+    let mut session = Session::start_for_bash(fixture.path(), 1, None);
+    session.send(&modern_request(1, "server/discover", empty_params()));
+    assert_eq!(session.receive()["id"], 1);
+    let first = call_tool(
+        &mut session,
+        2,
+        "bash",
+        json!({
+            "command": "sleep 30",
+            "detach": true,
+            "log_path": "first.log"
+        }),
+    );
+    assert_eq!(first["result"]["isError"], false);
+
+    let started = Instant::now();
+    let second = call_tool(
+        &mut session,
+        3,
+        "bash",
+        json!({
+            "command": "sleep 30",
+            "detach": true,
+            "log_path": "second.log"
+        }),
+    );
+
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(second["result"]["isError"], true);
+    assert_eq!(
+        second["result"]["structuredContent"]["error"]["code"],
+        "resource_busy"
+    );
+    assert!(response_text(&second).contains("first.log"));
+    assert!(response_text(&second).contains("pid "));
+    session.close();
+}
+
+#[test]
+fn missing_bash_is_non_retryable_over_real_stdio() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let missing = fixture.path().join("missing-bash");
+    let mut session = Session::start_for_bash(fixture.path(), 1, Some(&missing));
+    session.send(&modern_request(1, "server/discover", empty_params()));
+    assert_eq!(session.receive()["id"], 1);
+
+    let response = call_tool(&mut session, 2, "bash", json!({ "command": "true" }));
+
+    assert_eq!(response["result"]["isError"], true);
+    assert_eq!(
+        response["result"]["structuredContent"]["error"]["code"],
+        "io"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["error"]["retryable"],
+        false
+    );
+    assert!(response_text(&response).contains("CODEXSHIM_BASH"));
+    session.close();
+}
+
 #[test]
 fn modern_lifecycle_serves_a_tool_call_and_shuts_down_at_eof() {
     let mut session = Session::start();
@@ -173,7 +295,7 @@ fn modern_lifecycle_serves_a_tool_call_and_shuts_down_at_eof() {
             .iter()
             .map(|tool| tool["name"].as_str().expect("tool name"))
             .collect::<Vec<_>>(),
-        ["read", "grep", "glob", "run_process"]
+        ["read", "grep", "glob", "run_program", "bash"]
     );
 
     let mut call = empty_params();
@@ -261,7 +383,7 @@ fn stdin_eof_cancels_in_flight_process_and_exits_server() {
     assert_eq!(session.receive()["id"], 1);
 
     let mut call = empty_params();
-    call.insert("name".to_owned(), json!("run_process"));
+    call.insert("name".to_owned(), json!("run_program"));
     call.insert(
         "arguments".to_owned(),
         json!({
@@ -324,7 +446,7 @@ fn process_overload_is_fail_fast_and_preserves_resource_busy_contract() {
     for id in [2_u64, 3_u64] {
         let pid_file = fixture.path().join(format!("overload-child-{id}.pid"));
         let mut call = empty_params();
-        call.insert("name".to_owned(), json!("run_process"));
+        call.insert("name".to_owned(), json!("run_program"));
         call.insert(
             "arguments".to_owned(),
             json!({
@@ -351,7 +473,7 @@ fn process_overload_is_fail_fast_and_preserves_resource_busy_contract() {
     );
 
     let mut overflow = empty_params();
-    overflow.insert("name".to_owned(), json!("run_process"));
+    overflow.insert("name".to_owned(), json!("run_program"));
     overflow.insert(
         "arguments".to_owned(),
         json!({
@@ -407,7 +529,7 @@ fn default_process_and_read_only_capacity_can_progress_together() {
     for id in 2..2 + CAPACITY {
         let pid_file = fixture.path().join(format!("parallel-child-{id}.pid"));
         let mut call = empty_params();
-        call.insert("name".to_owned(), json!("run_process"));
+        call.insert("name".to_owned(), json!("run_program"));
         call.insert(
             "arguments".to_owned(),
             json!({
@@ -454,7 +576,7 @@ fn default_process_and_read_only_capacity_can_progress_together() {
     assert_eq!(completed_read_ids, read_ids);
 
     let mut overflow = empty_params();
-    overflow.insert("name".to_owned(), json!("run_process"));
+    overflow.insert("name".to_owned(), json!("run_program"));
     overflow.insert(
         "arguments".to_owned(),
         json!({
@@ -553,7 +675,7 @@ fn session_escaped_descendant_preserves_outcome_uncertain_wire_contract() {
     assert_eq!(session.receive()["id"], 1);
 
     let mut call = empty_params();
-    call.insert("name".to_owned(), json!("run_process"));
+    call.insert("name".to_owned(), json!("run_program"));
     call.insert(
         "arguments".to_owned(),
         json!({
@@ -763,7 +885,7 @@ fn unrestricted_scope_reads_searches_and_globs_outside_the_startup_root() {
     let process = call_tool(
         &mut session,
         5,
-        "run_process",
+        "run_program",
         json!({ "program": "cargo", "args": ["--version"], "cwd": base }),
     );
     assert_eq!(process["result"]["isError"], false);
@@ -857,7 +979,7 @@ fn default_compatibility_uses_native_legacy_initialize_lifecycle() {
             .iter()
             .map(|tool| tool["name"].as_str().expect("tool name"))
             .collect::<Vec<_>>(),
-        ["read", "grep", "glob", "run_process"]
+        ["read", "grep", "glob", "run_program", "bash"]
     );
 
     session.send(&json!({
@@ -884,4 +1006,9 @@ fn default_compatibility_uses_native_legacy_initialize_lifecycle() {
         "legacy read success must not emit structured content"
     );
     session.close();
+}
+
+fn allowed_programs() -> String {
+    let executable = std::env::current_exe().expect("integration test executable");
+    format!("cargo,{}", executable.display())
 }

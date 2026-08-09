@@ -1,9 +1,71 @@
+use std::{env, io, sync::OnceLock};
+
 use serde::Serialize;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 pub const MODEL_BYTE_LIMIT: usize = 32_000;
+pub const MIN_OUTPUT_BYTES: usize = 4_096;
+pub const MAX_OUTPUT_BYTES: usize = 262_144;
+pub const OUTPUT_BYTES_ENV: &str = "CODEXSHIM_OUTPUT_BYTES";
 const DIAGNOSTIC_TRUNCATION_MARKER: &str = "\n...[diagnostic truncated]";
+
+/// Codex CLI's default `tool_output_token_limit`. Output larger than this is discarded by the
+/// client, so the byte budget is derived from it rather than from a fixed byte count.
+const TARGET_TOKENS: f64 = 10_000.0;
+const ENGLISH_BYTES_PER_TOKEN: f64 = 5.17;
+const CJK_BYTES_PER_TOKEN: f64 = 2.17;
+
+/// Resolve the configured output ceiling once per process.
+///
+/// # Errors
+///
+/// Returns invalid input when `CODEXSHIM_OUTPUT_BYTES` is not an integer inside the
+/// documented range, so startup fails before any tool call renders output.
+pub fn configured_byte_limit() -> io::Result<usize> {
+    let Some(value) = env::var_os(OUTPUT_BYTES_ENV) else {
+        return Ok(MODEL_BYTE_LIMIT);
+    };
+    value
+        .to_str()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| (MIN_OUTPUT_BYTES..=MAX_OUTPUT_BYTES).contains(value))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{OUTPUT_BYTES_ENV} must be an integer from {MIN_OUTPUT_BYTES} to \
+                     {MAX_OUTPUT_BYTES}"
+                ),
+            )
+        })
+}
+
+#[must_use]
+pub fn effective_byte_limit() -> usize {
+    static LIMIT: OnceLock<usize> = OnceLock::new();
+    *LIMIT.get_or_init(|| configured_byte_limit().unwrap_or(MODEL_BYTE_LIMIT))
+}
+
+fn cjk_ratio<'a>(parts: impl IntoIterator<Item = &'a str>) -> f64 {
+    let mut total = 0_usize;
+    let mut cjk = 0_usize;
+    for part in parts {
+        for character in part.chars() {
+            total += 1;
+            if matches!(character, '\u{4E00}'..='\u{9FFF}') {
+                cjk += 1;
+            }
+        }
+    }
+    if total == 0 {
+        return 0.0;
+    }
+    #[allow(clippy::cast_precision_loss, reason = "ratio only needs f64 precision")]
+    {
+        cjk as f64 / total as f64
+    }
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,7 +105,7 @@ pub(crate) fn tool_result_fits_budget(
     structured: Option<&Value>,
     is_error: bool,
 ) -> bool {
-    tool_result_encoded_len(text, structured, is_error) <= MODEL_BYTE_LIMIT
+    tool_result_encoded_len(text, structured, is_error) <= effective_byte_limit()
 }
 
 pub(crate) fn tool_error_structure(
@@ -62,6 +124,7 @@ pub(crate) fn tool_error_structure(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn tool_error_result_fits_budget(
     code: &'static str,
     retryable: bool,
@@ -72,6 +135,17 @@ pub(crate) fn tool_error_result_fits_budget(
     tool_result_fits_budget(message, Some(&structured), true)
 }
 
+pub(crate) fn tool_error_result_fits_content_budget(
+    code: &'static str,
+    retryable: bool,
+    message: &str,
+    details: Option<&Value>,
+) -> bool {
+    let structured = tool_error_structure(code, retryable, message, details);
+    tool_result_encoded_len(message, Some(&structured), true)
+        <= OutputLimits::for_content(message).bytes
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OutputLimits {
     pub bytes: usize,
@@ -80,7 +154,33 @@ pub struct OutputLimits {
 impl Default for OutputLimits {
     fn default() -> Self {
         Self {
-            bytes: MODEL_BYTE_LIMIT,
+            bytes: effective_byte_limit(),
+        }
+    }
+}
+
+impl OutputLimits {
+    /// Narrow the byte budget for content the downstream client would tokenize densely.
+    /// CJK text costs roughly 2.17 bytes per token against 5.17 for English, so a byte
+    /// budget that is fine for English produces output the client silently truncates.
+    #[must_use]
+    pub fn for_content(text: &str) -> Self {
+        Self::for_content_parts(std::iter::once(text))
+    }
+
+    #[must_use]
+    pub fn for_content_parts<'a>(parts: impl IntoIterator<Item = &'a str>) -> Self {
+        let ratio = cjk_ratio(parts);
+        let bytes_per_token =
+            ENGLISH_BYTES_PER_TOKEN - ratio * (ENGLISH_BYTES_PER_TOKEN - CJK_BYTES_PER_TOKEN);
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the product is positive and far below usize::MAX"
+        )]
+        let aware = (TARGET_TOKENS * bytes_per_token) as usize;
+        Self {
+            bytes: effective_byte_limit().min(aware),
         }
     }
 }
@@ -283,6 +383,53 @@ mod tests {
     #[test]
     fn short_diagnostics_are_unchanged() {
         assert_eq!(bounded_diagnostic("short diagnostic"), "short diagnostic");
+    }
+
+    #[test]
+    fn cjk_ratio_is_script_agnostic_between_simplified_and_traditional() {
+        assert!((super::cjk_ratio(["abcdef"]) - 0.0).abs() < f64::EPSILON);
+        assert!((super::cjk_ratio(["设备网络转换"]) - 1.0).abs() < f64::EPSILON);
+        assert!((super::cjk_ratio(["設備網路轉換"]) - 1.0).abs() < f64::EPSILON);
+        assert!((super::cjk_ratio(["abcd", "設備"]) - 1.0 / 3.0).abs() < 1e-9);
+        assert!((super::cjk_ratio(std::iter::empty()) - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn content_budget_shrinks_with_cjk_density_and_never_exceeds_the_maximum() {
+        let maximum = super::effective_byte_limit();
+        let english = OutputLimits::for_content("plain ascii output").bytes;
+        let mixed = OutputLimits::for_content("plain ascii 設備網路轉換測試").bytes;
+        let chinese = OutputLimits::for_content("設備網路轉換").bytes;
+
+        assert_eq!(english, maximum);
+        assert!(chinese < mixed, "{chinese} must be below {mixed}");
+        assert!(mixed <= english);
+        assert!(chinese <= maximum);
+        assert_eq!(
+            OutputLimits::for_content("設備網路轉換").bytes,
+            OutputLimits::for_content_parts(["設備", "網路", "轉換"]).bytes
+        );
+    }
+
+    #[test]
+    fn configured_byte_limit_rejects_values_outside_the_documented_range() {
+        // SAFETY: the guard restores the previous value before any other test observes it.
+        unsafe {
+            for value in ["0", "4095", "262145", "many", "-1"] {
+                std::env::set_var(super::OUTPUT_BYTES_ENV, value);
+                assert!(
+                    super::configured_byte_limit().is_err(),
+                    "{value} must be rejected"
+                );
+            }
+            std::env::set_var(super::OUTPUT_BYTES_ENV, "48000");
+            assert_eq!(super::configured_byte_limit().ok(), Some(48_000));
+            std::env::remove_var(super::OUTPUT_BYTES_ENV);
+        }
+        assert_eq!(
+            super::configured_byte_limit().ok(),
+            Some(super::MODEL_BYTE_LIMIT)
+        );
     }
 
     #[test]

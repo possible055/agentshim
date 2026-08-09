@@ -1,10 +1,13 @@
 {
-  "resultType": "complete",
-  "ttlMs": 300000,
   "cacheScope": "private",
+  "resultType": "complete",
   "tools": [
     {
-      "name": "read",
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "Read a local repository or Codex extension source file as numbered text lines. Absolute paths may address configured Codex skill and plugin directories.",
       "inputSchema": {
         "additionalProperties": false,
@@ -36,14 +39,14 @@
         ],
         "type": "object"
       },
-      "annotations": {
-        "readOnlyHint": true,
-        "destructiveHint": false,
-        "openWorldHint": false
-      }
+      "name": "read"
     },
     {
-      "name": "grep",
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "Search local repository or Codex extension contents using Rust regex or fixed strings. Results are deterministic and expose structured numeric pagination.",
       "inputSchema": {
         "additionalProperties": false,
@@ -105,14 +108,14 @@
         ],
         "type": "object"
       },
-      "annotations": {
-        "readOnlyHint": true,
-        "destructiveHint": false,
-        "openWorldHint": false
-      }
+      "name": "grep"
     },
     {
-      "name": "glob",
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "Find local repository or Codex extension file paths using a glob pattern. Results use native absolute paths and expose structured numeric pagination.",
       "inputSchema": {
         "additionalProperties": false,
@@ -148,15 +151,16 @@
         ],
         "type": "object"
       },
-      "annotations": {
-        "readOnlyHint": true,
-        "destructiveHint": false,
-        "openWorldHint": false
-      }
+      "name": "glob"
     },
     {
-      "name": "run_process",
-      "description": "Run one local program with structured arguments without accepting a PowerShell or shell command string. This is an open-world, destructive operation and may require approval.",
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Run one permitted local program directly with literal arguments and no shell. There is no shell, so pipes, redirection, globbing, and variable expansion do not happen. Arguments are passed literally — do not add quoting. Prefer this when arguments contain characters a shell would mangle, such as Windows paths, regexes, and JSON. If the program is not permitted, this returns a not_permitted error — use bash instead; do not work around it. This is an open-world, destructive operation and may require approval.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -195,7 +199,7 @@
           },
           "timeout_ms": {
             "default": 120000,
-            "maximum": 300000,
+            "maximum": 600000,
             "minimum": 1,
             "type": "integer"
           },
@@ -213,12 +217,51 @@
         ],
         "type": "object"
       },
+      "name": "run_program"
+    },
+    {
       "annotations": {
-        "readOnlyHint": false,
         "destructiveHint": true,
         "idempotentHint": false,
-        "openWorldHint": true
-      }
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Run a POSIX bash command line and return merged stdout and stderr with the exit code. Write POSIX bash, never PowerShell, on every platform. The command runs non-interactively with no TTY and stdin closed, so pass flags such as -y or --no-edit instead of expecting a prompt. A non-zero exit code is a normal result, not a tool error. Both output streams are merged into one pipe, so lines appear in pipe-write order and cannot be attributed to a stream; a program that buffers stdout but not stderr can still interleave them differently from what a terminal would show. Output above the byte budget is truncated in the middle: redirect to a file and page it with read when you need all of it. The default timeout is 120000 ms and the maximum is 600000 ms; for work that needs longer, set detach with a log_path and read that file instead of waiting. Do not issue state-changing commands against the same working tree in parallel calls. This is an open-world, destructive operation and may require approval.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "description": "POSIX bash command line, run with --noprofile --norc -c.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "cwd": {
+            "description": "Optional platform-native absolute or repository-root-relative working directory; defaults to the repository root.",
+            "type": "string"
+          },
+          "detach": {
+            "default": false,
+            "description": "Run the command past the end of this call, bound to the server's lifetime. Requires log_path and forbids timeout_ms; returns the pid and log path instead of output.",
+            "type": "boolean"
+          },
+          "log_path": {
+            "description": "Repository-relative or root-absolute file for the detached command's merged output, truncated at start. Its parent directory must already exist. Required when detach is true and rejected otherwise.",
+            "type": "string"
+          },
+          "timeout_ms": {
+            "default": 120000,
+            "maximum": 600000,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      },
+      "name": "bash"
     }
-  ]
+  ],
+  "ttlMs": 300000
 }

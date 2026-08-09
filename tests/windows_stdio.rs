@@ -19,6 +19,7 @@ impl Session {
             .arg("serve")
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .env_remove("CODEXSHIM_MCP_COMPATIBILITY")
+            .env("CODEXSHIM_ALLOW_PROGRAMS", allowed_programs())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -82,7 +83,7 @@ fn cargo_multicall_proxy_keeps_cargo_identity() {
         2,
         "tools/call",
         json!({
-            "name": "run_process",
+            "name": "run_program",
             "arguments": {
                 "program": "cargo",
                 "args": ["--version"],
@@ -111,4 +112,9 @@ fn cargo_multicall_proxy_keeps_cargo_identity() {
     assert!(output.contains("Launcher: native"));
     assert!(output.contains("Exit code: 0"));
     session.close();
+}
+
+fn allowed_programs() -> String {
+    let executable = std::env::current_exe().expect("integration test executable");
+    format!("cargo,{}", executable.display())
 }

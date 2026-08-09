@@ -109,14 +109,38 @@ impl RepositoryRoot {
             key.push(".");
         }
         let absolute = self.path.join(&key);
-        Ok(ResolvedPath {
-            sort_key: PathSortKey::new(&key),
-            slash_path: slash_path(&key),
-            capability_key: key.clone(),
-            key,
-            absolute,
-            backend: PathBackend::Repository,
-        })
+        Ok(ResolvedPath::repository(absolute, key))
+    }
+
+    /// Create or truncate a repository file through the capability.
+    ///
+    /// [`Self::resolve`] admits a name lexically, which a symlink or junction stored inside the
+    /// repository passes even when it points outside; the write is what has to be confined, and
+    /// the retained directory handle is what confines it. The parent directory must already
+    /// exist, so a mistyped path fails instead of scattering files through the repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns the capability-relative open error, including when the path leaves the root
+    /// through a link or names a directory that does not exist.
+    pub fn create_truncated(&self, path: &ResolvedPath) -> io::Result<std::fs::File> {
+        let key = path.capability_key();
+        if let Some(parent) = key
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            && !self
+                .capability
+                .metadata(parent)
+                .is_ok_and(|metadata| metadata.is_dir())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("parent directory does not exist: {}", parent.display()),
+            ));
+        }
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        self.capability.open_with(key, &options).map(File::into_std)
     }
 
     /// Verify that the retained root handle remains accessible.
@@ -252,6 +276,56 @@ impl FileAccess {
             self.resolve_external_entry(operation_root, absolute)
         } else {
             self.resolve(absolute)
+        }
+    }
+
+    pub(crate) fn resolve_walked_entry(
+        &self,
+        operation_root: &ResolvedPath,
+        key: &Path,
+        absolute: &Path,
+    ) -> Result<ResolvedPath, PathError> {
+        reject_nul(key)?;
+        if key.as_os_str().is_empty()
+            || key
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return self.resolve_traversal_entry(operation_root, absolute);
+        }
+
+        let expected = if operation_root.is_external() {
+            operation_root.absolute().join(key)
+        } else {
+            self.root.path().join(key)
+        };
+        if expected.as_os_str() != absolute.as_os_str() {
+            return self.resolve_traversal_entry(operation_root, absolute);
+        }
+
+        match operation_root.backend {
+            PathBackend::Repository => {
+                Ok(ResolvedPath::repository(absolute.to_path_buf(), key.to_path_buf()))
+            }
+            PathBackend::Codex(index) => {
+                let operation_key = operation_root.capability_key();
+                let capability_key =
+                    if operation_key.as_os_str().is_empty() || operation_key == Path::new(".") {
+                        key.to_path_buf()
+                    } else {
+                        operation_key.join(key)
+                    };
+                Ok(ResolvedPath::codex(
+                    absolute.to_path_buf(),
+                    key.to_path_buf(),
+                    capability_key,
+                    index,
+                ))
+            }
+            PathBackend::Ambient => Ok(ResolvedPath::ambient(
+                absolute.to_path_buf(),
+                key.to_path_buf(),
+            )),
         }
     }
 

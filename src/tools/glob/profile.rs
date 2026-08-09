@@ -22,6 +22,8 @@ pub struct GlobStageTimings {
     pub merge_work_worker_ns: u64,
     pub batches: usize,
     pub matched_entries: usize,
+    pub retained_entries: usize,
+    pub retained_memory_bytes: usize,
 }
 
 #[cfg(feature = "bench-internals")]
@@ -43,6 +45,8 @@ struct GlobProfileCounters {
     merge_work_worker_ns: std::sync::atomic::AtomicU64,
     batches: std::sync::atomic::AtomicUsize,
     matched_entries: std::sync::atomic::AtomicUsize,
+    retained_entries: std::sync::atomic::AtomicUsize,
+    retained_memory_bytes: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(feature = "bench-internals")]
@@ -82,6 +86,18 @@ impl GlobProfiler {
             .fetch_add(matched_entries, std::sync::atomic::Ordering::Relaxed);
     }
 
+    fn record_retained(&self, retained_entries: usize, retained_memory_bytes: usize) {
+        let Self::Enabled(counters) = self else {
+            return;
+        };
+        counters
+            .retained_entries
+            .store(retained_entries, std::sync::atomic::Ordering::Relaxed);
+        counters
+            .retained_memory_bytes
+            .store(retained_memory_bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+
     fn snapshot(&self) -> GlobStageTimings {
         let Self::Enabled(counters) = self else {
             unreachable!("disabled profiler has no snapshot");
@@ -102,6 +118,12 @@ impl GlobProfiler {
                 .load(std::sync::atomic::Ordering::Relaxed),
             matched_entries: counters
                 .matched_entries
+                .load(std::sync::atomic::Ordering::Relaxed),
+            retained_entries: counters
+                .retained_entries
+                .load(std::sync::atomic::Ordering::Relaxed),
+            retained_memory_bytes: counters
+                .retained_memory_bytes
                 .load(std::sync::atomic::Ordering::Relaxed),
         }
     }
@@ -152,6 +174,10 @@ impl GlobProfiler {
     }
 
     fn record_batch(&self, _matched_entries: usize) {
+        let _ = self;
+    }
+
+    fn record_retained(&self, _retained_entries: usize, _retained_memory_bytes: usize) {
         let _ = self;
     }
 }

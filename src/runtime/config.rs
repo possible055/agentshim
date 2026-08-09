@@ -20,6 +20,8 @@ pub struct RuntimeConfig {
     pub scheduler_threads: usize,
     pub blocking_threads: usize,
     pub process_calls: usize,
+    pub detached_calls: usize,
+    pub output_bytes: usize,
 }
 
 impl RuntimeConfig {
@@ -46,11 +48,16 @@ impl RuntimeConfig {
                 })?,
         };
         let process_calls = parse_process_calls(env::var_os(PROCESS_CALLS_ENV).as_deref())?;
+        let detached_calls = crate::tools::bash::detached::parse_detached_calls(
+            env::var_os(crate::tools::bash::detached::DETACHED_CALLS_ENV).as_deref(),
+        )?;
         Ok(Self {
             worker_lanes,
             scheduler_threads: default_scheduler_threads(available),
-            blocking_threads: blocking_threads(process_calls),
+            blocking_threads: blocking_threads(process_calls, detached_calls),
             process_calls,
+            detached_calls,
+            output_bytes: crate::output::configured_byte_limit()?,
         })
     }
 
@@ -59,8 +66,13 @@ impl RuntimeConfig {
         Self {
             worker_lanes: worker_lanes.clamp(1, MAX_SEARCH_LANES),
             scheduler_threads: 1,
-            blocking_threads: blocking_threads(DEFAULT_PROCESS_CALLS),
+            blocking_threads: blocking_threads(
+                DEFAULT_PROCESS_CALLS,
+                crate::tools::bash::detached::DEFAULT_DETACHED_CALLS,
+            ),
             process_calls: DEFAULT_PROCESS_CALLS,
+            detached_calls: crate::tools::bash::detached::DEFAULT_DETACHED_CALLS,
+            output_bytes: crate::output::MODEL_BYTE_LIMIT,
         }
     }
 }
@@ -84,8 +96,8 @@ fn parse_process_calls(value: Option<&OsStr>) -> io::Result<usize> {
     }
 }
 
-fn blocking_threads(process_calls: usize) -> usize {
-    process_calls + MAX_READ_ONLY_CALLS + TRANSPORT_BLOCKING_THREADS
+fn blocking_threads(process_calls: usize, detached_calls: usize) -> usize {
+    process_calls + MAX_READ_ONLY_CALLS + detached_calls + TRANSPORT_BLOCKING_THREADS
 }
 
 #[cfg(windows)]

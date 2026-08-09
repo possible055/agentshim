@@ -3,10 +3,7 @@ use std::{
     collections::BinaryHeap,
     io,
     path::Path,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering as AtomicOrdering},
-    },
+    sync::{Arc, Mutex},
 };
 
 use globset::GlobBuilder;
@@ -16,11 +13,12 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     output::{OutputFormatter, OutputLimits},
     path::{FileAccess, PathError, PathSortKey, ResolvedPath},
+    runtime::{FileWorkCredit, FileWorkPool, RuntimeResources},
     sorting,
     tools::ToolOutput,
     traversal::{
-        TraversalControl, TraversalError, TraversalSummary, prefer_parallel_root, walk,
-        walk_parallel_batched,
+        ParallelTraversal, TraversalControl, TraversalError, TraversalSummary, prefer_parallel_root,
+        walk, walk_parallel_batched,
         walk_parallel_batched_with_literal_prefix, walk_with_literal_prefix,
     },
 };
@@ -32,7 +30,6 @@ const RETAINED_MEMORY_BYTES: usize = 32 * 1024 * 1024;
 const MEMORY_SAFETY_BYTES: usize = 8 * 1024 * 1024;
 const PATH_OMISSION: &str = "[glob path omitted: exceeds output budget]";
 const PARALLEL_BATCH_SIZE: usize = 256;
-static ACTIVE_ADAPTIVE_GLOBS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy)]
 pub enum GlobTraversal {
@@ -43,11 +40,6 @@ pub enum GlobTraversal {
     SerialLiteralPrefix,
     #[cfg(any(test, feature = "bench-internals"))]
     ParallelBatchedLiteralPrefix,
-}
-
-#[must_use]
-pub(crate) fn memory_charge() -> usize {
-    RETAINED_MEMORY_BYTES.saturating_add(MEMORY_SAFETY_BYTES)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -89,6 +81,14 @@ impl GlobRequest {
     }
 }
 
+#[must_use]
+pub(crate) fn memory_charge(request: &GlobRequest) -> usize {
+    let offset = request.offset.unwrap_or(0);
+    let limit = request.limit.unwrap_or(DEFAULT_LIMIT);
+    let retain = offset.saturating_add(limit).min(MAX_MATCHES);
+    MEMORY_SAFETY_BYTES.saturating_add(retain.saturating_mul(std::mem::size_of::<GlobMatch>()))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum GlobError {
     #[error("invalid glob request: {0}")]
@@ -120,30 +120,42 @@ pub fn execute(
     request: &GlobRequest,
     cancellation: &CancellationToken,
 ) -> Result<String, GlobError> {
-    execute_output(access, request, cancellation).map(|result| result.text)
+    execute_inner(
+        access,
+        request,
+        benchmark_resources(),
+        cancellation,
+        GlobTraversal::Adaptive,
+        &GlobProfiler::disabled(),
+    )
+    .map(|result| result.text)
 }
 
 pub(crate) fn execute_output(
     access: &Arc<FileAccess>,
     request: &GlobRequest,
+    resources: &RuntimeResources,
     cancellation: &CancellationToken,
 ) -> Result<ToolOutput, GlobError> {
-    execute_inner(access, request, cancellation)
+    execute_inner(
+        access,
+        request,
+        resources,
+        cancellation,
+        GlobTraversal::Adaptive,
+        &GlobProfiler::disabled(),
+    )
 }
 
 fn execute_inner(
     access: &Arc<FileAccess>,
     request: &GlobRequest,
+    resources: &RuntimeResources,
     cancellation: &CancellationToken,
+    traversal: GlobTraversal,
+    profiler: &GlobProfiler,
 ) -> Result<ToolOutput, GlobError> {
-    let profiler = GlobProfiler::disabled();
-    execute_inner_with_traversal(
-        access,
-        request,
-        cancellation,
-        GlobTraversal::Adaptive,
-        &profiler,
-    )
+    execute_inner_with_traversal(access, request, resources, cancellation, traversal, profiler)
 }
 
 #[cfg(any(test, feature = "bench-internals"))]
@@ -162,6 +174,7 @@ pub fn execute_with_traversal(
     execute_inner_with_traversal(
         access,
         request,
+        benchmark_resources(),
         cancellation,
         traversal,
         &GlobProfiler::disabled(),
@@ -185,7 +198,14 @@ pub fn execute_profiled_with_traversal(
     let profiler = GlobProfiler::enabled();
     let total_span = profiler.span(GlobStage::Total);
     let result =
-        execute_inner_with_traversal(access, request, cancellation, traversal, &profiler);
+        execute_inner_with_traversal(
+            access,
+            request,
+            benchmark_resources(),
+            cancellation,
+            traversal,
+            &profiler,
+        );
     drop(total_span);
     let output = result?;
     Ok(ProfiledGlob {
@@ -197,10 +217,13 @@ pub fn execute_profiled_with_traversal(
 fn execute_inner_with_traversal(
     access: &Arc<FileAccess>,
     request: &GlobRequest,
+    resources: &RuntimeResources,
     cancellation: &CancellationToken,
     traversal: GlobTraversal,
     profiler: &GlobProfiler,
 ) -> Result<ToolOutput, GlobError> {
+    let file_work_pool = resources.file_work_pool();
+    let _file_work_request = file_work_pool.begin_request();
     let setup_span = profiler.span(GlobStage::Setup);
     request.validate()?;
     let matcher = GlobBuilder::new(&request.pattern)
@@ -213,20 +236,9 @@ fn execute_inner_with_traversal(
     let literal_prefix = crate::traversal::literal_path_prefix(&request.pattern);
     let base_input = request.path.as_deref().unwrap_or(".");
     let base = access.resolve(Path::new(base_input))?;
-    let mut activity = None;
-    let traversal = match traversal {
-        GlobTraversal::Adaptive => {
-            let guard = ActiveAdaptiveGlob::enter();
-            let selected = if guard.was_idle && prefer_parallel_root(access, &base) {
-                GlobTraversal::ParallelBatched
-            } else {
-                GlobTraversal::Serial
-            };
-            activity = Some(guard);
-            selected
-        }
-        selected => selected,
-    };
+    let selection = select_glob_traversal(access, &base, traversal, &file_work_pool);
+    let traversal = selection.traversal;
+    let traversal_threads = selection.threads;
     let offset = request.offset.unwrap_or(0);
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT);
     let retain = offset.saturating_add(limit).min(MAX_MATCHES);
@@ -238,11 +250,13 @@ fn execute_inner_with_traversal(
     let regular_plan = GlobCollectPlan {
         include_ignored: request.include_ignored.unwrap_or(false),
         literal_prefix: None,
+        traversal_threads,
     };
     #[cfg(any(test, feature = "bench-internals"))]
     let prefix_plan = GlobCollectPlan {
         include_ignored: regular_plan.include_ignored,
         literal_prefix: literal_prefix.as_deref(),
+        traversal_threads,
     };
     drop(setup_span);
     let traversal_span = profiler.span(GlobStage::TraversalWall);
@@ -285,10 +299,15 @@ fn execute_inner_with_traversal(
             prefix_plan,
         )?,
     };
+    drop(selection.credits);
     drop(traversal_span);
     if let Some(error) = collection.terminal_error {
         return Err(error);
     }
+    profiler.record_retained(
+        collection.store.len(),
+        collection.store.retained_memory_bytes(),
+    );
     let skipped = summary.io_errors + summary.escaped_entries + summary.non_unicode_entries;
     if skipped > 0 {
         tracing::warn!(target: "codexshim", event = "traversal_skipped", phase = "execution", outcome = "degraded_success", counters = %format!("io_errors={},escaped_entries={},non_unicode_entries={}", summary.io_errors, summary.escaped_entries, summary.non_unicode_entries));
@@ -299,25 +318,49 @@ fn execute_inner_with_traversal(
     let render_span = profiler.span(GlobStage::Render);
     let result = render(request, &retained, collection.total, summary, cancellation);
     drop(render_span);
-    drop(activity);
     result
 }
 
-struct ActiveAdaptiveGlob {
-    was_idle: bool,
+struct GlobTraversalSelection {
+    traversal: GlobTraversal,
+    credits: Vec<FileWorkCredit>,
+    threads: usize,
 }
 
-impl ActiveAdaptiveGlob {
-    fn enter() -> Self {
-        Self {
-            was_idle: ACTIVE_ADAPTIVE_GLOBS.fetch_add(1, AtomicOrdering::AcqRel) == 0,
+fn select_glob_traversal(
+    access: &FileAccess,
+    base: &ResolvedPath,
+    requested: GlobTraversal,
+    pool: &FileWorkPool,
+) -> GlobTraversalSelection {
+    let wants_parallel = match requested {
+        GlobTraversal::Adaptive => prefer_parallel_root(access, base),
+        GlobTraversal::ParallelBatched => true,
+        #[cfg(any(test, feature = "bench-internals"))]
+        GlobTraversal::ParallelBatchedLiteralPrefix => true,
+        GlobTraversal::Serial => false,
+        #[cfg(any(test, feature = "bench-internals"))]
+        GlobTraversal::SerialLiteralPrefix => false,
+    };
+    let credits = if wants_parallel {
+        pool.try_credits(pool.extra_capacity())
+    } else {
+        Vec::new()
+    };
+    let traversal = match requested {
+        GlobTraversal::Adaptive if credits.is_empty() => GlobTraversal::Serial,
+        GlobTraversal::Adaptive => GlobTraversal::ParallelBatched,
+        GlobTraversal::ParallelBatched if credits.is_empty() => GlobTraversal::Serial,
+        #[cfg(any(test, feature = "bench-internals"))]
+        GlobTraversal::ParallelBatchedLiteralPrefix if credits.is_empty() => {
+            GlobTraversal::SerialLiteralPrefix
         }
-    }
-}
-
-impl Drop for ActiveAdaptiveGlob {
-    fn drop(&mut self) {
-        ACTIVE_ADAPTIVE_GLOBS.fetch_sub(1, AtomicOrdering::AcqRel);
+        selected => selected,
+    };
+    GlobTraversalSelection {
+        traversal,
+        threads: credits.len().saturating_add(1),
+        credits,
     }
 }
 
@@ -331,6 +374,7 @@ struct GlobCollection {
 struct GlobCollectPlan<'a> {
     include_ignored: bool,
     literal_prefix: Option<&'a Path>,
+    traversal_threads: usize,
 }
 
 fn collect_serial(
@@ -349,7 +393,11 @@ fn collect_serial(
                 collection.terminal_error = Some(error);
                 return TraversalControl::Stop;
             }
-            let path = match access.resolve_traversal_entry(base, entry.absolute) {
+            let sort_key = PathSortKey::new(entry.key);
+            if !collection.store.might_admit(&sort_key) {
+                return TraversalControl::Continue;
+            }
+            let path = match access.resolve_walked_entry(base, entry.key, entry.absolute) {
                 Ok(path) => path,
                 Err(error) => {
                     collection.terminal_error = Some(error.into());
@@ -394,12 +442,26 @@ fn collect_parallel(
 ) -> Result<(GlobCollection, TraversalSummary), GlobError> {
     let collection = Mutex::new(collection);
     let visit = |batch: &[crate::traversal::OwnedTraversalEntry]| {
+            let threshold = {
+                let wait_span = profiler.span(GlobStage::MergeWaitWorker);
+                let collection = collection
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                drop(wait_span);
+                collection.store.threshold()
+            };
             let mut found = Vec::new();
+            let mut matched_entries = 0_usize;
             for entry in batch {
                 if !matcher.is_match(&entry.key) {
                     continue;
                 }
-                match access.resolve_traversal_entry(base, &entry.absolute) {
+                matched_entries = matched_entries.saturating_add(1);
+                let sort_key = PathSortKey::new(&entry.key);
+                if !threshold.might_admit(&sort_key) {
+                    continue;
+                }
+                match access.resolve_walked_entry(base, &entry.key, &entry.absolute) {
                     Ok(path) => found.push(path),
                     Err(error) => {
                         let wait_span = profiler.span(GlobStage::MergeWaitWorker);
@@ -414,7 +476,7 @@ fn collect_parallel(
                     }
                 }
             }
-            profiler.record_batch(found.len());
+            profiler.record_batch(matched_entries);
             let wait_span = profiler.span(GlobStage::MergeWaitWorker);
             let mut collection = collection
                 .lock()
@@ -424,11 +486,13 @@ fn collect_parallel(
             if collection.terminal_error.is_some() {
                 return TraversalControl::Stop;
             }
-            for path in found {
+            for _ in 0..matched_entries {
                 if let Err(error) = record_match(&mut collection.total) {
                     collection.terminal_error = Some(error);
                     return TraversalControl::Stop;
                 }
+            }
+            for path in found {
                 if let Err(error) = collection.store.admit(&path) {
                     collection.terminal_error = Some(error);
                     return TraversalControl::Stop;
@@ -443,7 +507,10 @@ fn collect_parallel(
             base,
             plan.include_ignored,
             cancellation,
-            PARALLEL_BATCH_SIZE,
+            ParallelTraversal {
+                batch_size: PARALLEL_BATCH_SIZE,
+                threads: plan.traversal_threads,
+            },
             literal_prefix,
             visit,
         )?
@@ -453,7 +520,10 @@ fn collect_parallel(
             base,
             plan.include_ignored,
             cancellation,
-            PARALLEL_BATCH_SIZE,
+            ParallelTraversal {
+                batch_size: PARALLEL_BATCH_SIZE,
+                threads: plan.traversal_threads,
+            },
             visit,
         )?
     };
@@ -461,6 +531,16 @@ fn collect_parallel(
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     Ok((collection, summary))
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+fn benchmark_resources() -> &'static RuntimeResources {
+    static RESOURCES: std::sync::OnceLock<RuntimeResources> = std::sync::OnceLock::new();
+    RESOURCES.get_or_init(|| {
+        RuntimeResources::new(crate::runtime::RuntimeConfig::for_tests(
+            std::thread::available_parallelism().map_or(1, usize::from),
+        ))
+    })
 }
 
 fn record_match(total: &mut usize) -> Result<(), GlobError> {

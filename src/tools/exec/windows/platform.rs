@@ -1,13 +1,37 @@
-type PreparedStdio = (Pipe, Pipe, Pipe, AttributeList, STARTUPINFOEXW);
+struct PreparedStdio {
+    stdin: Pipe,
+    outputs: Vec<Pipe>,
+    attributes: AttributeList,
+    startup: STARTUPINFOEXW,
+}
 
-fn prepare_stdio() -> io::Result<PreparedStdio> {
+fn prepare_stdio(streams: Streams) -> io::Result<PreparedStdio> {
     let stdin = Pipe::stdin()?;
-    let stdout = Pipe::stdout()?;
-    let stderr = Pipe::stdout()?;
-    let inherited = [stdin.child.raw(), stdout.child.raw(), stderr.child.raw()];
+    let outputs = (0..streams.count())
+        .map(|_| Pipe::stdout())
+        .collect::<io::Result<Vec<_>>>()?;
+    // A merged topology points both child output handles at the same pipe, so the parent sees
+    // one interleaved stream in pipe-write order.
+    let error_handle = outputs
+        .last()
+        .expect("at least one output pipe is created")
+        .child
+        .raw();
+    let standard = [stdin.child.raw(), outputs[0].child.raw(), error_handle];
+    let mut inherited = Vec::with_capacity(standard.len());
+    for handle in standard {
+        if !inherited.contains(&handle) {
+            inherited.push(handle);
+        }
+    }
     let attributes = AttributeList::new(&inherited)?;
-    let startup = startup_info(inherited, &attributes)?;
-    Ok((stdin, stdout, stderr, attributes, startup))
+    let startup = startup_info(standard, &attributes)?;
+    Ok(PreparedStdio {
+        stdin,
+        outputs,
+        attributes,
+        startup,
+    })
 }
 
 fn startup_info(inherited: [HANDLE; 3], attributes: &AttributeList) -> io::Result<STARTUPINFOEXW> {
@@ -22,27 +46,28 @@ fn startup_info(inherited: [HANDLE; 3], attributes: &AttributeList) -> io::Resul
     Ok(startup)
 }
 
-type ThreadResults = (io::Result<()>, Capture, Capture);
+type ThreadResults = (io::Result<()>, Vec<Capture>);
 
 fn settle_threads(
     completion: &ThreadCompletion,
     stdin: thread::JoinHandle<io::Result<()>>,
-    stdout: thread::JoinHandle<io::Result<Capture>>,
-    stderr: thread::JoinHandle<io::Result<Capture>>,
+    drains: Vec<thread::JoinHandle<io::Result<Capture>>>,
 ) -> Result<ThreadResults, ProcessError> {
-    if !completion.wait_for(3, CLEANUP_DEADLINE) {
+    if !completion.wait_for(drains.len() + 1, CLEANUP_DEADLINE) {
         return Err(ProcessError::OutcomeUncertain);
     }
     let stdin = stdin
         .join()
         .map_err(|_| io::Error::other("stdin writer panicked"))?;
-    let stdout = stdout
-        .join()
-        .map_err(|_| io::Error::other("stdout drainer panicked"))??;
-    let stderr = stderr
-        .join()
-        .map_err(|_| io::Error::other("stderr drainer panicked"))??;
-    Ok((stdin, stdout, stderr))
+    let mut captures = Vec::with_capacity(drains.len());
+    for handle in drains {
+        captures.push(
+            handle
+                .join()
+                .map_err(|_| io::Error::other("output drainer panicked"))??,
+        );
+    }
+    Ok((stdin, captures))
 }
 
 struct LaunchEncoding {
@@ -51,13 +76,13 @@ struct LaunchEncoding {
 }
 
 impl LaunchEncoding {
-    fn new(resolved: &ResolvedProgram, request: &ProcessRequest) -> Result<Self, ProcessError> {
+    fn new(resolved: &ResolvedProgram, args: &[String]) -> Result<Self, ProcessError> {
         match resolved.launcher {
             Launcher::Native => {
                 let application = nul_terminated(resolved.executable.as_os_str());
                 let mut command_line = Vec::new();
                 append_native_argv0(&mut command_line, resolved.absolute.as_os_str());
-                for argument in &request.args {
+                for argument in args {
                     command_line.push(u16::from(b' '));
                     append_native_argument(&mut command_line, OsStr::new(argument));
                 }
@@ -75,7 +100,7 @@ impl LaunchEncoding {
                     .collect::<Vec<_>>();
                 command_line.extend(script);
                 command_line.push(u16::from(b'"'));
-                for argument in &request.args {
+                for argument in args {
                     command_line.push(u16::from(b' '));
                     append_batch_argument(&mut command_line, argument)?;
                 }
@@ -244,15 +269,15 @@ fn strip_verbatim_prefix(path: &[u16]) -> Option<Vec<u16>> {
     None
 }
 
-fn environment_block(request: &ProcessRequest) -> Vec<u16> {
+fn environment_block(plan: &EnvironmentPlan) -> Vec<u16> {
     let mut variables = std::env::vars_os().collect::<Vec<_>>();
-    for (key, value) in ENVIRONMENT_DEFAULTS {
+    for (key, value) in &plan.injected {
         set_environment(&mut variables, OsStr::new(key), OsStr::new(value));
     }
-    for key in &request.unset_env {
+    for key in &plan.removed {
         variables.retain(|(existing, _)| !environment_key_equal(existing, OsStr::new(key)));
     }
-    for (key, value) in &request.env {
+    for (key, value) in &plan.overrides {
         set_environment(&mut variables, OsStr::new(key), OsStr::new(value));
     }
     variables.sort_by(|left, right| environment_key_order(&left.0, &right.0));
@@ -556,6 +581,14 @@ impl Lifecycle {
         debug_assert_eq!(self.state, LifecycleState::Running);
         self.state = LifecycleState::Complete;
     }
+
+    /// Hand the job over to a longer-lived owner. The lifecycle stops managing the tree, so
+    /// dropping it no longer terminates the processes inside the job.
+    fn release_job(&mut self) -> OwnedHandle {
+        let job = self.job.take().expect("job installed before release");
+        self.state = LifecycleState::Complete;
+        job
+    }
 }
 
 impl Drop for Lifecycle {
@@ -576,6 +609,101 @@ impl Drop for Lifecycle {
             }
         }
     }
+}
+
+/// Spawn a process tree whose lifetime outlives this call, writing both output streams
+/// directly to `log`. The job handle keeps `KILL_ON_JOB_CLOSE`, so the tree dies with the
+/// server instance that owns the returned value.
+pub(crate) fn spawn_detached(
+    plan: &ExecPlan<'_>,
+    environment: &EnvironmentPlan,
+    log: File,
+) -> Result<DetachedTree, ProcessError> {
+    let launch = LaunchEncoding::new(plan.resolved, plan.args)?;
+    let block = environment_block(environment);
+    let cwd_wide = create_process_cwd(plan.cwd)?;
+    let null_input = File::open("NUL")?;
+    let log_handle = log.as_raw_handle() as HANDLE;
+    let input_handle = null_input.as_raw_handle() as HANDLE;
+    for handle in [input_handle, log_handle] {
+        if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+    }
+    let inherited = [input_handle, log_handle];
+    let attributes = AttributeList::new(&inherited)?;
+    let startup = startup_info([input_handle, log_handle, log_handle], &attributes)?;
+
+    let mut command_line = launch.command_line;
+    let mut process_info = PROCESS_INFORMATION::default();
+    let created = unsafe {
+        CreateProcessW(
+            launch.application.as_ptr(),
+            command_line.as_mut_ptr(),
+            null(),
+            null(),
+            1,
+            CREATE_UNICODE_ENVIRONMENT
+                | CREATE_NO_WINDOW
+                | CREATE_SUSPENDED
+                | EXTENDED_STARTUPINFO_PRESENT,
+            block.as_ptr().cast::<c_void>(),
+            cwd_wide.as_ptr(),
+            &raw const startup.StartupInfo,
+            &raw mut process_info,
+        )
+    };
+    if created == 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    drop(attributes);
+    let mut lifecycle = Lifecycle::new(process_info)?;
+    lifecycle.install_job()?;
+    lifecycle.resume()?;
+    let pid = process_info.dwProcessId;
+    let job = lifecycle.release_job();
+    drop(log);
+    drop(null_input);
+    Ok(DetachedTree { pid, job })
+}
+
+pub(crate) struct DetachedTree {
+    pid: u32,
+    job: OwnedHandle,
+}
+
+impl DetachedTree {
+    pub(crate) fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    pub(crate) fn is_running(&mut self) -> bool {
+        job_active_processes(self.job.raw()).unwrap_or(0) > 0
+    }
+
+    pub(crate) fn terminate(&mut self) {
+        unsafe {
+            TerminateJobObject(self.job.raw(), TERMINATION_EXIT_CODE);
+        }
+    }
+}
+
+fn job_active_processes(job: HANDLE) -> io::Result<u32> {
+    let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+    if unsafe {
+        QueryInformationJobObject(
+            job,
+            JobObjectBasicAccountingInformation,
+            (&raw mut accounting).cast::<c_void>(),
+            u32::try_from(size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>())
+                .map_err(|_| io::Error::other("job accounting size overflow"))?,
+            null_mut(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(accounting.ActiveProcesses)
 }
 
 fn set_job_information<T>(handle: HANDLE, class: i32, value: &T) -> io::Result<()> {

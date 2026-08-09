@@ -119,6 +119,13 @@ fn render(
     } else {
         format!("Path: {absolute}\nEncoding: {}", source_encoding.name())
     };
+    let limits = OutputLimits::for_content_parts(
+        collector
+            .candidates
+            .iter()
+            .take(available)
+            .map(|line| line.prefix.as_str()),
+    );
     let mut cap = available;
     loop {
         let partial = source_has_more || cap < available;
@@ -127,8 +134,7 @@ fn render(
             || "Complete.".to_owned(),
             |next| format!("Partial: next_start_line={next}."),
         );
-        let mut formatter =
-            OutputFormatter::new(header.clone(), vec![tail], OutputLimits::default())?;
+        let mut formatter = OutputFormatter::new(header.clone(), vec![tail], limits)?;
         let mut shown = 0_usize;
         for line in collector.candidates.iter().take(cap) {
             if formatter.try_push_line(render_candidate(line), cancellation)? {

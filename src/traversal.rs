@@ -75,6 +75,12 @@ pub struct OwnedTraversalEntry {
     pub file_type: Option<std::fs::FileType>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct ParallelTraversal {
+    pub batch_size: usize,
+    pub threads: usize,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum TraversalError {
     #[error("traversal cancelled")]
@@ -190,7 +196,7 @@ pub fn walk_parallel_batched(
     base: &ResolvedPath,
     include_ignored: bool,
     cancellation: &CancellationToken,
-    batch_size: usize,
+    parallel: ParallelTraversal,
     visitor: impl Fn(&[OwnedTraversalEntry]) -> TraversalControl + Send + Sync,
 ) -> Result<TraversalSummary, TraversalError> {
     walk_parallel_batched_filtered(
@@ -198,7 +204,7 @@ pub fn walk_parallel_batched(
         base,
         include_ignored,
         cancellation,
-        batch_size,
+        parallel,
         None,
         visitor,
     )
@@ -209,7 +215,7 @@ pub fn walk_parallel_batched_with_literal_prefix(
     base: &ResolvedPath,
     include_ignored: bool,
     cancellation: &CancellationToken,
-    batch_size: usize,
+    parallel: ParallelTraversal,
     literal_prefix: &Path,
     visitor: impl Fn(&[OwnedTraversalEntry]) -> TraversalControl + Send + Sync,
 ) -> Result<TraversalSummary, TraversalError> {
@@ -218,7 +224,7 @@ pub fn walk_parallel_batched_with_literal_prefix(
         base,
         include_ignored,
         cancellation,
-        batch_size,
+        parallel,
         Some(literal_prefix),
         visitor,
     )
@@ -229,7 +235,7 @@ fn walk_parallel_batched_filtered(
     base: &ResolvedPath,
     include_ignored: bool,
     cancellation: &CancellationToken,
-    batch_size: usize,
+    parallel: ParallelTraversal,
     literal_prefix: Option<&Path>,
     visitor: impl Fn(&[OwnedTraversalEntry]) -> TraversalControl + Send + Sync,
 ) -> Result<TraversalSummary, TraversalError> {
@@ -255,12 +261,13 @@ fn walk_parallel_batched_filtered(
             .require_git(false);
     }
     configure_entry_filter(&mut builder, access, base, literal_prefix);
+    builder.threads(parallel.threads.max(1));
 
     let summary = AtomicTraversalSummary::default();
     let stopped = AtomicBool::new(false);
     let cancelled = AtomicBool::new(false);
     let remainders = Mutex::new(Vec::new());
-    let batch_size = batch_size.max(1);
+    let batch_size = parallel.batch_size.max(1);
     builder.build_parallel().run(|| {
         let summary = &summary;
         let stopped = &stopped;
@@ -471,7 +478,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        TraversalControl, literal_path_prefix, walk, walk_parallel_batched,
+        ParallelTraversal, TraversalControl, literal_path_prefix, walk, walk_parallel_batched,
         walk_parallel_batched_with_literal_prefix, walk_with_literal_prefix,
     };
     use crate::path::{FileAccess, ReadScope, RepositoryRoot};
@@ -532,15 +539,24 @@ mod tests {
         })
         .expect("serial walk");
         let parallel = Mutex::new(Vec::new());
-        let parallel_summary =
-            walk_parallel_batched(&root, &base, false, &CancellationToken::new(), 2, |batch| {
+        let parallel_summary = walk_parallel_batched(
+            &root,
+            &base,
+            false,
+            &CancellationToken::new(),
+            ParallelTraversal {
+                batch_size: 2,
+                threads: 4,
+            },
+            |batch| {
                 parallel
                     .lock()
                     .expect("parallel results")
                     .extend(batch.iter().map(|entry| entry.key.clone()));
                 TraversalControl::Continue
-            })
-            .expect("parallel walk");
+            },
+        )
+        .expect("parallel walk");
         let mut parallel = parallel.into_inner().expect("parallel results");
         serial.sort();
         parallel.sort();
@@ -597,7 +613,10 @@ mod tests {
             &base,
             false,
             &CancellationToken::new(),
-            2,
+            ParallelTraversal {
+                batch_size: 2,
+                threads: 4,
+            },
             prefix,
             |batch| {
                 parallel
@@ -634,9 +653,17 @@ mod tests {
             .is_err()
         );
         assert!(
-            walk_parallel_batched(&root, &base, false, &cancellation, 2, |_| {
-                TraversalControl::Continue
-            })
+            walk_parallel_batched(
+                &root,
+                &base,
+                false,
+                &cancellation,
+                ParallelTraversal {
+                    batch_size: 2,
+                    threads: 4,
+                },
+                |_| TraversalControl::Continue,
+            )
             .is_err()
         );
     }

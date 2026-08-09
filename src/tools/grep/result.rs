@@ -175,14 +175,19 @@ fn render(
 ) -> Result<ToolOutput, GrepError> {
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT);
     let available = page.lines.len().min(limit);
+    let limits = OutputLimits::for_content_parts(
+        page.lines
+            .iter()
+            .take(available)
+            .map(|line| line.text.as_str()),
+    );
     let mut cap = available;
     loop {
         let total_skipped = page.skipped.saturating_add(page.traversal.skipped());
         let next_offset = (page.offset.saturating_add(cap) < page.total)
             .then(|| page.offset.saturating_add(cap));
         let tail = pagination_tail(total_skipped, next_offset);
-        let mut formatter =
-            OutputFormatter::new(String::new(), tail, OutputLimits::default())?;
+        let mut formatter = OutputFormatter::new(String::new(), tail, limits)?;
         let mut shown = 0_usize;
         for line in page.lines.iter().take(cap) {
             if formatter.try_push_line(&line.text, cancellation)? {
@@ -209,8 +214,7 @@ fn render(
             && let Some(fallback) = page.lines[0].fallback.as_deref()
         {
             let tail = pagination_tail(total_skipped, next_offset);
-            let mut formatter =
-                OutputFormatter::new(String::new(), tail, OutputLimits::default())?;
+            let mut formatter = OutputFormatter::new(String::new(), tail, limits)?;
             if !formatter.try_push_line(fallback, cancellation)? {
                 return Err(crate::output::OutputError::NoProgress.into());
             }

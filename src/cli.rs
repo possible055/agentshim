@@ -1,13 +1,19 @@
 fn usage() {
     eprintln!(
-        "Usage: codexshim <serve|doctor> [--read-scope <normal|unrestricted>] | logs <status|purge> | --version"
+        "Usage: codexshim <serve|doctor> [--read-scope <normal|unrestricted>] [--allow-programs <comma-separated>] | logs <status|purge> | --version"
     );
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
+struct ServeOptions {
+    read_scope: ReadScope,
+    allowed_programs: AllowedPrograms,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 enum CliCommand {
-    Serve(ReadScope),
-    Doctor(ReadScope),
+    Serve(ServeOptions),
+    Doctor(ServeOptions),
     LogsStatus,
     LogsPurge,
     Version,
@@ -44,47 +50,78 @@ fn parse_command(args: impl IntoIterator<Item = OsString>) -> Result<CliCommand,
     }
 
     let mut read_scope = None;
+    let mut allow_programs = None;
     while let Some(argument) = args.next() {
         let argument = argument
             .to_str()
             .ok_or_else(|| "arguments must be valid Unicode".to_owned())?;
-        let value = if argument == "--read-scope" {
-            args.next()
-                .ok_or_else(|| "--read-scope requires a value".to_owned())?
-                .into_string()
-                .map_err(|_| "read scope must be valid Unicode".to_owned())?
-        } else if let Some(value) = argument.strip_prefix("--read-scope=") {
-            if value.is_empty() {
-                return Err("--read-scope requires a value".to_owned());
+        let (flag, value) = flag_value(argument, &mut args)?;
+        match flag {
+            "--read-scope" => {
+                if read_scope.is_some() {
+                    return Err("--read-scope may be specified only once".to_owned());
+                }
+                read_scope = Some(
+                    value
+                        .parse::<ReadScope>()
+                        .map_err(|error| error.to_string())?,
+                );
             }
-            value.to_owned()
-        } else {
-            return Err(format!("unknown argument: {argument}"));
-        };
-        if read_scope.is_some() {
-            return Err("--read-scope may be specified only once".to_owned());
+            "--allow-programs" => {
+                if allow_programs.is_some() {
+                    return Err("--allow-programs may be specified only once".to_owned());
+                }
+                allow_programs = Some(
+                    AllowedPrograms::parse(&value).map_err(|error| error.to_string())?,
+                );
+            }
+            _ => return Err(format!("unknown argument: {argument}")),
         }
-        read_scope = Some(
-            value
-                .parse::<ReadScope>()
-                .map_err(|error| error.to_string())?,
-        );
     }
 
-    let read_scope = read_scope.unwrap_or_default();
+    // The startup flag wins over the environment so a deployment can pin the allowlist even
+    // when an inherited variable disagrees.
+    let allowed_programs = match allow_programs {
+        Some(allowed) => allowed,
+        None => AllowedPrograms::from_env().map_err(|error| error.to_string())?,
+    };
+    let options = ServeOptions {
+        read_scope: read_scope.unwrap_or_default(),
+        allowed_programs,
+    };
     match kind {
-        "serve" => Ok(CliCommand::Serve(read_scope)),
-        "doctor" => Ok(CliCommand::Doctor(read_scope)),
+        "serve" => Ok(CliCommand::Serve(options)),
+        "doctor" => Ok(CliCommand::Doctor(options)),
         _ => unreachable!("command was validated"),
     }
 }
 
+fn flag_value<'a>(
+    argument: &'a str,
+    args: &mut impl Iterator<Item = OsString>,
+) -> Result<(&'a str, String), String> {
+    if let Some((flag, value)) = argument.split_once('=') {
+        if value.is_empty() {
+            return Err(format!("{flag} requires a value"));
+        }
+        return Ok((flag, value.to_owned()));
+    }
+    let value = args
+        .next()
+        .ok_or_else(|| format!("{argument} requires a value"))?
+        .into_string()
+        .map_err(|_| format!("{argument} value must be valid Unicode"))?;
+    Ok((argument, value))
+}
+
 async fn run(config: RuntimeLimits, command: CliCommand) -> Result<(), Box<dyn Error>> {
     match command {
-        CliCommand::Serve(read_scope) => {
+        CliCommand::Serve(options) => {
+            let read_scope = options.read_scope;
             let service = CodexShim::builder(std::env::current_dir()?)?
                 .runtime_limits(config)
                 .read_scope(read_scope)
+                .allowed_programs(options.allowed_programs)
                 .build()?;
             let (stdin, stdout) = stdio();
             let reader = ShutdownReader {
@@ -93,15 +130,20 @@ async fn run(config: RuntimeLimits, command: CliCommand) -> Result<(), Box<dyn E
                 termination_reported: false,
             };
             tracing::info!(target: "codexshim", event = "server_start", phase = "lifecycle", read_scope = %read_scope);
+            let shutdown = service.clone();
             let running = service.serve((reader, DiagnosticWriter(stdout))).await?;
             tracing::info!(target: "codexshim", event = "server_ready", phase = "lifecycle");
-            running.waiting().await?;
+            let outcome = running.waiting().await;
+            shutdown.terminate_detached();
+            outcome?;
             tracing::info!(target: "codexshim", event = "server_stop", phase = "lifecycle");
         }
-        CliCommand::Doctor(read_scope) => {
+        CliCommand::Doctor(options) => {
+            let allowed = options.allowed_programs.clone();
             let service = CodexShim::builder(std::env::current_dir()?)?
                 .runtime_limits(config)
-                .read_scope(read_scope)
+                .read_scope(options.read_scope)
+                .allowed_programs(options.allowed_programs)
                 .build()?;
             service.verify_root()?;
             service.verify_process_runtime()?;
@@ -118,6 +160,19 @@ async fn run(config: RuntimeLimits, command: CliCommand) -> Result<(), Box<dyn E
                 "process calls: {}",
                 service.runtime_limits().process_calls
             );
+            println!(
+                "detached calls: {}",
+                service.runtime_limits().detached_calls
+            );
+            println!("output bytes: {}", service.runtime_limits().output_bytes);
+            println!("allowed programs: {}", allowed.describe());
+            match bash_report() {
+                Ok((executable, locale)) => {
+                    println!("bash: {}", executable.display());
+                    println!("bash locale: {locale}");
+                }
+                Err(error) => println!("bash: unavailable ({error})"),
+            }
             println!("process lifecycle: ok");
             println!(
                 "worker lanes: {}",

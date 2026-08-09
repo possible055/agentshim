@@ -1,9 +1,11 @@
 use std::ops::Deref;
 
+pub(crate) mod bash;
+pub(crate) mod exec;
 pub(crate) mod glob;
 pub(crate) mod grep;
-pub(crate) mod process;
 pub(crate) mod read;
+pub(crate) mod run_program;
 
 #[derive(Debug)]
 pub(crate) struct ToolOutput {
@@ -31,7 +33,13 @@ impl ToolOutput {
     }
 
     pub(crate) fn fits_budget(&self) -> bool {
-        self.encoded_len() <= crate::output::MODEL_BYTE_LIMIT
+        self.encoded_len() <= crate::output::effective_byte_limit()
+    }
+
+    /// Tighter than [`Self::fits_budget`] for CJK-dense output, which the downstream client
+    /// tokenizes at roughly half the bytes per token that English costs.
+    pub(crate) fn fits_content_budget(&self) -> bool {
+        self.encoded_len() <= crate::output::OutputLimits::for_content(&self.text).bytes
     }
 }
 

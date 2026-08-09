@@ -30,11 +30,19 @@ use crate::{
     output::bounded_diagnostic,
     path::{FileAccess, ReadScope, RepositoryRoot},
     runtime::{RuntimeConfig, RuntimeResources},
-    tools::process::{ProcessRequest, ProcessResolver},
+    tools::{
+        bash::{
+            BashRequest,
+            detached::{DetachedAdmission, DetachedTrees},
+            locate::BashLocator,
+        },
+        exec::{ProcessError, ProcessResolver},
+        run_program::{AllowedPrograms, ProcessRequest},
+    },
 };
 
-pub const SERVER_INSTRUCTIONS: &str = "Local repository and Codex extension tools for reading source files, searching contents, finding paths, and running programs with structured arguments without PowerShell command strings.";
-pub const UNRESTRICTED_SERVER_INSTRUCTIONS: &str = "Local filesystem tools for reading files, searching contents, and finding paths, plus structured program execution without PowerShell command strings. Read scope does not affect process execution.";
+pub const SERVER_INSTRUCTIONS: &str = "Local repository and Codex extension tools for reading source files, searching contents, finding paths, running one permitted program with literal arguments, and running POSIX bash command lines.";
+pub const UNRESTRICTED_SERVER_INSTRUCTIONS: &str = "Local filesystem tools for reading files, searching contents, and finding paths, plus one permitted program with literal arguments and POSIX bash command lines. Read scope is the structured access range of read, grep, and glob; it does not bound what a spawned process can reach.";
 pub const MCP_COMPATIBILITY_ENV: &str = "CODEXSHIM_MCP_COMPATIBILITY";
 
 const STRICT_PROTOCOLS: &[ProtocolVersion] = &[ProtocolVersion::V_2026_07_28];
@@ -102,6 +110,9 @@ pub struct CodexShim {
     file_access: Arc<FileAccess>,
     resources: RuntimeResources,
     process_resolver: ProcessResolver,
+    allowed_programs: AllowedPrograms,
+    detached: DetachedTrees,
+    bash_locator: BashLocator,
     protocol_compatibility: ProtocolCompatibility,
 }
 
@@ -109,13 +120,24 @@ pub struct CodexShimBuilder {
     root: PathBuf,
     read_scope: ReadScope,
     runtime: RuntimeConfig,
+    allowed_programs: AllowedPrograms,
     protocol_compatibility: ProtocolCompatibility,
 }
 
 enum ToolAdmission {
     ReadOnly(OwnedSemaphorePermit),
     Process(OwnedSemaphorePermit),
+    /// A detached `bash` call holds no foreground permit. Its capacity is the detached roster,
+    /// which limits living process trees rather than threads and output memory, and the two
+    /// must not be able to starve each other.
+    Detached(DetachedAdmission),
     None,
+}
+
+#[derive(Debug)]
+enum ToolAdmissionFailure {
+    Capacity(&'static str),
+    Process(ProcessError),
 }
 
 impl CodexShimBuilder {
@@ -129,6 +151,7 @@ impl CodexShimBuilder {
             root: root.into(),
             read_scope: ReadScope::default(),
             runtime: RuntimeConfig::from_env()?,
+            allowed_programs: AllowedPrograms::from_env()?,
             protocol_compatibility: ProtocolCompatibility::from_env()?,
         })
     }
@@ -142,6 +165,12 @@ impl CodexShimBuilder {
     #[must_use]
     pub fn runtime_limits(mut self, runtime: RuntimeConfig) -> Self {
         self.runtime = runtime;
+        self
+    }
+
+    #[must_use]
+    pub fn allowed_programs(mut self, allowed: AllowedPrograms) -> Self {
+        self.allowed_programs = allowed;
         self
     }
 
@@ -161,8 +190,11 @@ impl CodexShimBuilder {
         Ok(CodexShim {
             file_access: Arc::new(FileAccess::new(Arc::clone(&root), self.read_scope)),
             root,
+            detached: DetachedTrees::new(self.runtime.detached_calls),
+            bash_locator: BashLocator::capture(),
             resources: RuntimeResources::new(self.runtime),
             process_resolver: ProcessResolver::capture(),
+            allowed_programs: self.allowed_programs,
             protocol_compatibility: self.protocol_compatibility,
         })
     }
@@ -202,6 +234,12 @@ impl CodexShim {
         self.resources.shutdown_token()
     }
 
+    /// Terminate every detached tree this instance still owns. Detached work is bound to the
+    /// server lifetime, so nothing survives the session that started it.
+    pub fn terminate_detached(&self) {
+        self.detached.terminate_all();
+    }
+
     #[must_use]
     pub fn protocol_compatibility(&self) -> ProtocolCompatibility {
         self.protocol_compatibility
@@ -228,6 +266,9 @@ impl CodexShim {
     /// Returns a resolution, launch, capture, cleanup, or unexpected-output error.
     pub fn verify_process_runtime(&self) -> io::Result<()> {
         let executable = std::env::current_exe()?;
+        // The lifecycle probe launches this binary, so it carries its own single-entry
+        // allowlist rather than depending on how the operator configured `run_program`.
+        let probe_allowlist = AllowedPrograms::parse(&executable.to_string_lossy())?;
         let request = ProcessRequest {
             program: executable.to_string_lossy().into_owned(),
             args: vec!["--version".to_owned()],
@@ -237,9 +278,10 @@ impl CodexShim {
             stdin: None,
             timeout_ms: Some(5_000),
         };
-        let output = crate::tools::process::execute(
+        let output = crate::tools::run_program::execute(
             &self.root,
             &self.process_resolver,
+            &probe_allowlist,
             &request,
             Duration::from_secs(5),
             &CancellationToken::new(),
@@ -340,7 +382,10 @@ impl CodexShim {
         let worker = self.resources.acquire_worker(request_cancellation).await;
         let memory = self
             .resources
-            .reserve_memory(crate::tools::glob::memory_charge(), request_cancellation)
+            .reserve_memory(
+                crate::tools::glob::memory_charge(&glob_request),
+                request_cancellation,
+            )
             .await;
         let permits = match (worker, memory) {
             (Ok(worker), Ok(memory)) => (admission, worker, memory),
@@ -353,14 +398,19 @@ impl CodexShim {
         };
         tracing::info!(target: "codexshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
         let access = self.file_access.clone();
+        let resources = self.resources.clone();
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
         let span = tracing::Span::current();
         let running = Instant::now();
         let result = tokio::task::spawn_blocking(move || {
             span.in_scope(|| {
-                let result =
-                    crate::tools::glob::execute_output(&access, &glob_request, &cancellation);
+                let result = crate::tools::glob::execute_output(
+                    &access,
+                    &glob_request,
+                    &resources,
+                    &cancellation,
+                );
                 drop(permits);
                 result
             })
@@ -432,7 +482,7 @@ impl CodexShim {
         request_cancellation: &CancellationToken,
         admission: OwnedSemaphorePermit,
     ) -> CallToolResponse {
-        let process_request: ProcessRequest = match parse_request(arguments, "run_process") {
+        let process_request: ProcessRequest = match parse_request(arguments, "run_program") {
             Ok(request) => request,
             Err(error) => return classified_tool_error("validation", error),
         };
@@ -455,26 +505,28 @@ impl CodexShim {
             Ok(Err(_)) => {
                 return classified_tool_error(
                     cancellation_class(request_cancellation, &self.resources.shutdown_token()),
-                    "run_process cancelled while waiting for process capacity",
+                    "run_program cancelled while waiting for process capacity",
                 );
             }
-            Err(_) => return process_queue_timeout(process_request.timeout_ms()),
+            Err(_) => return queue_timeout("run_program", process_request.timeout_ms()),
         };
         tracing::info!(target: "codexshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
         let Some(remaining) = timeout.checked_sub(queued.elapsed()) else {
-            return process_queue_timeout(process_request.timeout_ms());
+            return queue_timeout("run_program", process_request.timeout_ms());
         };
         let root = self.root.clone();
         let resolver = self.process_resolver.clone();
+        let allowed = self.allowed_programs.clone();
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
         let span = tracing::Span::current();
         let running = Instant::now();
         let result = tokio::task::spawn_blocking(move || {
             span.in_scope(|| {
-                let result = crate::tools::process::execute_output(
+                let result = crate::tools::run_program::execute_output(
                     &root,
                     &resolver,
+                    &allowed,
                     &process_request,
                     remaining,
                     &cancellation,
@@ -485,7 +537,98 @@ impl CodexShim {
         })
         .await;
         cancellation_relay.abort();
-        blocking_response("run_process", duration_ms(running.elapsed()), result)
+        blocking_response("run_program", duration_ms(running.elapsed()), result)
+    }
+
+    async fn call_bash(
+        &self,
+        arguments: Option<JsonObject>,
+        request_cancellation: &CancellationToken,
+        admission: ToolAdmission,
+    ) -> CallToolResponse {
+        let bash_request: BashRequest = match parse_request(arguments, "bash") {
+            Ok(request) => request,
+            Err(error) => return classified_tool_error("validation", error),
+        };
+        if let Err(error) = bash_request.validate() {
+            return classified_tool_error("validation", error.to_string());
+        }
+        // The parsed request, not the pre-admission peek, decides which resource this call
+        // consumes. They can only disagree through a request that failed to parse as detached,
+        // and that case must still be capped rather than trusted.
+        let (foreground, detached_admission) = match (admission, bash_request.detach) {
+            (ToolAdmission::Process(permit), false) => (Some(permit), None),
+            (ToolAdmission::Process(permit), true) => {
+                drop(permit);
+                match self.detached.admit() {
+                    Ok(admission) => (None, Some(admission)),
+                    Err(ProcessError::ResourceBusy(message)) => {
+                        return resource_busy_with_message("bash", "detached", message);
+                    }
+                    Err(error) => return diagnostic_tool_error(&error),
+                }
+            }
+            (ToolAdmission::Detached(admission), true) => (None, Some(admission)),
+            (ToolAdmission::Detached(admission), false) => {
+                drop(admission);
+                match self.resources.try_admit_process() {
+                Some(permit) => (Some(permit), None),
+                None => return resource_busy("bash", "process"),
+                }
+            }
+            _ => unreachable!("bash is admitted as a process or a detached call"),
+        };
+        let timeout = Duration::from_millis(bash_request.timeout_ms());
+        let queued = Instant::now();
+        let memory_charge = bash_request.memory_charge();
+        let permits = match tokio::time::timeout(timeout, async {
+            let memory = self
+                .resources
+                .reserve_memory(memory_charge, request_cancellation)
+                .await?;
+            Ok::<_, crate::runtime::AcquireError>((foreground, memory))
+        })
+        .await
+        {
+            Ok(Ok(permits)) => Some(permits),
+            Ok(Err(_)) => {
+                return classified_tool_error(
+                    cancellation_class(request_cancellation, &self.resources.shutdown_token()),
+                    "bash cancelled while waiting for request memory",
+                );
+            }
+            Err(_) => None,
+        };
+        let Some(permits) = permits else {
+            return queue_timeout("bash", bash_request.timeout_ms());
+        };
+        tracing::info!(target: "codexshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
+        let Some(remaining) = timeout.checked_sub(queued.elapsed()) else {
+            return queue_timeout("bash", bash_request.timeout_ms());
+        };
+        let root = self.root.clone();
+        let locator = self.bash_locator.clone();
+        let (cancellation, cancellation_relay) =
+            relayed_cancellation(request_cancellation, self.resources.shutdown_token());
+        let span = tracing::Span::current();
+        let running = Instant::now();
+        let result = tokio::task::spawn_blocking(move || {
+            span.in_scope(|| {
+                let result = crate::tools::bash::execute_output(
+                    &root,
+                    &locator,
+                    detached_admission,
+                    &bash_request,
+                    remaining,
+                    &cancellation,
+                );
+                drop(permits);
+                result
+            })
+        })
+        .await;
+        cancellation_relay.abort();
+        blocking_response("bash", duration_ms(running.elapsed()), result)
     }
 
     fn server_info(read_scope: ReadScope) -> ServerInfo {
@@ -515,8 +658,14 @@ impl CodexShim {
             ("grep", ToolAdmission::ReadOnly(admission)) => Ok(self
                 .call_grep(request.arguments, &context.ct, admission)
                 .await),
-            ("run_process", ToolAdmission::Process(admission)) => Ok(self
+            ("run_program", ToolAdmission::Process(admission)) => Ok(self
                 .call_process(request.arguments, &context.ct, admission)
+                .await),
+            (
+                "bash",
+                admission @ (ToolAdmission::Process(_) | ToolAdmission::Detached(_)),
+            ) => Ok(self
+                .call_bash(request.arguments, &context.ct, admission)
                 .await),
             (_, ToolAdmission::None) => {
                 tracing::error!(target: "codexshim", event = "tool_unknown", phase = "request", error_class = "validation");
@@ -530,18 +679,26 @@ impl CodexShim {
         }
     }
 
-    fn try_admit_tool(&self, name: &str) -> Result<ToolAdmission, ()> {
-        match name {
+    fn try_admit_tool(
+        &self,
+        request: &CallToolRequestParams,
+    ) -> Result<ToolAdmission, ToolAdmissionFailure> {
+        match request.name.as_ref() {
             "read" | "glob" | "grep" => self
                 .resources
                 .try_admit_read_only()
                 .map(ToolAdmission::ReadOnly)
-                .ok_or(()),
-            "run_process" => self
+                .ok_or(ToolAdmissionFailure::Capacity("read_only")),
+            "bash" if requests_detach(request.arguments.as_ref()) => self
+                .detached
+                .admit()
+                .map(ToolAdmission::Detached)
+                .map_err(ToolAdmissionFailure::Process),
+            "run_program" | "bash" => self
                 .resources
                 .try_admit_process()
                 .map(ToolAdmission::Process)
-                .ok_or(()),
+                .ok_or(ToolAdmissionFailure::Capacity("process")),
             _ => Ok(ToolAdmission::None),
         }
     }
@@ -604,8 +761,19 @@ impl ServerHandler for CodexShim {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
-        let Ok(admission) = self.try_admit_tool(request.name.as_ref()) else {
-            return Ok(resource_busy(request.name.as_ref()));
+        let admission = match self.try_admit_tool(&request) {
+            Ok(admission) => admission,
+            Err(ToolAdmissionFailure::Capacity(class)) => {
+                return Ok(resource_busy(request.name.as_ref(), class));
+            }
+            Err(ToolAdmissionFailure::Process(error)) => {
+                return Ok(match error {
+                    ProcessError::ResourceBusy(message) => {
+                        resource_busy_with_message("bash", "detached", message)
+                    }
+                    other => diagnostic_tool_error(&other),
+                });
+            }
         };
         if !tracing::enabled!(target: "codexshim", tracing::Level::INFO) {
             return self.dispatch_tool(request, &context, admission).await;

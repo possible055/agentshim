@@ -27,11 +27,26 @@ struct TopK {
 
 impl TopK {
     fn new(capacity: usize) -> Self {
+        let heap = BinaryHeap::with_capacity(capacity);
+        let charged = heap
+            .capacity()
+            .saturating_mul(std::mem::size_of::<GlobMatch>());
         Self {
             capacity,
-            heap: BinaryHeap::with_capacity(capacity),
-            charged: 0,
+            heap,
+            charged,
         }
+    }
+
+    fn threshold(&self) -> TopKThreshold {
+        TopKThreshold {
+            has_capacity: self.capacity > 0 && self.heap.len() < self.capacity,
+            worst: self.heap.peek().map(|entry| entry.sort_key.clone()),
+        }
+    }
+
+    fn might_admit(&self, sort_key: &PathSortKey) -> bool {
+        self.threshold().might_admit(sort_key)
     }
 
     fn admit(&mut self, path: &ResolvedPath) -> Result<(), GlobError> {
@@ -40,9 +55,8 @@ impl TopK {
         }
         let absolute = crate::path::display_path(path.absolute());
         let charge = absolute
-            .len()
-            .saturating_add(path.key().as_os_str().len())
-            .saturating_add(std::mem::size_of::<GlobMatch>());
+            .capacity()
+            .saturating_add(path.sort_key().capacity_bytes());
         let candidate = GlobMatch {
             sort_key: path.sort_key().clone(),
             absolute,
@@ -72,6 +86,14 @@ impl TopK {
         Ok(())
     }
 
+    fn len(&self) -> usize {
+        self.heap.len()
+    }
+
+    fn retained_memory_bytes(&self) -> usize {
+        self.charged
+    }
+
     fn charge(&mut self, charge: usize) -> Result<(), GlobError> {
         let total = self.charged.saturating_add(charge);
         if total > RETAINED_MEMORY_BYTES {
@@ -89,6 +111,22 @@ impl TopK {
     }
 }
 
+#[derive(Clone)]
+struct TopKThreshold {
+    has_capacity: bool,
+    worst: Option<PathSortKey>,
+}
+
+impl TopKThreshold {
+    fn might_admit(&self, sort_key: &PathSortKey) -> bool {
+        self.has_capacity
+            || self
+                .worst
+                .as_ref()
+                .is_some_and(|worst| sort_key <= worst)
+    }
+}
+
 fn render(
     request: &GlobRequest,
     retained: &[GlobMatch],
@@ -99,6 +137,13 @@ fn render(
     let offset = request.offset.unwrap_or(0);
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT);
     let available = retained.len().saturating_sub(offset).min(limit);
+    let limits = OutputLimits::for_content_parts(
+        retained
+            .iter()
+            .skip(offset)
+            .take(available)
+            .map(|matched| matched.absolute.as_str()),
+    );
     let mut cap = available;
     loop {
         let next_offset = (offset.saturating_add(cap) < total)
@@ -111,7 +156,7 @@ fn render(
             || "Complete.".to_owned(),
             |next| format!("Partial: next_offset={next}."),
         ));
-        let mut formatter = OutputFormatter::new(String::new(), tail, OutputLimits::default())?;
+        let mut formatter = OutputFormatter::new(String::new(), tail, limits)?;
         let mut shown = 0_usize;
         for matched in retained.iter().skip(offset).take(cap) {
             if formatter.try_push_line(&matched.absolute, cancellation)? {

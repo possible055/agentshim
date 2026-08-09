@@ -30,7 +30,7 @@ fn tools_list_snapshot() {
 fn successful_tools_do_not_advertise_output_schemas() {
     let result = serde_json::to_value(CodexShim::tools_result()).expect("serialize tools");
     let tools = result["tools"].as_array().expect("tools array");
-    for name in ["read", "grep", "glob", "run_process"] {
+    for name in ["read", "grep", "glob", "run_program", "bash"] {
         assert!(
             tool(tools, name).get("outputSchema").is_none(),
             "{name} must not advertise an output schema"
@@ -54,15 +54,17 @@ fn tool_annotations_match_codex_approval_contract() {
         );
     }
 
-    assert_eq!(
-        tool(tools, "run_process")["annotations"],
-        json!({
-            "readOnlyHint": false,
-            "destructiveHint": true,
-            "idempotentHint": false,
-            "openWorldHint": true
-        })
-    );
+    for name in ["run_program", "bash"] {
+        assert_eq!(
+            tool(tools, name)["annotations"],
+            json!({
+                "readOnlyHint": false,
+                "destructiveHint": true,
+                "idempotentHint": false,
+                "openWorldHint": true
+            })
+        );
+    }
 }
 
 #[test]
@@ -75,7 +77,7 @@ fn unrestricted_catalog_changes_scope_text_without_changing_approval_annotations
         .as_array()
         .expect("unrestricted tools array");
 
-    for name in ["read", "grep", "glob", "run_process"] {
+    for name in ["read", "grep", "glob", "run_program", "bash"] {
         assert_eq!(
             tool(normal_tools, name)["annotations"],
             tool(unrestricted_tools, name)["annotations"]
@@ -89,10 +91,9 @@ fn unrestricted_catalog_changes_scope_text_without_changing_approval_annotations
                 .contains("local filesystem")
         );
     }
-    assert_eq!(
-        tool(normal_tools, "run_process"),
-        tool(unrestricted_tools, "run_process")
-    );
+    for name in ["run_program", "bash"] {
+        assert_eq!(tool(normal_tools, name), tool(unrestricted_tools, name));
+    }
 }
 
 fn tool<'a>(tools: &'a [Value], name: &str) -> &'a Value {

@@ -35,9 +35,15 @@ mod tests {
             parse_process_calls(None).expect("default process calls"),
             DEFAULT_PROCESS_CALLS
         );
-        for (value, expected_threads) in [("1", 19), ("16", 34), ("32", 50)] {
+        for (value, expected_threads) in [("1", 35), ("16", 50), ("32", 66)] {
             let calls = parse_process_calls(Some(OsStr::new(value))).expect("valid process calls");
-            assert_eq!(blocking_threads(calls), expected_threads);
+            assert_eq!(
+                blocking_threads(
+                    calls,
+                    crate::tools::bash::detached::DEFAULT_DETACHED_CALLS
+                ),
+                expected_threads
+            );
         }
         for value in ["0", "33", "-1", "many"] {
             let error =
@@ -52,12 +58,18 @@ mod tests {
         let resources = RuntimeResources::new(RuntimeConfig::for_tests(4));
         let pool = resources.file_work_pool();
         assert_eq!(pool.extra_capacity(), 3);
-        let credits = (0..3)
-            .map(|_| pool.try_credit().expect("extra credit"))
-            .collect::<Vec<_>>();
+        let credits = pool.try_credits(usize::MAX);
+        assert_eq!(credits.len(), 3);
         assert!(pool.try_credit().is_none());
         drop(credits);
         assert_eq!(pool.available_credits(), 3);
+
+        let first_request = pool.begin_request();
+        let second_request = pool.begin_request();
+        assert!(pool.try_credits(3).is_empty());
+        drop(second_request);
+        assert_eq!(pool.try_credits(2).len(), 2);
+        drop(first_request);
 
         let inline = RuntimeResources::new(RuntimeConfig::for_tests(1)).file_work_pool();
         assert_eq!(inline.extra_capacity(), 0);
@@ -143,7 +155,7 @@ mod tests {
     async fn process_admission_recovers_after_task_cancellation() {
         let mut config = RuntimeConfig::for_tests(1);
         config.process_calls = 1;
-        config.blocking_threads = blocking_threads(config.process_calls);
+        config.blocking_threads = blocking_threads(config.process_calls, config.detached_calls);
         let resources = RuntimeResources::new(config);
         let permit = resources.try_admit_process().expect("process admission");
         let task = tokio::spawn(async move {
@@ -161,7 +173,7 @@ mod tests {
     fn process_admission_uses_the_runtime_configuration() {
         let mut config = RuntimeConfig::for_tests(1);
         config.process_calls = 2;
-        config.blocking_threads = blocking_threads(config.process_calls);
+        config.blocking_threads = blocking_threads(config.process_calls, config.detached_calls);
         let resources = RuntimeResources::new(config);
         let permits = (0..2)
             .map(|_| resources.try_admit_process().expect("process admission"))

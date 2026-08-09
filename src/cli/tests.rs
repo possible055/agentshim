@@ -3,7 +3,8 @@ mod tests {
     use std::io;
 
     use super::{
-        MAX_RECEIVE_FRAME_BYTES, ReceiveFrameReader, ShutdownReader, CliCommand, parse_command,
+        CliCommand, MAX_RECEIVE_FRAME_BYTES, ReceiveFrameReader, ServeOptions, ShutdownReader,
+        parse_command,
     };
     use codexshim::ReadScope;
     use serde_json::json;
@@ -13,20 +14,30 @@ mod tests {
         parse_command(args.iter().map(std::ffi::OsString::from))
     }
 
+    fn serve_options(command: Result<CliCommand, String>) -> ServeOptions {
+        match command.expect("parsed command") {
+            CliCommand::Serve(options) | CliCommand::Doctor(options) => options,
+            other => panic!("expected serve or doctor, got {other:?}"),
+        }
+    }
+
     #[test]
     fn read_scope_defaults_and_accepts_both_argument_forms() {
-        assert_eq!(parse(&["serve"]), Ok(CliCommand::Serve(ReadScope::Normal)));
         assert_eq!(
-            parse(&["serve", "--read-scope", "normal"]),
-            Ok(CliCommand::Serve(ReadScope::Normal))
+            serve_options(parse(&["serve"])).read_scope,
+            ReadScope::Normal
         );
         assert_eq!(
-            parse(&["serve", "--read-scope", "unrestricted"]),
-            Ok(CliCommand::Serve(ReadScope::Unrestricted))
+            serve_options(parse(&["serve", "--read-scope", "normal"])).read_scope,
+            ReadScope::Normal
         );
         assert_eq!(
-            parse(&["doctor", "--read-scope=normal"]),
-            Ok(CliCommand::Doctor(ReadScope::Normal))
+            serve_options(parse(&["serve", "--read-scope", "unrestricted"])).read_scope,
+            ReadScope::Unrestricted
+        );
+        assert_eq!(
+            serve_options(parse(&["doctor", "--read-scope=normal"])).read_scope,
+            ReadScope::Normal
         );
     }
 
@@ -44,6 +55,36 @@ mod tests {
             ][..],
             &["serve", "--unknown"][..],
             &["--version", "extra"][..],
+        ] {
+            assert!(parse(args).is_err(), "unexpectedly accepted {args:?}");
+        }
+    }
+
+    #[test]
+    fn allowed_programs_default_to_deny_and_accept_both_argument_forms() {
+        assert!(
+            serve_options(parse(&["serve"]))
+                .allowed_programs
+                .is_empty()
+        );
+        assert_eq!(
+            serve_options(parse(&["serve", "--allow-programs", "git,cargo"]))
+                .allowed_programs
+                .describe(),
+            "git, cargo"
+        );
+        assert_eq!(
+            serve_options(parse(&["doctor", "--allow-programs=git"]))
+                .allowed_programs
+                .describe(),
+            "git"
+        );
+        for args in [
+            &["serve", "--allow-programs"][..],
+            &["serve", "--allow-programs="][..],
+            &["serve", "--allow-programs", "git,,cargo"][..],
+            &["serve", "--allow-programs", "tools/git"][..],
+            &["serve", "--allow-programs", "git", "--allow-programs", "cargo"][..],
         ] {
             assert!(parse(args).is_err(), "unexpectedly accepted {args:?}");
         }
@@ -135,7 +176,7 @@ mod tests {
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "run_process",
+                "name": "run_program",
                 "arguments": {
                     "program": "cargo",
                     "stdin": "\u{1}".repeat(1_048_576),
@@ -158,7 +199,7 @@ mod tests {
             "id": 2,
             "method": "tools/call",
             "params": {
-                "name": "run_process",
+                "name": "run_program",
                 "arguments": {
                     "program": "cargo",
                     "args": ["test", "--locked", "--all-targets", "--", "--nocapture"],

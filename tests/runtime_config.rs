@@ -6,6 +6,7 @@ fn doctor(process_calls: Option<&str>) -> std::process::Output {
         .arg("doctor")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env_remove("CODEXSHIM_PROCESS_CALLS")
+        .env_remove("CODEXSHIM_DETACHED_CALLS")
         .env("CODEXSHIM_LOG_MODE", "off");
     if let Some(process_calls) = process_calls {
         command.env("CODEXSHIM_PROCESS_CALLS", process_calls);
@@ -16,7 +17,7 @@ fn doctor(process_calls: Option<&str>) -> std::process::Output {
 #[test]
 fn doctor_reports_resolved_runtime_capacity() {
     for (configured, process_calls, blocking_threads) in
-        [(None, 16, 34), (Some("1"), 1, 19), (Some("32"), 32, 50)]
+        [(None, 16, 50), (Some("1"), 1, 35), (Some("32"), 32, 66)]
     {
         let output = doctor(configured);
         assert!(
@@ -27,6 +28,7 @@ fn doctor_reports_resolved_runtime_capacity() {
         let stdout = String::from_utf8(output.stdout).expect("doctor stdout");
         assert!(stdout.contains("read-only calls: 16"));
         assert!(stdout.contains(&format!("process calls: {process_calls}")));
+        assert!(stdout.contains("detached calls: 16"));
         assert!(stdout.contains(&format!("blocking threads: {blocking_threads}")));
     }
 }
@@ -51,6 +53,7 @@ fn startup_log_records_resolved_runtime_capacity() {
         .arg("doctor")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("CODEXSHIM_PROCESS_CALLS", "32")
+        .env("CODEXSHIM_DETACHED_CALLS", "16")
         .env("CODEXSHIM_LOG_MODE", "all")
         .env("CODEXSHIM_LOG_DIR", logs.path())
         .output()
@@ -70,6 +73,8 @@ fn startup_log_records_resolved_runtime_capacity() {
         })
         .expect("JSONL log");
     let contents = fs::read_to_string(log).expect("read startup log");
-    assert!(contents.contains("process_calls=32,read_only_calls=16,worker_lanes="));
-    assert!(contents.contains(",blocking_threads=50"));
+    assert!(
+        contents.contains("process_calls=32,detached_calls=16,read_only_calls=16,worker_lanes=")
+    );
+    assert!(contents.contains(",blocking_threads=66"));
 }

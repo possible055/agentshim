@@ -11,7 +11,7 @@ fn main() -> ExitCode {
         }
     };
     if matches!(command, CliCommand::LogsStatus | CliCommand::LogsPurge) {
-        return run_logs_command(command);
+        return run_logs_command(&command);
     }
     let _diagnostics = initialize_diagnostics();
     install_panic_hook();
@@ -22,7 +22,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    tracing::info!(target: "codexshim", event = "runtime_config", phase = "startup", counters = %format!("process_calls={},read_only_calls={},worker_lanes={},blocking_threads={}", config.process_calls, MAX_READ_ONLY_CALLS, config.worker_lanes, config.blocking_threads));
+    tracing::info!(target: "codexshim", event = "runtime_config", phase = "startup", counters = %format!("process_calls={},detached_calls={},read_only_calls={},worker_lanes={},blocking_threads={}", config.process_calls, config.detached_calls, MAX_READ_ONLY_CALLS, config.worker_lanes, config.blocking_threads));
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(config.scheduler_threads)
         .max_blocking_threads(config.blocking_threads)
@@ -91,7 +91,7 @@ fn install_panic_hook() {
     }));
 }
 
-fn run_logs_command(command: CliCommand) -> ExitCode {
+fn run_logs_command(command: &CliCommand) -> ExitCode {
     let config = match DiagnosticsConfig::from_env() {
         Ok(config) => config,
         Err(error) => {

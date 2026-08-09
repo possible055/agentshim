@@ -1,24 +1,19 @@
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, ffi::OsStr, path::PathBuf};
+    use std::{ffi::OsStr, path::PathBuf, time::Duration};
 
-    use super::super::{launcher_for, validate_launcher_request};
+    use super::super::{
+        resolve::launcher_for,
+        spawn::{EnvironmentPlan, ExecPlan, Streams},
+    };
     use super::{
         BATCH_COMMAND_LINE_LIMIT, FAILURE_POINT, FailurePoint, LaunchEncoding, Launcher,
-        ProcessRequest, ResolvedProgram, append_native_argument, append_native_argv0,
-        finish_batch_command_line, finish_native_command_line, run,
+        ResolvedProgram, append_native_argument, append_native_argv0, finish_batch_command_line,
+        finish_native_command_line, run,
     };
 
-    fn fixture_request(args: Vec<&str>) -> ProcessRequest {
-        ProcessRequest {
-            program: "fixture".to_owned(),
-            args: args.into_iter().map(str::to_owned).collect(),
-            cwd: None,
-            env: BTreeMap::new(),
-            unset_env: Vec::new(),
-            stdin: None,
-            timeout_ms: Some(1_000),
-        }
+    fn fixture_args(args: Vec<&str>) -> Vec<String> {
+        args.into_iter().map(str::to_owned).collect()
     }
 
     #[test]
@@ -43,9 +38,9 @@ mod tests {
             executable: PathBuf::from(r"C:\toolchains\rustup.exe"),
             launcher: Launcher::Native,
         };
-        let request = fixture_request(vec!["--version"]);
 
-        let launch = LaunchEncoding::new(&resolved, &request).expect("encode native proxy");
+        let launch = LaunchEncoding::new(&resolved, &fixture_args(vec!["--version"]))
+            .expect("encode native proxy");
 
         assert_eq!(
             String::from_utf16(&launch.application[..launch.application.len() - 1])
@@ -66,20 +61,18 @@ mod tests {
             executable: PathBuf::from(r"C:\repo\probe.cmd"),
             launcher: Launcher::CmdCompat,
         };
-        let request = fixture_request(vec![
+        let args = fixture_args(vec![
             "%PATH%", "!", "^", "&", "|", "<", ">", "a\"b", "tail\\", "", "界",
         ]);
-        let launch = LaunchEncoding::new(&resolved, &request).expect("encode batch corpus");
+        let launch = LaunchEncoding::new(&resolved, &args).expect("encode batch corpus");
         let encoded = String::from_utf16(&launch.command_line[..launch.command_line.len() - 1])
             .expect("valid fixture UTF-16");
         assert!(encoded.starts_with("cmd.exe /e:ON /v:OFF /d /c \"\"C:\\repo\\probe.cmd\""));
         assert!(encoded.contains("%%cd:~,%PATH%%cd:~,%"));
         assert!(encoded.ends_with('"'));
 
-        let mut rejected = fixture_request(vec!["line\rbreak"]);
-        assert!(LaunchEncoding::new(&resolved, &rejected).is_err());
-        rejected.args = vec!["line\nbreak".to_owned()];
-        assert!(LaunchEncoding::new(&resolved, &rejected).is_err());
+        assert!(LaunchEncoding::new(&resolved, &fixture_args(vec!["line\rbreak"])).is_err());
+        assert!(LaunchEncoding::new(&resolved, &fixture_args(vec!["line\nbreak"])).is_err());
         assert!(finish_batch_command_line(vec![u16::from(b'x'); BATCH_COMMAND_LINE_LIMIT]).is_ok());
         assert!(
             finish_batch_command_line(vec![u16::from(b'x'); BATCH_COMMAND_LINE_LIMIT + 1]).is_err()
@@ -102,26 +95,31 @@ mod tests {
             FailurePoint::Running,
         ] {
             let pid_file = fixture.path().join(format!("{point:?}.pid"));
-            let mut request = fixture_request(vec![
+            let args = fixture_args(vec![
                 "--exact",
-                "tools::process::tests::windows_grandchild_child_fixture",
+                "tools::run_program::tests::windows_grandchild_child_fixture",
                 "--nocapture",
             ]);
-            request
-                .env
-                .insert("CODEXSHIM_PROCESS_FIXTURE".to_owned(), "child".to_owned());
-            request.env.insert(
+            let mut environment = EnvironmentPlan::default();
+            environment.overrides.push((
+                "CODEXSHIM_PROCESS_FIXTURE".to_owned(),
+                "child".to_owned(),
+            ));
+            environment.overrides.push((
                 "CODEXSHIM_PROCESS_PID_FILE".to_owned(),
                 pid_file.to_string_lossy().into_owned(),
-            );
+            ));
+            let plan = ExecPlan {
+                resolved: &resolved,
+                cwd: fixture.path(),
+                args: &args,
+                environment: &environment,
+                stdin: None,
+                streams: Streams::Separate,
+                timeout: Duration::from_secs(5),
+            };
             FAILURE_POINT.with(|configured| configured.set(Some(point)));
-            let result = run(
-                &resolved,
-                fixture.path(),
-                &request,
-                std::time::Duration::from_secs(5),
-                &tokio_util::sync::CancellationToken::new(),
-            );
+            let result = run(&plan, &tokio_util::sync::CancellationToken::new());
             FAILURE_POINT.with(|configured| configured.set(None));
             assert!(result.is_err(), "failure point {point:?} was not exercised");
             if let Ok(pid) = std::fs::read_to_string(&pid_file) {
@@ -131,39 +129,10 @@ mod tests {
     }
 
     #[test]
-    fn command_evaluation_launchers_and_ps1_are_rejected() {
-        let cmd = ResolvedProgram {
-            absolute: PathBuf::from(r"C:\tools\safe.exe"),
-            executable: PathBuf::from(r"C:\Windows\System32\cmd.exe"),
-            launcher: Launcher::Native,
-        };
-        let cmd_request = fixture_request(vec!["/d", "/c", "echo injected"]);
-        assert!(validate_launcher_request(&cmd, &cmd_request).is_err());
-
-        let powershell = ResolvedProgram {
-            absolute: PathBuf::from(r"C:\tools\safe.exe"),
-            executable: PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe"),
-            launcher: Launcher::Native,
-        };
-        for switch in [
-            "-Command",
-            "-c",
-            "-CommandWithArgs",
-            "-cwa",
-            "-EncodedCommand",
-            "-e",
-            "-ec",
-            "-enc",
-            "-command:Get-Process",
-            "-encodedcommand=payload",
-        ] {
-            let powershell_request = fixture_request(vec!["-NoProfile", switch, "Get-Process"]);
-            assert!(
-                validate_launcher_request(&powershell, &powershell_request).is_err(),
-                "{switch} must be rejected"
-            );
-        }
-        assert!(launcher_for(PathBuf::from("script.ps1").as_path()).is_err());
+    fn powershell_scripts_report_a_missing_launcher_capability() {
+        let error = launcher_for(PathBuf::from("script.ps1").as_path())
+            .expect_err(".ps1 has no launcher");
+        assert!(error.to_string().contains("not implemented"));
     }
 
     fn assert_process_is_gone(pid: u32) {

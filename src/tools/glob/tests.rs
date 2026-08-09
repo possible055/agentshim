@@ -332,7 +332,19 @@ mod tests {
 
     #[test]
     fn runtime_memory_charge_includes_safety_margin() {
-        assert_eq!(memory_charge(), 40 * 1024 * 1024);
-        assert!(memory_charge() <= MEMORY_SOFT_TARGET_BYTES);
+        let default = request("**/*");
+        assert_eq!(
+            memory_charge(&default),
+            8 * 1024 * 1024 + 200 * std::mem::size_of::<GlobMatch>()
+        );
+        let mut maximum = default;
+        maximum.offset = Some(MAX_MATCHES - 1);
+        maximum.limit = Some(1);
+        assert_eq!(
+            memory_charge(&maximum),
+            8 * 1024 * 1024 + MAX_MATCHES * std::mem::size_of::<GlobMatch>()
+        );
+        assert!(memory_charge(&maximum) <= MEMORY_SOFT_TARGET_BYTES);
+        assert!(memory_charge(&maximum).saturating_mul(16) < 1024 * 1024 * 1024);
     }
 }

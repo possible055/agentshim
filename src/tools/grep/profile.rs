@@ -59,7 +59,10 @@ pub struct GrepStageTimings {
     pub pathname_reopens: usize,
     pub render_copy_bytes: usize,
     pub candidate_count: usize,
+    pub searched_candidates: usize,
+    pub matched_candidates: usize,
     pub candidate_estimated_retained_bytes: usize,
+    pub candidate_retained_memory_bytes: usize,
     pub candidate_vec_capacity: usize,
     pub candidate_soft_target_crossings: usize,
     pub candidate_key_bytes: usize,
@@ -120,6 +123,8 @@ struct GrepProfileCounters {
     pathname_reopens: std::sync::atomic::AtomicUsize,
     render_copy_bytes: std::sync::atomic::AtomicUsize,
     candidate_count: std::sync::atomic::AtomicUsize,
+    searched_candidates: std::sync::atomic::AtomicUsize,
+    matched_candidates: std::sync::atomic::AtomicUsize,
     candidate_estimated_retained_bytes: std::sync::atomic::AtomicUsize,
     candidate_vec_capacity: std::sync::atomic::AtomicUsize,
     candidate_soft_target_crossings: std::sync::atomic::AtomicUsize,
@@ -169,6 +174,8 @@ impl Default for GrepProfileCounters {
             pathname_reopens: std::sync::atomic::AtomicUsize::new(0),
             render_copy_bytes: std::sync::atomic::AtomicUsize::new(0),
             candidate_count: std::sync::atomic::AtomicUsize::new(0),
+            searched_candidates: std::sync::atomic::AtomicUsize::new(0),
+            matched_candidates: std::sync::atomic::AtomicUsize::new(0),
             candidate_estimated_retained_bytes: std::sync::atomic::AtomicUsize::new(0),
             candidate_vec_capacity: std::sync::atomic::AtomicUsize::new(0),
             candidate_soft_target_crossings: std::sync::atomic::AtomicUsize::new(0),
@@ -313,6 +320,22 @@ impl GrepProfiler {
         }
     }
 
+    fn record_searched_candidate(&self) {
+        if let Self::Enabled(counters) = self {
+            counters
+                .searched_candidates
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn record_matched_candidate(&self) {
+        if let Self::Enabled(counters) = self {
+            counters
+                .matched_candidates
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     fn record_pathname_reopen(&self) {
         if let Self::Enabled(counters) = self {
             counters
@@ -335,6 +358,10 @@ impl GrepProfiler {
         let Self::Enabled(counters) = self else {
             unreachable!("disabled profiler has no snapshot");
         };
+        let candidate_count = load_usize(&counters.candidate_count);
+        let candidate_vec_capacity = load_usize(&counters.candidate_vec_capacity);
+        let candidate_estimated_retained_bytes =
+            load_usize(&counters.candidate_estimated_retained_bytes);
         GrepStageTimings {
             total_ns: load_u64(&counters.total_ns),
             setup_ns: load_u64(&counters.setup_ns),
@@ -374,11 +401,16 @@ impl GrepProfiler {
             mmap_requested_files: load_usize(&counters.mmap_requested_files),
             pathname_reopens: load_usize(&counters.pathname_reopens),
             render_copy_bytes: load_usize(&counters.render_copy_bytes),
-            candidate_count: load_usize(&counters.candidate_count),
-            candidate_estimated_retained_bytes: load_usize(
-                &counters.candidate_estimated_retained_bytes,
+            candidate_count,
+            searched_candidates: load_usize(&counters.searched_candidates),
+            matched_candidates: load_usize(&counters.matched_candidates),
+            candidate_estimated_retained_bytes,
+            candidate_retained_memory_bytes: candidate_estimated_retained_bytes.saturating_add(
+                candidate_vec_capacity
+                    .saturating_sub(candidate_count)
+                    .saturating_mul(std::mem::size_of::<Candidate>()),
             ),
-            candidate_vec_capacity: load_usize(&counters.candidate_vec_capacity),
+            candidate_vec_capacity,
             candidate_soft_target_crossings: load_usize(
                 &counters.candidate_soft_target_crossings,
             ),
@@ -544,6 +576,14 @@ impl GrepProfiler {
     }
 
     fn record_search_file(&self, _source: GrepSourcePolicy) {
+        let _ = self;
+    }
+
+    fn record_searched_candidate(&self) {
+        let _ = self;
+    }
+
+    fn record_matched_candidate(&self) {
         let _ = self;
     }
 

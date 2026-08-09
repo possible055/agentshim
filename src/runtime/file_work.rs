@@ -88,6 +88,18 @@ impl FileWorkPool {
     }
 
     #[must_use]
+    pub fn try_credits(&self, maximum: usize) -> Vec<FileWorkCredit> {
+        let mut credits = Vec::with_capacity(maximum.min(self.extra_capacity()));
+        while credits.len() < maximum {
+            let Some(credit) = self.try_credit() else {
+                break;
+            };
+            credits.push(credit);
+        }
+        credits
+    }
+
+    #[must_use]
     pub fn begin_request(self: &Arc<Self>) -> FileWorkRequest {
         self.active_requests.fetch_add(1, Ordering::AcqRel);
         FileWorkRequest {

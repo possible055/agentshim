@@ -10,6 +10,7 @@ fn collect_candidates(
     glob: Option<&globset::GlobMatcher>,
     cancellation: &CancellationToken,
     traversal: GrepTraversal,
+    resources: &RuntimeResources,
     #[cfg(any(test, feature = "bench-internals"))] literal_prefix: Option<&Path>,
     policy: CandidatePolicy,
     profiler: &GrepProfiler,
@@ -35,17 +36,29 @@ fn collect_candidates(
             true,
         ));
     }
-    let mut activity = None;
+    let wants_parallel = match traversal {
+        GrepTraversal::Adaptive => prefer_parallel_root(access, &base),
+        GrepTraversal::ParallelBatched => true,
+        #[cfg(any(test, feature = "bench-internals"))]
+        GrepTraversal::ParallelBatchedLiteralPrefix => true,
+        GrepTraversal::Serial => false,
+        #[cfg(any(test, feature = "bench-internals"))]
+        GrepTraversal::SerialLiteralPrefix => false,
+    };
+    let pool = resources.file_work_pool();
+    let traversal_credits = if wants_parallel {
+        pool.try_credits(pool.extra_capacity())
+    } else {
+        Vec::new()
+    };
+    let traversal_threads = traversal_credits.len().saturating_add(1);
     let traversal = match traversal {
-        GrepTraversal::Adaptive => {
-            let guard = ActiveAdaptiveGrepTraversal::enter();
-            let selected = if guard.was_idle && prefer_parallel_root(access, &base) {
-                GrepTraversal::ParallelBatched
-            } else {
-                GrepTraversal::Serial
-            };
-            activity = Some(guard);
-            selected
+        GrepTraversal::Adaptive if traversal_credits.is_empty() => GrepTraversal::Serial,
+        GrepTraversal::Adaptive => GrepTraversal::ParallelBatched,
+        GrepTraversal::ParallelBatched if traversal_credits.is_empty() => GrepTraversal::Serial,
+        #[cfg(any(test, feature = "bench-internals"))]
+        GrepTraversal::ParallelBatchedLiteralPrefix if traversal_credits.is_empty() => {
+            GrepTraversal::SerialLiteralPrefix
         }
         selected => selected,
     };
@@ -66,6 +79,7 @@ fn collect_candidates(
             cancellation,
             None,
             policy,
+            traversal_threads,
         )?,
         #[cfg(any(test, feature = "bench-internals"))]
         GrepTraversal::SerialLiteralPrefix => collect_candidates_serial(
@@ -84,18 +98,62 @@ fn collect_candidates(
             cancellation,
             literal_prefix,
             policy,
+            traversal_threads,
         )?,
     };
-    drop(activity);
+    drop(traversal_credits);
     drop(traversal_span);
     let sort_span = profiler.span(GrepStage::CandidateSort);
-    sorting::sort_by(&mut candidates, cancellation, |left, right| {
-        left.path.sort_key().cmp(right.path.sort_key())
-    })
-    .map_err(|_| GrepError::Cancelled)?;
+    sort_candidates(&mut candidates, cancellation)?;
     drop(sort_span);
     profiler.record_candidate_metrics(metrics);
     Ok((candidates, summary, false))
+}
+
+fn sort_candidates(
+    candidates: &mut [Candidate],
+    cancellation: &CancellationToken,
+) -> Result<(), GrepError> {
+    let compare =
+        |left: &Candidate, right: &Candidate| left.path.sort_key().cmp(right.path.sort_key());
+    #[cfg(feature = "bench-internals")]
+    {
+        match std::env::var(BENCH_SORT_ENV).as_deref() {
+            Ok("heapsort") => sorting::sort_by(candidates, cancellation, compare),
+            Ok("unstable") => sorting::sort_unstable_by(candidates, cancellation, compare),
+            Err(std::env::VarError::NotPresent) => {
+                production_sort_candidates(candidates, cancellation, compare)
+            }
+            Ok(value) => {
+                return Err(GrepError::Validation(format!(
+                    "{BENCH_SORT_ENV} must be heapsort or unstable; got {value}"
+                )));
+            }
+            Err(error) => {
+                return Err(GrepError::Validation(format!(
+                    "{BENCH_SORT_ENV} is not valid Unicode: {error}"
+                )));
+            }
+        }
+        .map_err(|_| GrepError::Cancelled)
+    }
+    #[cfg(not(feature = "bench-internals"))]
+    {
+        production_sort_candidates(candidates, cancellation, compare)
+            .map_err(|_| GrepError::Cancelled)
+    }
+}
+
+fn production_sort_candidates(
+    candidates: &mut [Candidate],
+    cancellation: &CancellationToken,
+    compare: impl FnMut(&Candidate, &Candidate) -> Ordering,
+) -> Result<(), sorting::SortCancelled> {
+    if candidates.len() >= UNSTABLE_SORT_MIN_CANDIDATES {
+        sorting::sort_unstable_by(candidates, cancellation, compare)
+    } else {
+        sorting::sort_by(candidates, cancellation, compare)
+    }
 }
 
 fn collect_candidates_serial(
@@ -157,6 +215,7 @@ fn collect_candidates_parallel(
     cancellation: &CancellationToken,
     literal_prefix: Option<&Path>,
     policy: CandidatePolicy,
+    traversal_threads: usize,
 ) -> Result<(Vec<Candidate>, TraversalSummary, CandidateMetrics), GrepError> {
     let collection = Mutex::new(CandidateCollection::new(policy));
     let visit =
@@ -167,7 +226,10 @@ fn collect_candidates_parallel(
             base,
             false,
             cancellation,
-            PARALLEL_BATCH_SIZE,
+            ParallelTraversal {
+                batch_size: PARALLEL_BATCH_SIZE,
+                threads: traversal_threads,
+            },
             literal_prefix,
             visit,
         )?
@@ -177,7 +239,10 @@ fn collect_candidates_parallel(
             base,
             false,
             cancellation,
-            PARALLEL_BATCH_SIZE,
+            ParallelTraversal {
+                batch_size: PARALLEL_BATCH_SIZE,
+                threads: traversal_threads,
+            },
             visit,
         )?
     };
@@ -247,7 +312,7 @@ fn candidate_from_entry(
     {
         return Ok(None);
     }
-    let path = access.resolve_traversal_entry(base, absolute)?;
+    let path = access.resolve_walked_entry(base, key, absolute)?;
     candidate(path).map(Some)
 }
 
@@ -436,24 +501,6 @@ impl CandidateCollection {
         if self.terminal_error.is_none() {
             self.terminal_error = Some(error);
         }
-    }
-}
-
-struct ActiveAdaptiveGrepTraversal {
-    was_idle: bool,
-}
-
-impl ActiveAdaptiveGrepTraversal {
-    fn enter() -> Self {
-        Self {
-            was_idle: ACTIVE_ADAPTIVE_GREP_TRAVERSALS.fetch_add(1, AtomicOrdering::AcqRel) == 0,
-        }
-    }
-}
-
-impl Drop for ActiveAdaptiveGrepTraversal {
-    fn drop(&mut self) {
-        ACTIVE_ADAPTIVE_GREP_TRAVERSALS.fetch_sub(1, AtomicOrdering::AcqRel);
     }
 }
 
@@ -652,6 +699,7 @@ fn search_opened_candidate_with_searcher(
     before: &FileFingerprint,
 ) -> Result<FileOutcome, GrepError> {
     let mut sink = PlanSink::new(context.matcher, context.plan, context.cancellation);
+    context.profiler.record_searched_candidate();
     let scan_span = context.profiler.span(GrepStage::SearchScanWorker);
     let (search_result, file) = search_source(file, before, context, searcher, &mut sink);
     drop(scan_span);
@@ -691,7 +739,11 @@ fn search_opened_candidate_with_searcher(
     let path = sink
         .matched_file()
         .then(|| Arc::clone(&candidate.path));
-    sink.finish(path)
+    let outcome = sink.finish(path)?;
+    if outcome.matched {
+        context.profiler.record_matched_candidate();
+    }
+    Ok(outcome)
 }
 
 fn search_source(
@@ -1335,7 +1387,6 @@ fn ordered_search(
     context: &OrderedSearchContext<'_>,
 ) -> Result<Page, GrepError> {
     let pool = context.resources.file_work_pool();
-    let _request = pool.begin_request();
     let shared: SharedSearchWindow = Arc::new((
         Mutex::new(PoolWindow {
             slots: (0..pool.extra_capacity())

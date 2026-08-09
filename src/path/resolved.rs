@@ -1,12 +1,24 @@
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ResolvedPath {
     key: PathBuf,
-    capability_key: PathBuf,
+    capability_key: Option<PathBuf>,
     absolute: PathBuf,
     sort_key: PathSortKey,
-    slash_path: Option<String>,
+    slash_path: std::sync::OnceLock<Option<String>>,
     backend: PathBackend,
 }
+
+impl PartialEq for ResolvedPath {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+            && self.capability_key == other.capability_key
+            && self.absolute == other.absolute
+            && self.sort_key == other.sort_key
+            && self.backend == other.backend
+    }
+}
+
+impl Eq for ResolvedPath {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PathBackend {
@@ -33,7 +45,9 @@ impl ResolvedPath {
 
     #[must_use]
     pub fn slash_path(&self) -> Option<&str> {
-        self.slash_path.as_deref()
+        self.slash_path
+            .get_or_init(|| slash_path(&self.key))
+            .as_deref()
     }
 
     #[must_use]
@@ -57,26 +71,48 @@ impl ResolvedPath {
         ResolvedPathMemory {
             key_bytes: self.key.as_os_str().len(),
             key_capacity: self.key.capacity(),
-            capability_key_bytes: self.capability_key.as_os_str().len(),
-            capability_key_capacity: self.capability_key.capacity(),
+            capability_key_bytes: self
+                .capability_key
+                .as_ref()
+                .map_or(0, |key| key.as_os_str().len()),
+            capability_key_capacity: self.capability_key.as_ref().map_or(0, PathBuf::capacity),
             absolute_bytes: self.absolute.as_os_str().len(),
             absolute_capacity: self.absolute.capacity(),
             sort_key_bytes: self.sort_key.byte_len(),
             sort_key_capacity: self.sort_key.capacity_bytes(),
-            slash_path_bytes: self.slash_path.as_ref().map_or(0, String::len),
-            slash_path_capacity: self.slash_path.as_ref().map_or(0, String::capacity),
+            slash_path_bytes: self
+                .slash_path
+                .get()
+                .and_then(Option::as_ref)
+                .map_or(0, String::len),
+            slash_path_capacity: self
+                .slash_path
+                .get()
+                .and_then(Option::as_ref)
+                .map_or(0, String::capacity),
         }
     }
 
     fn capability_key(&self) -> &Path {
-        &self.capability_key
+        self.capability_key.as_deref().unwrap_or(&self.key)
+    }
+
+    fn repository(absolute: PathBuf, key: PathBuf) -> Self {
+        Self {
+            sort_key: PathSortKey::new(&key),
+            slash_path: std::sync::OnceLock::new(),
+            capability_key: None,
+            key,
+            absolute,
+            backend: PathBackend::Repository,
+        }
     }
 
     fn ambient(absolute: PathBuf, key: PathBuf) -> Self {
         Self {
             sort_key: PathSortKey::new(&key),
-            slash_path: slash_path(&key),
-            capability_key: key.clone(),
+            slash_path: std::sync::OnceLock::new(),
+            capability_key: None,
             key,
             absolute,
             backend: PathBackend::Ambient,
@@ -86,9 +122,9 @@ impl ResolvedPath {
     fn codex(absolute: PathBuf, key: PathBuf, capability_key: PathBuf, index: usize) -> Self {
         Self {
             sort_key: PathSortKey::new(&key),
-            slash_path: slash_path(&key),
+            slash_path: std::sync::OnceLock::new(),
             key,
-            capability_key,
+            capability_key: Some(capability_key),
             absolute,
             backend: PathBackend::Codex(index),
         }
@@ -121,7 +157,7 @@ type PlatformSortKey = Vec<u16>;
 type PlatformSortKey = String;
 
 impl PathSortKey {
-    fn new(path: &Path) -> Self {
+    pub(crate) fn new(path: &Path) -> Self {
         Self(platform_sort_key(path))
     }
 
@@ -141,8 +177,7 @@ impl PathSortKey {
         }
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
-    fn capacity_bytes(&self) -> usize {
+    pub(crate) fn capacity_bytes(&self) -> usize {
         #[cfg(unix)]
         {
             self.0.capacity()

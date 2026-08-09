@@ -32,6 +32,7 @@ const GREP_LANES_ENV: &str = "CODEXSHIM_BENCH_GREP_LANES";
 const GREP_TRAVERSALS_ENV: &str = "CODEXSHIM_BENCH_GREP_TRAVERSALS";
 const GREP_WORKLOAD_ENV: &str = "CODEXSHIM_BENCH_GREP_WORKLOAD";
 const GREP_GLOB_ENV: &str = "CODEXSHIM_BENCH_GREP_GLOB";
+const GREP_SELECTED_FILES_ENV: &str = "CODEXSHIM_BENCH_GREP_SELECTED_FILES";
 const GLOB_VARIANTS_ONLY_ENV: &str = "CODEXSHIM_BENCH_GLOB_VARIANTS_ONLY";
 const GLOB_PROFILE_ONLY_ENV: &str = "CODEXSHIM_BENCH_GLOB_PROFILE_ONLY";
 const GLOB_PATTERN_ENV: &str = "CODEXSHIM_BENCH_GLOB_PATTERN";
@@ -45,7 +46,6 @@ const GREP_PATHNAME_REOPEN_ENV: &str = "CODEXSHIM_BENCH_GREP_PATHNAME_REOPEN";
 const GREP_MODE_ENV: &str = "CODEXSHIM_BENCH_GREP_MODE";
 const BENCH_COMMIT_ENV: &str = "CODEXSHIM_BENCH_COMMIT";
 const BENCH_WORKTREE_ENV: &str = "CODEXSHIM_BENCH_WORKTREE";
-const SPARSE_GREP_FIXTURE_THRESHOLD: usize = 100_000;
 const GLOB_P95_ENV: &str = "CODEXSHIM_BENCH_MAX_GLOB_P95_MS_PER_1K";
 const GREP_P95_ENV: &str = "CODEXSHIM_BENCH_MAX_GREP_P95_MS_PER_1K";
 const READ_P95_ENV: &str = "CODEXSHIM_BENCH_MAX_READ_P95_MS";
@@ -212,17 +212,24 @@ fn set_codex_home(value: Option<OsString>) {
 
 fn create_corpus(directory: &Path, files: usize) {
     let workload = grep_workload();
+    let selected_files = workload.selected_files(files);
     for index in 0..files {
         let shard = directory.join(format!("shard-{:06}", index / 1_000));
         if index % 1_000 == 0 {
             fs::create_dir_all(&shard).expect("corpus shard");
         }
-        let content = if workload.includes(index) {
+        let selected = index < selected_files;
+        let content = if selected {
             workload.content(index)
         } else {
             format!("pub fn fixture_{index}() {{}}\n")
         };
-        fs::write(shard.join(format!("file-{index:09}.rs")), content).expect("corpus file");
+        let suffix = if selected && !matches!(workload.file_size, GrepFileSize::Legacy) {
+            "selected.rs"
+        } else {
+            "rs"
+        };
+        fs::write(shard.join(format!("file-{index:09}.{suffix}")), content).expect("corpus file");
     }
 }
 
@@ -451,6 +458,8 @@ fn profile_glob(
                 },
                 "batches": stages.batches,
                 "matched_entries": stages.matched_entries,
+                "retained_entries": stages.retained_entries,
+                "retained_memory_bytes": stages.retained_memory_bytes,
                 "output_bytes": profile.output.len(),
                 "output_equivalent": true,
             })
@@ -460,12 +469,11 @@ fn profile_glob(
 
 fn grep_request(directory: &str, files: usize) -> GrepRequest {
     let workload = grep_workload();
+    let _selected_files = workload.selected_files(files);
     GrepRequest {
         pattern: "needle-".to_owned(),
         path: Some(directory.to_owned()),
-        glob: Some(
-            std::env::var(GREP_GLOB_ENV).unwrap_or_else(|_| workload.glob(files).to_owned()),
-        ),
+        glob: Some(std::env::var(GREP_GLOB_ENV).unwrap_or_else(|_| workload.glob().to_owned())),
         mode: Some(grep_mode()),
         fixed_strings: Some(true),
         case: None,
@@ -600,12 +608,18 @@ fn emit_grep_profile(emission: &GrepProfileEmission<'_>) {
                 "scope": emission.scope,
                 "workload": grep_workload().name,
                 "fixture_files": emission.files,
+                "selected_files": grep_workload().selected_files(emission.files),
                 "traversal": emission.traversal,
                 "source": emission.source,
                 "pathname_reopen": emission.pathname_reopen,
+                "open_strategy": "default",
+                "sort": std::env::var("CODEXSHIM_BENCH_GREP_SORT")
+                    .unwrap_or_else(|_| "heapsort".to_owned()),
                 "lanes": stages.lanes,
                 "candidate_count": stages.candidate_count,
-                "candidate_estimated_retained_bytes": stages.candidate_estimated_retained_bytes,
+                "searched_candidates": stages.searched_candidates,
+                "matched_candidates": stages.matched_candidates,
+                "candidate_retained_memory_bytes": stages.candidate_retained_memory_bytes,
                 "candidate_vec_capacity": stages.candidate_vec_capacity,
                 "candidate_soft_target_crossings": stages.candidate_soft_target_crossings,
                 "candidate_path_bytes": {
@@ -650,12 +664,18 @@ fn full_grep_profile_json(emission: &GrepProfileEmission<'_>) -> serde_json::Val
         "scope": emission.scope,
         "workload": grep_workload().name,
         "fixture_files": emission.files,
+        "selected_files": grep_workload().selected_files(emission.files),
         "traversal": emission.traversal,
         "source": emission.source,
         "pathname_reopen": emission.pathname_reopen,
+        "open_strategy": "default",
+        "sort": std::env::var("CODEXSHIM_BENCH_GREP_SORT")
+            .unwrap_or_else(|_| "heapsort".to_owned()),
         "lanes": stages.lanes,
         "candidate_count": stages.candidate_count,
-        "candidate_estimated_retained_bytes": stages.candidate_estimated_retained_bytes,
+        "searched_candidates": stages.searched_candidates,
+        "matched_candidates": stages.matched_candidates,
+        "candidate_retained_memory_bytes": stages.candidate_retained_memory_bytes,
         "candidate_vec_capacity": stages.candidate_vec_capacity,
         "candidate_soft_target_crossings": stages.candidate_soft_target_crossings,
         "candidate_path_bytes": {
@@ -1045,22 +1065,28 @@ impl GrepWorkload {
         }
     }
 
-    fn includes(self, index: usize) -> bool {
-        match self.file_size {
-            GrepFileSize::Legacy | GrepFileSize::OneKiB => true,
-            GrepFileSize::SixtyFourKiB => index < 1_000,
-            GrepFileSize::FourMiB => index < 10,
+    fn selected_files(self, files: usize) -> usize {
+        if matches!(self.file_size, GrepFileSize::Legacy) {
+            return files;
         }
+        std::env::var(GREP_SELECTED_FILES_ENV)
+            .unwrap_or_else(|_| {
+                panic!("{GREP_SELECTED_FILES_ENV} is required for non-legacy grep workloads")
+            })
+            .parse::<usize>()
+            .ok()
+            .filter(|selected| (1..=files).contains(selected))
+            .unwrap_or_else(|| {
+                panic!("{GREP_SELECTED_FILES_ENV} must be an integer from 1 to {files}")
+            })
     }
 
-    fn glob(self, files: usize) -> &'static str {
+    fn glob(self) -> &'static str {
         match self.file_size {
-            GrepFileSize::Legacy if files >= SPARSE_GREP_FIXTURE_THRESHOLD => {
-                "**/shard-000000/*.rs"
+            GrepFileSize::Legacy => "**/*.rs",
+            GrepFileSize::OneKiB | GrepFileSize::SixtyFourKiB | GrepFileSize::FourMiB => {
+                "**/*.selected.rs"
             }
-            GrepFileSize::Legacy | GrepFileSize::OneKiB => "**/*.rs",
-            GrepFileSize::SixtyFourKiB => "**/shard-000000/*.rs",
-            GrepFileSize::FourMiB => "**/file-00000000?.rs",
         }
     }
 

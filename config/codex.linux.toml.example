@@ -1,18 +1,24 @@
 [mcp_servers.codexshim]
 command = "/absolute/path/to/codexshim"
-args = ["serve"]
+args = ["serve", "--allow-programs", "git,cargo,rustup,gh"]
 # Normal mode includes repository and Codex skill/plugin paths. To allow other
 # absolute read/grep/glob paths, use:
-# args = ["serve", "--read-scope", "unrestricted"]
+# args = ["serve", "--read-scope", "unrestricted", "--allow-programs", "git,cargo,rustup,gh"]
 required = true
 supports_parallel_tool_calls = true
 startup_timeout_sec = 15
-tool_timeout_sec = 310
-enabled_tools = ["read", "grep", "glob", "run_process"]
+tool_timeout_sec = 610
+enabled_tools = ["read", "grep", "glob", "run_program", "bash"]
 default_tools_approval_mode = "writes"
+# CODEXSHIM_OUTPUT_BYTES raises the per-call output ceiling; 4096-262144, default 32000.
 env = { CODEX_MCP_PROTOCOL_VERSION = "2026-07-28" }
 
-[mcp_servers.codexshim.tools.run_process]
+# run_program is allowlisted and takes literal argv, so it can be approved on request.
+[mcp_servers.codexshim.tools.run_program]
+approval_mode = "on-request"
+
+# bash takes an arbitrary command line, so it always prompts.
+[mcp_servers.codexshim.tools.bash]
 approval_mode = "prompt"
 
 [features]

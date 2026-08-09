@@ -64,11 +64,20 @@ mod tests {
         assert!(skill.is_external());
         assert!(!skill.is_ambient());
         assert!(access.metadata_kind(&skill).expect("metadata").is_file);
+        let walked = access
+            .resolve_walked_entry(
+                &skill_root,
+                Path::new("example/SKILL.md"),
+                skill.absolute(),
+            )
+            .expect("walked skill entry");
+        let external = access
+            .resolve_external_entry(&skill_root, skill.absolute())
+            .expect("external skill entry");
+        assert_eq!(walked, external);
+        assert_eq!(walked.capability_key(), external.capability_key());
         assert_eq!(
-            access
-                .resolve_external_entry(&skill_root, skill.absolute())
-                .expect("skill entry")
-                .key(),
+            external.key(),
             Path::new("example/SKILL.md")
         );
         assert_eq!(
@@ -112,6 +121,94 @@ mod tests {
         assert_eq!(relative.key(), Path::new("src/lib.rs"));
         assert_eq!(relative, absolute);
         assert_eq!(relative.slash_path(), Some("src/lib.rs"));
+    }
+
+    #[test]
+    fn walked_repository_entries_match_general_resolution() {
+        let fixture = tempfile::tempdir().expect("create fixture");
+        fs::create_dir(fixture.path().join("src")).expect("create src");
+        fs::write(fixture.path().join("src/lib.rs"), "pub fn fixture() {}")
+            .expect("write fixture");
+        let access = FileAccess::new(
+            Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
+            ReadScope::Normal,
+        );
+        let operation_root = access.resolve(Path::new("src")).expect("operation root");
+        let absolute = access.root().path().join("src/lib.rs");
+
+        let walked = access
+            .resolve_walked_entry(&operation_root, Path::new("src/lib.rs"), &absolute)
+            .expect("walked entry");
+        let general = access.resolve(&absolute).expect("general resolution");
+
+        assert_eq!(walked, general);
+        assert_eq!(walked.capability_key(), general.capability_key());
+        assert_eq!(walked.slash_path(), general.slash_path());
+    }
+
+    #[test]
+    fn walked_repository_entries_with_curdir_use_normalized_resolution() {
+        let fixture = tempfile::tempdir().expect("create fixture");
+        fs::create_dir(fixture.path().join("src")).expect("create src");
+        fs::write(fixture.path().join("src/lib.rs"), "pub fn fixture() {}")
+            .expect("write fixture");
+        let access = FileAccess::new(
+            Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
+            ReadScope::Normal,
+        );
+        let operation_root = access.resolve(Path::new(".")).expect("operation root");
+        let key = Path::new("./src/lib.rs");
+        let walked = access
+            .resolve_walked_entry(&operation_root, key, &access.root().path().join(key))
+            .expect("walked entry");
+
+        assert_eq!(walked.key(), Path::new("src/lib.rs"));
+        assert_eq!(walked.slash_path(), Some("src/lib.rs"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walked_repository_absolute_path_with_curdir_is_normalized_even_when_key_is_clean() {
+        let fixture = tempfile::tempdir().expect("create fixture");
+        fs::create_dir(fixture.path().join("src")).expect("create src");
+        fs::write(fixture.path().join("src/lib.rs"), "pub fn fixture() {}")
+            .expect("write fixture");
+        let access = FileAccess::new(
+            Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
+            ReadScope::Normal,
+        );
+        let operation_root = access.resolve(Path::new(".")).expect("operation root");
+        let absolute = access.root().path().join("./src/lib.rs");
+        let walked = access
+            .resolve_walked_entry(&operation_root, Path::new("src/lib.rs"), &absolute)
+            .expect("walked entry");
+
+        assert_eq!(walked.absolute(), access.root().path().join("src/lib.rs"));
+        assert!(!walked.absolute().to_string_lossy().contains("/./"));
+    }
+
+    #[test]
+    fn walked_ambient_entries_match_external_resolution() {
+        let repository = tempfile::tempdir().expect("repository fixture");
+        let outside = tempfile::tempdir().expect("outside fixture");
+        fs::create_dir(outside.path().join("nested")).expect("nested directory");
+        let absolute = outside.path().join("nested/file.txt");
+        fs::write(&absolute, "fixture").expect("fixture file");
+        let access = FileAccess::new(
+            Arc::new(RepositoryRoot::open(repository.path()).expect("root")),
+            ReadScope::Unrestricted,
+        );
+        let operation_root = access.resolve(outside.path()).expect("operation root");
+
+        let walked = access
+            .resolve_walked_entry(&operation_root, Path::new("nested/file.txt"), &absolute)
+            .expect("walked entry");
+        let general = access
+            .resolve_external_entry(&operation_root, &absolute)
+            .expect("external resolution");
+
+        assert_eq!(walked, general);
+        assert_eq!(walked.slash_path(), Some("nested/file.txt"));
     }
 
     #[test]

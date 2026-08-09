@@ -6,6 +6,14 @@ fn parse_request<T: DeserializeOwned>(
         .map_err(|error| format!("invalid {tool} request: {error}"))
 }
 
+/// Which admission class a `bash` call belongs to has to be known before the request is parsed,
+/// because parsing happens after admission. This reads the one field that decides it, exactly as
+/// `BashRequest` does: literal `true`, nothing coerced. A disagreement with the parsed request is
+/// still caught later, so this only has to be honest, not authoritative.
+fn requests_detach(arguments: Option<&JsonObject>) -> bool {
+    arguments.is_some_and(|arguments| arguments.get("detach") == Some(&Value::Bool(true)))
+}
+
 fn tool_error(
     code: &'static str,
     retryable: bool,
@@ -158,13 +166,15 @@ impl DiagnosticError for crate::tools::grep::GrepError {
     }
 }
 
-impl DiagnosticError for crate::tools::process::ProcessError {
+impl DiagnosticError for crate::tools::exec::ProcessError {
     fn error_class(&self) -> &'static str {
-        use crate::tools::process::ProcessError;
+        use crate::tools::exec::ProcessError;
         match self {
             ProcessError::Validation(_) => "validation",
             ProcessError::Resolve(_) => "path",
-            ProcessError::Io(_) => "io",
+            ProcessError::NotPermitted(_) => "not_permitted",
+            ProcessError::ResourceBusy(_) => "resource_busy",
+            ProcessError::Io(_) | ProcessError::Unavailable(_) => "io",
             ProcessError::Timeout { .. } | ProcessError::TimeoutBeforeSpawn { .. } => {
                 "resource_timeout"
             }
@@ -174,8 +184,22 @@ impl DiagnosticError for crate::tools::process::ProcessError {
         }
     }
 
+    /// `io` is retryable by default because most of it is transient. A missing interpreter is
+    /// not: the answer is fixed for the life of this server instance, and advertising a retry
+    /// invites the model to spend its turns re-running a call that cannot start.
+    fn retryable(&self) -> bool {
+        use crate::tools::exec::ProcessError;
+        match self {
+            ProcessError::Unavailable(_) => false,
+            other => matches!(
+                other.error_class(),
+                "io" | "resource_timeout" | "resource_busy"
+            ),
+        }
+    }
+
     fn details(&self) -> Option<Value> {
-        use crate::tools::process::ProcessError;
+        use crate::tools::exec::ProcessError;
         match self {
             ProcessError::Timeout { details, .. } => serde_json::to_value(details).ok(),
             ProcessError::TimeoutBeforeSpawn { timeout_ms } => Some(json!({
@@ -199,6 +223,18 @@ fn classified_tool_error(
     tool_error(error_class, retryable, message, None)
 }
 
+fn diagnostic_tool_error<E: DiagnosticError + ?Sized>(error: &E) -> CallToolResponse {
+    let error_class = error.error_class();
+    let details = error.details();
+    tracing::error!(target: "codexshim", event = "tool_error", phase = "response", outcome = "error", error_class);
+    tool_error(
+        error_class,
+        error.retryable(),
+        error.to_string(),
+        details.as_ref(),
+    )
+}
+
 fn blocking_response<E: DiagnosticError>(
     tool: &str,
     run_ms: u64,
@@ -206,7 +242,7 @@ fn blocking_response<E: DiagnosticError>(
 ) -> CallToolResponse {
     match result {
         Ok(Ok(output)) => {
-            let outcome = if tool == "run_process" && output.child_nonzero {
+            let outcome = if output.child_nonzero {
                 "child_nonzero"
             } else {
                 "success"
@@ -218,35 +254,39 @@ fn blocking_response<E: DiagnosticError>(
             }
             CallToolResult::success(vec![ContentBlock::text(output.text)]).into()
         }
-        Ok(Err(error)) => {
-            let error_class = error.error_class();
-            let details = error.details();
-            tracing::error!(target: "codexshim", event = "tool_error", phase = "response", outcome = "error", error_class);
-            tool_error(
-                error_class,
-                error.retryable(),
-                error.to_string(),
-                details.as_ref(),
-            )
-        }
+        Ok(Err(error)) => diagnostic_tool_error(&error),
         Err(error) => {
             classified_tool_error("worker_panic", format!("{tool} worker failed: {error}"))
         }
     }
 }
 
-fn process_queue_timeout(timeout_ms: u64) -> CallToolResponse {
+fn queue_timeout(tool: &str, timeout_ms: u64) -> CallToolResponse {
     classified_tool_error(
         "resource_timeout",
-        process_queue_timeout_message(timeout_ms),
+        queue_timeout_message(tool, timeout_ms),
     )
 }
 
-fn resource_busy(tool: &str) -> CallToolResponse {
-    classified_tool_error(
-        "resource_busy",
-        format!("{tool} capacity is busy; retry the request later"),
+/// Admission runs before the per-call tracing span exists, so the tool and the admission class
+/// are logged explicitly here; without them a saturated server cannot be told apart from a
+/// saturated read-only pool in diagnostics.
+fn resource_busy(tool: &str, admission: &'static str) -> CallToolResponse {
+    resource_busy_with_message(
+        tool,
+        admission,
+        format!("{tool} {admission} capacity is busy; retry the request later"),
     )
+}
+
+fn resource_busy_with_message(
+    tool: &str,
+    admission: &'static str,
+    message: impl Into<String>,
+) -> CallToolResponse {
+    tracing::error!(target: "codexshim", event = "tool_error", phase = "request", outcome = "error", error_class = "resource_busy", tool, admission);
+    let retryable = true;
+    tool_error("resource_busy", retryable, message, None)
 }
 
 fn cancellation_class(request: &CancellationToken, shutdown: &CancellationToken) -> &'static str {
@@ -261,9 +301,9 @@ fn duration_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-fn process_queue_timeout_message(timeout_ms: u64) -> String {
+fn queue_timeout_message(tool: &str, timeout_ms: u64) -> String {
     format!(
-        "run_process timed out after {timeout_ms} ms while waiting for process capacity; no child was started"
+        "{tool} timed out after {timeout_ms} ms while waiting for process capacity; no child was started"
     )
 }
 
@@ -288,9 +328,9 @@ fn relayed_cancellation(
     (cancellation, relay)
 }
 
-fn tool_catalog(read_scope: ReadScope) -> &'static [Tool; 4] {
-    static NORMAL_TOOLS: OnceLock<[Tool; 4]> = OnceLock::new();
-    static UNRESTRICTED_TOOLS: OnceLock<[Tool; 4]> = OnceLock::new();
+fn tool_catalog(read_scope: ReadScope) -> &'static [Tool; 5] {
+    static NORMAL_TOOLS: OnceLock<[Tool; 5]> = OnceLock::new();
+    static UNRESTRICTED_TOOLS: OnceLock<[Tool; 5]> = OnceLock::new();
     let tools = match read_scope {
         ReadScope::Normal => &NORMAL_TOOLS,
         ReadScope::Unrestricted => &UNRESTRICTED_TOOLS,
@@ -300,7 +340,8 @@ fn tool_catalog(read_scope: ReadScope) -> &'static [Tool; 4] {
             read_tool(read_scope),
             grep_tool(read_scope),
             glob_tool(read_scope),
-            run_process_tool(),
+            run_program_tool(),
+            bash_tool(),
         ]
     })
 }
@@ -473,10 +514,15 @@ fn glob_tool(read_scope: ReadScope) -> Tool {
     .with_annotations(read_only_annotations())
 }
 
-fn run_process_tool() -> Tool {
+fn run_program_tool() -> Tool {
     Tool::new(
-        "run_process",
-        "Run one local program with structured arguments without accepting a PowerShell or shell command string. This is an open-world, destructive operation and may require approval.",
+        "run_program",
+        "Run one permitted local program directly with literal arguments and no shell. There is \
+         no shell, so pipes, redirection, globbing, and variable expansion do not happen. \
+         Arguments are passed literally — do not add quoting. Prefer this when arguments contain \
+         characters a shell would mangle, such as Windows paths, regexes, and JSON. If the \
+         program is not permitted, this returns a not_permitted error — use bash instead; do not \
+         work around it. This is an open-world, destructive operation and may require approval.",
         schema(json!({
             "type": "object",
             "additionalProperties": false,
@@ -510,7 +556,7 @@ fn run_process_tool() -> Tool {
                 "timeout_ms": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 300_000,
+                    "maximum": 600_000,
                     "default": 120_000
                 },
                 "unset_env": {
@@ -521,6 +567,63 @@ fn run_process_tool() -> Tool {
                 }
             },
             "required": ["program"]
+        })),
+    )
+    .with_annotations(
+        ToolAnnotations::new()
+            .read_only(false)
+            .destructive(true)
+            .idempotent(false)
+            .open_world(true),
+    )
+}
+
+fn bash_tool() -> Tool {
+    Tool::new(
+        "bash",
+        "Run a POSIX bash command line and return merged stdout and stderr with the exit code. \
+         Write POSIX bash, never PowerShell, on every platform. The command runs \
+         non-interactively with no TTY and stdin closed, so pass flags such as -y or --no-edit \
+         instead of expecting a prompt. A non-zero exit code is a normal result, not a tool \
+         error. Both output streams are merged into one pipe, so lines appear in pipe-write \
+         order and cannot be attributed to a stream; a program that buffers stdout but not \
+         stderr can still interleave them differently from what a terminal would show. Output \
+         above the byte budget is truncated in the middle: redirect to a file and page it with \
+         read when you need all of it. The default timeout is 120000 ms and the maximum is \
+         600000 ms; for work that needs longer, set detach with a log_path and read that file \
+         instead of waiting. Do not issue state-changing commands against the same working \
+         tree in parallel calls. This is an open-world, destructive operation and may require \
+         approval.",
+        schema(json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "POSIX bash command line, run with --noprofile --norc -c."
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Optional platform-native absolute or repository-root-relative working directory; defaults to the repository root."
+                },
+                "detach": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Run the command past the end of this call, bound to the server's lifetime. Requires log_path and forbids timeout_ms; returns the pid and log path instead of output."
+                },
+                "log_path": {
+                    "type": "string",
+                    "description": "Repository-relative or root-absolute file for the detached command's merged output, truncated at start. Its parent directory must already exist. Required when detach is true and rejected otherwise."
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 600_000,
+                    "default": 120_000
+                }
+            },
+            "required": ["command"]
         })),
     )
     .with_annotations(

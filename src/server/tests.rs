@@ -2,12 +2,12 @@
 mod tests {
     use std::fs;
 
-    use rmcp::model::{CallToolResponse, ContentBlock};
+    use rmcp::model::{CallToolRequestParams, CallToolResponse, ContentBlock};
     use serde_json::json;
 
     use super::{
-        CodexShim, ProtocolCompatibility, blocking_response, process_queue_timeout_message,
-        tool_error,
+        CodexShim, ProtocolCompatibility, ToolAdmission, ToolAdmissionFailure, blocking_response,
+        diagnostic_tool_error, queue_timeout_message, tool_error,
     };
     use crate::output::MODEL_BYTE_LIMIT;
 
@@ -31,7 +31,7 @@ mod tests {
 
     #[test]
     fn process_queue_timeout_does_not_claim_process_diagnostics() {
-        let message = process_queue_timeout_message(25);
+        let message = queue_timeout_message("run_program", 25);
         assert!(message.contains("no child was started"));
         for field in ["Resolved program:", "Launcher:", "Cwd:", "Exit code:"] {
             assert!(!message.contains(field));
@@ -101,8 +101,8 @@ mod tests {
         let output =
             crate::tools::ToolOutput::with_child_nonzero("summary".to_owned(), true);
         let CallToolResponse::Complete(result) =
-            blocking_response::<crate::tools::process::ProcessError>(
-                "run_process",
+            blocking_response::<crate::tools::exec::ProcessError>(
+                "run_program",
                 3,
                 Ok(Ok(output)),
             )
@@ -116,6 +116,84 @@ mod tests {
         assert_eq!(content.text, "summary");
         assert_eq!(result.structured_content, None);
         assert_eq!(result.is_error, Some(false));
+    }
+
+    #[test]
+    fn unavailable_bash_response_is_io_and_not_retryable() {
+        let error = crate::tools::exec::ProcessError::Unavailable("no GNU bash".to_owned());
+        let CallToolResponse::Complete(result) = diagnostic_tool_error(&error) else {
+            panic!("tool error must be complete");
+        };
+        let structured = result
+            .structured_content
+            .as_ref()
+            .expect("structured error");
+
+        assert_eq!(structured["error"]["code"], "io");
+        assert_eq!(structured["error"]["retryable"], false);
+        assert_eq!(result.is_error, Some(true));
+    }
+
+    fn detached_request() -> CallToolRequestParams {
+        serde_json::from_value(json!({
+            "name": "bash",
+            "arguments": {
+                "command": "sleep 30",
+                "detach": true,
+                "log_path": "build.log"
+            }
+        }))
+        .expect("call tool request")
+    }
+
+    #[test]
+    fn detached_admission_reserves_before_blocking_scheduling_and_fails_fast() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let mut runtime = crate::runtime::RuntimeConfig::for_tests(1);
+        runtime.detached_calls = 1;
+        let server = CodexShim::builder(fixture.path())
+            .expect("builder")
+            .runtime_limits(runtime)
+            .build()
+            .expect("server");
+        let request = detached_request();
+        let first = server
+            .try_admit_tool(&request)
+            .expect("first detached admission");
+
+        assert_eq!(server.detached.reserved_count(), 1);
+        assert!(matches!(
+            server.try_admit_tool(&request),
+            Err(ToolAdmissionFailure::Process(
+                crate::tools::exec::ProcessError::ResourceBusy(_)
+            ))
+        ));
+        drop(first);
+        assert_eq!(server.detached.reserved_count(), 0);
+    }
+
+    #[test]
+    fn foreground_saturation_does_not_consume_detached_capacity() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let mut runtime = crate::runtime::RuntimeConfig::for_tests(1);
+        runtime.process_calls = 1;
+        runtime.detached_calls = 1;
+        let server = CodexShim::builder(fixture.path())
+            .expect("builder")
+            .runtime_limits(runtime)
+            .build()
+            .expect("server");
+        let foreground = server
+            .resources
+            .try_admit_process()
+            .expect("foreground admission");
+
+        assert!(server.resources.try_admit_process().is_none());
+        let detached = server
+            .try_admit_tool(&detached_request())
+            .expect("detached admission remains independent");
+        assert!(matches!(detached, ToolAdmission::Detached(_)));
+        drop(foreground);
     }
 
     #[test]
