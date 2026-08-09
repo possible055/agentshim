@@ -1,0 +1,75 @@
+[package]
+name = "codexshim-pdf-read"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "Apache-2.0"
+publish = false
+description = "Internal read-only PDF core for codexshim"
+
+[lib]
+name = "codexshim_pdf_read"
+doctest = false
+test = false
+
+[dependencies]
+aes = "0.9"
+brotli = "8"
+byteorder = "1.5"
+bytes = "1.5"
+cbc = "0.2"
+encoding_rs = "0.8"
+fast_image_resize = { version = "6", optional = true }
+fax = "0.3"
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+fontdb = { version = "0.23", optional = true }
+harfrust = { version = "0.12", optional = true }
+hayro-jbig2 = { version = "0.3", optional = true, default-features = false }
+hayro-jpeg2000 = { version = "=0.3.5", optional = true, default-features = false }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+jpeg-decoder = { version = "0.3", default-features = false }
+log = "0.4"
+md-5 = { version = "0.11", optional = true }
+memchr = "2"
+nom = "8"
+phf = { version = "0.14", features = ["macros"] }
+qcms = { version = "0.3", optional = true }
+regex = "1.12"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.11"
+smallvec = "1.13"
+stringprep = "0.1"
+thiserror = "2"
+tiny-skia = { version = "0.12", optional = true }
+ttf-parser = "0.25"
+unicode-bidi = { version = "0.3", default-features = false }
+unicode-normalization = "0.1"
+weezl = "0.2"
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3.27"
+
+[features]
+default = ["icc-qcms", "legacy-crypto", "rendering"]
+icc-qcms = ["dep:qcms"]
+jpeg2000 = ["dep:hayro-jpeg2000"]
+legacy-crypto = ["dep:md-5"]
+rendering = [
+    "dep:fast_image_resize",
+    "dep:fontdb",
+    "dep:harfrust",
+    "dep:hayro-jbig2",
+    "dep:tiny-skia",
+    "jpeg2000",
+]
+test-support = []
+
+[lints.clippy]
+# The retained upstream source predates this repository's lint profile.
+all = "allow"
+pedantic = "allow"
+
+[lints.rust]
+dead_code = "allow"
+unused_imports = "allow"

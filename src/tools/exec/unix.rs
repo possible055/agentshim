@@ -74,7 +74,7 @@ pub(super) fn run(
                 captures,
             });
         }
-        thread::sleep(Duration::from_millis(10));
+        lifecycle.wait_io(Duration::from_millis(10))?;
     };
 
     let captures = if terminated_descendants {
@@ -256,6 +256,14 @@ impl Lifecycle {
             .poll()
     }
 
+    fn wait_io(&mut self, timeout: Duration) -> Result<(), ProcessError> {
+        self.io
+            .as_mut()
+            .expect("I/O is installed before waiting")
+            .wait(timeout)
+            .map_err(ProcessError::Io)
+    }
+
     fn cleanup(&mut self) -> Result<(), ProcessError> {
         let deadline = Instant::now() + CLEANUP_DEADLINE;
         if let Some(io) = self.io.as_mut() {
@@ -296,7 +304,7 @@ impl Lifecycle {
                 io.close_all();
                 return Err(ProcessError::OutcomeUncertain);
             }
-            thread::sleep(Duration::from_millis(10));
+            io.wait(Duration::from_millis(10))?;
         }
     }
 
@@ -381,6 +389,46 @@ impl UnixIo {
             }
         }
         result
+    }
+
+    fn wait(&self, timeout: Duration) -> io::Result<()> {
+        let mut descriptors =
+            Vec::with_capacity(usize::from(self.stdin.is_some()) + self.readers.len());
+        if let Some(stdin) = &self.stdin
+            && self.input_offset < self.input.len()
+        {
+            descriptors.push(libc::pollfd {
+                fd: stdin.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            });
+        }
+        descriptors.extend(self.readers.iter().filter_map(|reader| {
+            reader.as_ref().map(|reader| libc::pollfd {
+                fd: reader.as_raw_fd(),
+                events: libc::POLLIN | libc::POLLHUP,
+                revents: 0,
+            })
+        }));
+        let timeout_ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+        // SAFETY: `descriptors` owns a contiguous array for the duration of this call. `poll`
+        // ignores the pointer when the descriptor count is zero and provides the bounded wait.
+        let result = unsafe {
+            libc::poll(
+                descriptors.as_mut_ptr(),
+                libc::nfds_t::try_from(descriptors.len()).unwrap_or(libc::nfds_t::MAX),
+                timeout_ms,
+            )
+        };
+        if result >= 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::Interrupted {
+            Ok(())
+        } else {
+            Err(error)
+        }
     }
 
     fn poll_stdin(&mut self) -> io::Result<()> {
@@ -486,6 +534,7 @@ fn terminate(
     loop {
         let _ = child.try_wait()?;
         if !group_exists(process_group)? {
+            let _ = child.wait()?;
             return Ok(());
         }
         if Instant::now() >= grace_deadline {
@@ -498,6 +547,7 @@ fn terminate(
     loop {
         let _ = child.try_wait()?;
         if !group_exists(process_group)? {
+            let _ = child.wait()?;
             return Ok(());
         }
         if Instant::now() >= cleanup_deadline {
@@ -560,9 +610,11 @@ pub(crate) fn spawn_detached(
             Ok(())
         });
     }
-    let child = command.spawn()?;
+    let mut child = command.spawn()?;
     let pid = child.id();
     let Ok(process_group) = i32::try_from(pid) else {
+        let _ = child.kill();
+        let _ = child.wait();
         return Err(ProcessError::Io(io::Error::other(
             "child process ID does not fit pid_t",
         )));
@@ -587,21 +639,25 @@ impl DetachedTree {
 
     pub(crate) fn is_running(&mut self) -> bool {
         let _ = self.child.try_wait();
-        group_exists(self.process_group).unwrap_or(false)
+        let running = group_exists(self.process_group).unwrap_or(false);
+        if !running {
+            let _ = self.child.wait();
+        }
+        running
     }
 
     pub(crate) fn terminate(&mut self) {
-        let _ = signal_group(self.process_group, libc::SIGTERM);
-        let deadline = Instant::now() + TERM_GRACE;
-        while Instant::now() < deadline {
-            let _ = self.child.try_wait();
-            if !group_exists(self.process_group).unwrap_or(false) {
-                return;
-            }
-            thread::sleep(Duration::from_millis(10));
+        if terminate(
+            self.process_group,
+            &mut self.child,
+            Instant::now() + CLEANUP_DEADLINE,
+        )
+        .is_err()
+        {
+            let _ = signal_group(self.process_group, libc::SIGKILL);
+            let _ = self.child.kill();
+            let _ = self.child.wait();
         }
-        let _ = signal_group(self.process_group, libc::SIGKILL);
-        let _ = self.child.try_wait();
     }
 }
 
@@ -610,7 +666,8 @@ impl DetachedTree {
 impl Drop for DetachedTree {
     fn drop(&mut self) {
         let _ = signal_group(self.process_group, libc::SIGKILL);
-        let _ = self.child.try_wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -650,4 +707,34 @@ fn fail_setup_for_tests(point: SetupFailurePoint) -> io::Result<()> {
         return Err(io::Error::other("injected Unix lifecycle setup failure"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::*;
+
+    #[test]
+    fn pipe_readiness_wakes_a_long_poll_immediately() {
+        let (read, write) = merged_pipe().expect("pipe");
+        let mut io = UnixIo::new(
+            File::open("/dev/null").expect("null input"),
+            vec![File::from(read)],
+            1024,
+            Vec::new(),
+        )
+        .expect("unix I/O");
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            let mut writer = File::from(write);
+            writer.write_all(b"ready").expect("pipe write");
+        });
+        let started = Instant::now();
+
+        io.wait(Duration::from_secs(2)).expect("readiness wait");
+        assert!(started.elapsed() < Duration::from_millis(500));
+        io.poll().expect("drain");
+        writer.join().expect("writer");
+        io.poll().expect("EOF");
+        assert_eq!(io.captures[0].bytes_read, 5);
+    }
 }

@@ -98,7 +98,7 @@ impl LaunchEncoding {
                 let mut command_line = "cmd.exe /e:ON /v:OFF /d /c \"\""
                     .encode_utf16()
                     .collect::<Vec<_>>();
-                command_line.extend(script);
+                append_batch_path(&mut command_line, &script)?;
                 command_line.push(u16::from(b'"'));
                 for argument in args {
                     command_line.push(u16::from(b' '));
@@ -204,6 +204,28 @@ fn append_batch_argument(output: &mut Vec<u16>, argument: &str) -> Result<(), Pr
     if quote {
         output.extend(std::iter::repeat_n(u16::from(b'\\'), backslashes));
         output.push(u16::from(b'"'));
+    }
+    Ok(())
+}
+
+fn append_batch_path(output: &mut Vec<u16>, path: &[u16]) -> Result<(), ProcessError> {
+    if path.iter().any(|unit| {
+        matches!(
+            *unit,
+            unit if unit == u16::from(b'\0')
+                || unit == u16::from(b'\r')
+                || unit == u16::from(b'\n')
+        )
+    }) {
+        return Err(ProcessError::Validation(
+            "cmd-compat script path must not contain NUL, CR, or LF".to_owned(),
+        ));
+    }
+    for unit in path {
+        if *unit == u16::from(b'%') {
+            append_ascii(output, "%%cd:~,");
+        }
+        output.push(*unit);
     }
     Ok(())
 }

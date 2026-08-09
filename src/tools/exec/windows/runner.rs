@@ -20,7 +20,9 @@ use windows_sys::Win32::{
         CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
         WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
-    Globalization::{CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN, CompareStringOrdinal},
+    Globalization::{
+        CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN, CompareStringOrdinal, GetOEMCP,
+    },
     Security::SECURITY_ATTRIBUTES,
     System::{
         IO::{CreateIoCompletionPort, GetQueuedCompletionStatus},
@@ -151,7 +153,7 @@ pub(super) fn run(
     let stdin_file = stdin_pipe.parent.into_file();
     let input = plan.stdin.map(str::to_owned);
     let (io_failed, completion, stdin_thread, drains) =
-        spawn_io_threads(stdin_file, output_files, input);
+        spawn_io_threads(stdin_file, output_files, input, plan.resolved.launcher);
 
     let mut primary_exit = None;
     let exit_code = loop {
@@ -222,10 +224,16 @@ type PendingIo = (
     Vec<thread::JoinHandle<io::Result<Capture>>>,
 );
 
-fn spawn_io_threads(stdin: File, outputs: Vec<File>, input: Option<String>) -> IoThreads {
+fn spawn_io_threads(
+    stdin: File,
+    outputs: Vec<File>,
+    input: Option<String>,
+    launcher: Launcher,
+) -> IoThreads {
     let failed = Arc::new(AtomicBool::new(false));
     let completion = ThreadCompletion::new();
     let capture_bytes = capture_bytes_per_stream(outputs.len());
+    let oem_code_page = (launcher == Launcher::CmdCompat).then(|| unsafe { GetOEMCP() });
     let stdin = spawn_monitored(Arc::clone(&failed), completion.clone(), move || {
         write_stdin(stdin, input.as_deref())
     });
@@ -233,7 +241,7 @@ fn spawn_io_threads(stdin: File, outputs: Vec<File>, input: Option<String>) -> I
         .into_iter()
         .map(|output| {
             spawn_monitored(Arc::clone(&failed), completion.clone(), move || {
-                drain(output, capture_bytes)
+                drain(output, capture_bytes, oem_code_page)
             })
         })
         .collect();

@@ -56,7 +56,7 @@ impl LineCollector {
 
     fn push_segment(&mut self, text: &str) {
         self.current_bytes = self.current_bytes.saturating_add(text.len());
-        if self.current.len() >= LINE_PREFIX_BYTES {
+        if self.current_number < self.start || self.current.len() >= LINE_PREFIX_BYTES {
             return;
         }
         for character in text.chars() {

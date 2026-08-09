@@ -10,6 +10,40 @@ pub struct RuntimeResources {
     shutdown: CancellationToken,
 }
 
+pub(crate) struct MemoryReservation {
+    resources: RuntimeResources,
+    permits: Vec<OwnedSemaphorePermit>,
+    reserved_bytes: usize,
+}
+
+impl MemoryReservation {
+    pub(crate) fn from_initial(
+        resources: RuntimeResources,
+        permit: OwnedSemaphorePermit,
+        reserved_bytes: usize,
+    ) -> Self {
+        Self {
+            resources,
+            permits: vec![permit],
+            reserved_bytes: rounded_memory_bytes(reserved_bytes),
+        }
+    }
+
+    pub(crate) fn try_grow_to(&mut self, bytes: usize) -> bool {
+        let target = bytes.div_ceil(MEMORY_GROWTH_BYTES) * MEMORY_GROWTH_BYTES;
+        if target <= self.reserved_bytes {
+            return true;
+        }
+        let additional = target - self.reserved_bytes;
+        let Some(permit) = self.resources.try_reserve_memory(additional) else {
+            return false;
+        };
+        self.permits.push(permit);
+        self.reserved_bytes = target;
+        true
+    }
+}
+
 impl RuntimeResources {
     #[must_use]
     pub fn new(config: RuntimeConfig) -> Self {
@@ -19,9 +53,7 @@ impl RuntimeResources {
             worker_lanes: Arc::new(Semaphore::new(config.worker_lanes)),
             open_files: Arc::new(Semaphore::new(MAX_OPEN_FILES)),
             process_calls: Arc::new(Semaphore::new(config.process_calls)),
-            memory: Arc::new(Semaphore::new(
-                MEMORY_SOFT_TARGET_BYTES / MEMORY_PERMIT_BYTES,
-            )),
+            memory: Arc::new(Semaphore::new(config.memory_bytes / MEMORY_PERMIT_BYTES)),
             file_work: Arc::new(FileWorkPool::new(config.worker_lanes)),
             shutdown: CancellationToken::new(),
         }
@@ -89,7 +121,7 @@ impl RuntimeResources {
     ///
     /// # Errors
     ///
-    /// Requests above the soft target reserve at most the target and continue; callers
+    /// Requests above the configured target reserve at most the target and continue; callers
     /// choose an equivalent fallback when a try-only reservation is unavailable.
     pub async fn reserve_memory(
         &self,
@@ -98,7 +130,7 @@ impl RuntimeResources {
     ) -> Result<OwnedSemaphorePermit, AcquireError> {
         let permits = bytes
             .div_ceil(MEMORY_PERMIT_BYTES)
-            .clamp(1, MEMORY_SOFT_TARGET_BYTES / MEMORY_PERMIT_BYTES);
+            .clamp(1, self.config.memory_bytes / MEMORY_PERMIT_BYTES);
         let permits = u32::try_from(permits).expect("soft memory target fits u32 permits");
         acquire(&self.memory, request, &self.shutdown, permits).await
     }
@@ -107,10 +139,14 @@ impl RuntimeResources {
     pub fn try_reserve_memory(&self, bytes: usize) -> Option<OwnedSemaphorePermit> {
         let permits = bytes
             .div_ceil(MEMORY_PERMIT_BYTES)
-            .clamp(1, MEMORY_SOFT_TARGET_BYTES / MEMORY_PERMIT_BYTES);
+            .clamp(1, self.config.memory_bytes / MEMORY_PERMIT_BYTES);
         let permits = u32::try_from(permits).ok()?;
         self.memory.clone().try_acquire_many_owned(permits).ok()
     }
+}
+
+fn rounded_memory_bytes(bytes: usize) -> usize {
+    bytes.div_ceil(MEMORY_PERMIT_BYTES) * MEMORY_PERMIT_BYTES
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]

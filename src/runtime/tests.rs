@@ -1,11 +1,14 @@
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsStr;
+    use std::ffi::{OsStr, OsString};
 
     use super::{
-        DEFAULT_PROCESS_CALLS, MAX_CONFIGURED_PROCESS_CALLS, MAX_READ_ONLY_CALLS,
-        MEMORY_SOFT_TARGET_BYTES, RuntimeConfig, RuntimeResources, blocking_threads,
-        default_scheduler_threads, default_worker_lanes, parse_process_calls,
+        DEFAULT_GLOB_MEMORY_BYTES, DEFAULT_GREP_MEMORY_BYTES, DEFAULT_MEMORY_BYTES,
+        DEFAULT_PROCESS_CALLS, GLOB_MEMORY_BYTES_ENV, GREP_MEMORY_BYTES_ENV,
+        MAX_CONFIGURED_PROCESS_CALLS, MAX_READ_ONLY_CALLS, MAX_TOOL_MEMORY_BYTES,
+        MIN_TOOL_MEMORY_BYTES, MemoryReservation, RuntimeConfig, RuntimeResources,
+        blocking_threads, default_scheduler_threads, default_worker_lanes, global_memory_bytes,
+        parse_process_calls, parse_tool_memory_bytes,
     };
     use tokio_util::sync::CancellationToken;
 
@@ -51,6 +54,78 @@ mod tests {
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         }
         assert_eq!(MAX_CONFIGURED_PROCESS_CALLS, 32);
+    }
+
+    #[test]
+    fn search_memory_configuration_defaults_bounds_and_global_capacity() {
+        assert_eq!(
+            parse_tool_memory_bytes(None, GREP_MEMORY_BYTES_ENV, DEFAULT_GREP_MEMORY_BYTES)
+                .expect("grep default"),
+            DEFAULT_GREP_MEMORY_BYTES
+        );
+        assert_eq!(
+            parse_tool_memory_bytes(None, GLOB_MEMORY_BYTES_ENV, DEFAULT_GLOB_MEMORY_BYTES)
+                .expect("glob default"),
+            DEFAULT_GLOB_MEMORY_BYTES
+        );
+        for value in [MIN_TOOL_MEMORY_BYTES, MAX_TOOL_MEMORY_BYTES] {
+            let rendered = value.to_string();
+            assert_eq!(
+                parse_tool_memory_bytes(
+                    Some(OsStr::new(&rendered)),
+                    GREP_MEMORY_BYTES_ENV,
+                    DEFAULT_GREP_MEMORY_BYTES
+                )
+                .expect("valid bound"),
+                value
+            );
+        }
+        for value in [
+            "0".to_owned(),
+            (MIN_TOOL_MEMORY_BYTES - 1).to_string(),
+            (MAX_TOOL_MEMORY_BYTES + 1).to_string(),
+            "many".to_owned(),
+            "-1".to_owned(),
+        ] {
+            assert!(
+                parse_tool_memory_bytes(
+                    Some(OsStr::new(&value)),
+                    GREP_MEMORY_BYTES_ENV,
+                    DEFAULT_GREP_MEMORY_BYTES
+                )
+                .is_err(),
+                "{value} must be rejected"
+            );
+        }
+        let invalid = invalid_unicode();
+        assert!(
+            parse_tool_memory_bytes(
+                Some(&invalid),
+                GREP_MEMORY_BYTES_ENV,
+                DEFAULT_GREP_MEMORY_BYTES
+            )
+            .is_err()
+        );
+        assert_eq!(
+            global_memory_bytes(DEFAULT_GREP_MEMORY_BYTES, DEFAULT_GLOB_MEMORY_BYTES),
+            DEFAULT_MEMORY_BYTES
+        );
+        assert_eq!(
+            global_memory_bytes(MAX_TOOL_MEMORY_BYTES, DEFAULT_GLOB_MEMORY_BYTES),
+            MAX_TOOL_MEMORY_BYTES
+        );
+    }
+
+    #[cfg(windows)]
+    fn invalid_unicode() -> OsString {
+        use std::os::windows::ffi::OsStringExt;
+        OsString::from_wide(&[0xD800])
+    }
+
+    #[cfg(unix)]
+    fn invalid_unicode() -> OsString {
+        use std::os::unix::ffi::OsStringExt;
+        OsString::from_vec(vec![0xFF])
     }
 
     #[test]
@@ -106,17 +181,52 @@ mod tests {
         let resources = RuntimeResources::new(RuntimeConfig::for_tests(1));
         let request = CancellationToken::new();
         let oversized = resources
-            .reserve_memory(MEMORY_SOFT_TARGET_BYTES + 1, &request)
+            .reserve_memory(DEFAULT_MEMORY_BYTES + 1, &request)
             .await
             .expect("soft target must not fail the request");
         assert!(resources.try_reserve_memory(1).is_none());
         drop(oversized);
         let reservation = resources
-            .try_reserve_memory(MEMORY_SOFT_TARGET_BYTES)
+            .try_reserve_memory(DEFAULT_MEMORY_BYTES)
             .expect("try reservation");
         assert!(resources.try_reserve_memory(1).is_none());
         drop(reservation);
         assert!(resources.try_reserve_memory(1).is_some());
+    }
+
+    #[test]
+    fn dynamic_memory_reservations_fail_fast_and_recover_on_drop_and_panic() {
+        let mut config = RuntimeConfig::for_tests(1);
+        config.memory_bytes = MIN_TOOL_MEMORY_BYTES;
+        let resources = RuntimeResources::new(config);
+        let initial = resources
+            .try_reserve_memory(1024 * 1024)
+            .expect("initial reservation");
+        let mut reservation =
+            MemoryReservation::from_initial(resources.clone(), initial, 1024 * 1024);
+        let pressure = resources
+            .try_reserve_memory(MIN_TOOL_MEMORY_BYTES - 1024 * 1024)
+            .expect("competing reservation");
+        assert!(!reservation.try_grow_to(2 * 1024 * 1024));
+        drop(pressure);
+        assert!(reservation.try_grow_to(2 * 1024 * 1024));
+        drop(reservation);
+
+        let panic_resources = resources.clone();
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let initial = panic_resources
+                .try_reserve_memory(1024 * 1024)
+                .expect("panic reservation");
+            let _reservation =
+                MemoryReservation::from_initial(panic_resources, initial, 1024 * 1024);
+            panic!("injected reservation panic");
+        }));
+        assert!(panic.is_err());
+        assert!(
+            resources
+                .try_reserve_memory(MIN_TOOL_MEMORY_BYTES)
+                .is_some()
+        );
     }
 
     #[test]

@@ -2,10 +2,14 @@
 mod tests {
     use std::{fs, sync::Arc};
 
+    use encoding_rs::{BIG5, GB18030, GBK};
+    use base64::Engine as _;
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        AFTER_READ_HOOK, BEFORE_READ_HOOK, MAX_LINE_COUNT, ReadError, ReadRequest, execute,
+        AFTER_READ_HOOK, BEFORE_READ_HOOK, DecodeError, MAX_LINE_COUNT, PDF_READ_MEMORY_BYTES,
+        PdfMode, ReadError, ReadRequest, TEXT_READ_MEMORY_BYTES, execute, execute_output, prepare,
+        fit_pdf_text_output,
     };
     use crate::path::{FileAccess, ReadScope, RepositoryRoot};
 
@@ -26,6 +30,8 @@ mod tests {
             start_line: None,
             line_count: None,
             encoding: None,
+            pdf_mode: None,
+            pages: None,
         }
     }
 
@@ -68,6 +74,171 @@ mod tests {
         assert!(latin.contains("Encoding: windows-1252\n1\tcafé"));
     }
 
+    fn pdf_with_text() -> Vec<u8> {
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        let mut offsets = [0_usize; 6];
+        let mut object = |id: usize, body: &[u8]| {
+            offsets[id] = pdf.len();
+            pdf.extend_from_slice(format!("{id} 0 obj\n").as_bytes());
+            pdf.extend_from_slice(body);
+            pdf.extend_from_slice(b"\nendobj\n");
+        };
+        object(1, b"<< /Type /Catalog /Pages 2 0 R >>");
+        object(
+            2,
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        );
+        object(
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        );
+        let content = b"BT /F1 18 Tf 20 150 Td (PDF read heading) Tj ET";
+        let mut stream = format!("<< /Length {} >>\nstream\n", content.len()).into_bytes();
+        stream.extend_from_slice(content);
+        stream.extend_from_slice(b"\nendstream");
+        object(4, &stream);
+        object(
+            5,
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+        );
+        let xref = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 6\n0000000000 65535 f \n");
+        for offset in offsets.iter().skip(1) {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(b"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n");
+        pdf.extend_from_slice(format!("{xref}\n%%EOF\n").as_bytes());
+        pdf
+    }
+
+    #[test]
+    fn reads_pdf_as_markdown_or_png_without_extension_routing() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        fs::write(fixture.path().join("document.bin"), pdf_with_text()).expect("pdf");
+        let access = access(fixture.path());
+        let cancellation = CancellationToken::new();
+
+        let text = execute(&access, &request("document.bin"), &cancellation).expect("markdown");
+        assert!(text.contains("PDF: pages 1-1 of 1 as Markdown"));
+        assert!(text.contains("PDF read heading"));
+
+        let mut image_request = request("document.bin");
+        image_request.pdf_mode = Some(PdfMode::Image);
+        image_request.pages = Some("1".to_owned());
+        let output =
+            execute_output(&access, &image_request, &cancellation).expect("rendered image");
+        assert_eq!(output.images.len(), 1);
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(&output.images[0].data)
+            .expect("base64");
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+
+    #[test]
+    fn pdf_auto_detection_requires_the_header_at_byte_zero() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        fs::write(
+            fixture.path().join("ordinary.txt"),
+            "ordinary text\n%PDF-1.7 is only a quoted marker\n",
+        )
+        .expect("text fixture");
+        let access = access(fixture.path());
+        let cancellation = CancellationToken::new();
+
+        let text =
+            execute(&access, &request("ordinary.txt"), &cancellation).expect("ordinary text");
+        assert!(text.contains("2\t%PDF-1.7 is only a quoted marker"));
+
+        let mut forced = request("ordinary.txt");
+        forced.pdf_mode = Some(PdfMode::Text);
+        assert!(matches!(
+            execute(&access, &forced, &cancellation),
+            Err(ReadError::Pdf(_))
+        ));
+    }
+
+    #[test]
+    fn prepares_memory_charge_from_content_before_execution() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        fs::write(fixture.path().join("source.txt"), "text\n").expect("text");
+        fs::write(fixture.path().join("document.bin"), pdf_with_text()).expect("pdf");
+        let access = access(fixture.path());
+        let cancellation = CancellationToken::new();
+
+        let text = prepare(&access, &request("source.txt"), &cancellation).expect("prepare text");
+        assert_eq!(text.memory_charge(), TEXT_READ_MEMORY_BYTES);
+        let pdf = prepare(&access, &request("document.bin"), &cancellation).expect("prepare PDF");
+        assert_eq!(pdf.memory_charge(), PDF_READ_MEMORY_BYTES);
+    }
+
+    #[test]
+    fn bounds_pdf_markdown_by_pages_then_by_utf8_boundary() {
+        let two_pages = vec![(0, "a".repeat(20_000)), (1, "b".repeat(20_000))];
+        let output = fit_pdf_text_output("document.pdf", 2, &two_pages).expect("bounded pages");
+        assert!(output.text.contains("## Page 1"));
+        assert!(!output.text.contains("## Page 2"));
+        assert!(!output.text.contains("[page truncated]"));
+        assert!(output.fits_content_budget());
+
+        let one_page = vec![(0, "第一行\n".repeat(20_000))];
+        let output = fit_pdf_text_output("document.pdf", 1, &one_page).expect("bounded page");
+        assert!(output.text.contains("… [page truncated]"));
+        assert!(output.text.is_char_boundary(output.text.len()));
+        assert!(output.fits_content_budget());
+    }
+
+    #[test]
+    fn auto_detects_common_chinese_encodings_conservatively() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let traditional_text = "繁體中文測試資料\n第二行內容足夠辨識\n";
+        let simplified_text = "简体中文测试数据\n第二行内容足够识别\n";
+        let gb18030_text = "简体中文扩展字符𠀀测试\n第二行内容足够识别\n";
+
+        let (traditional, _, traditional_errors) = BIG5.encode(traditional_text);
+        assert!(!traditional_errors);
+        fs::write(fixture.path().join("traditional.txt"), traditional.as_ref())
+            .expect("Big5 fixture");
+
+        let (simplified, _, simplified_errors) = GBK.encode(simplified_text);
+        assert!(!simplified_errors);
+        fs::write(fixture.path().join("simplified.txt"), simplified.as_ref())
+            .expect("GBK fixture");
+
+        let (gb18030, _, gb18030_errors) = GB18030.encode(gb18030_text);
+        assert!(!gb18030_errors);
+        fs::write(fixture.path().join("gb18030.txt"), gb18030.as_ref())
+            .expect("GB18030 fixture");
+
+        let (ambiguous, _, ambiguous_errors) = BIG5.encode("中文\n");
+        assert!(!ambiguous_errors);
+        fs::write(fixture.path().join("ambiguous.txt"), ambiguous.as_ref())
+            .expect("short Big5 fixture");
+
+        let root = access(fixture.path());
+        let cancellation = CancellationToken::new();
+        let traditional = execute(&root, &request("traditional.txt"), &cancellation)
+            .expect("auto-detect Big5");
+        assert!(traditional.contains("Encoding: Big5\n1\t繁體中文測試資料"));
+
+        let simplified = execute(&root, &request("simplified.txt"), &cancellation)
+            .expect("auto-detect GBK");
+        assert!(simplified.contains("Encoding: GBK\n1\t简体中文测试数据"));
+
+        let gb18030 =
+            execute(&root, &request("gb18030.txt"), &cancellation).expect("auto-detect GB18030");
+        assert!(gb18030.contains("Encoding: GBK\n1\t简体中文扩展字符𠀀测试"));
+
+        assert!(matches!(
+            execute(&root, &request("ambiguous.txt"), &cancellation),
+            Err(ReadError::Decode(DecodeError::UndetectedEncoding))
+        ));
+        let mut explicit = request("ambiguous.txt");
+        explicit.encoding = Some("big5".to_owned());
+        let explicit =
+            execute(&root, &explicit, &cancellation).expect("explicit short Big5 fallback");
+        assert!(explicit.contains("Encoding: Big5\n1\t中文"));
+    }
+
     #[test]
     fn empty_long_binary_invalid_and_out_of_range_are_bounded() {
         let fixture = tempfile::tempdir().expect("fixture");
@@ -96,6 +267,28 @@ mod tests {
         beyond.start_line = Some(100);
         let output = execute(&root, &beyond, &cancellation).expect("past eof");
         assert!(output.ends_with("\nComplete."));
+    }
+
+    #[test]
+    fn deep_page_skips_unretained_line_prefixes_without_changing_output() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let mut text = String::new();
+        for line in 1..=20_000 {
+            use std::fmt::Write as _;
+            writeln!(text, "line-{line:05}-{}", "x".repeat(64)).expect("fixture line");
+        }
+        fs::write(fixture.path().join("deep.txt"), text).expect("deep fixture");
+        let root = access(fixture.path());
+        let cancellation = CancellationToken::new();
+        let mut page = request("deep.txt");
+        page.start_line = Some(19_991);
+        page.line_count = Some(5);
+
+        let output = execute(&root, &page, &cancellation).expect("deep page");
+        assert!(output.contains("19991\tline-19991-"));
+        assert!(output.contains("19995\tline-19995-"));
+        assert!(!output.contains("19990\t"));
+        assert!(output.ends_with("Partial: next_start_line=19996."));
     }
 
     #[test]

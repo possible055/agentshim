@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/pdf-read-core"]
+resolver = "3"
+
 [package]
 name = "codexshim"
 version = "0.1.3-alpha.3"
@@ -7,8 +11,11 @@ license = "Apache-2.0"
 description = "Capability-aware MCP repository tools for Codex"
 
 [dependencies]
+base64 = "=0.22.1"
 cap-std = "=4.0.2"
+chardetng = "=1.0.0"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+codexshim-pdf-read = { path = "crates/pdf-read-core" }
 encoding_rs = "0.8.35"
 globset = "0.4.16"
 grep-matcher = "0.1.9"

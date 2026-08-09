@@ -14,6 +14,7 @@ fn collect_candidates(
     #[cfg(any(test, feature = "bench-internals"))] literal_prefix: Option<&Path>,
     policy: CandidatePolicy,
     profiler: &GrepProfiler,
+    memory: Option<MemoryReservation>,
 ) -> Result<(Vec<Candidate>, TraversalSummary, bool), GrepError> {
     let traversal_span = profiler.span(GrepStage::CandidateTraversal);
     let base = access.resolve(Path::new(input))?;
@@ -25,7 +26,8 @@ fn collect_candidates(
                 .slash_path()
                 .is_some_and(|path| glob.is_match(path))
         });
-        let mut collection = CandidateCollection::new(policy);
+        let mut collection =
+            CandidateCollection::new(policy, resources.config().grep_memory_bytes, memory);
         if matches {
             collection.admit(candidate)?;
         }
@@ -62,6 +64,8 @@ fn collect_candidates(
         }
         selected => selected,
     };
+    let collection =
+        CandidateCollection::new(policy, resources.config().grep_memory_bytes, memory);
     let (mut candidates, summary, metrics) = match traversal {
         GrepTraversal::Adaptive => unreachable!("adaptive traversal was resolved"),
         GrepTraversal::Serial => collect_candidates_serial(
@@ -70,7 +74,7 @@ fn collect_candidates(
             glob,
             cancellation,
             None,
-            policy,
+            collection,
         )?,
         GrepTraversal::ParallelBatched => collect_candidates_parallel(
             access,
@@ -78,8 +82,8 @@ fn collect_candidates(
             glob,
             cancellation,
             None,
-            policy,
             traversal_threads,
+            collection,
         )?,
         #[cfg(any(test, feature = "bench-internals"))]
         GrepTraversal::SerialLiteralPrefix => collect_candidates_serial(
@@ -88,7 +92,7 @@ fn collect_candidates(
             glob,
             cancellation,
             literal_prefix,
-            policy,
+            collection,
         )?,
         #[cfg(any(test, feature = "bench-internals"))]
         GrepTraversal::ParallelBatchedLiteralPrefix => collect_candidates_parallel(
@@ -97,8 +101,8 @@ fn collect_candidates(
             glob,
             cancellation,
             literal_prefix,
-            policy,
             traversal_threads,
+            collection,
         )?,
     };
     drop(traversal_credits);
@@ -162,9 +166,8 @@ fn collect_candidates_serial(
     glob: Option<&globset::GlobMatcher>,
     cancellation: &CancellationToken,
     literal_prefix: Option<&Path>,
-    policy: CandidatePolicy,
+    mut collection: CandidateCollection,
 ) -> Result<(Vec<Candidate>, TraversalSummary, CandidateMetrics), GrepError> {
-    let mut collection = CandidateCollection::new(policy);
     let mut terminal_error = None;
     let mut visit = |entry: crate::traversal::TraversalEntry<'_>| {
         let candidate = match candidate_from_entry(
@@ -214,10 +217,10 @@ fn collect_candidates_parallel(
     glob: Option<&globset::GlobMatcher>,
     cancellation: &CancellationToken,
     literal_prefix: Option<&Path>,
-    policy: CandidatePolicy,
     traversal_threads: usize,
+    collection: CandidateCollection,
 ) -> Result<(Vec<Candidate>, TraversalSummary, CandidateMetrics), GrepError> {
-    let collection = Mutex::new(CandidateCollection::new(policy));
+    let collection = Mutex::new(collection);
     let visit =
         |batch: &[OwnedTraversalEntry]| collect_candidate_batch(access, base, glob, batch, &collection);
     let summary = if let Some(literal_prefix) = literal_prefix {
@@ -318,31 +321,21 @@ fn candidate_from_entry(
 
 struct CandidateCollection {
     candidates: Vec<Candidate>,
-    #[cfg(any(test, feature = "bench-internals"))]
     policy: CandidatePolicy,
-    #[cfg(any(test, feature = "bench-internals"))]
+    memory_limit: usize,
+    memory: Option<MemoryReservation>,
+    path_retained_bytes: usize,
     estimated_retained_bytes: usize,
-    #[cfg(any(test, feature = "bench-internals"))]
     soft_target_crossings: usize,
-    #[cfg(any(test, feature = "bench-internals"))]
     key_bytes: usize,
-    #[cfg(any(test, feature = "bench-internals"))]
     key_capacity: usize,
-    #[cfg(any(test, feature = "bench-internals"))]
     capability_key_bytes: usize,
-    #[cfg(any(test, feature = "bench-internals"))]
     capability_key_capacity: usize,
-    #[cfg(any(test, feature = "bench-internals"))]
     absolute_bytes: usize,
-    #[cfg(any(test, feature = "bench-internals"))]
     absolute_capacity: usize,
-    #[cfg(any(test, feature = "bench-internals"))]
     sort_key_bytes: usize,
-    #[cfg(any(test, feature = "bench-internals"))]
     sort_key_capacity: usize,
-    #[cfg(any(test, feature = "bench-internals"))]
     slash_path_bytes: usize,
-    #[cfg(any(test, feature = "bench-internals"))]
     slash_path_capacity: usize,
     terminal_error: Option<GrepError>,
 }
@@ -350,92 +343,88 @@ struct CandidateCollection {
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default)]
 struct CandidateMetrics {
-    #[cfg(any(test, feature = "bench-internals"))]
     count: usize,
-    #[cfg(any(test, feature = "bench-internals"))]
     estimated_retained_bytes: usize,
-    #[cfg(any(test, feature = "bench-internals"))]
     vec_capacity: usize,
-    #[cfg(any(test, feature = "bench-internals"))]
     soft_target_crossings: usize,
-    #[cfg(any(test, feature = "bench-internals"))]
     key_bytes: usize,
-    #[cfg(any(test, feature = "bench-internals"))]
     key_capacity: usize,
-    #[cfg(any(test, feature = "bench-internals"))]
     capability_key_bytes: usize,
-    #[cfg(any(test, feature = "bench-internals"))]
     capability_key_capacity: usize,
-    #[cfg(any(test, feature = "bench-internals"))]
     absolute_bytes: usize,
-    #[cfg(any(test, feature = "bench-internals"))]
     absolute_capacity: usize,
-    #[cfg(any(test, feature = "bench-internals"))]
     sort_key_bytes: usize,
-    #[cfg(any(test, feature = "bench-internals"))]
     sort_key_capacity: usize,
-    #[cfg(any(test, feature = "bench-internals"))]
     slash_path_bytes: usize,
-    #[cfg(any(test, feature = "bench-internals"))]
     slash_path_capacity: usize,
 }
 
 impl CandidateCollection {
-    fn new(policy: CandidatePolicy) -> Self {
-        #[cfg(not(any(test, feature = "bench-internals")))]
-        let _ = policy;
+    fn new(
+        policy: CandidatePolicy,
+        memory_limit: usize,
+        memory: Option<MemoryReservation>,
+    ) -> Self {
+        let candidates = Vec::with_capacity(1_024);
+        let estimated_retained_bytes = candidates
+            .capacity()
+            .saturating_mul(std::mem::size_of::<Candidate>());
         Self {
-            candidates: Vec::with_capacity(1_024),
-            #[cfg(any(test, feature = "bench-internals"))]
+            candidates,
             policy,
-            #[cfg(any(test, feature = "bench-internals"))]
-            estimated_retained_bytes: 0,
-            #[cfg(any(test, feature = "bench-internals"))]
+            memory_limit,
+            memory,
+            path_retained_bytes: 0,
+            estimated_retained_bytes,
             soft_target_crossings: 0,
-            #[cfg(any(test, feature = "bench-internals"))]
             key_bytes: 0,
-            #[cfg(any(test, feature = "bench-internals"))]
             key_capacity: 0,
-            #[cfg(any(test, feature = "bench-internals"))]
             capability_key_bytes: 0,
-            #[cfg(any(test, feature = "bench-internals"))]
             capability_key_capacity: 0,
-            #[cfg(any(test, feature = "bench-internals"))]
             absolute_bytes: 0,
-            #[cfg(any(test, feature = "bench-internals"))]
             absolute_capacity: 0,
-            #[cfg(any(test, feature = "bench-internals"))]
             sort_key_bytes: 0,
-            #[cfg(any(test, feature = "bench-internals"))]
             sort_key_capacity: 0,
-            #[cfg(any(test, feature = "bench-internals"))]
             slash_path_bytes: 0,
-            #[cfg(any(test, feature = "bench-internals"))]
             slash_path_capacity: 0,
             terminal_error: None,
         }
     }
 
-    #[allow(clippy::unnecessary_wraps)]
     fn admit(&mut self, candidate: Candidate) -> Result<(), GrepError> {
-        #[cfg(not(any(test, feature = "bench-internals")))]
-        {
-            self.candidates.push(candidate);
-            Ok(())
-        }
-
-        #[cfg(any(test, feature = "bench-internals"))]
-        {
         let components = candidate.path.memory_components();
-        let retained = self
-            .estimated_retained_bytes
+        self.candidates
+            .try_reserve(1)
+            .map_err(|_| GrepError::CandidateMemory)?;
+        let path_retained = self
+            .path_retained_bytes
             .saturating_add(components.key_capacity)
             .saturating_add(components.capability_key_capacity)
             .saturating_add(components.absolute_capacity)
             .saturating_add(components.sort_key_capacity)
             .saturating_add(components.slash_path_capacity)
-            .saturating_add(std::mem::size_of::<ResolvedPath>())
-            .saturating_add(std::mem::size_of::<Candidate>());
+            .saturating_add(std::mem::size_of::<ResolvedPath>());
+        let retained = path_retained.saturating_add(
+            self.candidates
+                .capacity()
+                .saturating_mul(std::mem::size_of::<Candidate>()),
+        );
+        let hard_limit = self.memory_limit.min(match self.policy {
+            #[cfg(any(test, feature = "bench-internals"))]
+            CandidatePolicy::FatalCeiling => CANDIDATE_SOFT_TARGET_BYTES,
+            CandidatePolicy::SoftTarget => self.memory_limit,
+        });
+        if retained > hard_limit {
+            return Err(GrepError::CandidateMemory);
+        }
+        if self
+            .memory
+            .as_mut()
+            .is_some_and(|memory| !memory.try_grow_to(retained))
+        {
+            return Err(GrepError::MemoryBusy);
+        }
+        self.path_retained_bytes = path_retained;
         self.estimated_retained_bytes = retained;
         self.key_bytes = self.key_bytes.saturating_add(components.key_bytes);
         self.key_capacity = self.key_capacity.saturating_add(components.key_capacity);
@@ -458,26 +447,14 @@ impl CandidateCollection {
             .slash_path_capacity
             .saturating_add(components.slash_path_capacity);
         self.candidates.push(candidate);
+        #[cfg(any(test, feature = "bench-internals"))]
         if retained > CANDIDATE_SOFT_TARGET_BYTES {
             self.soft_target_crossings = self.soft_target_crossings.saturating_add(1);
-            #[cfg(any(test, feature = "bench-internals"))]
-            if self.policy == CandidatePolicy::FatalCeiling {
-                return Err(GrepError::CandidateMemory);
-            }
         }
         Ok(())
-        }
     }
 
     fn metrics(&self) -> CandidateMetrics {
-        #[cfg(not(any(test, feature = "bench-internals")))]
-        {
-            let _ = self;
-            CandidateMetrics::default()
-        }
-
-        #[cfg(any(test, feature = "bench-internals"))]
-        {
         CandidateMetrics {
             count: self.candidates.len(),
             estimated_retained_bytes: self.estimated_retained_bytes,
@@ -493,7 +470,6 @@ impl CandidateCollection {
             sort_key_capacity: self.sort_key_capacity,
             slash_path_bytes: self.slash_path_bytes,
             slash_path_capacity: self.slash_path_capacity,
-        }
         }
     }
 
@@ -630,7 +606,7 @@ fn build_searcher(plan: SearchPlan, source: GrepSourcePolicy) -> Searcher {
     let mmap = match source {
         GrepSourcePolicy::Hybrid => MmapChoice::never(),
         #[cfg(any(test, feature = "bench-internals"))]
-        GrepSourcePolicy::Reader => MmapChoice::never(),
+        GrepSourcePolicy::CaptureLimit(_) | GrepSourcePolicy::Reader => MmapChoice::never(),
         #[cfg(any(test, feature = "bench-internals"))]
         GrepSourcePolicy::FileNever => MmapChoice::never(),
         #[cfg(any(test, feature = "bench-internals"))]
@@ -753,8 +729,14 @@ fn search_source(
     searcher: &mut Searcher,
     sink: &mut PlanSink<'_>,
 ) -> (Result<(), SearchError>, File) {
+    let memory_source_limit = memory_source_limit(context.variant.source);
+    let use_memory_source = context.plan.mode == GrepMode::Content
+        && memory_source_limit > 0
+        && before.length() <= memory_source_limit;
     let use_search_file = match context.variant.source {
         GrepSourcePolicy::Hybrid => true,
+        #[cfg(any(test, feature = "bench-internals"))]
+        GrepSourcePolicy::CaptureLimit(_) => true,
         #[cfg(any(test, feature = "bench-internals"))]
         GrepSourcePolicy::Reader => false,
         #[cfg(any(test, feature = "bench-internals"))]
@@ -762,10 +744,7 @@ fn search_source(
         #[cfg(any(test, feature = "bench-internals"))]
         GrepSourcePolicy::MmapThreshold(minimum_bytes) => before.length() >= minimum_bytes,
     };
-    let memory_bytes = if context.variant.source == GrepSourcePolicy::Hybrid
-        && context.plan.mode == GrepMode::Content
-        && before.length() <= MEMORY_SOURCE_BYTES as u64
-    {
+    let memory_bytes = if use_memory_source {
         usize::try_from(before.length())
             .ok()
             .and_then(|len| context.resources?.try_reserve_memory(len).map(|permit| (len, permit)))
@@ -823,10 +802,7 @@ fn search_source(
         };
         drop(memory_permit);
         (result, file)
-    } else if context.variant.source == GrepSourcePolicy::Hybrid
-        && context.plan.mode == GrepMode::Content
-        && before.length() <= MEMORY_SOURCE_BYTES as u64
-    {
+    } else if use_memory_source {
         context.profiler.record_search_reader();
         let source_span = context.profiler.span(GrepStage::SearchReaderWorker);
         let mut file = file;
@@ -849,6 +825,19 @@ fn search_source(
         let result = searcher.search_reader(context.matcher, &mut file, sink);
         drop(source_span);
         (result, file)
+    }
+}
+
+fn memory_source_limit(source: GrepSourcePolicy) -> u64 {
+    match source {
+        GrepSourcePolicy::Hybrid => MEMORY_SOURCE_BYTES as u64,
+        #[cfg(any(test, feature = "bench-internals"))]
+        GrepSourcePolicy::CaptureLimit(bytes) => bytes,
+        #[cfg(any(test, feature = "bench-internals"))]
+        GrepSourcePolicy::Reader
+        | GrepSourcePolicy::FileNever
+        | GrepSourcePolicy::MmapAlways
+        | GrepSourcePolicy::MmapThreshold(_) => 0,
     }
 }
 

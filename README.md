@@ -140,7 +140,7 @@ On Windows, codexshim derives the Git-for-Windows toolchain directories from the
 { "command": "cargo test > /dev/null; echo EXIT=$?", "detach": true, "log_path": "local/test.log" }
 ```
 
-Poll progress with `read` on `log_path` — its `next_start_line` continuation metadata is the cursor. A detached tree is bound to the codexshim instance, not to the call: it survives the call, and it is terminated when the server stops, so nothing outlives the Codex session. `CODEXSHIM_DETACHED_CALLS` bounds how many may be live at once (1–16, default 16); the roster is reserved before blocking scheduling, so a full roster fails immediately with a retryable `resource_busy` error listing the live pids and their log paths. `log_path` is admitted lexically and then opened through the retained repository capability, which blocks symlink and junction escapes.
+Poll progress with `read` on `log_path` — its `next_start_line` continuation metadata is the cursor. A detached tree is tracked by the codexshim instance rather than the call. On Windows, lifecycle ownership covers the Job Object. On Unix, it covers the process group codexshim created; a program that calls `setsid()` or daemonizes can escape that group, so this is best-effort lifecycle cleanup rather than a sandbox. `CODEXSHIM_DETACHED_CALLS` bounds how many may be live at once (1–16, default 16); the roster is reserved before blocking scheduling, so a full roster fails immediately with a retryable `resource_busy` error listing the live pids and their log paths. `log_path` is admitted lexically and then opened through the retained repository capability, which blocks symlink and junction escapes.
 
 ### `--read-scope`
 
@@ -169,6 +169,8 @@ Relative paths and absolute paths inside the repository always use the repositor
 | `CODEXSHIM_DETACHED_CALLS` | `16` | Per-instance live detached `bash` trees; accepts integers from 1 through 16. |
 | `CODEXSHIM_ALLOW_PROGRAMS` | empty | Comma-separated `run_program` allowlist; the `--allow-programs` flag takes precedence. |
 | `CODEXSHIM_OUTPUT_BYTES` | `32000` | Per-call output ceiling in bytes; accepts integers from 4096 through 262144. |
+| `CODEXSHIM_GREP_MEMORY_BYTES` | `268435456` | Per-call hard limit for retained `grep` candidates; accepts integers from 8388608 through 1073741824. |
+| `CODEXSHIM_GLOB_MEMORY_BYTES` | `33554432` | Per-call hard limit for retained `glob` matches; accepts integers from 8388608 through 1073741824. |
 | `CODEXSHIM_BASH` | probed | Absolute path to a GNU bash. An explicit override that fails validation is an error, never a fallback. |
 | `CODEXSHIM_LOG_MODE` | `errors` | One of `off`, `errors`, `all`. |
 | `CODEXSHIM_LOG_DIR` | platform default | Override the log directory with an absolute path. |

@@ -113,6 +113,32 @@ fn invalid_utf8_is_escaped_across_valid_spans() {
     let rendered = capture.render(capture.retained());
     assert_eq!(rendered.text, "a💩b\\xFF");
     assert_eq!(rendered.invalid_bytes, 1);
+    assert_eq!(rendered.encoding, "utf-8-with-byte-escapes");
+}
+
+#[cfg(windows)]
+#[test]
+fn cmd_compat_oem_fallback_preserves_utf8_and_decodes_cp950_runs() {
+    let mut utf8 = Capture::new_windows_oem(1024, 950);
+    utf8.push("UTF-8 界".as_bytes());
+    let rendered = utf8.render(utf8.retained());
+    assert_eq!(rendered.text, "UTF-8 界");
+    assert_eq!(rendered.encoding, "utf-8");
+    assert_eq!(rendered.invalid_bytes, 0);
+
+    let mut mixed = Capture::new_windows_oem(1024, 950);
+    mixed.push(b"prefix \xA4\xA4\xA4\xE5 suffix");
+    let rendered = mixed.render(mixed.retained());
+    assert_eq!(rendered.text, "prefix 中文 suffix");
+    assert_eq!(rendered.encoding, "windows-oem-950-fallback");
+    assert_eq!(rendered.invalid_bytes, 4);
+
+    let mut binary = Capture::new_windows_oem(1024, 950);
+    binary.push(b"binary \xA4");
+    let rendered = binary.render(binary.retained());
+    assert_eq!(rendered.text, "binary \\xA4");
+    assert_eq!(rendered.encoding, "utf-8-with-byte-escapes");
+    assert_eq!(rendered.invalid_bytes, 1);
 }
 
 #[test]

@@ -1,7 +1,6 @@
 use std::{
     io::{self, Read},
     path::Path,
-    sync::Arc,
 };
 
 use cap_std::fs::File;
@@ -9,7 +8,9 @@ use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    encoding::{DecodeControl, DecodeError, SourceEncoding, decode_stream},
+    encoding::{
+        DecodeControl, DecodeError, SourceEncoding, decode_stream, detect_legacy_encoding,
+    },
     output::{OutputFormatter, OutputLimits},
     path::{FileAccess, PathError, ResolvedPath},
     tools::ToolOutput,
@@ -19,6 +20,15 @@ const PREFIX_BYTES: usize = 8 * 1024;
 const CANDIDATE_BYTES: usize = 64 * 1024;
 const LINE_PREFIX_BYTES: usize = 8 * 1024;
 const MAX_LINE_COUNT: usize = 2_000;
+const TEXT_READ_MEMORY_BYTES: usize = 256 * 1024;
+const PDF_READ_MEMORY_BYTES: usize = crate::runtime::DEFAULT_MEMORY_BYTES;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum PdfMode {
+    Text,
+    Image,
+}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,6 +37,8 @@ pub struct ReadRequest {
     pub start_line: Option<usize>,
     pub line_count: Option<usize>,
     pub encoding: Option<String>,
+    pub pdf_mode: Option<PdfMode>,
+    pub pages: Option<String>,
 }
 
 impl ReadRequest {
@@ -76,6 +88,8 @@ pub enum ReadError {
     NotRegular,
     #[error("cannot read binary, image, PDF, or executable content as source text")]
     Binary,
+    #[error("read resource limit exceeded: {0}")]
+    ResourceLimit(String),
     #[error("file changed while it was being read")]
     Changed,
     #[error("read cancelled")]
@@ -84,6 +98,8 @@ pub enum ReadError {
     Decode(#[from] DecodeError),
     #[error(transparent)]
     Output(#[from] crate::output::OutputError),
+    #[error(transparent)]
+    Pdf(#[from] codexshim_pdf_read::PdfReadError),
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -96,36 +112,43 @@ pub enum ReadError {
 /// output-budget error without returning a mixed file version.
 #[cfg(any(test, feature = "bench-internals"))]
 pub fn execute(
-    access: &Arc<FileAccess>,
+    access: &std::sync::Arc<FileAccess>,
     request: &ReadRequest,
     cancellation: &CancellationToken,
 ) -> Result<String, ReadError> {
     execute_output(access, request, cancellation).map(|result| result.text)
 }
 
+#[cfg(any(test, feature = "bench-internals"))]
 pub(crate) fn execute_output(
-    access: &Arc<FileAccess>,
+    access: &std::sync::Arc<FileAccess>,
     request: &ReadRequest,
     cancellation: &CancellationToken,
 ) -> Result<ToolOutput, ReadError> {
     execute_inner(access, request, cancellation)
 }
 
+#[cfg(any(test, feature = "bench-internals"))]
 fn execute_inner(
-    access: &Arc<FileAccess>,
+    access: &std::sync::Arc<FileAccess>,
     request: &ReadRequest,
     cancellation: &CancellationToken,
 ) -> Result<ToolOutput, ReadError> {
-    request.validate()?;
-    let resolved = access.resolve(Path::new(&request.path))?;
-    let absolute = crate::path::display_path(resolved.absolute());
-    match read_once(access, &resolved, &absolute, request, cancellation)? {
+    let prepared = prepare(access, request, cancellation)?;
+    match execute_prepared(access, request, prepared, cancellation)? {
         Attempt::Stable(output) => return Ok(output),
         Attempt::Changed => {
             tracing::warn!(target: "codexshim", event = "read_retry", phase = "execution", outcome = "degraded_success", reason = "file_changed");
         }
     }
-    match read_once(access, &resolved, &absolute, request, cancellation) {
+    let prepared = match prepare(access, request, cancellation) {
+        Ok(prepared) => prepared,
+        Err(ReadError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(ReadError::Changed);
+        }
+        Err(error) => return Err(error),
+    };
+    match execute_prepared(access, request, prepared, cancellation) {
         Ok(Attempt::Stable(output)) => Ok(output),
         Ok(Attempt::Changed) => Err(ReadError::Changed),
         Err(ReadError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {

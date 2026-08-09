@@ -30,6 +30,7 @@ pub fn bash_report() -> Result<(std::path::PathBuf, String), String> {
             tools::bash::locate::LocateError::Cancelled => {
                 "bash discovery was cancelled".to_owned()
             }
+            tools::bash::locate::LocateError::TimedOut => "bash discovery timed out".to_owned(),
             tools::bash::locate::LocateError::Unavailable(message) => message.to_string(),
         })
 }

@@ -27,6 +27,8 @@ const BENCH_SCALES_ENV: &str = "CODEXSHIM_BENCH_SCALES";
 const BENCH_SCOPES_ENV: &str = "CODEXSHIM_BENCH_SCOPES";
 const BENCH_QUICK_ENV: &str = "CODEXSHIM_BENCH_QUICK";
 const BENCH_QUICK_CONCURRENT_ENV: &str = "CODEXSHIM_BENCH_QUICK_CONCURRENT";
+const BENCH_WARM_SAMPLES_ENV: &str = "CODEXSHIM_BENCH_WARM_SAMPLES";
+const BENCH_CONCURRENCY_LEVELS_ENV: &str = "CODEXSHIM_BENCH_CONCURRENCY_LEVELS";
 const OPEN_BATCH_ONLY_ENV: &str = "CODEXSHIM_BENCH_OPEN_BATCH_ONLY";
 const GREP_LANES_ENV: &str = "CODEXSHIM_BENCH_GREP_LANES";
 const GREP_TRAVERSALS_ENV: &str = "CODEXSHIM_BENCH_GREP_TRAVERSALS";
@@ -44,6 +46,9 @@ const GREP_COMPACT_PROFILE_ENV: &str = "CODEXSHIM_BENCH_GREP_COMPACT_PROFILE";
 const GREP_SOURCES_ENV: &str = "CODEXSHIM_BENCH_GREP_SOURCES";
 const GREP_PATHNAME_REOPEN_ENV: &str = "CODEXSHIM_BENCH_GREP_PATHNAME_REOPEN";
 const GREP_MODE_ENV: &str = "CODEXSHIM_BENCH_GREP_MODE";
+const READ_START_LINE_ENV: &str = "CODEXSHIM_BENCH_READ_START_LINE";
+const READ_LINE_COUNT_ENV: &str = "CODEXSHIM_BENCH_READ_LINE_COUNT";
+const READ_ONLY_ENV: &str = "CODEXSHIM_BENCH_READ_ONLY";
 const BENCH_COMMIT_ENV: &str = "CODEXSHIM_BENCH_COMMIT";
 const BENCH_WORKTREE_ENV: &str = "CODEXSHIM_BENCH_WORKTREE";
 const GLOB_P95_ENV: &str = "CODEXSHIM_BENCH_MAX_GLOB_P95_MS_PER_1K";
@@ -54,7 +59,11 @@ const READ_P95_ENV: &str = "CODEXSHIM_BENCH_MAX_READ_P95_MS";
 enum GrepFileSize {
     Legacy,
     OneKiB,
+    FourKiB,
+    SixteenKiB,
+    ThirtyTwoKiB,
     SixtyFourKiB,
+    TwoHundredFiftySixKiB,
     FourMiB,
 }
 
@@ -137,10 +146,11 @@ fn fixture_scales() -> Vec<usize> {
         .map(|value| value.parse::<usize>().expect("fixture scale is an integer"))
         .collect::<Vec<_>>();
     assert!(
-        scales
-            .iter()
-            .all(|scale| matches!(*scale, 1_000 | 10_000 | 100_000 | 1_000_000)),
-        "{BENCH_SCALES_ENV} accepts only 1000,10000,100000,1000000"
+        scales.iter().all(|scale| matches!(
+            *scale,
+            1_000 | 2_000 | 4_000 | 8_000 | 10_000 | 100_000 | 1_000_000
+        )),
+        "{BENCH_SCALES_ENV} accepts only 1000,2000,4000,8000,10000,100000,1000000"
     );
     scales
 }
@@ -162,6 +172,12 @@ fn benchmark_scale(files: usize) {
     set_codex_home(previous_codex_home);
     let unrestricted_access = Arc::new(FileAccess::new(Arc::clone(&root), ReadScope::Unrestricted));
     let repository_access = Arc::new(FileAccess::new(Arc::clone(&root), ReadScope::Normal));
+    let read_file_name = if matches!(grep_workload().file_size, GrepFileSize::Legacy) {
+        "file-000000000.rs"
+    } else {
+        "file-000000000.selected.rs"
+    };
+    let repository_read_file = format!("corpus/shard-000000/{read_file_name}");
 
     if scope_enabled("repository") {
         benchmark_tools(
@@ -169,12 +185,13 @@ fn benchmark_scale(files: usize) {
             files,
             &repository_access,
             "corpus",
-            "corpus/shard-000000/file-000000000.rs",
+            &repository_read_file,
         );
     }
     let codex_path = codex_corpus.to_string_lossy().into_owned();
     let codex_file = codex_corpus
-        .join("shard-000000/file-000000000.rs")
+        .join("shard-000000")
+        .join(read_file_name)
         .to_string_lossy()
         .into_owned();
     if scope_enabled("normal_codex") {
@@ -241,6 +258,10 @@ fn benchmark_tools(
     read_path: &str,
 ) {
     let cancellation = CancellationToken::new();
+    if std::env::var_os(READ_ONLY_ENV).is_some_and(|value| value == "1") {
+        benchmark_read(access, read_path, &cancellation, files, scope);
+        return;
+    }
     if std::env::var_os(OPEN_BATCH_ONLY_ENV).is_some_and(|value| value == "1") {
         benchmark_open_batches(scope, files, access, directory);
         return;
@@ -315,19 +336,41 @@ fn benchmark_tools(
     if grep_variants_only {
         return;
     }
+    benchmark_read(access, read_path, &cancellation, files, scope);
+}
+
+fn benchmark_read(
+    access: &Arc<FileAccess>,
+    read_path: &str,
+    cancellation: &CancellationToken,
+    files: usize,
+    scope: &str,
+) {
     measure(scope, "read", files, || {
         read::execute(
             access,
             &ReadRequest {
                 path: read_path.to_owned(),
-                start_line: Some(1),
-                line_count: Some(2_000),
+                start_line: Some(read_benchmark_value(READ_START_LINE_ENV, 1)),
+                line_count: Some(read_benchmark_value(READ_LINE_COUNT_ENV, 2_000)),
                 encoding: None,
+                pdf_mode: None,
+                pages: None,
             },
-            &cancellation,
+            cancellation,
         )
         .expect("read benchmark")
     });
+}
+
+fn read_benchmark_value(name: &str, default: usize) -> usize {
+    std::env::var(name).map_or(default, |value| {
+        value
+            .parse::<usize>()
+            .ok()
+            .filter(|value| *value > 0)
+            .unwrap_or_else(|| panic!("{name} must be a positive integer"))
+    })
 }
 
 fn benchmark_open_batches(scope: &str, files: usize, access: &FileAccess, directory: &str) {
@@ -372,7 +415,7 @@ fn measure_open_batches(
     let cold_ms = cold_started.elapsed().as_secs_f64() * 1_000.0;
     assert_eq!(opened, paths.len());
 
-    let warm_samples = if quick_mode() { 1 } else { WARM_SAMPLES };
+    let warm_samples = warm_samples();
     let mut warm_ms = Vec::with_capacity(warm_samples);
     for _ in 0..warm_samples {
         let started = Instant::now();
@@ -772,7 +815,7 @@ fn measure_with(
     let cold_ms = cold_started.elapsed().as_secs_f64() * 1_000.0;
     assert!(!expected.is_empty(), "{operation} returned no output");
 
-    let warm_samples = if quick_mode() { 1 } else { WARM_SAMPLES };
+    let warm_samples = warm_samples();
     let mut warm_ms = Vec::with_capacity(warm_samples);
     for _ in 0..warm_samples {
         let started = Instant::now();
@@ -876,6 +919,19 @@ fn quick_mode() -> bool {
     std::env::var_os(BENCH_QUICK_ENV).is_some_and(|value| value == "1")
 }
 
+fn warm_samples() -> usize {
+    if quick_mode() {
+        return 1;
+    }
+    std::env::var(BENCH_WARM_SAMPLES_ENV).map_or(WARM_SAMPLES, |value| {
+        value
+            .parse::<usize>()
+            .ok()
+            .filter(|samples| (1..=100).contains(samples))
+            .unwrap_or_else(|| panic!("{BENCH_WARM_SAMPLES_ENV} must be from 1 to 100"))
+    })
+}
+
 fn grep_lanes() -> &'static [usize] {
     static CONFIGURED: OnceLock<Option<Vec<usize>>> = OnceLock::new();
     if let Some(configured) = CONFIGURED
@@ -927,6 +983,15 @@ fn grep_sources() -> &'static [(&'static str, grep::GrepSourcePolicy)] {
                     .map(str::trim)
                     .map(|value| match value {
                         "hybrid" => ("hybrid", grep::GrepSourcePolicy::Hybrid),
+                        value if value.starts_with("capture-limit:") => {
+                            let bytes = value["capture-limit:".len()..]
+                                .parse::<u64>()
+                                .ok()
+                                .filter(|bytes| *bytes > 0)
+                                .expect("capture limit is a positive byte count");
+                            let name = Box::leak(value.to_owned().into_boxed_str());
+                            (&*name, grep::GrepSourcePolicy::CaptureLimit(bytes))
+                        }
                         "reader" => ("reader", grep::GrepSourcePolicy::Reader),
                         "file-never" => ("file-never", grep::GrepSourcePolicy::FileNever),
                         "mmap-always" => ("mmap-always", grep::GrepSourcePolicy::MmapAlways),
@@ -940,8 +1005,8 @@ fn grep_sources() -> &'static [(&'static str, grep::GrepSourcePolicy)] {
                             (&*name, grep::GrepSourcePolicy::MmapThreshold(bytes))
                         }
                         _ => panic!(
-                            "{GREP_SOURCES_ENV} accepts hybrid,reader,file-never,mmap-always,or \
-                             mmap-threshold:<bytes>"
+                            "{GREP_SOURCES_ENV} accepts hybrid,capture-limit:<bytes>,reader,\
+                             file-never,mmap-always,or mmap-threshold:<bytes>"
                         ),
                     })
                     .collect::<Vec<_>>();
@@ -1034,6 +1099,13 @@ fn grep_workload() -> GrepWorkload {
             "1k-dense" => {
                 GrepWorkload::matrix("1k-dense", GrepFileSize::OneKiB, MatchDensity::Dense)
             }
+            "4k-rare" => GrepWorkload::matrix("4k-rare", GrepFileSize::FourKiB, MatchDensity::Rare),
+            "16k-rare" => {
+                GrepWorkload::matrix("16k-rare", GrepFileSize::SixteenKiB, MatchDensity::Rare)
+            }
+            "32k-rare" => {
+                GrepWorkload::matrix("32k-rare", GrepFileSize::ThirtyTwoKiB, MatchDensity::Rare)
+            }
             "64k-none" => {
                 GrepWorkload::matrix("64k-none", GrepFileSize::SixtyFourKiB, MatchDensity::None)
             }
@@ -1043,6 +1115,11 @@ fn grep_workload() -> GrepWorkload {
             "64k-dense" => {
                 GrepWorkload::matrix("64k-dense", GrepFileSize::SixtyFourKiB, MatchDensity::Dense)
             }
+            "256k-rare" => GrepWorkload::matrix(
+                "256k-rare",
+                GrepFileSize::TwoHundredFiftySixKiB,
+                MatchDensity::Rare,
+            ),
             "4m-none" => GrepWorkload::matrix("4m-none", GrepFileSize::FourMiB, MatchDensity::None),
             "4m-rare" => GrepWorkload::matrix("4m-rare", GrepFileSize::FourMiB, MatchDensity::Rare),
             "4m-dense" => {
@@ -1050,7 +1127,8 @@ fn grep_workload() -> GrepWorkload {
             }
             _ => panic!(
                 "{GREP_WORKLOAD_ENV} accepts legacy, 1k-none, 1k-rare, 1k-dense, \
-                 64k-none, 64k-rare, 64k-dense, 4m-none, 4m-rare, or 4m-dense"
+                 4k-rare, 16k-rare, 32k-rare, 64k-none, 64k-rare, 64k-dense, \
+                 256k-rare, 4m-none, 4m-rare, or 4m-dense"
             ),
         }
     })
@@ -1069,24 +1147,31 @@ impl GrepWorkload {
         if matches!(self.file_size, GrepFileSize::Legacy) {
             return files;
         }
-        std::env::var(GREP_SELECTED_FILES_ENV)
-            .unwrap_or_else(|_| {
-                panic!("{GREP_SELECTED_FILES_ENV} is required for non-legacy grep workloads")
-            })
+        let configured = std::env::var(GREP_SELECTED_FILES_ENV).unwrap_or_else(|_| {
+            panic!("{GREP_SELECTED_FILES_ENV} is required for non-legacy grep workloads")
+        });
+        if configured == "all" {
+            return files;
+        }
+        configured
             .parse::<usize>()
             .ok()
             .filter(|selected| (1..=files).contains(selected))
             .unwrap_or_else(|| {
-                panic!("{GREP_SELECTED_FILES_ENV} must be an integer from 1 to {files}")
+                panic!("{GREP_SELECTED_FILES_ENV} must be all or an integer from 1 to {files}")
             })
     }
 
     fn glob(self) -> &'static str {
         match self.file_size {
             GrepFileSize::Legacy => "**/*.rs",
-            GrepFileSize::OneKiB | GrepFileSize::SixtyFourKiB | GrepFileSize::FourMiB => {
-                "**/*.selected.rs"
-            }
+            GrepFileSize::OneKiB
+            | GrepFileSize::FourKiB
+            | GrepFileSize::SixteenKiB
+            | GrepFileSize::ThirtyTwoKiB
+            | GrepFileSize::SixtyFourKiB
+            | GrepFileSize::TwoHundredFiftySixKiB
+            | GrepFileSize::FourMiB => "**/*.selected.rs",
         }
     }
 
@@ -1097,7 +1182,11 @@ impl GrepWorkload {
         let target = match self.file_size {
             GrepFileSize::Legacy => unreachable!(),
             GrepFileSize::OneKiB => 1_024,
+            GrepFileSize::FourKiB => 4 * 1_024,
+            GrepFileSize::SixteenKiB => 16 * 1_024,
+            GrepFileSize::ThirtyTwoKiB => 32 * 1_024,
             GrepFileSize::SixtyFourKiB => 64 * 1_024,
+            GrepFileSize::TwoHundredFiftySixKiB => 256 * 1_024,
             GrepFileSize::FourMiB => 4 * 1024 * 1024,
         };
         let matching = match self.density {
@@ -1127,6 +1216,36 @@ impl GrepWorkload {
 }
 
 fn concurrency_levels() -> &'static [usize] {
+    static CONFIGURED: OnceLock<Option<Vec<usize>>> = OnceLock::new();
+    if let Some(configured) = CONFIGURED
+        .get_or_init(|| {
+            std::env::var(BENCH_CONCURRENCY_LEVELS_ENV)
+                .ok()
+                .map(|value| {
+                    let levels = value
+                        .split(',')
+                        .map(str::trim)
+                        .map(|value| {
+                            value
+                                .parse::<usize>()
+                                .expect("concurrency level is an integer")
+                        })
+                        .collect::<Vec<_>>();
+                    assert!(
+                        !levels.is_empty()
+                            && levels
+                                .iter()
+                                .all(|level| CONCURRENCY_LEVELS.contains(level)),
+                        "{BENCH_CONCURRENCY_LEVELS_ENV} accepts only comma-separated values from \
+                         1,8,16"
+                    );
+                    levels
+                })
+        })
+        .as_deref()
+    {
+        return configured;
+    }
     if quick_mode() && std::env::var_os(BENCH_QUICK_CONCURRENT_ENV).is_none_or(|value| value != "1")
     {
         &CONCURRENCY_LEVELS[..1]

@@ -8,8 +8,15 @@ pub(crate) mod read;
 pub(crate) mod run_program;
 
 #[derive(Debug)]
+pub(crate) struct ToolImage {
+    pub data: String,
+    pub mime_type: &'static str,
+}
+
+#[derive(Debug)]
 pub(crate) struct ToolOutput {
     pub text: String,
+    pub images: Vec<ToolImage>,
     pub child_nonzero: bool,
 }
 
@@ -17,6 +24,7 @@ impl ToolOutput {
     pub(crate) fn new(text: String) -> Self {
         Self {
             text,
+            images: Vec::new(),
             child_nonzero: false,
         }
     }
@@ -24,7 +32,16 @@ impl ToolOutput {
     pub(crate) fn with_child_nonzero(text: String, child_nonzero: bool) -> Self {
         Self {
             text,
+            images: Vec::new(),
             child_nonzero,
+        }
+    }
+
+    pub(crate) fn with_images(text: String, images: Vec<ToolImage>) -> Self {
+        Self {
+            text,
+            images,
+            child_nonzero: false,
         }
     }
 

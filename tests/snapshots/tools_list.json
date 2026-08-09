@@ -8,12 +8,12 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Read a local repository or Codex extension source file as numbered text lines. Absolute paths may address configured Codex skill and plugin directories.",
+      "description": "Read a local repository or Codex extension file. Text files are returned as numbered lines; PDFs default to page-oriented Markdown and can be rendered as images. Absolute paths may address configured Codex skill and plugin directories.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
           "encoding": {
-            "description": "Optional WHATWG encoding label. A BOM takes precedence; otherwise valid UTF-8 is used when omitted.",
+            "description": "Optional WHATWG encoding label. A BOM takes precedence; when omitted, UTF-8, Big5, and GBK/GB18030 are detected conservatively.",
             "type": "string"
           },
           "line_count": {
@@ -22,9 +22,23 @@
             "minimum": 1,
             "type": "integer"
           },
+          "pages": {
+            "description": "PDF only: one-based page or continuous page range, such as \"3\" or \"1-5\".",
+            "pattern": "^[1-9][0-9]*(-[1-9][0-9]*)?$",
+            "type": "string"
+          },
           "path": {
             "description": "Platform-native repository path or absolute path under a configured Codex skill or plugin directory.",
             "minLength": 1,
+            "type": "string"
+          },
+          "pdf_mode": {
+            "default": "text",
+            "description": "PDF only: return page Markdown or PNG image content blocks.",
+            "enum": [
+              "text",
+              "image"
+            ],
             "type": "string"
           },
           "start_line": {
@@ -160,7 +174,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Run one permitted local program directly with literal arguments and no shell. There is no shell, so pipes, redirection, globbing, and variable expansion do not happen. Arguments are passed literally — do not add quoting. Prefer this when arguments contain characters a shell would mangle, such as Windows paths, regexes, and JSON. If the program is not permitted, this returns a not_permitted error — use bash instead; do not work around it. This is an open-world, destructive operation and may require approval.",
+      "description": "Run one permitted local program directly with literal arguments and no shell. There is no shell, so pipes, redirection, globbing, and variable expansion do not happen. Arguments are passed literally — do not add quoting. Prefer this when arguments contain characters a shell would mangle, such as Windows paths, regexes, and JSON. If the program is not permitted, this returns a not_permitted error — use bash instead; do not work around it. Cleanup owns a Windows Job Object or the Unix process group it created; a Unix program that starts a new session can escape that group. This is not a sandbox. This is an open-world, destructive operation and may require approval.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -226,7 +240,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Run a POSIX bash command line and return merged stdout and stderr with the exit code. Write POSIX bash, never PowerShell, on every platform. The command runs non-interactively with no TTY and stdin closed, so pass flags such as -y or --no-edit instead of expecting a prompt. A non-zero exit code is a normal result, not a tool error. Both output streams are merged into one pipe, so lines appear in pipe-write order and cannot be attributed to a stream; a program that buffers stdout but not stderr can still interleave them differently from what a terminal would show. Output above the byte budget is truncated in the middle: redirect to a file and page it with read when you need all of it. The default timeout is 120000 ms and the maximum is 600000 ms; for work that needs longer, set detach with a log_path and read that file instead of waiting. Do not issue state-changing commands against the same working tree in parallel calls. This is an open-world, destructive operation and may require approval.",
+      "description": "Run a POSIX bash command line and return merged stdout and stderr with the exit code. Write POSIX bash, never PowerShell, on every platform. The command runs non-interactively with no TTY and stdin closed, so pass flags such as -y or --no-edit instead of expecting a prompt. A non-zero exit code is a normal result, not a tool error. Both output streams are merged into one pipe, so lines appear in pipe-write order and cannot be attributed to a stream; a program that buffers stdout but not stderr can still interleave them differently from what a terminal would show. Output above the byte budget is truncated in the middle: redirect to a file and page it with read when you need all of it. The default timeout is 120000 ms and the maximum is 600000 ms; for work that needs longer, set detach with a log_path and read that file instead of waiting. Do not issue state-changing commands against the same working tree in parallel calls. Cleanup owns a Windows Job Object or the Unix process group it created; a Unix program that starts a new session can escape that group. This is not a sandbox. This is an open-world, destructive operation and may require approval.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -241,7 +255,7 @@
           },
           "detach": {
             "default": false,
-            "description": "Run the command past the end of this call, bound to the server's lifetime. Requires log_path and forbids timeout_ms; returns the pid and log path instead of output.",
+            "description": "Run the command past the end of this call under server-owned lifecycle tracking. Windows owns a Job Object; Unix owns the created process group, which a program can escape by starting a new session. Requires log_path and forbids timeout_ms; returns the pid and log path instead of output.",
             "type": "boolean"
           },
           "log_path": {

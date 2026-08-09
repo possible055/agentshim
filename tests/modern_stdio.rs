@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeSet,
+    fs,
     io::{BufRead, BufReader, Write},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     thread,
@@ -9,6 +10,7 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
+use base64::Engine as _;
 use serde_json::{Map, Value, json};
 
 const MAX_RECEIVE_FRAME_BYTES: usize = 8 * 1024 * 1024;
@@ -35,6 +37,10 @@ impl Session {
 
     fn start_with_process_calls(process_calls: usize) -> Self {
         Self::start_with_options(None, None, Some(process_calls))
+    }
+
+    fn start_at(root: &std::path::Path) -> Self {
+        Self::spawn(Self::base_command(root))
     }
 
     fn start_with_options(
@@ -181,6 +187,40 @@ fn response_text(response: &Value) -> &str {
         .expect("tool response text")
 }
 
+fn pdf_with_text() -> Vec<u8> {
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    let mut offsets = [0_usize; 6];
+    let mut object = |id: usize, body: &[u8]| {
+        offsets[id] = pdf.len();
+        pdf.extend_from_slice(format!("{id} 0 obj\n").as_bytes());
+        pdf.extend_from_slice(body);
+        pdf.extend_from_slice(b"\nendobj\n");
+    };
+    object(1, b"<< /Type /Catalog /Pages 2 0 R >>");
+    object(2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+    object(
+        3,
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+    );
+    let content = b"BT /F1 18 Tf 20 150 Td (PDF image block) Tj ET";
+    let mut stream = format!("<< /Length {} >>\nstream\n", content.len()).into_bytes();
+    stream.extend_from_slice(content);
+    stream.extend_from_slice(b"\nendstream");
+    object(4, &stream);
+    object(
+        5,
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+    );
+    let xref = pdf.len();
+    pdf.extend_from_slice(b"xref\n0 6\n0000000000 65535 f \n");
+    for offset in offsets.iter().skip(1) {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(b"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n");
+    pdf.extend_from_slice(format!("{xref}\n%%EOF\n").as_bytes());
+    pdf
+}
+
 #[test]
 fn bash_toolchain_commands_work_over_real_stdio() {
     if codexshim::bash_report().is_err() {
@@ -317,6 +357,40 @@ fn modern_lifecycle_serves_a_tool_call_and_shuts_down_at_eof() {
         "read success must not emit structured content"
     );
 
+    session.close();
+}
+
+#[test]
+fn pdf_image_read_returns_an_image_content_block_over_real_stdio() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    fs::write(fixture.path().join("document.pdf"), pdf_with_text()).expect("PDF fixture");
+    let mut session = Session::start_at(fixture.path());
+    session.send(&modern_request(1, "server/discover", empty_params()));
+    assert_eq!(session.receive()["id"], 1);
+
+    let response = call_tool(
+        &mut session,
+        2,
+        "read",
+        json!({
+            "path": "document.pdf",
+            "pdf_mode": "image",
+            "pages": "1"
+        }),
+    );
+
+    assert_eq!(response["result"]["isError"], false);
+    let content = response["result"]["content"]
+        .as_array()
+        .expect("content blocks");
+    assert_eq!(content.len(), 2);
+    assert_eq!(content[1]["type"], "image");
+    assert_eq!(content[1]["mimeType"], "image/png");
+    let encoded = content[1]["data"].as_str().expect("base64 image data");
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .expect("valid base64");
+    assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
     session.close();
 }
 
@@ -721,6 +795,10 @@ fn session_escaped_descendant_preserves_outcome_uncertain_wire_contract() {
     assert_eq!(
         response["result"]["structuredContent"]["error"]["details"]["termination_outcome"],
         "uncertain"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["error"]["details"]["containment_scope"],
+        "process_group"
     );
     assert!(
         !process_is_running(helper_pid),

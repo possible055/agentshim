@@ -3,7 +3,8 @@ use std::{
     io::{self, Read},
 };
 
-use encoding_rs::{Decoder, DecoderResult, Encoding, UTF_8, UTF_16BE, UTF_16LE};
+use chardetng::{EncodingDetector, Iso2022JpDetection, Utf8Detection};
+use encoding_rs::{BIG5, Decoder, DecoderResult, Encoding, GBK, UTF_8, UTF_16BE, UTF_16LE};
 use tokio_util::sync::CancellationToken;
 
 const DECODE_CHUNK_BYTES: usize = 64 * 1024;
@@ -55,6 +56,10 @@ pub enum DecodeError {
     Utf32,
     #[error("unknown or replacement-only encoding label: {0}")]
     UnknownEncoding(String),
+    #[error(
+        "cannot reliably detect text encoding; supported automatic legacy encodings are Big5 and GBK"
+    )]
+    UndetectedEncoding,
     #[error("input is not valid {0}")]
     Malformed(&'static str),
     #[error("decoded content contains NUL and is treated as binary")]

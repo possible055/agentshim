@@ -1,0 +1,22 @@
+codexshim-pdf-read
+Copyright 2026 codexshim contributors
+
+This crate contains a modified, read-only derivative of PDFOxide source code.
+
+PDFOxide
+Copyright (c) 2025-2026 Yury Fedoseev and the PDFOxide project contributors
+
+PDFOxide is the product; "pdf_oxide" is the name of its packages/crate.
+The upstream source is available under the MIT license OR the Apache License,
+Version 2.0. This derivative uses the Apache License, Version 2.0.
+
+Copyright in the upstream PDFOxide code base is held by Yury Fedoseev and the
+project's contributors.
+
+"PDFOxide" and "pdf_oxide", together with any associated logo, are trademarks
+of Yury Fedoseev and are not covered by the source-code license. These names
+are used only to identify the origin of the derived source.
+
+Portions of the upstream software incorporate third-party open-source
+components. Their applicable licenses remain identified by this crate's Cargo
+dependency metadata and the repository lockfile.

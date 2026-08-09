@@ -130,6 +130,15 @@ impl DiagnosticError for crate::tools::read::ReadError {
             | ReadError::NotRegular => "path",
             ReadError::Cancelled => "client_cancellation",
             ReadError::Output(_) => "output_invariant",
+            ReadError::ResourceLimit(_) => "resource_limit",
+            ReadError::Pdf(error) => match error.kind() {
+                codexshim_pdf_read::PdfReadErrorKind::Invalid => "pdf_invalid",
+                codexshim_pdf_read::PdfReadErrorKind::Unsupported => "pdf_unsupported",
+                codexshim_pdf_read::PdfReadErrorKind::Encrypted => "pdf_encrypted",
+                codexshim_pdf_read::PdfReadErrorKind::ResourceLimit => "resource_limit",
+                codexshim_pdf_read::PdfReadErrorKind::Processing => "pdf_processing",
+                codexshim_pdf_read::PdfReadErrorKind::Io => "io",
+            },
             ReadError::Io(_) | ReadError::Decode(_) | ReadError::Binary | ReadError::Changed => {
                 "io"
             }
@@ -144,7 +153,9 @@ impl DiagnosticError for crate::tools::glob::GlobError {
             GlobError::Validation(_) | GlobError::Pattern(_) => "validation",
             GlobError::Path(_) => "path",
             GlobError::Output(_) => "output_invariant",
-            GlobError::TooManyMatches | GlobError::Memory => "resource_timeout",
+            GlobError::TooManyMatches => "resource_timeout",
+            GlobError::Memory => "resource_limit",
+            GlobError::MemoryBusy => "resource_busy",
             GlobError::Traversal(_) | GlobError::Io(_) => "io",
         }
     }
@@ -158,8 +169,8 @@ impl DiagnosticError for crate::tools::grep::GrepError {
             GrepError::Path(_) => "path",
             GrepError::Cancelled => "client_cancellation",
             GrepError::Output(_) => "output_invariant",
-            #[cfg(any(test, feature = "bench-internals"))]
-            GrepError::CandidateMemory => "resource_timeout",
+            GrepError::CandidateMemory => "resource_limit",
+            GrepError::MemoryBusy => "resource_busy",
             GrepError::PoolPoison | GrepError::CaptureMemory => "resource_timeout",
             GrepError::Traversal(_) | GrepError::Io(_) => "io",
         }
@@ -204,10 +215,12 @@ impl DiagnosticError for crate::tools::exec::ProcessError {
             ProcessError::Timeout { details, .. } => serde_json::to_value(details).ok(),
             ProcessError::TimeoutBeforeSpawn { timeout_ms } => Some(json!({
                 "timeout_ms": timeout_ms,
-                "termination_outcome": "not_started"
+                "termination_outcome": "not_started",
+                "containment_scope": crate::tools::exec::containment_scope()
             })),
             ProcessError::OutcomeUncertain => Some(json!({
-                "termination_outcome": "uncertain"
+                "termination_outcome": "uncertain",
+                "containment_scope": crate::tools::exec::containment_scope()
             })),
             _ => None,
         }
@@ -252,7 +265,15 @@ fn blocking_response<E: DiagnosticError>(
             } else {
                 tracing::info!(target: "codexshim", event = "tool_complete", phase = "response", outcome, run_ms);
             }
-            CallToolResult::success(vec![ContentBlock::text(output.text)]).into()
+            let mut content = Vec::with_capacity(output.images.len() + 1);
+            content.push(ContentBlock::text(output.text));
+            content.extend(
+                output
+                    .images
+                    .into_iter()
+                    .map(|image| ContentBlock::image(image.data, image.mime_type)),
+            );
+            CallToolResult::success(content).into()
         }
         Ok(Err(error)) => diagnostic_tool_error(&error),
         Err(error) => {
@@ -349,11 +370,11 @@ fn tool_catalog(read_scope: ReadScope) -> &'static [Tool; 5] {
 fn read_tool(read_scope: ReadScope) -> Tool {
     let (description, path_description) = match read_scope {
         ReadScope::Normal => (
-            "Read a local repository or Codex extension source file as numbered text lines. Absolute paths may address configured Codex skill and plugin directories.",
+            "Read a local repository or Codex extension file. Text files are returned as numbered lines; PDFs default to page-oriented Markdown and can be rendered as images. Absolute paths may address configured Codex skill and plugin directories.",
             "Platform-native repository path or absolute path under a configured Codex skill or plugin directory.",
         ),
         ReadScope::Unrestricted => (
-            "Read a local filesystem source file as numbered text lines. Relative paths use the repository root; absolute paths may address supported locations outside it.",
+            "Read a local filesystem file. Text files are returned as numbered lines; PDFs default to page-oriented Markdown and can be rendered as images. Relative paths use the repository root; absolute paths may address supported locations outside it.",
             "Platform-native regular file path. Relative paths use the repository root; absolute paths may address supported local filesystems.",
         ),
     };
@@ -366,7 +387,7 @@ fn read_tool(read_scope: ReadScope) -> Tool {
             "properties": {
                 "encoding": {
                     "type": "string",
-                    "description": "Optional WHATWG encoding label. A BOM takes precedence; otherwise valid UTF-8 is used when omitted."
+                    "description": "Optional WHATWG encoding label. A BOM takes precedence; when omitted, UTF-8, Big5, and GBK/GB18030 are detected conservatively."
                 },
                 "line_count": {
                     "type": "integer",
@@ -374,10 +395,21 @@ fn read_tool(read_scope: ReadScope) -> Tool {
                     "maximum": 2000,
                     "description": "Maximum number of lines to return."
                 },
+                "pages": {
+                    "type": "string",
+                    "pattern": "^[1-9][0-9]*(-[1-9][0-9]*)?$",
+                    "description": "PDF only: one-based page or continuous page range, such as \"3\" or \"1-5\"."
+                },
                 "path": {
                     "type": "string",
                     "minLength": 1,
                     "description": path_description
+                },
+                "pdf_mode": {
+                    "type": "string",
+                    "enum": ["text", "image"],
+                    "default": "text",
+                    "description": "PDF only: return page Markdown or PNG image content blocks."
                 },
                 "start_line": {
                     "type": "integer",
@@ -522,7 +554,9 @@ fn run_program_tool() -> Tool {
          Arguments are passed literally — do not add quoting. Prefer this when arguments contain \
          characters a shell would mangle, such as Windows paths, regexes, and JSON. If the \
          program is not permitted, this returns a not_permitted error — use bash instead; do not \
-         work around it. This is an open-world, destructive operation and may require approval.",
+         work around it. Cleanup owns a Windows Job Object or the Unix process group it created; \
+         a Unix program that starts a new session can escape that group. This is not a sandbox. \
+         This is an open-world, destructive operation and may require approval.",
         schema(json!({
             "type": "object",
             "additionalProperties": false,
@@ -592,8 +626,9 @@ fn bash_tool() -> Tool {
          read when you need all of it. The default timeout is 120000 ms and the maximum is \
          600000 ms; for work that needs longer, set detach with a log_path and read that file \
          instead of waiting. Do not issue state-changing commands against the same working \
-         tree in parallel calls. This is an open-world, destructive operation and may require \
-         approval.",
+         tree in parallel calls. Cleanup owns a Windows Job Object or the Unix process group it \
+         created; a Unix program that starts a new session can escape that group. This is not a \
+         sandbox. This is an open-world, destructive operation and may require approval.",
         schema(json!({
             "type": "object",
             "additionalProperties": false,
@@ -610,7 +645,7 @@ fn bash_tool() -> Tool {
                 "detach": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Run the command past the end of this call, bound to the server's lifetime. Requires log_path and forbids timeout_ms; returns the pid and log path instead of output."
+                    "description": "Run the command past the end of this call under server-owned lifecycle tracking. Windows owns a Job Object; Unix owns the created process group, which a program can escape by starting a new session. Requires log_path and forbids timeout_ms; returns the pid and log path instead of output."
                 },
                 "log_path": {
                     "type": "string",

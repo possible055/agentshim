@@ -13,7 +13,10 @@ mod tests {
     use super::execute_profiled_with_traversal;
     use crate::{
         path::{FileAccess, ReadScope, RepositoryRoot, slash_path},
-        runtime::MEMORY_SOFT_TARGET_BYTES,
+        runtime::{
+            DEFAULT_GLOB_MEMORY_BYTES, MIN_TOOL_MEMORY_BYTES, MemoryReservation, RuntimeConfig,
+            RuntimeResources,
+        },
         traversal::{TraversalSummary, prefer_parallel_root},
     };
 
@@ -248,7 +251,12 @@ mod tests {
         }
         oracle.sort();
         for (offset, limit) in [(0_usize, 17_usize), (57, 31), (246, 10), (257, 5)] {
-            let mut top = TopK::new(offset.saturating_add(limit).min(paths.len()));
+            let mut top = TopK::new(
+                offset.saturating_add(limit).min(paths.len()),
+                DEFAULT_GLOB_MEMORY_BYTES,
+                None,
+            )
+            .expect("top-k");
             for path in &paths {
                 top.admit(path).expect("admit");
             }
@@ -268,6 +276,44 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn top_k_memory_limit_rejects_the_first_byte_over_the_limit() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root = RepositoryRoot::open(fixture.path()).expect("root");
+        let path = root.resolve(Path::new("candidate.rs")).expect("candidate");
+        let mut oracle = TopK::new(1, usize::MAX, None).expect("oracle");
+        oracle.admit(&path).expect("oracle admission");
+        let limit = oracle.retained_memory_bytes() - 1;
+        let mut limited = TopK::new(1, limit, None).expect("limited top-k");
+
+        assert!(matches!(limited.admit(&path), Err(GlobError::Memory)));
+    }
+
+    #[test]
+    fn top_k_global_memory_pressure_is_retryable_and_releases_permits() {
+        let mut config = RuntimeConfig::for_tests(1);
+        config.memory_bytes = MIN_TOOL_MEMORY_BYTES;
+        let resources = RuntimeResources::new(config);
+        let initial = resources
+            .try_reserve_memory(1024)
+            .expect("initial reservation");
+        let reservation = MemoryReservation::from_initial(resources.clone(), initial, 1024);
+        let pressure = resources
+            .try_reserve_memory(MIN_TOOL_MEMORY_BYTES - 1024)
+            .expect("competing reservation");
+
+        assert!(matches!(
+            TopK::new(1, DEFAULT_GLOB_MEMORY_BYTES, Some(reservation)),
+            Err(GlobError::MemoryBusy)
+        ));
+        drop(pressure);
+        assert!(
+            resources
+                .try_reserve_memory(MIN_TOOL_MEMORY_BYTES)
+                .is_some()
+        );
     }
 
     #[test]
@@ -344,7 +390,7 @@ mod tests {
             memory_charge(&maximum),
             8 * 1024 * 1024 + MAX_MATCHES * std::mem::size_of::<GlobMatch>()
         );
-        assert!(memory_charge(&maximum) <= MEMORY_SOFT_TARGET_BYTES);
+        assert!(memory_charge(&maximum) <= DEFAULT_GLOB_MEMORY_BYTES);
         assert!(memory_charge(&maximum).saturating_mul(16) < 1024 * 1024 * 1024);
     }
 }

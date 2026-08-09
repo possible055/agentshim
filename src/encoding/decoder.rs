@@ -1,3 +1,48 @@
+const MIN_AUTODETECT_NON_ASCII_BYTES: usize = 8;
+
+pub(crate) fn detect_legacy_encoding(
+    prefix: &[u8],
+    explicit: Option<&str>,
+    sample_is_complete: bool,
+) -> Result<Option<&'static str>, DecodeError> {
+    if explicit.is_some() || starts_with_unicode_bom(prefix) || prefix_is_utf8(prefix) {
+        return Ok(None);
+    }
+    if prefix
+        .iter()
+        .filter(|byte| **byte >= 0x80)
+        .take(MIN_AUTODETECT_NON_ASCII_BYTES)
+        .count()
+        < MIN_AUTODETECT_NON_ASCII_BYTES
+    {
+        return Err(DecodeError::UndetectedEncoding);
+    }
+
+    let mut detector = EncodingDetector::new(Iso2022JpDetection::Deny);
+    detector.feed(prefix, sample_is_complete);
+    let encoding = detector.guess(None, Utf8Detection::Allow);
+    if encoding == BIG5 || encoding == GBK {
+        Ok(Some(encoding.name()))
+    } else {
+        Err(DecodeError::UndetectedEncoding)
+    }
+}
+
+fn starts_with_unicode_bom(prefix: &[u8]) -> bool {
+    prefix.starts_with(&[0x00, 0x00, 0xFE, 0xFF])
+        || prefix.starts_with(&[0xFF, 0xFE, 0x00, 0x00])
+        || prefix.starts_with(&[0xEF, 0xBB, 0xBF])
+        || prefix.starts_with(&[0xFF, 0xFE])
+        || prefix.starts_with(&[0xFE, 0xFF])
+}
+
+fn prefix_is_utf8(prefix: &[u8]) -> bool {
+    match std::str::from_utf8(prefix) {
+        Ok(_) => true,
+        Err(error) => error.error_len().is_none(),
+    }
+}
+
 fn detect_encoding(
     prefix: &[u8],
     explicit: Option<&str>,

@@ -1,4 +1,4 @@
-use std::{env, io, sync::OnceLock};
+use std::{env, ffi::OsStr, io, sync::OnceLock};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -23,22 +23,25 @@ const CJK_BYTES_PER_TOKEN: f64 = 2.17;
 /// Returns invalid input when `CODEXSHIM_OUTPUT_BYTES` is not an integer inside the
 /// documented range, so startup fails before any tool call renders output.
 pub fn configured_byte_limit() -> io::Result<usize> {
-    let Some(value) = env::var_os(OUTPUT_BYTES_ENV) else {
-        return Ok(MODEL_BYTE_LIMIT);
-    };
-    value
-        .to_str()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| (MIN_OUTPUT_BYTES..=MAX_OUTPUT_BYTES).contains(value))
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "{OUTPUT_BYTES_ENV} must be an integer from {MIN_OUTPUT_BYTES} to \
+    parse_configured_byte_limit(env::var_os(OUTPUT_BYTES_ENV).as_deref())
+}
+
+fn parse_configured_byte_limit(value: Option<&OsStr>) -> io::Result<usize> {
+    value.map_or(Ok(MODEL_BYTE_LIMIT), |value| {
+        value
+            .to_str()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| (MIN_OUTPUT_BYTES..=MAX_OUTPUT_BYTES).contains(value))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "{OUTPUT_BYTES_ENV} must be an integer from {MIN_OUTPUT_BYTES} to \
                      {MAX_OUTPUT_BYTES}"
-                ),
-            )
-        })
+                    ),
+                )
+            })
+    })
 }
 
 #[must_use]
@@ -413,21 +416,18 @@ mod tests {
 
     #[test]
     fn configured_byte_limit_rejects_values_outside_the_documented_range() {
-        // SAFETY: the guard restores the previous value before any other test observes it.
-        unsafe {
-            for value in ["0", "4095", "262145", "many", "-1"] {
-                std::env::set_var(super::OUTPUT_BYTES_ENV, value);
-                assert!(
-                    super::configured_byte_limit().is_err(),
-                    "{value} must be rejected"
-                );
-            }
-            std::env::set_var(super::OUTPUT_BYTES_ENV, "48000");
-            assert_eq!(super::configured_byte_limit().ok(), Some(48_000));
-            std::env::remove_var(super::OUTPUT_BYTES_ENV);
+        for value in ["0", "4095", "262145", "many", "-1"] {
+            assert!(
+                super::parse_configured_byte_limit(Some(std::ffi::OsStr::new(value))).is_err(),
+                "{value} must be rejected"
+            );
         }
         assert_eq!(
-            super::configured_byte_limit().ok(),
+            super::parse_configured_byte_limit(Some(std::ffi::OsStr::new("48000"))).ok(),
+            Some(48_000)
+        );
+        assert_eq!(
+            super::parse_configured_byte_limit(None).ok(),
             Some(super::MODEL_BYTE_LIMIT)
         );
     }

@@ -17,6 +17,7 @@ mod tests {
     use super::execute_profiled;
     use crate::{
         path::{FileAccess, ReadScope, RepositoryRoot},
+        runtime::{MIN_TOOL_MEMORY_BYTES, MemoryReservation, RuntimeConfig, RuntimeResources},
         traversal::prefer_parallel_root,
     };
 
@@ -178,8 +179,9 @@ mod tests {
         let (_fixture, root) = fixture();
         let path = root.resolve(Path::new("src/a.rs")).expect("candidate path");
         let candidate = candidate(path).expect("candidate");
-        let mut collection = CandidateCollection::new(CandidatePolicy::SoftTarget);
-        collection.estimated_retained_bytes = CANDIDATE_SOFT_TARGET_BYTES;
+        let mut collection =
+            CandidateCollection::new(CandidatePolicy::SoftTarget, usize::MAX, None);
+        collection.path_retained_bytes = CANDIDATE_SOFT_TARGET_BYTES;
 
         collection.admit(candidate).expect("soft target is not fatal");
         assert_eq!(collection.soft_target_crossings, 1);
@@ -191,11 +193,60 @@ mod tests {
         let (_fixture, root) = fixture();
         let path = root.resolve(Path::new("src/a.rs")).expect("candidate path");
         let candidate = candidate(path).expect("candidate");
-        let mut collection = CandidateCollection::new(CandidatePolicy::FatalCeiling);
-        collection.estimated_retained_bytes = CANDIDATE_SOFT_TARGET_BYTES;
+        let mut collection =
+            CandidateCollection::new(CandidatePolicy::FatalCeiling, usize::MAX, None);
+        collection.path_retained_bytes = CANDIDATE_SOFT_TARGET_BYTES;
 
         let error = collection.admit(candidate).expect_err("fatal benchmark policy");
         assert!(matches!(error, GrepError::CandidateMemory));
+    }
+
+    #[test]
+    fn candidate_memory_limit_rejects_the_first_byte_over_the_limit() {
+        let (_fixture, root) = fixture();
+        let path = root.resolve(Path::new("src/a.rs")).expect("candidate path");
+        let candidate = candidate(path).expect("candidate");
+        let mut oracle =
+            CandidateCollection::new(CandidatePolicy::SoftTarget, usize::MAX, None);
+        oracle.admit(candidate.clone()).expect("oracle admission");
+        let limit = oracle.estimated_retained_bytes - 1;
+        let mut limited = CandidateCollection::new(CandidatePolicy::SoftTarget, limit, None);
+
+        assert!(matches!(
+            limited.admit(candidate),
+            Err(GrepError::CandidateMemory)
+        ));
+    }
+
+    #[test]
+    fn candidate_global_memory_pressure_is_retryable_and_releases_permits() {
+        let (_fixture, root) = fixture();
+        let path = root.resolve(Path::new("src/a.rs")).expect("candidate path");
+        let candidate = candidate(path).expect("candidate");
+        let mut config = RuntimeConfig::for_tests(1);
+        config.memory_bytes = MIN_TOOL_MEMORY_BYTES;
+        let resources = RuntimeResources::new(config);
+        let initial = resources
+            .try_reserve_memory(1024)
+            .expect("initial reservation");
+        let reservation = MemoryReservation::from_initial(resources.clone(), initial, 1024);
+        let pressure = resources
+            .try_reserve_memory(MIN_TOOL_MEMORY_BYTES - 1024)
+            .expect("competing reservation");
+        let mut collection =
+            CandidateCollection::new(CandidatePolicy::SoftTarget, usize::MAX, Some(reservation));
+
+        assert!(matches!(
+            collection.admit(candidate),
+            Err(GrepError::MemoryBusy)
+        ));
+        drop(collection);
+        drop(pressure);
+        assert!(
+            resources
+                .try_reserve_memory(MIN_TOOL_MEMORY_BYTES)
+                .is_some()
+        );
     }
 
     #[test]
@@ -437,6 +488,8 @@ mod tests {
         let query = request("needle");
         let expected = execute(&root, &query, 2, &CancellationToken::new()).expect("baseline");
         for source in [
+            GrepSourcePolicy::CaptureLimit(1),
+            GrepSourcePolicy::CaptureLimit(u64::MAX),
             GrepSourcePolicy::Reader,
             GrepSourcePolicy::FileNever,
             GrepSourcePolicy::MmapAlways,

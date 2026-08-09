@@ -23,19 +23,36 @@ struct TopK {
     capacity: usize,
     heap: BinaryHeap<GlobMatch>,
     charged: usize,
+    memory_limit: usize,
+    reservation: Option<crate::runtime::MemoryReservation>,
 }
 
 impl TopK {
-    fn new(capacity: usize) -> Self {
+    fn new(
+        capacity: usize,
+        memory_limit: usize,
+        mut reservation: Option<crate::runtime::MemoryReservation>,
+    ) -> Result<Self, GlobError> {
         let heap = BinaryHeap::with_capacity(capacity);
         let charged = heap
             .capacity()
             .saturating_mul(std::mem::size_of::<GlobMatch>());
-        Self {
+        if charged > memory_limit {
+            return Err(GlobError::Memory);
+        }
+        if reservation
+            .as_mut()
+            .is_some_and(|reservation| !reservation.try_grow_to(charged))
+        {
+            return Err(GlobError::MemoryBusy);
+        }
+        Ok(Self {
             capacity,
             heap,
             charged,
-        }
+            memory_limit,
+            reservation,
+        })
     }
 
     fn threshold(&self) -> TopKThreshold {
@@ -77,9 +94,10 @@ impl TopK {
             .charged
             .saturating_sub(worst.charge)
             .saturating_add(charge);
-        if new_charge > RETAINED_MEMORY_BYTES {
+        if new_charge > self.memory_limit {
             return Err(GlobError::Memory);
         }
+        self.reserve(new_charge)?;
         self.heap.pop();
         self.heap.push(candidate);
         self.charged = new_charge;
@@ -96,10 +114,22 @@ impl TopK {
 
     fn charge(&mut self, charge: usize) -> Result<(), GlobError> {
         let total = self.charged.saturating_add(charge);
-        if total > RETAINED_MEMORY_BYTES {
+        if total > self.memory_limit {
             return Err(GlobError::Memory);
         }
+        self.reserve(total)?;
         self.charged = total;
+        Ok(())
+    }
+
+    fn reserve(&mut self, total: usize) -> Result<(), GlobError> {
+        if self
+            .reservation
+            .as_mut()
+            .is_some_and(|reservation| !reservation.try_grow_to(total))
+        {
+            return Err(GlobError::MemoryBusy);
+        }
         Ok(())
     }
 

@@ -153,23 +153,35 @@ pub(crate) fn execute_output(
 ) -> Result<ToolOutput, ProcessError> {
     let started = std::time::Instant::now();
     request.validate()?;
+    let deadline = (!request.detach).then(|| started + timeout);
     if cancellation.is_cancelled() {
         return Err(ProcessError::Cancelled);
     }
-    let runtime = match locator.resolve(cancellation) {
+    let runtime = match deadline.map_or_else(
+        || locator.resolve(cancellation),
+        |deadline| locator.resolve_before(cancellation, deadline),
+    ) {
         Ok(runtime) => runtime,
         Err(LocateError::Cancelled) => return Err(ProcessError::Cancelled),
+        Err(LocateError::TimedOut) => {
+            return Err(ProcessError::TimeoutBeforeSpawn {
+                timeout_ms: request.timeout_ms(),
+            });
+        }
         Err(LocateError::Unavailable(error)) => {
             return Err(ProcessError::Unavailable(error.to_string()));
         }
     };
+    ensure_before_spawn(deadline, request.timeout_ms())?;
     tracing::info!(target: "codexshim", event = "process_resolve", phase = "execution");
     let cwd = spawn::resolve_cwd(root, request.cwd.as_deref()).map_err(invalid)?;
+    ensure_before_spawn(deadline, request.timeout_ms())?;
     let resolved = ResolvedProgram {
         absolute: runtime.executable.clone(),
         executable: runtime.executable.clone(),
         launcher: launcher_for(&runtime.executable)?,
     };
+    ensure_before_spawn(deadline, request.timeout_ms())?;
     let environment = environment(&runtime);
     let args = vec![
         "--noprofile".to_owned(),
@@ -191,12 +203,12 @@ pub(crate) fn execute_output(
         })?;
         return run_detached(root, admission, request, &launch, cancellation);
     }
-    let timeout =
-        timeout
-            .checked_sub(started.elapsed())
-            .ok_or(ProcessError::TimeoutBeforeSpawn {
-                timeout_ms: request.timeout_ms(),
-            })?;
+    let timeout = deadline
+        .and_then(|deadline| deadline.checked_duration_since(std::time::Instant::now()))
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or(ProcessError::TimeoutBeforeSpawn {
+            timeout_ms: request.timeout_ms(),
+        })?;
     let plan = ExecPlan {
         resolved: &resolved,
         cwd: &cwd,
@@ -235,6 +247,17 @@ pub(crate) fn execute_output(
             })
         }
         Err(failure) => Err(failure.into_process_error(request.timeout_ms())),
+    }
+}
+
+fn ensure_before_spawn(
+    deadline: Option<std::time::Instant>,
+    timeout_ms: u64,
+) -> Result<(), ProcessError> {
+    if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+        Err(ProcessError::TimeoutBeforeSpawn { timeout_ms })
+    } else {
+        Ok(())
     }
 }
 
@@ -297,10 +320,11 @@ fn run_detached(
     let pid = tree.pid();
     admission.retain(tree, log_path.clone());
     let rendered = format!(
-        "Bash: {}\nCwd: {}\nPid: {pid}\nLog path: {}\nDetached; the tree runs until it exits or this server stops.",
+        "Bash: {}\nCwd: {}\nPid: {pid}\nLog path: {}\nDetached; lifecycle scope is {}.",
         diagnostic_path(&resolved.absolute),
         diagnostic_path(cwd),
-        diagnostic_path(&log_path)
+        diagnostic_path(&log_path),
+        crate::tools::exec::containment_scope()
     );
     Ok(ToolOutput::new(rendered))
 }
@@ -355,11 +379,12 @@ fn completed_output(completed: &CompletedBash, output: &RenderedCapture) -> Tool
         format!("Exit code: {}", completed.exit),
         format!("Duration ms: {}", completed.duration.as_millis()),
         format!(
-            "Output bytes: total={}, shown={}, omitted={}, invalid={}",
+            "Output bytes: total={}, shown={}, omitted={}, invalid={}, encoding={}",
             completed.output.bytes_read,
             output.shown_bytes,
             output.omitted_bytes,
-            output.invalid_bytes
+            output.invalid_bytes,
+            output.encoding
         ),
         "Complete.".to_owned(),
     ];
@@ -409,7 +434,7 @@ fn timeout_output(
     output: &RenderedCapture,
 ) -> TimeoutRender {
     let header = format!(
-        "bash timed out after {timeout_ms} ms and its process tree was terminated\nBash: {}\nCwd: {}\nStatus: timed out; process tree terminated",
+        "bash timed out after {timeout_ms} ms and its owned process containment was terminated\nBash: {}\nCwd: {}\nStatus: timed out; owned process containment terminated",
         diagnostic_path(&timed_out.bash),
         diagnostic_path(&timed_out.cwd)
     );
@@ -417,11 +442,12 @@ fn timeout_output(
         "Exit code: unavailable (timed out)".to_owned(),
         format!("Duration ms: {}", timed_out.duration.as_millis()),
         format!(
-            "Output bytes: total={}, shown={}, omitted={}, invalid={}",
+            "Output bytes: total={}, shown={}, omitted={}, invalid={}, encoding={}",
             timed_out.output.bytes_read,
             output.shown_bytes,
             output.omitted_bytes,
-            output.invalid_bytes
+            output.invalid_bytes,
+            output.encoding
         ),
         "Incomplete.".to_owned(),
     ];
@@ -443,6 +469,7 @@ fn timeout_output(
         shown: output.shown_bytes,
         omitted: output.omitted_bytes,
         invalid_utf8: output.invalid_bytes,
+        encoding: output.encoding.clone(),
     };
     TimeoutRender {
         text,
@@ -455,6 +482,7 @@ fn timeout_output(
             stdout: summary.clone(),
             stderr: summary,
             termination_outcome: "terminated",
+            containment_scope: crate::tools::exec::containment_scope(),
         },
     }
 }

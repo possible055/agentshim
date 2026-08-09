@@ -26,7 +26,6 @@ use crate::{
 const DEFAULT_LIMIT: usize = 200;
 const MAX_LIMIT: usize = 1_000;
 const MAX_MATCHES: usize = 100_000;
-const RETAINED_MEMORY_BYTES: usize = 32 * 1024 * 1024;
 const MEMORY_SAFETY_BYTES: usize = 8 * 1024 * 1024;
 const PATH_OMISSION: &str = "[glob path omitted: exceeds output budget]";
 const PARALLEL_BATCH_SIZE: usize = 256;
@@ -97,8 +96,13 @@ pub enum GlobError {
     Pattern(String),
     #[error("more than 100000 paths matched; narrow pattern or path")]
     TooManyMatches,
-    #[error("retained glob paths exceed the bounded memory budget; narrow pattern or offset")]
+    #[error(
+        "retained glob paths exceed the configured memory limit; narrow pattern or offset, or \
+         raise CODEXSHIM_GLOB_MEMORY_BYTES"
+    )]
     Memory,
+    #[error("glob could not grow within the shared memory capacity; retry later")]
+    MemoryBusy,
     #[error(transparent)]
     Path(#[from] PathError),
     #[error(transparent)]
@@ -127,6 +131,7 @@ pub fn execute(
         cancellation,
         GlobTraversal::Adaptive,
         &GlobProfiler::disabled(),
+        None,
     )
     .map(|result| result.text)
 }
@@ -136,6 +141,7 @@ pub(crate) fn execute_output(
     request: &GlobRequest,
     resources: &RuntimeResources,
     cancellation: &CancellationToken,
+    memory: crate::runtime::MemoryReservation,
 ) -> Result<ToolOutput, GlobError> {
     execute_inner(
         access,
@@ -144,6 +150,7 @@ pub(crate) fn execute_output(
         cancellation,
         GlobTraversal::Adaptive,
         &GlobProfiler::disabled(),
+        Some(memory),
     )
 }
 
@@ -154,8 +161,17 @@ fn execute_inner(
     cancellation: &CancellationToken,
     traversal: GlobTraversal,
     profiler: &GlobProfiler,
+    memory: Option<crate::runtime::MemoryReservation>,
 ) -> Result<ToolOutput, GlobError> {
-    execute_inner_with_traversal(access, request, resources, cancellation, traversal, profiler)
+    execute_inner_with_traversal(
+        access,
+        request,
+        resources,
+        cancellation,
+        traversal,
+        profiler,
+        memory,
+    )
 }
 
 #[cfg(any(test, feature = "bench-internals"))]
@@ -178,6 +194,7 @@ pub fn execute_with_traversal(
         cancellation,
         traversal,
         &GlobProfiler::disabled(),
+        None,
     )
         .map(|output| output.text)
 }
@@ -205,6 +222,7 @@ pub fn execute_profiled_with_traversal(
             cancellation,
             traversal,
             &profiler,
+            None,
         );
     drop(total_span);
     let output = result?;
@@ -221,6 +239,7 @@ fn execute_inner_with_traversal(
     cancellation: &CancellationToken,
     traversal: GlobTraversal,
     profiler: &GlobProfiler,
+    memory: Option<crate::runtime::MemoryReservation>,
 ) -> Result<ToolOutput, GlobError> {
     let file_work_pool = resources.file_work_pool();
     let _file_work_request = file_work_pool.begin_request();
@@ -238,25 +257,28 @@ fn execute_inner_with_traversal(
     let base = access.resolve(Path::new(base_input))?;
     let selection = select_glob_traversal(access, &base, traversal, &file_work_pool);
     let traversal = selection.traversal;
-    let traversal_threads = selection.threads;
     let offset = request.offset.unwrap_or(0);
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT);
     let retain = offset.saturating_add(limit).min(MAX_MATCHES);
     let collection = GlobCollection {
-        store: TopK::new(retain),
+        store: TopK::new(
+            retain,
+            resources.config().glob_memory_bytes,
+            memory,
+        )?,
         total: 0,
         terminal_error: None,
     };
     let regular_plan = GlobCollectPlan {
         include_ignored: request.include_ignored.unwrap_or(false),
         literal_prefix: None,
-        traversal_threads,
+        traversal_threads: selection.threads,
     };
     #[cfg(any(test, feature = "bench-internals"))]
     let prefix_plan = GlobCollectPlan {
         include_ignored: regular_plan.include_ignored,
         literal_prefix: literal_prefix.as_deref(),
-        traversal_threads,
+        traversal_threads: selection.threads,
     };
     drop(setup_span);
     let traversal_span = profiler.span(GlobStage::TraversalWall);

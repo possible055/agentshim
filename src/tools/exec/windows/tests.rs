@@ -80,6 +80,37 @@ mod tests {
     }
 
     #[test]
+    fn batch_script_path_percent_expansion_is_escaped_and_executes_the_literal_file() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let script = fixture.path().join("%CD%.cmd");
+        std::fs::write(&script, "@echo literal-script\r\n").expect("batch fixture");
+        let resolved = ResolvedProgram {
+            absolute: script.clone(),
+            executable: script,
+            launcher: Launcher::CmdCompat,
+        };
+        let launch = LaunchEncoding::new(&resolved, &[]).expect("encode literal batch path");
+        let encoded = String::from_utf16(&launch.command_line[..launch.command_line.len() - 1])
+            .expect("valid fixture UTF-16");
+        assert!(encoded.contains("%%cd:~,%CD%%cd:~,%"));
+        let plan = ExecPlan {
+            resolved: &resolved,
+            cwd: fixture.path(),
+            args: &[],
+            environment: &EnvironmentPlan::default(),
+            stdin: None,
+            streams: Streams::Merged,
+            timeout: Duration::from_secs(5),
+        };
+        let Ok(outcome) = run(&plan, &tokio_util::sync::CancellationToken::new()) else {
+            panic!("literal batch run failed");
+        };
+        assert_eq!(outcome.exit, "0");
+        let rendered = outcome.captures[0].render(outcome.captures[0].retained());
+        assert!(rendered.text.contains("literal-script"));
+    }
+
+    #[test]
     fn every_launcher_transition_failure_uses_raii_cleanup() {
         let fixture = tempfile::tempdir().expect("fixture");
         let executable = std::env::current_exe().expect("test executable");

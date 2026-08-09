@@ -29,11 +29,28 @@ pub(crate) struct Capture {
     head_limit: usize,
     tail_limit: usize,
     tail_start: usize,
+    encoding: CaptureEncoding,
     pub(crate) bytes_read: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CaptureEncoding {
+    Utf8,
+    #[cfg(windows)]
+    WindowsOem(u32),
 }
 
 impl Capture {
     pub(crate) fn new(total_bytes: usize) -> Self {
+        Self::with_encoding(total_bytes, CaptureEncoding::Utf8)
+    }
+
+    #[cfg(windows)]
+    pub(super) fn new_windows_oem(total_bytes: usize, code_page: u32) -> Self {
+        Self::with_encoding(total_bytes, CaptureEncoding::WindowsOem(code_page))
+    }
+
+    fn with_encoding(total_bytes: usize, encoding: CaptureEncoding) -> Self {
         let head_limit = total_bytes.div_ceil(2).max(1);
         let tail_limit = total_bytes.saturating_sub(head_limit).max(1);
         Self {
@@ -42,6 +59,7 @@ impl Capture {
             head_limit,
             tail_limit,
             tail_start: 0,
+            encoding,
             bytes_read: 0,
         }
     }
@@ -104,12 +122,13 @@ impl Capture {
         if limit == self.bytes_read && self.dropped() == 0 {
             let mut bytes = self.head.clone();
             bytes.extend_from_slice(&self.ordered_tail());
-            let (text, invalid_bytes) = escape_invalid_utf8(&bytes);
+            let (text, invalid_bytes, encoding) = self.render_bytes(&bytes);
             return RenderedCapture {
                 text,
                 shown_bytes: self.bytes_read,
                 omitted_bytes: 0,
                 invalid_bytes,
+                encoding,
             };
         }
 
@@ -147,13 +166,33 @@ impl Capture {
             }
         }
         bytes.extend_from_slice(tail);
-        let (text, invalid_bytes) = escape_invalid_utf8(&bytes);
+        let (text, invalid_bytes, encoding) = self.render_bytes(&bytes);
         RenderedCapture {
             text,
             shown_bytes,
             omitted_bytes,
             invalid_bytes,
+            encoding,
         }
+    }
+
+    fn render_bytes(&self, bytes: &[u8]) -> (String, usize, String) {
+        let (escaped, invalid_bytes) = escape_invalid_utf8(bytes);
+        if invalid_bytes == 0 {
+            return (escaped, 0, "utf-8".to_owned());
+        }
+        #[cfg(windows)]
+        if let CaptureEncoding::WindowsOem(code_page) = self.encoding
+            && let Some(decoded) = decode_mixed_utf8_oem(bytes, code_page)
+        {
+            return (
+                decoded,
+                invalid_bytes,
+                format!("windows-oem-{code_page}-fallback"),
+            );
+        }
+        let _ = self.encoding;
+        (escaped, invalid_bytes, "utf-8-with-byte-escapes".to_owned())
     }
 
     fn ordered_tail(&self) -> Vec<u8> {
@@ -172,6 +211,75 @@ pub(crate) struct RenderedCapture {
     pub(crate) shown_bytes: usize,
     pub(crate) omitted_bytes: usize,
     pub(crate) invalid_bytes: usize,
+    pub(crate) encoding: String,
+}
+
+#[cfg(windows)]
+fn decode_mixed_utf8_oem(mut bytes: &[u8], code_page: u32) -> Option<String> {
+    use windows_sys::Win32::Globalization::IsDBCSLeadByteEx;
+
+    let mut output = String::new();
+    while !bytes.is_empty() {
+        match std::str::from_utf8(bytes) {
+            Ok(text) => {
+                output.push_str(text);
+                break;
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                output.push_str(std::str::from_utf8(&bytes[..valid]).ok()?);
+                let invalid = &bytes[valid..];
+                let fallback_len = if invalid.len() >= 2
+                    && unsafe { IsDBCSLeadByteEx(code_page, invalid[0]) } != 0
+                {
+                    2
+                } else {
+                    error.error_len().unwrap_or(invalid.len())
+                };
+                output.push_str(&decode_windows_code_page(
+                    &invalid[..fallback_len],
+                    code_page,
+                )?);
+                bytes = &invalid[fallback_len..];
+            }
+        }
+    }
+    Some(output)
+}
+
+#[cfg(windows)]
+fn decode_windows_code_page(bytes: &[u8], code_page: u32) -> Option<String> {
+    use windows_sys::Win32::Globalization::{MB_ERR_INVALID_CHARS, MultiByteToWideChar};
+
+    let input_len = i32::try_from(bytes.len()).ok()?;
+    let required = unsafe {
+        MultiByteToWideChar(
+            code_page,
+            MB_ERR_INVALID_CHARS,
+            bytes.as_ptr(),
+            input_len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if required == 0 {
+        return None;
+    }
+    let mut wide = vec![0_u16; usize::try_from(required).ok()?];
+    let written = unsafe {
+        MultiByteToWideChar(
+            code_page,
+            MB_ERR_INVALID_CHARS,
+            bytes.as_ptr(),
+            input_len,
+            wide.as_mut_ptr(),
+            required,
+        )
+    };
+    if written != required {
+        return None;
+    }
+    String::from_utf16(&wide).ok()
 }
 
 fn allocate_view_bytes(
@@ -275,8 +383,15 @@ pub(crate) fn escape_invalid_utf8(bytes: &[u8]) -> (String, usize) {
 }
 
 #[cfg(windows)]
-pub(super) fn drain(mut reader: impl Read, capture_bytes: usize) -> io::Result<Capture> {
-    let mut capture = Capture::new(capture_bytes);
+pub(super) fn drain(
+    mut reader: impl Read,
+    capture_bytes: usize,
+    oem_code_page: Option<u32>,
+) -> io::Result<Capture> {
+    let mut capture = oem_code_page.map_or_else(
+        || Capture::new(capture_bytes),
+        |code_page| Capture::new_windows_oem(capture_bytes, code_page),
+    );
     let mut chunk = vec![0_u8; DRAIN_CHUNK_BYTES].into_boxed_slice();
     loop {
         let count = reader.read(&mut chunk)?;

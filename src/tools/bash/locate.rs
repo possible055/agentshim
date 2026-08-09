@@ -60,6 +60,7 @@ struct BashInputs {
 #[derive(Debug)]
 pub(crate) enum LocateError {
     Cancelled,
+    TimedOut,
     Unavailable(Arc<str>),
 }
 
@@ -92,9 +93,28 @@ impl BashLocator {
         &self,
         cancellation: &CancellationToken,
     ) -> Result<Arc<BashRuntime>, LocateError> {
+        self.resolve_with_deadline(cancellation, None)
+    }
+
+    pub(crate) fn resolve_before(
+        &self,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<Arc<BashRuntime>, LocateError> {
+        self.resolve_with_deadline(cancellation, Some(deadline))
+    }
+
+    fn resolve_with_deadline(
+        &self,
+        cancellation: &CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<Arc<BashRuntime>, LocateError> {
         loop {
             if cancellation.is_cancelled() {
                 return Err(LocateError::Cancelled);
+            }
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Err(LocateError::TimedOut);
             }
             let mut state = self.lock();
             match &*state {
@@ -104,13 +124,19 @@ impl BashLocator {
                 LocatorState::Empty => {
                     *state = LocatorState::Probing;
                     drop(state);
-                    return self.probe_as_owner(cancellation);
+                    return self.probe_as_owner(cancellation, deadline);
                 }
                 LocatorState::Probing => {
+                    let wait = deadline
+                        .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
+                        .map_or(WAIT_SLICE, |remaining| remaining.min(WAIT_SLICE));
+                    if wait.is_zero() {
+                        return Err(LocateError::TimedOut);
+                    }
                     let waited = self
                         .inner
                         .changed
-                        .wait_timeout(state, WAIT_SLICE)
+                        .wait_timeout(state, wait)
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     drop(waited.0);
                 }
@@ -121,14 +147,17 @@ impl BashLocator {
     fn probe_as_owner(
         &self,
         cancellation: &CancellationToken,
+        deadline: Option<Instant>,
     ) -> Result<Arc<BashRuntime>, LocateError> {
         let mut reset = ProbeReset::new(&self.inner);
         let result = if cancellation.is_cancelled() {
             Err(ProbeError::Cancelled)
         } else {
-            let result = probe(&self.inner.inputs, cancellation);
+            let result = probe(&self.inner.inputs, cancellation, deadline);
             if cancellation.is_cancelled() {
                 Err(ProbeError::Cancelled)
+            } else if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                Err(ProbeError::TimedOut)
             } else {
                 result
             }
@@ -154,6 +183,12 @@ impl BashLocator {
                 reset.disarm();
                 self.inner.changed.notify_all();
                 Err(LocateError::Cancelled)
+            }
+            Err(ProbeError::TimedOut) => {
+                *state = LocatorState::Empty;
+                reset.disarm();
+                self.inner.changed.notify_all();
+                Err(LocateError::TimedOut)
             }
         }
     }
@@ -222,15 +257,20 @@ impl Drop for ProbeReset<'_> {
 #[derive(Debug)]
 enum ProbeError {
     Cancelled,
+    TimedOut,
     Unavailable(String),
 }
 
-fn probe(inputs: &BashInputs, cancellation: &CancellationToken) -> Result<BashRuntime, ProbeError> {
+fn probe(
+    inputs: &BashInputs,
+    cancellation: &CancellationToken,
+    deadline: Option<Instant>,
+) -> Result<BashRuntime, ProbeError> {
+    let budget = Budget::for_request(deadline);
     #[cfg(test)]
     if let Some(gate) = &inputs.probe_gate {
-        gate.wait(cancellation)?;
+        gate.wait(cancellation, &budget)?;
     }
-    let budget = Budget::new(PROBE_BUDGET);
     let executable = locate(inputs, &budget, cancellation)?;
     let path = toolchain_path(&executable, &inputs.inherited_path);
     let locale = detect_locale(&executable, path.as_deref(), &budget, cancellation)?;
@@ -436,12 +476,24 @@ fn detect_locale(
 
 struct Budget {
     deadline: Instant,
+    request_deadline: Option<Instant>,
 }
 
 impl Budget {
+    #[cfg(test)]
     fn new(total: Duration) -> Self {
         Self {
             deadline: Instant::now() + total,
+            request_deadline: None,
+        }
+    }
+
+    fn for_request(request_deadline: Option<Instant>) -> Self {
+        let probe_deadline = Instant::now() + PROBE_BUDGET;
+        Self {
+            deadline: request_deadline
+                .map_or(probe_deadline, |deadline| deadline.min(probe_deadline)),
+            request_deadline,
         }
     }
 
@@ -450,6 +502,11 @@ impl Budget {
             .checked_duration_since(Instant::now())
             .filter(|remaining| !remaining.is_zero())
             .map(|remaining| remaining.min(PROBE_TIMEOUT))
+    }
+
+    fn request_expired(&self) -> bool {
+        self.request_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
     }
 }
 
@@ -475,7 +532,11 @@ fn probe_output_in(
     cwd: &Path,
 ) -> Result<Option<String>, ProbeError> {
     let Some(timeout) = budget.slice() else {
-        return Ok(None);
+        return if budget.request_expired() {
+            Err(ProbeError::TimedOut)
+        } else {
+            Ok(None)
+        };
     };
     if cancellation.is_cancelled() {
         return Err(ProbeError::Cancelled);
@@ -507,6 +568,7 @@ fn probe_output_in(
     match spawn::run(&plan, cancellation) {
         Ok(outcome) if outcome.exit == "0" => Ok(probe_capture(outcome.captures)),
         Err(ExecFailure::Process(ProcessError::Cancelled)) => Err(ProbeError::Cancelled),
+        Err(ExecFailure::TimedOut { .. }) if budget.request_expired() => Err(ProbeError::TimedOut),
         Ok(_) | Err(ExecFailure::TimedOut { .. } | ExecFailure::Process(_)) => Ok(None),
     }
 }
@@ -554,7 +616,7 @@ impl TestProbeGate {
         }
     }
 
-    fn wait(&self, cancellation: &CancellationToken) -> Result<(), ProbeError> {
+    fn wait(&self, cancellation: &CancellationToken, budget: &Budget) -> Result<(), ProbeError> {
         if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) != 0 {
             return Ok(());
         }
@@ -567,11 +629,25 @@ impl TestProbeGate {
             if cancellation.is_cancelled() {
                 return Err(ProbeError::Cancelled);
             }
+            if budget.request_expired() {
+                return Err(ProbeError::TimedOut);
+            }
             if *released {
                 return Ok(());
             }
+            let wait = budget
+                .deadline
+                .checked_duration_since(Instant::now())
+                .map_or(Duration::ZERO, |remaining| remaining.min(WAIT_SLICE));
+            if wait.is_zero() {
+                return if budget.request_expired() {
+                    Err(ProbeError::TimedOut)
+                } else {
+                    Ok(())
+                };
+            }
             released = changed
-                .wait_timeout(released, WAIT_SLICE)
+                .wait_timeout(released, wait)
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .0;
         }
@@ -669,6 +745,62 @@ mod tests {
         ));
         gate.release();
         assert!(owner.join().expect("owner").is_ok());
+        assert!(locator.resolve(&CancellationToken::new()).is_ok());
+    }
+
+    #[test]
+    fn owner_deadline_resets_the_locator_for_a_later_probe() {
+        let Some(runtime) = available_bash() else {
+            return;
+        };
+        let gate = Arc::new(TestProbeGate::new());
+        let locator = BashLocator::for_tests(
+            Some(runtime.executable.clone().into_os_string()),
+            Vec::new(),
+            std::env::var_os("PATH").unwrap_or_default(),
+        )
+        .with_probe_gate(Arc::clone(&gate));
+        let worker_locator = locator.clone();
+        let worker = std::thread::spawn(move || {
+            worker_locator.resolve_before(
+                &CancellationToken::new(),
+                Instant::now() + Duration::from_millis(100),
+            )
+        });
+        gate.entered.wait();
+
+        assert!(matches!(
+            worker.join().expect("probe owner"),
+            Err(LocateError::TimedOut)
+        ));
+        assert!(locator.resolve(&CancellationToken::new()).is_ok());
+    }
+
+    #[test]
+    fn waiter_deadline_does_not_cancel_the_shared_probe_owner() {
+        let Some(runtime) = available_bash() else {
+            return;
+        };
+        let gate = Arc::new(TestProbeGate::new());
+        let locator = BashLocator::for_tests(
+            Some(runtime.executable.clone().into_os_string()),
+            Vec::new(),
+            std::env::var_os("PATH").unwrap_or_default(),
+        )
+        .with_probe_gate(Arc::clone(&gate));
+        let owner_locator = locator.clone();
+        let owner = std::thread::spawn(move || owner_locator.resolve(&CancellationToken::new()));
+        gate.entered.wait();
+
+        assert!(matches!(
+            locator.resolve_before(
+                &CancellationToken::new(),
+                Instant::now() + Duration::from_millis(50)
+            ),
+            Err(LocateError::TimedOut)
+        ));
+        gate.release();
+        assert!(owner.join().expect("probe owner").is_ok());
         assert!(locator.resolve(&CancellationToken::new()).is_ok());
     }
 

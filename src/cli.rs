@@ -165,6 +165,18 @@ async fn run(config: RuntimeLimits, command: CliCommand) -> Result<(), Box<dyn E
                 service.runtime_limits().detached_calls
             );
             println!("output bytes: {}", service.runtime_limits().output_bytes);
+            println!(
+                "grep memory bytes: {}",
+                service.runtime_limits().grep_memory_bytes
+            );
+            println!(
+                "glob memory bytes: {}",
+                service.runtime_limits().glob_memory_bytes
+            );
+            println!(
+                "global memory bytes: {}",
+                service.runtime_limits().memory_bytes
+            );
             println!("allowed programs: {}", allowed.describe());
             match bash_report() {
                 Ok((executable, locale)) => {

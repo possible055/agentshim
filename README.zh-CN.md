@@ -140,7 +140,7 @@ Windows 上，codexshim 会从探测到的 Git for Windows bash 推导其工具�
 { "command": "cargo test > /dev/null; echo EXIT=$?", "detach": true, "log_path": "local/test.log" }
 ```
 
-用 `read` 读取 `log_path` 观察进度——它的 `next_start_line` 续读信息即为游标。detached 行程树绑定的是 codexshim 实例而非本次调用：它在调用返回后继续存活，并在服务停止时被终止，因此不会有任何东西活过 Codex session。`CODEXSHIM_DETACHED_CALLS` 限制同时存活的数量（1–16，默认 16）；roster 在 blocking scheduling 前就保留名额，因此满载会立即返回可重试的 `resource_busy` 错误，并列出存活各笔的 pid 与 log 路径。`log_path` 先做词法 admission，再透过保留的 repository capability 开启，以阻挡 symlink／junction escape。
+用 `read` 读取 `log_path` 观察进度——它的 `next_start_line` 续读信息即为游标。detached 行程树由 codexshim 实例而非本次调用追踪。Windows 上的生命周期所有权涵盖 Job Object；Unix 上则涵盖 codexshim 建立的 process group，程序若调用 `setsid()` 或 daemonize 可能逃离该群组，因此这是 best-effort lifecycle cleanup，并非 sandbox。`CODEXSHIM_DETACHED_CALLS` 限制同时存活的数量（1–16，默认 16）；roster 在 blocking scheduling 前就保留名额，因此满载会立即返回可重试的 `resource_busy` 错误，并列出存活各笔的 pid 与 log 路径。`log_path` 先做词法 admission，再透过保留的 repository capability 开启，以阻挡 symlink／junction escape。
 
 ### `--read-scope`
 
@@ -169,6 +169,8 @@ args = ["serve", "--read-scope", "unrestricted"]
 | `CODEXSHIM_DETACHED_CALLS` | `16` | 每个实例存活中的 detached `bash` 行程树数量；接受 1 到 16 的整数。 |
 | `CODEXSHIM_ALLOW_PROGRAMS` | 空 | 逗号分隔的 `run_program` 白名单；`--allow-programs` 旗标优先。 |
 | `CODEXSHIM_OUTPUT_BYTES` | `32000` | 每次呼叫的输出上限（位元组）；接受 4096 到 262144 的整数。 |
+| `CODEXSHIM_GREP_MEMORY_BYTES` | `268435456` | 每次 `grep` 呼叫保留候选项目的记忆体硬上限；接受 8388608 到 1073741824 的整数。 |
+| `CODEXSHIM_GLOB_MEMORY_BYTES` | `33554432` | 每次 `glob` 呼叫保留匹配项目的记忆体硬上限；接受 8388608 到 1073741824 的整数。 |
 | `CODEXSHIM_BASH` | 自动探测 | GNU bash 的绝对路径。显式覆写若验证失败即为错误，不会退回自动探测。 |
 | `CODEXSHIM_LOG_MODE` | `errors` | 取值 `off`、`errors`、`all` 之一。 |
 | `CODEXSHIM_LOG_DIR` | 平台默认 | 用绝对路径覆盖日志目录。 |

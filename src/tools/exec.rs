@@ -43,7 +43,7 @@ pub enum ProcessError {
     },
     #[error("process timed out after {timeout_ms} ms before spawn; no child was started")]
     TimeoutBeforeSpawn { timeout_ms: u64 },
-    #[error("process was cancelled and its process tree was terminated")]
+    #[error("process was cancelled and its owned process containment was terminated")]
     Cancelled,
     #[error("process cleanup did not complete before its deadline; outcome uncertain")]
     OutcomeUncertain,
@@ -61,6 +61,7 @@ pub(crate) struct ProcessStreamSummary {
     pub omitted: usize,
     #[serde(rename = "invalid_utf8_bytes")]
     pub invalid_utf8: usize,
+    pub encoding: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -73,4 +74,17 @@ pub(crate) struct ProcessTimeoutDetails {
     pub stdout: ProcessStreamSummary,
     pub stderr: ProcessStreamSummary,
     pub termination_outcome: &'static str,
+    pub containment_scope: &'static str,
+}
+
+#[must_use]
+pub(crate) const fn containment_scope() -> &'static str {
+    #[cfg(windows)]
+    {
+        "job"
+    }
+    #[cfg(not(windows))]
+    {
+        "process_group"
+    }
 }

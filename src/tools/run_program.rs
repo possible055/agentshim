@@ -215,13 +215,17 @@ pub(crate) fn execute_output(
     cancellation: &CancellationToken,
 ) -> Result<ToolOutput, ProcessError> {
     let started = std::time::Instant::now();
+    let deadline = started + timeout;
     request.validate()?;
+    ensure_before_spawn(deadline, request.timeout_ms())?;
     if cancellation.is_cancelled() {
         return Err(ProcessError::Cancelled);
     }
     tracing::info!(target: "codexshim", event = "process_resolve", phase = "execution");
     let cwd = spawn::resolve_cwd(root, request.cwd.as_deref()).map_err(invalid)?;
+    ensure_before_spawn(deadline, request.timeout_ms())?;
     let program = resolver.resolve(&request.program, &cwd)?;
+    ensure_before_spawn(deadline, request.timeout_ms())?;
     if !allowed.permits(&program) {
         return Err(ProcessError::NotPermitted(format!(
             "{:?} resolves to {}, which is not in the run_program allowlist. Use bash for this, \
@@ -231,12 +235,13 @@ pub(crate) fn execute_output(
             allowed.describe()
         )));
     }
-    let timeout =
-        timeout
-            .checked_sub(started.elapsed())
-            .ok_or(ProcessError::TimeoutBeforeSpawn {
-                timeout_ms: request.timeout_ms(),
-            })?;
+    ensure_before_spawn(deadline, request.timeout_ms())?;
+    let timeout = deadline
+        .checked_duration_since(std::time::Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or(ProcessError::TimeoutBeforeSpawn {
+            timeout_ms: request.timeout_ms(),
+        })?;
     let environment = request.environment();
     let plan = ExecPlan {
         resolved: &program,
@@ -282,6 +287,14 @@ pub(crate) fn execute_output(
             })
         }
         Err(failure) => Err(failure.into_process_error(request.timeout_ms())),
+    }
+}
+
+fn ensure_before_spawn(deadline: std::time::Instant, timeout_ms: u64) -> Result<(), ProcessError> {
+    if std::time::Instant::now() >= deadline {
+        Err(ProcessError::TimeoutBeforeSpawn { timeout_ms })
+    } else {
+        Ok(())
     }
 }
 
@@ -349,18 +362,20 @@ fn completed_output(
         format!("Exit code: {}", completed.exit),
         format!("Duration ms: {}", completed.duration.as_millis()),
         format!(
-            "Stdout bytes: total={}, shown={}, omitted={}, invalid={}",
+            "Stdout bytes: total={}, shown={}, omitted={}, invalid={}, encoding={}",
             completed.stdout.bytes_read,
             stdout.shown_bytes,
             stdout.omitted_bytes,
-            stdout.invalid_bytes
+            stdout.invalid_bytes,
+            stdout.encoding
         ),
         format!(
-            "Stderr bytes: total={}, shown={}, omitted={}, invalid={}",
+            "Stderr bytes: total={}, shown={}, omitted={}, invalid={}, encoding={}",
             completed.stderr.bytes_read,
             stderr.shown_bytes,
             stderr.omitted_bytes,
-            stderr.invalid_bytes
+            stderr.invalid_bytes,
+            stderr.encoding
         ),
         "Complete.".to_owned(),
     ];
@@ -403,7 +418,7 @@ fn timeout_output(
     stderr: &RenderedCapture,
 ) -> TimeoutRender {
     let header = format!(
-        "process timed out after {timeout_ms} ms and its process tree was terminated\nResolved program: {}\nLauncher: {}\nCwd: {}\nStatus: timed out; process tree terminated",
+        "process timed out after {timeout_ms} ms and its owned process containment was terminated\nResolved program: {}\nLauncher: {}\nCwd: {}\nStatus: timed out; owned process containment terminated",
         diagnostic_path(&timed_out.resolved.absolute),
         spawn::launcher_label(&timed_out.resolved),
         diagnostic_path(&timed_out.cwd)
@@ -412,18 +427,20 @@ fn timeout_output(
         "Exit code: unavailable (timed out)".to_owned(),
         format!("Duration ms: {}", timed_out.duration.as_millis()),
         format!(
-            "Stdout bytes: total={}, shown={}, omitted={}, invalid={}",
+            "Stdout bytes: total={}, shown={}, omitted={}, invalid={}, encoding={}",
             timed_out.stdout.bytes_read,
             stdout.shown_bytes,
             stdout.omitted_bytes,
-            stdout.invalid_bytes
+            stdout.invalid_bytes,
+            stdout.encoding
         ),
         format!(
-            "Stderr bytes: total={}, shown={}, omitted={}, invalid={}",
+            "Stderr bytes: total={}, shown={}, omitted={}, invalid={}, encoding={}",
             timed_out.stderr.bytes_read,
             stderr.shown_bytes,
             stderr.omitted_bytes,
-            stderr.invalid_bytes
+            stderr.invalid_bytes,
+            stderr.encoding
         ),
         "Incomplete.".to_owned(),
     ];
@@ -456,14 +473,17 @@ fn timeout_output(
                 shown: stdout.shown_bytes,
                 omitted: stdout.omitted_bytes,
                 invalid_utf8: stdout.invalid_bytes,
+                encoding: stdout.encoding.clone(),
             },
             stderr: ProcessStreamSummary {
                 total: timed_out.stderr.bytes_read,
                 shown: stderr.shown_bytes,
                 omitted: stderr.omitted_bytes,
                 invalid_utf8: stderr.invalid_bytes,
+                encoding: stderr.encoding.clone(),
             },
             termination_outcome: "terminated",
+            containment_scope: crate::tools::exec::containment_scope(),
         },
     }
 }

@@ -234,8 +234,7 @@ impl CodexShim {
         self.resources.shutdown_token()
     }
 
-    /// Terminate every detached tree this instance still owns. Detached work is bound to the
-    /// server lifetime, so nothing survives the session that started it.
+    /// Terminate every detached tree this instance still owns.
     pub fn terminate_detached(&self) {
         self.detached.terminate_all();
     }
@@ -323,6 +322,8 @@ impl CodexShim {
             .with_cache_scope(CacheScope::Private)
     }
 
+    // Read retries intentionally keep capability and reservation lifetimes in one scope.
+    #[allow(clippy::too_many_lines)]
     async fn call_read(
         &self,
         arguments: Option<JsonObject>,
@@ -330,18 +331,15 @@ impl CodexShim {
         admission: OwnedSemaphorePermit,
     ) -> CallToolResponse {
         let queued = Instant::now();
-        let read_request = match parse_request(arguments, "read") {
+        let read_request: crate::tools::read::ReadRequest =
+            match parse_request(arguments, "read") {
             Ok(request) => request,
             Err(error) => return classified_tool_error("validation", error),
         };
         let worker = self.resources.acquire_worker(request_cancellation).await;
         let open_file = self.resources.acquire_open_file(request_cancellation).await;
-        let memory = self
-            .resources
-            .reserve_memory(256 * 1024, request_cancellation)
-            .await;
-        let permits = match (worker, open_file, memory) {
-            (Ok(worker), Ok(open_file), Ok(memory)) => (admission, worker, open_file, memory),
+        let permits = match (worker, open_file) {
+            (Ok(worker), Ok(open_file)) => (admission, worker, open_file),
             _ => {
                 return classified_tool_error(
                     cancellation_class(request_cancellation, &self.resources.shutdown_token()),
@@ -355,15 +353,94 @@ impl CodexShim {
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
         let span = tracing::Span::current();
         let running = Instant::now();
-        let result = tokio::task::spawn_blocking(move || {
-            span.in_scope(|| {
-                let result =
-                    crate::tools::read::execute_output(&access, &read_request, &cancellation);
-                drop(permits);
-                result
+        let mut result = None;
+        for attempt_index in 0..2 {
+            let prepare_access = access.clone();
+            let prepare_request = read_request.clone();
+            let prepare_cancellation = cancellation.clone();
+            let prepare_span = span.clone();
+            let prepared = tokio::task::spawn_blocking(move || {
+                prepare_span.in_scope(|| {
+                    crate::tools::read::prepare(
+                        &prepare_access,
+                        &prepare_request,
+                        &prepare_cancellation,
+                    )
+                })
             })
-        })
-        .await;
+            .await;
+            let prepared = match prepared {
+                Ok(Ok(prepared)) => prepared,
+                Ok(Err(crate::tools::read::ReadError::Io(error)))
+                    if attempt_index > 0 && error.kind() == io::ErrorKind::NotFound =>
+                {
+                    result = Some(Ok(Err(crate::tools::read::ReadError::Changed)));
+                    break;
+                }
+                Ok(Err(error)) => {
+                    result = Some(Ok(Err(error)));
+                    break;
+                }
+                Err(error) => {
+                    result = Some(Err(error));
+                    break;
+                }
+            };
+            let Ok(memory) = self
+                .resources
+                .reserve_memory(prepared.memory_charge(), request_cancellation)
+                .await
+            else {
+                cancellation_relay.abort();
+                drop(permits);
+                return classified_tool_error(
+                    cancellation_class(
+                        request_cancellation,
+                        &self.resources.shutdown_token(),
+                    ),
+                    "read cancelled while waiting for runtime capacity",
+                );
+            };
+            let execute_access = access.clone();
+            let execute_request = read_request.clone();
+            let execute_cancellation = cancellation.clone();
+            let execute_span = span.clone();
+            let executed = tokio::task::spawn_blocking(move || {
+                execute_span.in_scope(|| {
+                    crate::tools::read::execute_prepared(
+                        &execute_access,
+                        &execute_request,
+                        prepared,
+                        &execute_cancellation,
+                    )
+                })
+            })
+            .await;
+            drop(memory);
+            match executed {
+                Ok(Ok(crate::tools::read::Attempt::Stable(output))) => {
+                    result = Some(Ok(Ok(output)));
+                    break;
+                }
+                Ok(Ok(crate::tools::read::Attempt::Changed)) if attempt_index == 0 => {
+                    tracing::warn!(target: "codexshim", event = "read_retry", phase = "execution", outcome = "degraded_success", reason = "file_changed");
+                }
+                Ok(Ok(crate::tools::read::Attempt::Changed)) => {
+                    result = Some(Ok(Err(crate::tools::read::ReadError::Changed)));
+                    break;
+                }
+                Ok(Err(error)) => {
+                    result = Some(Ok(Err(error)));
+                    break;
+                }
+                Err(error) => {
+                    result = Some(Err(error));
+                    break;
+                }
+            }
+        }
+        let result = result.expect("read attempt loop always produces a result");
+        drop(permits);
         cancellation_relay.abort();
         blocking_response("read", duration_ms(running.elapsed()), result)
     }
@@ -399,6 +476,12 @@ impl CodexShim {
         tracing::info!(target: "codexshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
         let access = self.file_access.clone();
         let resources = self.resources.clone();
+        let reservation = crate::runtime::MemoryReservation::from_initial(
+            resources.clone(),
+            permits.2,
+            crate::tools::glob::memory_charge(&glob_request),
+        );
+        let permits = (permits.0, permits.1);
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
         let span = tracing::Span::current();
@@ -410,6 +493,7 @@ impl CodexShim {
                     &glob_request,
                     &resources,
                     &cancellation,
+                    reservation,
                 );
                 drop(permits);
                 result
@@ -455,6 +539,12 @@ impl CodexShim {
         tracing::info!(target: "codexshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
         let access = self.file_access.clone();
         let resources = self.resources.clone();
+        let reservation = crate::runtime::MemoryReservation::from_initial(
+            resources.clone(),
+            permits.3,
+            crate::tools::grep::base_memory_charge(),
+        );
+        let permits = (permits.0, permits.1, permits.2);
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
         let span = tracing::Span::current();
@@ -466,6 +556,7 @@ impl CodexShim {
                     &grep_request,
                     &resources,
                     &cancellation,
+                    reservation,
                 );
                 drop(permits);
                 result
@@ -523,6 +614,12 @@ impl CodexShim {
         let running = Instant::now();
         let result = tokio::task::spawn_blocking(move || {
             span.in_scope(|| {
+                let Some(remaining) = remaining.checked_sub(running.elapsed()) else {
+                    drop(permits);
+                    return Err(ProcessError::TimeoutBeforeSpawn {
+                        timeout_ms: process_request.timeout_ms(),
+                    });
+                };
                 let result = crate::tools::run_program::execute_output(
                     &root,
                     &resolver,
@@ -614,6 +711,17 @@ impl CodexShim {
         let running = Instant::now();
         let result = tokio::task::spawn_blocking(move || {
             span.in_scope(|| {
+                let remaining = if bash_request.detach {
+                    remaining
+                } else {
+                    let Some(remaining) = remaining.checked_sub(running.elapsed()) else {
+                        drop(permits);
+                        return Err(ProcessError::TimeoutBeforeSpawn {
+                            timeout_ms: bash_request.timeout_ms(),
+                        });
+                    };
+                    remaining
+                };
                 let result = crate::tools::bash::execute_output(
                     &root,
                     &locator,

@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     output::{OutputFormatter, OutputLimits},
     path::{FileAccess, PathError, ResolvedPath},
-    runtime::RuntimeResources,
+    runtime::{MemoryReservation, RuntimeResources},
     sorting,
     tools::ToolOutput,
     tools::read::FileFingerprint,
@@ -35,7 +35,7 @@ const MAX_LIMIT: usize = 1_000;
 const MAX_CONTEXT: usize = 20;
 #[cfg(any(test, feature = "bench-internals"))]
 pub(crate) const CANDIDATE_SOFT_TARGET_BYTES: usize = 64 * 1024 * 1024;
-const MEMORY_SOURCE_BYTES: usize = 8 * 1024 * 1024;
+const MEMORY_SOURCE_BYTES: usize = 16 * 1024;
 const SEARCH_HEAP_BYTES: usize = 1024 * 1024;
 const CAPTURE_MEMORY_BYTES: usize = 1024 * 1024;
 const PAGE_MEMORY_BYTES: usize = 48 * 1024;
@@ -67,6 +67,8 @@ pub enum GrepTraversal {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GrepSourcePolicy {
     Hybrid,
+    #[cfg(any(test, feature = "bench-internals"))]
+    CaptureLimit(u64),
     #[cfg(any(test, feature = "bench-internals"))]
     Reader,
     #[cfg(any(test, feature = "bench-internals"))]
@@ -109,6 +111,18 @@ impl GrepBenchmarkVariant {
             Ok("reader") => GrepSourcePolicy::Reader,
             Ok("file-never") => GrepSourcePolicy::FileNever,
             Ok("mmap-always") => GrepSourcePolicy::MmapAlways,
+            Ok(value) if value.starts_with("capture-limit:") => {
+                let bytes = value["capture-limit:".len()..]
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|bytes| *bytes > 0)
+                    .ok_or_else(|| {
+                        GrepError::Validation(format!(
+                            "{BENCH_SOURCE_ENV} capture limit must be a positive byte count"
+                        ))
+                    })?;
+                GrepSourcePolicy::CaptureLimit(bytes)
+            }
             Ok(value) if value.starts_with("mmap-threshold:") => {
                 let bytes = value["mmap-threshold:".len()..]
                     .parse::<u64>()
@@ -123,8 +137,8 @@ impl GrepBenchmarkVariant {
             }
             Ok(value) => {
                 return Err(GrepError::Validation(format!(
-                    "{BENCH_SOURCE_ENV} must be hybrid, reader, file-never, mmap-always, or \
-                     mmap-threshold:<bytes>; got {value}"
+                    "{BENCH_SOURCE_ENV} must be hybrid, capture-limit:<bytes>, reader, \
+                     file-never, mmap-always, or mmap-threshold:<bytes>; got {value}"
                 )));
             }
             Err(error) => {
@@ -256,9 +270,13 @@ pub enum GrepError {
     Regex(String),
     #[error("invalid grep glob: {0}")]
     Glob(String),
-    #[cfg(any(test, feature = "bench-internals"))]
-    #[error("benchmark candidate policy reached its fatal 64 MiB ceiling")]
+    #[error(
+        "grep candidates exceed the configured memory limit; narrow path/glob or adjust \
+         CODEXSHIM_GREP_MEMORY_BYTES"
+    )]
     CandidateMemory,
+    #[error("grep memory capacity is busy; retry the request later")]
+    MemoryBusy,
     #[error("grep worker pool state was poisoned")]
     PoolPoison,
     #[error("grep matching content exceeds the bounded capture budget; narrow the query")]
@@ -293,9 +311,12 @@ pub fn execute(
             request,
             resources,
             cancellation,
-            GrepTraversal::Adaptive,
-            GrepBenchmarkVariant::default(),
-            &GrepProfiler::disabled(),
+            GrepExecution {
+                traversal: GrepTraversal::Adaptive,
+                variant: GrepBenchmarkVariant::default(),
+                profiler: &GrepProfiler::disabled(),
+                memory: None,
+            },
         )
         .map(|result| result.text)
     })
@@ -325,9 +346,12 @@ pub fn execute_with_traversal(
             request,
             resources,
             cancellation,
-            traversal,
-            GrepBenchmarkVariant::default(),
-            &GrepProfiler::disabled(),
+            GrepExecution {
+                traversal,
+                variant: GrepBenchmarkVariant::default(),
+                profiler: &GrepProfiler::disabled(),
+                memory: None,
+            },
         )
         .map(|result| result.text)
     })
@@ -353,9 +377,12 @@ pub fn execute_with_variant(
             request,
             resources,
             cancellation,
-            traversal,
-            variant,
-            &GrepProfiler::disabled(),
+            GrepExecution {
+                traversal,
+                variant,
+                profiler: &GrepProfiler::disabled(),
+                memory: None,
+            },
         )
         .map(|result| result.text)
     })
@@ -427,9 +454,12 @@ pub fn execute_profiled_with_variant(
             request,
             resources,
             cancellation,
-            traversal,
-            variant,
-            &profiler,
+            GrepExecution {
+                traversal,
+                variant,
+                profiler: &profiler,
+                memory: None,
+            },
         )?
         .text;
         drop(total_span);
@@ -463,6 +493,7 @@ pub(crate) fn execute_output(
     request: &GrepRequest,
     resources: &RuntimeResources,
     cancellation: &CancellationToken,
+    memory: MemoryReservation,
 ) -> Result<ToolOutput, GrepError> {
     #[cfg(feature = "bench-internals")]
     let variant = GrepBenchmarkVariant::from_env()?;
@@ -473,10 +504,20 @@ pub(crate) fn execute_output(
         request,
         resources,
         cancellation,
-        GrepTraversal::Adaptive,
-        variant,
-        &GrepProfiler::disabled(),
+        GrepExecution {
+            traversal: GrepTraversal::Adaptive,
+            variant,
+            profiler: &GrepProfiler::disabled(),
+            memory: Some(memory),
+        },
     )
+}
+
+struct GrepExecution<'a> {
+    traversal: GrepTraversal,
+    variant: GrepBenchmarkVariant,
+    profiler: &'a GrepProfiler,
+    memory: Option<MemoryReservation>,
 }
 
 fn execute_inner(
@@ -484,10 +525,14 @@ fn execute_inner(
     request: &GrepRequest,
     resources: &RuntimeResources,
     cancellation: &CancellationToken,
-    traversal: GrepTraversal,
-    variant: GrepBenchmarkVariant,
-    profiler: &GrepProfiler,
+    execution: GrepExecution<'_>,
 ) -> Result<ToolOutput, GrepError> {
+    let GrepExecution {
+        traversal,
+        variant,
+        profiler,
+        memory,
+    } = execution;
     let candidate_policy = CandidatePolicy::from_environment()?;
     let file_work_pool = resources.file_work_pool();
     let _file_work_request = file_work_pool.begin_request();
@@ -523,6 +568,7 @@ fn execute_inner(
         literal_prefix.as_deref(),
         candidate_policy,
         profiler,
+        memory,
     )
     .map_err(normalize_cancellation)?;
     let skipped = traversal_summary.io_errors

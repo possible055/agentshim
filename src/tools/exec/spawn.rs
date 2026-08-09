@@ -30,10 +30,8 @@ pub(crate) const MAX_TIMEOUT_MS: u64 = 600_000;
 #[cfg(unix)]
 pub(super) const TERM_GRACE: Duration = Duration::from_millis(250);
 pub(super) const CLEANUP_DEADLINE: Duration = Duration::from_secs(5);
-/// How long descendants may outlive the primary process before the tree is terminated. A
-/// foreground call owns its whole tree, so `cmd &` cannot survive the response; a detached tree
-/// is how a command outlives its call. Shared by both platforms because the alternative is the
-/// same POSIX line waiting on Unix and being killed on Windows.
+/// How long descendants may outlive the primary process before the owned containment is
+/// terminated. A detached tree is how a command intentionally outlives its call.
 pub(super) const DESCENDANT_EXIT_GRACE: Duration = Duration::from_millis(250);
 
 /// Pipe topology for one call. `Merged` points the child's stdout and stderr at a single pipe
