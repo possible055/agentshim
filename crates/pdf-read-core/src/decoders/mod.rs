@@ -229,8 +229,11 @@ pub fn decode_stream_with_options(
     // Apply filters in order
     for filter_name in filters {
         let decoder = create_decoder(filter_name)?;
+        crate::budget::check_cancelled()?;
 
         current = decoder.decode(&current)?;
+        crate::metrics::record_decoded_stream(current.len());
+        crate::budget::check_stream_allocation(current.len())?;
 
         // SECURITY: Check decompression ratio after each filter
         // PDF Spec: ISO 32000-1:2008 does not specify limits, but this is a
@@ -287,13 +290,19 @@ pub fn decode_stream_with_params(
     filters: &[String],
     params: Option<&DecodeParams>,
 ) -> Result<Vec<u8>> {
+    // The raw copy is itself an allocation proportional to attacker-controlled input, so
+    // it is charged like any decoded stream rather than treated as free setup.
+    crate::budget::check_stream_allocation(data.len())?;
     let mut current = data.to_vec();
 
     // Apply filters in order
     for filter_name in filters {
         let decoder = create_decoder(filter_name)?;
+        crate::budget::check_cancelled()?;
 
         current = decoder.decode(&current)?;
+        crate::metrics::record_decoded_stream(current.len());
+        crate::budget::check_stream_allocation(current.len())?;
     }
 
     // Apply predictor if specified

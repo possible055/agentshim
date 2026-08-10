@@ -10,11 +10,24 @@ pub struct BrotliDecoder;
 
 impl StreamDecoder for BrotliDecoder {
     fn decode(&self, input: &[u8]) -> Result<Vec<u8>> {
+        // An unbounded `read_to_end` here would let a Brotli stream expand past every
+        // ceiling the rest of the call respects, so the reader stops at the budget and
+        // reaching it is reported as a limit rather than silently truncating.
+        let ceiling = crate::budget::stream_ceiling();
         let mut output = Vec::new();
-        let mut reader = brotli::Decompressor::new(input, 4096);
+        let mut reader = brotli::Decompressor::new(input, 4096).take(ceiling);
         reader
             .read_to_end(&mut output)
             .map_err(|e| Error::Decode(format!("BrotliDecode: {}", e)))?;
+        if output.len() as u64 >= ceiling {
+            return Err(Error::ResourceLimit {
+                resource: "pdf_single_stream",
+                scope: crate::error::LimitScope::Call,
+                limit_bytes: ceiling,
+                observed_bytes: output.len() as u64,
+            });
+        }
+        crate::budget::check_stream_allocation(output.len())?;
         Ok(output)
     }
 

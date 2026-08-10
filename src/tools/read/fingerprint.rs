@@ -4,7 +4,18 @@ pub(crate) enum Attempt<T> {
 }
 
 enum PreparedKind {
-    Pdf,
+    /// The mode is resolved here so admission knows which reservation and which runtime
+    /// ceiling apply before any PDF work starts.
+    Pdf {
+        mode: PdfMode,
+        /// Bytes this call reserves, and therefore the ceiling the core enforces.
+        ///
+        /// Resolved once, here, so the number charged against the shared pool and the
+        /// number the parser is held to are the same number. Keeping them as two
+        /// independent constants is how a configured reservation ends up describing
+        /// nothing.
+        call_bytes: usize,
+    },
     Text {
         detected_encoding: Option<&'static str>,
     },
@@ -19,12 +30,67 @@ pub(crate) struct PreparedRead {
     kind: PreparedKind,
 }
 
+/// Per-mode reservations.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PdfMemoryBudgets {
+    pub(crate) text_bytes: usize,
+    pub(crate) image_bytes: usize,
+}
+
+impl PdfMemoryBudgets {
+    pub(crate) fn from_config(config: &crate::runtime::RuntimeConfig) -> Self {
+        Self {
+            text_bytes: config.pdf_text_memory_bytes,
+            image_bytes: config.pdf_image_memory_bytes,
+        }
+    }
+
+    /// The shipped defaults, for paths that resolve a read without a running server.
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) const fn defaults() -> Self {
+        Self {
+            text_bytes: crate::runtime::DEFAULT_PDF_TEXT_MEMORY_BYTES,
+            image_bytes: crate::runtime::DEFAULT_PDF_IMAGE_MEMORY_BYTES,
+        }
+    }
+
+    fn for_mode(self, mode: PdfMode) -> usize {
+        match mode {
+            PdfMode::Image => self.image_bytes,
+            PdfMode::Auto | PdfMode::Text => self.text_bytes,
+        }
+    }
+}
+
 impl PreparedRead {
+    pub(crate) fn pdf_mode(&self) -> Option<PdfMode> {
+        match self.kind {
+            PreparedKind::Pdf { mode, .. } => Some(mode),
+            PreparedKind::Text { .. } => None,
+        }
+    }
+
+    /// Bytes this call reserves from the shared pool.
+    ///
+    /// For a PDF this is the same number the core is held to, so the pool's view of the
+    /// call and the parser's ceiling cannot drift apart.
     pub(crate) fn memory_charge(&self) -> usize {
         match self.kind {
-            PreparedKind::Pdf => PDF_READ_MEMORY_BYTES,
+            PreparedKind::Pdf { call_bytes, .. } => call_bytes,
             PreparedKind::Text { .. } => TEXT_READ_MEMORY_BYTES,
         }
+    }
+
+    pub(crate) fn runtime_limit(&self) -> Option<std::time::Duration> {
+        let configured = match self.kind {
+            PreparedKind::Pdf {
+                mode: PdfMode::Image,
+                ..
+            } => crate::runtime::PDF_IMAGE_RUNTIME_LIMIT,
+            PreparedKind::Pdf { .. } => crate::runtime::PDF_TEXT_RUNTIME_LIMIT,
+            PreparedKind::Text { .. } => return None,
+        };
+        Some(forced_runtime_limit().unwrap_or(configured))
     }
 }
 
@@ -32,6 +98,7 @@ pub(crate) fn prepare(
     access: &FileAccess,
     request: &ReadRequest,
     cancellation: &CancellationToken,
+    budgets: PdfMemoryBudgets,
 ) -> Result<PreparedRead, ReadError> {
     request.validate()?;
     if cancellation.is_cancelled() {
@@ -48,7 +115,11 @@ pub(crate) fn prepare(
         .take(PREFIX_BYTES as u64)
         .read_to_end(&mut prefix)?;
     let kind = if has_pdf_header(&prefix) || has_pdf_parameters(request) {
-        PreparedKind::Pdf
+        let mode = request.pdf_mode.unwrap_or(PdfMode::Auto);
+        PreparedKind::Pdf {
+            mode,
+            call_bytes: budgets.for_mode(mode),
+        }
     } else {
         if has_binary_magic(&prefix) {
             return Err(ReadError::Binary);
@@ -79,14 +150,19 @@ pub(crate) fn execute_prepared(
     if cancellation.is_cancelled() {
         return Err(ReadError::Cancelled);
     }
-    if matches!(prepared.kind, PreparedKind::Pdf) {
+    if let PreparedKind::Pdf { call_bytes, .. } = prepared.kind {
         let output = read_pdf(
             &prepared.file,
             &prepared.absolute,
             request,
+            &prepared.before.source_id(),
             cancellation,
+            call_bytes,
         )?;
         run_after_read_hook();
+        if take_forced_change() {
+            return Ok(Attempt::Changed);
+        }
         return if source_is_unchanged(
             access,
             &prepared.resolved,

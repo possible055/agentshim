@@ -1,5 +1,8 @@
 [workspace]
 members = [".", "crates/pdf-read-core"]
+# The PDF corpus and limit tests live in the member crate; without this the bare
+# `cargo test --locked` used by CI selects only the root package and skips them.
+default-members = [".", "crates/pdf-read-core"]
 resolver = "3"
 
 [package]

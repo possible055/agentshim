@@ -572,6 +572,11 @@ mod tests {
                 capture_records: 10,
             };
             let path = fixture.path().join("src/a.rs");
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .and_then(|file| file.set_modified(std::time::UNIX_EPOCH))
+                .expect("set initial modification time");
             let candidate = candidate(root.resolve(Path::new("src/a.rs")).expect("candidate path"))
                 .expect("candidate");
             let outcome = search_file_with_variant_hook(

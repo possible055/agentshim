@@ -356,6 +356,8 @@ fn benchmark_read(
                 encoding: None,
                 pdf_mode: None,
                 pages: None,
+                pdf_text_offset: None,
+                pdf_source_id: None,
             },
             cancellation,
         )

@@ -6,6 +6,7 @@ pub struct RuntimeResources {
     open_files: Arc<Semaphore>,
     process_calls: Arc<Semaphore>,
     memory: Arc<Semaphore>,
+    pdf_calls: Arc<Semaphore>,
     file_work: Arc<FileWorkPool>,
     shutdown: CancellationToken,
 }
@@ -54,6 +55,7 @@ impl RuntimeResources {
             open_files: Arc::new(Semaphore::new(MAX_OPEN_FILES)),
             process_calls: Arc::new(Semaphore::new(config.process_calls)),
             memory: Arc::new(Semaphore::new(config.memory_bytes / MEMORY_PERMIT_BYTES)),
+            pdf_calls: Arc::new(Semaphore::new(MAX_PDF_CALLS)),
             file_work: Arc::new(FileWorkPool::new(config.worker_lanes)),
             shutdown: CancellationToken::new(),
         }
@@ -134,6 +136,58 @@ impl RuntimeResources {
         let permits = u32::try_from(permits).expect("soft memory target fits u32 permits");
         acquire(&self.memory, request, &self.shutdown, permits).await
     }
+
+    /// Acquire the single PDF work slot, waiting at most [`PDF_GATE_WAIT`].
+    ///
+    /// A bounded wait rather than an immediate failure: plain text reads never touch this
+    /// gate, so a PDF pausing here cannot delay them, while two ordinary back-to-back PDF
+    /// reads would otherwise turn into an error the caller is expected to retry
+    /// immediately — which is just a spin.
+    ///
+    /// Returns `None` on timeout, cancellation, or shutdown.
+    pub async fn acquire_pdf_gate(
+        &self,
+        request: &CancellationToken,
+    ) -> Option<OwnedSemaphorePermit> {
+        PDF_GATE_ACQUISITIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tokio::time::timeout(
+            PDF_GATE_WAIT,
+            acquire(&self.pdf_calls, request, &self.shutdown, 1),
+        )
+        .await
+        .ok()?
+        .ok()
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub fn try_acquire_pdf_gate(&self) -> Option<OwnedSemaphorePermit> {
+        self.pdf_calls.clone().try_acquire_owned().ok()
+    }
+
+    /// Free slots on the PDF gate. Used to assert that no path leaks the permit.
+    #[must_use]
+    #[cfg(test)]
+    pub fn available_pdf_slots(&self) -> usize {
+        self.pdf_calls.available_permits()
+    }
+}
+
+/// Counts attempts to take the gate, not successes.
+///
+/// The retry loop must take the gate at most once per call: releasing between attempts
+/// would let another call in, so a caller who hit `file_changed` would come back with
+/// `resource_busy` instead. A counter is the only way to tell "held across both attempts"
+/// apart from "released and immediately re-taken", which look identical from outside.
+static PDF_GATE_ACQUISITIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub fn pdf_gate_acquisitions() -> usize {
+    PDF_GATE_ACQUISITIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+impl RuntimeResources {
 
     #[must_use]
     pub fn try_reserve_memory(&self, bytes: usize) -> Option<OwnedSemaphorePermit> {

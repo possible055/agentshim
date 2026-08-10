@@ -43,13 +43,17 @@ impl Session {
     }
 
     fn call_read(&mut self, id: u64, path: &Value, expected_error: bool) {
+        self.call(id, "read", &json!({ "path": path }), expected_error);
+    }
+
+    fn call(&mut self, id: u64, name: &str, arguments: &Value, expected_error: bool) {
         let request = json!({
             "jsonrpc": "2.0",
             "id": id,
             "method": "tools/call",
             "params": {
-                "name": "read",
-                "arguments": { "path": path },
+                "name": name,
+                "arguments": arguments,
                 "_meta": {
                     "io.modelcontextprotocol/protocolVersion": "2026-07-28",
                     "io.modelcontextprotocol/clientInfo": {
@@ -112,6 +116,21 @@ fn jsonl_paths(directory: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+fn records(directory: &Path) -> Vec<Value> {
+    jsonl_paths(directory)
+        .iter()
+        .flat_map(|path| {
+            BufReader::new(fs::File::open(path).expect("log"))
+                .lines()
+                .map(|line| {
+                    serde_json::from_str::<Value>(&line.expect("complete line"))
+                        .expect("complete JSON")
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 #[test]
 fn multiple_servers_share_complete_jsonl_without_mixing_call_identity() {
     let directory = tempfile::tempdir().expect("log directory");
@@ -124,18 +143,7 @@ fn multiple_servers_share_complete_jsonl_without_mixing_call_identity() {
 
     let deadline = Instant::now() + Duration::from_secs(3);
     let records = loop {
-        let records = jsonl_paths(directory.path())
-            .iter()
-            .flat_map(|path| {
-                BufReader::new(fs::File::open(path).expect("log"))
-                    .lines()
-                    .map(|line| {
-                        serde_json::from_str::<Value>(&line.expect("complete line"))
-                            .expect("complete JSON")
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
+        let records = records(directory.path());
         if records
             .iter()
             .filter(|record| record["event"] == "tool_error")
@@ -180,6 +188,37 @@ fn multiple_servers_share_complete_jsonl_without_mixing_call_identity() {
 
     for session in sessions {
         session.close();
+    }
+}
+
+#[test]
+fn shell_delegate_log_event_contains_only_the_derived_classification() {
+    let directory = tempfile::tempdir().expect("log directory");
+    let mut session = Session::start(directory.path());
+    let command = "pwsh -NoProfile -Command private_argument C:/private/path";
+    session.call(
+        1,
+        "bash",
+        &json!({ "command": command, "timeout_ms": 0 }),
+        true,
+    );
+    session.close();
+
+    let records = records(directory.path());
+    let event = records
+        .iter()
+        .find(|record| record["event"] == "tool_start" && record["tool"] == "bash")
+        .expect("bash tool_start event");
+    assert_eq!(event["shell_delegate"], "pwsh");
+    for key in ["command", "arguments", "path", "token", "argv"] {
+        assert!(event.get(key).is_none(), "sensitive field present: {key}");
+    }
+    let serialized = serde_json::to_string(event).expect("serialize event");
+    for sensitive in [command, "private_argument", "C:/private/path"] {
+        assert!(
+            !serialized.contains(sensitive),
+            "event contains sensitive input: {sensitive}"
+        );
     }
 }
 

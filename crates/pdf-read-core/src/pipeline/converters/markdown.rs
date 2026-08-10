@@ -1810,14 +1810,25 @@ impl MarkdownOutputConverter {
                             for _ in 0..spacing.min(20) {
                                 current_line.push(' ');
                             }
-                        } else if !current_line.trim_end().ends_with('-') {
+                        } else {
                             // A line wrapped mid-word at a hyphen (`frozen-` /
                             // `thawed`) joins WITHOUT a space — `frozen- thawed`
-                            // (a space after the hyphen) is never correct. Whether
-                            // to also DROP the hyphen is genuinely ambiguous (a real
-                            // compound `frozen-thawed` keeps it), so leave the hyphen
-                            // and only suppress the spurious space.
-                            current_line.push(' ');
+                            // (a space after the hyphen) is never correct.
+                            let trimmed = current_line.trim_end();
+                            if !trimmed.ends_with('-') {
+                                current_line.push(' ');
+                            } else if crate::extractors::text::splits_one_word(
+                                trimmed,
+                                span.span.text.trim_start(),
+                            ) {
+                                // The hyphen belongs to the line break rather than the
+                                // word, so it goes too: `implementa-` / `tion` is
+                                // `implementation`. The guard keeps it wherever it may
+                                // be the author's — capitals, digits, and compounds
+                                // such as `pre-training` — which is the ambiguity this
+                                // site previously resolved by always keeping it.
+                                current_line.truncate(trimmed.len() - 1);
+                            }
                         }
                     }
                 }
@@ -4560,20 +4571,45 @@ mod tests {
 
     #[test]
     fn md_wrapped_hyphen_line_joins_without_space() {
-        // A line that wraps mid-word at a hyphen must join WITHOUT a space:
-        // `frozen-` + `thawed` → `frozen-thawed`, never `frozen- thawed`.
+        // A line that wraps mid-word at a hyphen joins WITHOUT a space, and the hyphen
+        // goes with it: it belongs to the line break, not to the word.
         let converter = MarkdownOutputConverter::new();
         let config = TextPipelineConfig::default();
         let spans = vec![
-            make_span_w("frozen-", 0.0, 100.0, 40.0, 10.0, FontWeight::Normal),
-            make_span_w("thawed", 0.0, 89.0, 40.0, 10.0, FontWeight::Normal),
+            make_span_w("implementa-", 0.0, 100.0, 40.0, 10.0, FontWeight::Normal),
+            make_span_w("tion", 0.0, 89.0, 40.0, 10.0, FontWeight::Normal),
         ];
         let md = converter.convert(&spans, &config).unwrap();
-        assert!(md.contains("frozen-thawed"), "not joined: {md:?}");
+        assert!(md.contains("implementation"), "not rejoined: {md:?}");
         assert!(
-            !md.contains("frozen- thawed"),
+            !md.contains("implementa- tion"),
             "spurious space after hyphen: {md:?}"
         );
+    }
+
+    /// The other half of the rule: a hyphen the author wrote survives the same wrap.
+    /// This is the case that keeps `pre-training` and `self-attention` intact on the
+    /// academic PDFs the read path is aimed at.
+    #[test]
+    fn md_wrapped_hyphen_keeps_an_authored_compound() {
+        let converter = MarkdownOutputConverter::new();
+        let config = TextPipelineConfig::default();
+        for (head, tail, joined) in [
+            ("pre-", "training", "pre-training"),
+            ("self-", "attention", "self-attention"),
+            ("Fine-", "Tuning", "Fine-Tuning"),
+            ("2019-", "2020", "2019-2020"),
+        ] {
+            let spans = vec![
+                make_span_w(head, 0.0, 100.0, 40.0, 10.0, FontWeight::Normal),
+                make_span_w(tail, 0.0, 89.0, 40.0, 10.0, FontWeight::Normal),
+            ];
+            let md = converter.convert(&spans, &config).unwrap();
+            assert!(
+                md.contains(joined),
+                "{head:?}+{tail:?} lost its hyphen: {md:?}"
+            );
+        }
     }
 
     #[test]

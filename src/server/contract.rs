@@ -130,7 +130,9 @@ impl DiagnosticError for crate::tools::read::ReadError {
             | ReadError::NotRegular => "path",
             ReadError::Cancelled => "client_cancellation",
             ReadError::Output(_) => "output_invariant",
-            ReadError::ResourceLimit(_) => "resource_limit",
+            ReadError::ResourceLimit { .. } => "resource_limit",
+            ReadError::PdfImageRequired { .. } => "pdf_image_required",
+            ReadError::PdfProcessing(_) => "pdf_processing",
             ReadError::Pdf(error) => match error.kind() {
                 codexshim_pdf_read::PdfReadErrorKind::Invalid => "pdf_invalid",
                 codexshim_pdf_read::PdfReadErrorKind::Unsupported => "pdf_unsupported",
@@ -138,10 +140,55 @@ impl DiagnosticError for crate::tools::read::ReadError {
                 codexshim_pdf_read::PdfReadErrorKind::ResourceLimit => "resource_limit",
                 codexshim_pdf_read::PdfReadErrorKind::Processing => "pdf_processing",
                 codexshim_pdf_read::PdfReadErrorKind::Io => "io",
+                // The mode runtime ceiling cancels the same token the client uses, so
+                // the service decides which of the two it was; a core cancellation on
+                // its own is the client's.
+                codexshim_pdf_read::PdfReadErrorKind::Cancelled => "client_cancellation",
             },
             ReadError::Io(_) | ReadError::Decode(_) | ReadError::Binary | ReadError::Changed => {
                 "io"
             }
+        }
+    }
+
+    fn details(&self) -> Option<Value> {
+        use crate::tools::read::ReadError;
+        match self {
+            // Retrying the same parameters can never succeed, so the error is not
+            // retryable; the caller still needs the exact parameters that would work.
+            ReadError::PdfImageRequired { pages, source_id } => Some(json!({
+                "retry_with": [{
+                    "pdf_mode": "image",
+                    "pages": pages,
+                    "pdf_source_id": source_id
+                }]
+            })),
+            ReadError::ResourceLimit {
+                resource,
+                limit_bytes,
+                observed_bytes,
+                ..
+            } => {
+                let mut details = json!({ "resource": resource });
+                let map = details.as_object_mut().expect("object literal");
+                if let Some(limit) = limit_bytes {
+                    map.insert("limit_bytes".to_owned(), json!(limit));
+                }
+                if let Some(observed) = observed_bytes {
+                    map.insert("observed".to_owned(), json!(observed));
+                }
+                Some(details)
+            }
+            // A limit raised inside the parser carries the same shape as one raised by
+            // the tool, so the caller does not have to know which layer refused.
+            ReadError::Pdf(error) => error.limit().map(|limit| {
+                json!({
+                    "resource": limit.resource,
+                    "limit_bytes": limit.limit_bytes,
+                    "observed": limit.observed_bytes
+                })
+            }),
+            _ => None,
         }
     }
 }
@@ -282,6 +329,48 @@ fn blocking_response<E: DiagnosticError>(
     }
 }
 
+/// The PDF gate and the mode reservation, held together for one call.
+///
+/// Both are released by dropping this, which is what makes every early return, timeout,
+/// cancellation, and error path leak-free without a bespoke cleanup branch each.
+struct PdfAdmission {
+    _gate: OwnedSemaphorePermit,
+    _memory: OwnedSemaphorePermit,
+}
+
+/// `resource_busy` without a delay hint invites an immediate retry, which is just a spin.
+fn pdf_busy(permit: &'static str) -> CallToolResponse {
+    let retry_after_ms = u64::try_from(crate::runtime::PDF_GATE_WAIT.as_millis()).unwrap_or(300);
+    tracing::warn!(target: "codexshim", event = "tool_error", phase = "admission", outcome = "error", error_class = "resource_busy", permit);
+    tool_error(
+        "resource_busy",
+        true,
+        format!("read PDF {permit} capacity is busy; retry the request later"),
+        Some(&json!({
+            "permit": permit,
+            "retry_after_ms": retry_after_ms
+        })),
+    )
+}
+
+fn pdf_timeout(limit: Duration, elapsed: Duration) -> CallToolResponse {
+    tracing::warn!(target: "codexshim", event = "tool_error", phase = "execution", outcome = "error", error_class = "resource_timeout");
+    tool_error(
+        "resource_timeout",
+        true,
+        format!(
+            "PDF read exceeded its {} ms mode runtime limit",
+            limit.as_millis()
+        ),
+        Some(&json!({
+            "limit_ms": u64::try_from(limit.as_millis()).unwrap_or(u64::MAX),
+            "elapsed_ms": u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            "work_stopped": true,
+            "partial_output": false
+        })),
+    )
+}
+
 fn queue_timeout(tool: &str, timeout_ms: u64) -> CallToolResponse {
     classified_tool_error(
         "resource_timeout",
@@ -398,7 +487,7 @@ fn read_tool(read_scope: ReadScope) -> Tool {
                 "pages": {
                     "type": "string",
                     "pattern": "^[1-9][0-9]*(-[1-9][0-9]*)?$",
-                    "description": "PDF only: one-based page or continuous page range, such as \"3\" or \"1-5\"."
+                    "description": "PDF only: one-based page or continuous page range, such as \"3\" or \"1-5\". A range extending past the last page is clamped to it; a range starting past it is an error."
                 },
                 "path": {
                     "type": "string",
@@ -407,9 +496,19 @@ fn read_tool(read_scope: ReadScope) -> Tool {
                 },
                 "pdf_mode": {
                     "type": "string",
-                    "enum": ["text", "image"],
-                    "default": "text",
-                    "description": "PDF only: return page Markdown or PNG image content blocks."
+                    "enum": ["auto", "text", "image"],
+                    "default": "auto",
+                    "description": "PDF only: \"auto\" and \"text\" return page Markdown, \"image\" renders PNG content blocks. Without pages, text modes deliver the first 10 pages and image renders page 1, each with a continuation."
+                },
+                "pdf_source_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "PDF only: opaque token from a previous response, replayed to prove the continuation targets the same source version."
+                },
+                "pdf_text_offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "PDF only: resume a single page's Markdown at this UTF-8 byte offset. Requires pages to name exactly one page, and a non-zero value requires pdf_source_id."
                 },
                 "start_line": {
                     "type": "integer",

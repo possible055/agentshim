@@ -1,6 +1,8 @@
 use std::io::{Seek, SeekFrom, Write};
 
-use codexshim_pdf_read::{MarkdownOptions, PageClass, ParserLimits, PdfReadDocument, RenderLimits};
+use codexshim_pdf_read::{
+    MarkdownOptions, PageTextStatus, ParserLimits, PdfReadDocument, RenderLimits,
+};
 
 fn push_object(pdf: &mut Vec<u8>, offsets: &mut [usize], id: usize, body: &[u8]) {
     offsets[id] = pdf.len();
@@ -166,14 +168,21 @@ fn characterizes_markdown() {
     assert!(markdown.contains("Readable body text."));
 }
 
+/// The single class became two independent assessments: whether the text is usable, and
+/// what the page draws. A raster page and a text page differ in both.
 #[test]
-fn characterizes_page_classification() {
+fn characterizes_page_assessment() {
     let document = open_pdf(&characterization_pdf());
     let scanned_document = open_pdf(&scanned_pdf());
-    let scanned = scanned_document.classify_page(0).unwrap();
 
-    assert_eq!(document.classify_page(0).unwrap(), PageClass::TextLayer);
-    assert_eq!(scanned, PageClass::Scanned);
+    let text = document.assess_page_text(0).unwrap();
+    assert_eq!(text.status, PageTextStatus::Ready);
+    assert!(!document.assess_page_visual(0).unwrap().has_image_xobjects);
+
+    let scanned_text = scanned_document.assess_page_text(0).unwrap();
+    let scanned_visual = scanned_document.assess_page_visual(0).unwrap();
+    assert_eq!(scanned_text.status, PageTextStatus::Absent);
+    assert!(scanned_visual.has_image_xobjects);
 }
 
 #[test]

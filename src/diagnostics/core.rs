@@ -194,6 +194,7 @@ fn allowed_field(name: &str) -> bool {
         "event"
             | "call_id"
             | "tool"
+            | "shell_delegate"
             | "phase"
             | "outcome"
             | "queue_ms"

@@ -37,6 +37,12 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test
         run: cargo test --locked
+      - name: Offline pwsh degradation eval
+        run: >-
+          python3 scripts/eval-pwsh-degradation.py
+          --responses evals/fixtures/pwsh_degradation_baseline.jsonl
+          --transcript "${RUNNER_TEMP}/pwsh-degradation-scored.jsonl"
+          --report "${RUNNER_TEMP}/pwsh-degradation-report.json"
       - name: Metadata
         run: cargo metadata --locked --no-deps --format-version 1
 

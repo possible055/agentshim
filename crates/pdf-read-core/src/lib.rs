@@ -34,12 +34,20 @@ core::arch::global_asm!(
     "jmp memcmp@PLT",
 );
 
+mod budget;
 mod error;
+mod metrics;
 mod read_api;
 
+pub use budget::{
+    enter as enter_budget, CancelSignal, PdfResourceLimits, DEFAULT_IMAGE_CALL_BYTES,
+    DEFAULT_TEXT_CALL_BYTES, MAX_IMAGE_EDGE_PIXELS, MAX_IMAGE_PIXELS,
+};
+pub use metrics::{current as current_metrics, measure, PdfReadMetrics};
 pub use read_api::{
-    MarkdownOptions, PageClass, PageInfo, ParserLimits, PdfReadDocument, PdfReadError,
-    PdfReadErrorKind, RenderLimits, RenderedPage,
+    LimitScope, MarkdownChunk, MarkdownOptions, PageInfo, PageTextAssessment, PageTextStatus,
+    PageVisualAssessment, ParserLimits, PdfReadDocument, PdfReadError, PdfReadErrorKind,
+    RenderLimits, RenderedPage, ResourceLimitDetails,
 };
 
 pub(crate) mod cache;
@@ -756,6 +764,6 @@ mod tests {
 
     #[test]
     fn test_name() {
-        assert_eq!(NAME, "pdf_oxide");
+        assert_eq!(NAME, "codexshim-pdf-read");
     }
 }

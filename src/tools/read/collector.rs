@@ -298,7 +298,56 @@ struct PlatformFingerprint {
     modified: Option<std::time::SystemTime>,
 }
 
+/// FNV-1a. Chosen over `DefaultHasher` because the token has to mean the same thing in
+/// a later process, and `DefaultHasher`'s output is explicitly not guaranteed stable
+/// across toolchain releases. This is a mix-up guard, not a security digest.
+fn stable_hash(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 impl FileFingerprint {
+    /// Opaque token identifying this exact source version.
+    ///
+    /// Continuation requests carry it back so a source replaced between rounds is
+    /// rejected instead of silently stitching two different documents together. It is
+    /// derived from the same fingerprint the retry logic already trusts, and is
+    /// deliberately a hash so identity and timestamps are not exposed to the caller.
+    pub(crate) fn source_id(&self) -> String {
+        let mut material = Vec::with_capacity(64);
+        material.push(u8::from(self.regular));
+        #[cfg(unix)]
+        {
+            material.extend_from_slice(&self.platform.device.to_le_bytes());
+            material.extend_from_slice(&self.platform.inode.to_le_bytes());
+            material.extend_from_slice(&self.platform.length.to_le_bytes());
+            material.extend_from_slice(&self.platform.modified_seconds.to_le_bytes());
+            material.extend_from_slice(&self.platform.modified_nanoseconds.to_le_bytes());
+        }
+        #[cfg(windows)]
+        {
+            material.extend_from_slice(&self.platform.volume.to_le_bytes());
+            material.extend_from_slice(&self.platform.file_id);
+            material.extend_from_slice(&self.platform.length.to_le_bytes());
+            material.extend_from_slice(&self.platform.last_write_time.to_le_bytes());
+            material.extend_from_slice(&self.platform.change_time.to_le_bytes());
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            material.extend_from_slice(&self.platform.length.to_le_bytes());
+            if let Some(modified) = self.platform.modified
+                && let Ok(since) = modified.duration_since(std::time::UNIX_EPOCH)
+            {
+                material.extend_from_slice(&since.as_nanos().to_le_bytes());
+            }
+        }
+        format!("{:016x}", stable_hash(&material))
+    }
+
     #[must_use]
     pub(crate) fn length(&self) -> u64 {
         #[cfg(windows)]
@@ -511,5 +560,60 @@ fn run_after_read_hook() {
 
 #[cfg(not(test))]
 fn run_after_read_hook() {}
+
+/// Forces the next N `execute_prepared` calls to report `file_changed`.
+///
+/// The existing read hooks are thread-locals, so they cannot reach work the server runs
+/// on a blocking pool. Proving that the PDF gate survives a retry needs the retry to
+/// happen on that path, deterministically, so this seam is global. Tests that use it hold
+/// [`global_read_state_guard`].
+#[cfg(test)]
+pub(crate) static FORCED_CHANGES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Shortens the PDF mode runtime ceiling to 1 ms so the timeout path can be exercised
+/// without a five-second test.
+#[cfg(test)]
+pub(crate) static FORCED_PDF_RUNTIME_LIMIT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+fn forced_runtime_limit() -> Option<std::time::Duration> {
+    match FORCED_PDF_RUNTIME_LIMIT.load(std::sync::atomic::Ordering::SeqCst) {
+        0 => None,
+        millis => Some(std::time::Duration::from_millis(millis)),
+    }
+}
+
+#[cfg(not(test))]
+fn forced_runtime_limit() -> Option<std::time::Duration> {
+    None
+}
+
+/// Serialises tests that read or write process-global read state: the forced-change seam,
+/// the forced runtime ceiling, and the PDF gate acquisition counter. All are global, so
+/// concurrent PDF tests would otherwise see each other's writes.
+#[cfg(test)]
+pub(crate) fn global_read_state_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+fn take_forced_change() -> bool {
+    FORCED_CHANGES
+        .fetch_update(
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+            |remaining| (remaining > 0).then(|| remaining - 1),
+        )
+        .is_ok()
+}
+
+#[cfg(not(test))]
+fn take_forced_change() -> bool {
+    false
+}
 
 include!("tests.rs");

@@ -111,6 +111,8 @@ fn spawn_lifecycle(plan: &ExecPlan<'_>) -> Result<Lifecycle, ProcessError> {
             if libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());
             }
+            #[cfg(target_os = "linux")]
+            arm_parent_death_signal()?;
             Ok(())
         });
     }
@@ -585,6 +587,26 @@ pub(super) fn group_exists(process_group: i32) -> io::Result<bool> {
     }
 }
 
+/// Request the kernel to deliver `SIGKILL` when the parent process exits, so an abrupt
+/// owner death (SIGKILL, OOM, crash) still reaps the child tree without relying on
+/// `Drop`. The `getppid` re-check closes the race where the parent dies between fork
+/// and `prctl`: if reparenting already happened the pdeathsig would never fire, so the
+/// child must bail out before `exec`.
+#[cfg(target_os = "linux")]
+fn arm_parent_death_signal() -> io::Result<()> {
+    let ppid = unsafe { libc::getppid() };
+    // SAFETY: PR_SET_PDEATHSIG with SIGKILL is a valid Linux prctl request.
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::getppid() } != ppid {
+        return Err(io::Error::other(
+            "parent died before parent-death signal was armed",
+        ));
+    }
+    Ok(())
+}
+
 /// Spawn a process tree whose lifetime outlives this call, writing both output streams
 /// directly to `log`. No pipe, drain thread, or capture is created.
 pub(crate) fn spawn_detached(
@@ -607,6 +629,8 @@ pub(crate) fn spawn_detached(
             if libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());
             }
+            #[cfg(target_os = "linux")]
+            arm_parent_death_signal()?;
             Ok(())
         });
     }

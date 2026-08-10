@@ -10,30 +10,22 @@ use crate::error::{Error, Result};
 use flate2::read::{DeflateDecoder, ZlibDecoder};
 use std::io::Read;
 
-/// Default cap for [`FlateDecoder`]: 256 MB per stream.
+/// Backstop cap for [`FlateDecoder`] when no call budget is installed: 256 MB per stream.
 ///
 /// Prevents zip-bomb / flate-bomb attacks where a tiny compressed stream
 /// expands to an arbitrarily large output, exhausting virtual memory and
 /// triggering an allocator abort (SIGABRT / exit 134).
 ///
-/// 256 MB accommodates A4 @ 600 DPI RGB (~99 MB) with headroom.
-///
-/// Override via:
-/// - `PDF_OXIDE_MAX_DECOMPRESS_MB` environment variable (e.g. `64` for 64 MB)
-/// - [`FlateDecoder::with_limit`] for programmatic control
+/// Inside a call this is not the operative number — the call budget's per-stream ceiling
+/// is, and it is lower. There is deliberately no environment override: an external
+/// variable that raises the safety ceiling is a switch for turning the resource contract
+/// off, and it also cost a `std::env::var` on every stream. Use
+/// [`FlateDecoder::with_limit`] when a test needs a different bound.
 pub const DEFAULT_MAX_DECOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
 
-fn effective_limit_from_str(val: Option<&str>) -> u64 {
-    val.and_then(|v| v.parse::<u64>().ok())
-        .map(|mb| mb * 1024 * 1024)
-        .unwrap_or(DEFAULT_MAX_DECOMPRESSED_BYTES)
-}
-
-/// Read the decompression limit from the environment, falling back to the
-/// compile-time default.
+/// The tighter of the backstop and whatever the current call budget allows.
 fn effective_limit() -> u64 {
-    let val = std::env::var("PDF_OXIDE_MAX_DECOMPRESS_MB");
-    effective_limit_from_str(val.as_deref().ok())
+    crate::budget::stream_ceiling().min(DEFAULT_MAX_DECOMPRESSED_BYTES)
 }
 
 /// Heuristic validator for partial-recovery output from a failing decompress.
@@ -79,14 +71,19 @@ fn looks_like_real_stream(output: &[u8]) -> bool {
 
 /// Returns `Err` if `output` reached the decompression cap, indicating that the
 /// stream was truncated rather than fully decoded.
+///
+/// Reported as a resource limit rather than a decode failure: callers skip a malformed
+/// element and carry on, which for a truncated bomb would mean reporting a partial page
+/// as a whole one. A limit has to stop the call.
 #[inline]
 fn check_limit(output: &[u8], limit: u64) -> Result<()> {
     if output.len() as u64 >= limit {
-        return Err(Error::Decode(format!(
-            "FlateDecode output reached the {} MB safety limit; \
-             stream may be a flate bomb or an unusually large image",
-            limit / (1024 * 1024)
-        )));
+        return Err(Error::ResourceLimit {
+            resource: "pdf_single_stream",
+            scope: crate::error::LimitScope::Call,
+            limit_bytes: limit,
+            observed_bytes: output.len() as u64,
+        });
     }
     Ok(())
 }
@@ -475,9 +472,15 @@ mod tests {
         // Verify that check_limit rejects output at or above the cap.
         let large = vec![0u8; DEFAULT_MAX_DECOMPRESSED_BYTES as usize];
         let result = check_limit(&large, DEFAULT_MAX_DECOMPRESSED_BYTES);
-        assert!(result.is_err());
-        let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("safety limit"));
+        // Reported as a structured resource limit rather than a decode failure, so a
+        // caller that skips malformed elements cannot swallow it as a short page.
+        assert!(matches!(
+            result,
+            Err(Error::ResourceLimit {
+                resource: "pdf_single_stream",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -525,19 +528,6 @@ mod tests {
         assert!(
             !msg.contains("MAX_DECOMPRESSED_BYTES"),
             "error message must not reference internal symbol names: {msg}"
-        );
-    }
-
-    #[test]
-    fn test_effective_limit_env_variable() {
-        assert_eq!(
-            effective_limit_from_str(None),
-            DEFAULT_MAX_DECOMPRESSED_BYTES
-        );
-        assert_eq!(effective_limit_from_str(Some("64")), 64 * 1024 * 1024);
-        assert_eq!(
-            effective_limit_from_str(Some("not_a_number")),
-            DEFAULT_MAX_DECOMPRESSED_BYTES
         );
     }
 }

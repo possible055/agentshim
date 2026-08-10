@@ -21,10 +21,13 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 
+mod assessment;
 mod classification;
 mod markdown;
 #[cfg(feature = "rendering")]
 mod rendering;
+
+pub use assessment::{PageTextAssessment, PageTextStatus, PageVisualAssessment};
 
 // Re-export MutexExt from cache module for local use and backward compatibility
 pub(crate) use crate::cache::MutexExt;
@@ -128,6 +131,41 @@ const DEFAULT_OBJECT_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 /// Default maximum number of entries for the XObject span/image caches.
 const DEFAULT_XOBJECT_CACHE_MAX_ENTRIES: usize = 1024;
 
+/// Ceiling for the decoded-XObject reuse cache when no call budget is installed.
+///
+/// Inside a call this is not the operative number — the call budget's stream-cache
+/// ceiling is, and it is lower. This cache is the one stream allocation that survives
+/// across pages, so leaving it outside the budget meant a call could hold this much
+/// beyond everything the budget accounted for.
+const DEFAULT_STREAM_CACHE_BYTES: usize = 50 * 1024 * 1024;
+
+/// Admit a decoded XObject stream into the reuse cache if the budget has room for it.
+///
+/// Declining to cache is never an error: the caller already holds the decoded bytes and
+/// only loses reuse on a later page.
+pub(crate) fn admit_xobject_stream(
+    document: &PdfDocument,
+    xobject_ref: crate::object::ObjectRef,
+    data: &[u8],
+) {
+    let room = crate::budget::stream_cache_room().min(DEFAULT_STREAM_CACHE_BYTES);
+    let current = document.xobject_stream_cache_bytes.load(Ordering::Relaxed);
+    let proposed = current.saturating_add(data.len());
+    if data.len() > room || proposed > DEFAULT_STREAM_CACHE_BYTES {
+        return;
+    }
+    if crate::budget::check_stream_cache_growth(proposed).is_err() {
+        return;
+    }
+    document
+        .xobject_stream_cache_bytes
+        .store(proposed, Ordering::Relaxed);
+    document
+        .xobject_stream_cache
+        .lock_or_recover()
+        .insert(xobject_ref, std::sync::Arc::new(data.to_vec()));
+}
+
 /// Heuristic multiplier for the forward-gap guard in the main
 /// assembly loop's compound newline predicate
 /// (`y_diff > 2.0 && gap > K * max(fs)`). Visual gap-sweep over
@@ -225,6 +263,29 @@ impl BoundedObjectCache {
             self.insertion_order.push_back(key);
         }
         self.current_bytes += entry_size;
+        crate::metrics::record_object_cache(self.current_bytes);
+        // Eviction already keeps the cache under `max_bytes`; this reports the call
+        // budget's view, which may be tighter than the cache's own configured size.
+        if crate::budget::check_cache_growth(self.current_bytes, self.map.len()).is_err() {
+            self.evict_to(
+                crate::budget::active_limits()
+                    .map_or(self.max_bytes, |limits| limits.object_cache_bytes),
+            );
+        }
+    }
+
+    /// Drop oldest entries until the estimated live size is within `target`.
+    fn evict_to(&mut self, target: usize) {
+        while self.current_bytes > target {
+            let Some(key) = self.insertion_order.pop_front() else {
+                break;
+            };
+            if let Some(value) = self.map.remove(&key) {
+                self.current_bytes = self
+                    .current_bytes
+                    .saturating_sub(Self::estimate_size(&value));
+            }
+        }
     }
 
     fn len(&self) -> usize {
@@ -601,8 +662,19 @@ impl ImageExtractFilter {
 /// `/Type/ObjStm`), doesn't anchor on any particular position within the
 /// header, and doesn't rely on xref entries being correct — which is the
 /// whole point of the recovery path it serves.
-fn find_objstm_candidates(content: &[u8]) -> Vec<(u32, u64)> {
-    const DICT_PEEK_BYTES: usize = 2048;
+/// Window scanned after the xref table when looking for the `trailer` keyword and its
+/// dictionary. Generous for a structure that is normally a few hundred bytes.
+const TRAILER_SCAN_BYTES: usize = 1024 * 1024;
+
+/// Longest lookahead `find_objstm_candidates` performs from a header.
+const DICT_PEEK_BYTES: usize = 2048;
+/// Window overlap that keeps that lookahead intact across a boundary.
+const OBJSTM_SCAN_OVERLAP_BYTES: usize = DICT_PEEK_BYTES + 64;
+
+fn find_objstm_candidates(
+    content: &[u8],
+    chunk: &crate::xref_reconstruction::ScanChunk,
+) -> Vec<(u32, u64)> {
     let mut out = Vec::new();
     let mut pos = 0usize;
     while pos < content.len() {
@@ -669,7 +741,9 @@ fn find_objstm_candidates(content: &[u8]) -> Vec<(u32, u64)> {
         let window_end = (pos + DICT_PEEK_BYTES).min(content.len());
         let window = &content[pos..window_end];
         if contains_objstm_marker(window) {
-            out.push((obj_num, header_start as u64));
+            if let Some(absolute) = chunk.absolute(header_start) {
+                out.push((obj_num, absolute as u64));
+            }
         }
 
         pos = header_start + 1;
@@ -948,6 +1022,13 @@ impl PdfDocument {
                     }
                     Err(recon_err) => {
                         log::error!("XRef reconstruction also failed: {}", recon_err);
+                        // The original parse error is the more useful diagnosis for a
+                        // damaged file, but a budget refusal or cancellation is not a
+                        // diagnosis of the file at all — reporting it as `InvalidXref`
+                        // would blame the input for our own ceiling.
+                        if matches!(recon_err, Error::ResourceLimit { .. } | Error::Cancelled) {
+                            return Err(recon_err);
+                        }
                         return Err(e); // Return original error
                     }
                 }
@@ -1554,73 +1635,20 @@ impl PdfDocument {
             obj_ref.gen
         );
 
-        let mut content = Vec::new();
-        {
-            // Hold one guard for seek+read to prevent split-lock race (#398 Race A).
-            let mut reader = self.reader.lock_or_recover();
-            reader.seek(SeekFrom::Start(0))?;
-            reader.read_to_end(&mut content)?;
-        }
-
         let mut offsets = HashMap::new();
-
-        // Scan for all "N G obj" patterns in the file
-        let mut pos = 0;
-        while pos < content.len() {
-            // Look for digit at a line start (after newline or at file start)
-            let valid_start = pos == 0 || content[pos - 1] == b'\n' || content[pos - 1] == b'\r';
-            if !valid_start || !content[pos].is_ascii_digit() {
-                pos += 1;
-                continue;
+        {
+            // Hold one guard across the whole scan to prevent a split-lock race
+            // (#398 Race A). The file is read in bounded windows rather than whole:
+            // this fallback is triggered by an incomplete xref, so it is reachable from
+            // ordinary input, and buffering the file here would make a second complete
+            // copy of attacker-controlled data.
+            let mut reader = self.reader.lock_or_recover();
+            for chunk in crate::xref_reconstruction::ScanChunks::new(&mut *reader)? {
+                let chunk = chunk?;
+                let content = chunk.bytes.as_slice();
+                scan_object_headers(content, &chunk, &mut offsets);
             }
-
-            // Try to parse "N G obj" starting at pos
-            let start = pos;
-            // Parse object number (digits)
-            while pos < content.len() && content[pos].is_ascii_digit() {
-                pos += 1;
-            }
-            if pos >= content.len() || content[pos] != b' ' {
-                continue;
-            }
-            let obj_num_str = std::str::from_utf8(&content[start..pos]).unwrap_or("");
-            let obj_num: u32 = match obj_num_str.parse() {
-                Ok(n) => n,
-                Err(_) => continue,
-            };
-
-            pos += 1; // skip space
-
-            // Parse generation number (digits)
-            let gen_start = pos;
-            while pos < content.len() && content[pos].is_ascii_digit() {
-                pos += 1;
-            }
-            if pos >= content.len() || content[pos] != b' ' {
-                continue;
-            }
-            let _gen_str = std::str::from_utf8(&content[gen_start..pos]).unwrap_or("");
-
-            pos += 1; // skip space
-
-            // Check for "obj" keyword
-            if pos + 3 <= content.len() && &content[pos..pos + 3] == b"obj" {
-                let after_obj = pos + 3;
-                // Verify "obj" is followed by whitespace, newline, or '<'
-                let valid_end = after_obj >= content.len() || {
-                    let c = content[after_obj];
-                    c == b'\n' || c == b'\r' || c == b' ' || c == b'\t' || c == b'<'
-                };
-                if valid_end {
-                    offsets.entry(obj_num).or_insert(start as u64);
-                    pos = after_obj;
-                    continue;
-                }
-            }
-            // Reset pos to just after the start to avoid infinite loop
-            pos = start + 1;
         }
-
         log::info!("File scan found {} objects", offsets.len());
 
         let result = offsets.get(&obj_ref.id).copied();
@@ -1672,19 +1700,29 @@ impl PdfDocument {
         // Only flip `objstm_recovery_done` after we finish the scan+parse
         // pass; a transient seek/read failure should leave the flag unset
         // so a later retry can still attempt recovery.
-        let file_bytes = {
+        // Windowed rather than whole-file: this recovery is reached from ordinary input
+        // (an xref that mis-marks compressed objects as free), so buffering the file here
+        // would make a second complete copy of attacker-controlled data. The overlap
+        // covers the dictionary peek so a header near a window edge still sees its
+        // `/Type /ObjStm`.
+        let candidates = {
             let mut r = self.reader.lock_or_recover();
-            if r.seek(SeekFrom::Start(0)).is_err() {
-                return;
+            let chunks = match crate::xref_reconstruction::ScanChunks::with_overlap(
+                &mut *r,
+                OBJSTM_SCAN_OVERLAP_BYTES,
+            ) {
+                Ok(chunks) => chunks,
+                Err(_) => return,
+            };
+            let mut candidates = Vec::new();
+            for chunk in chunks {
+                let Ok(chunk) = chunk else {
+                    return;
+                };
+                candidates.extend(find_objstm_candidates(chunk.bytes.as_slice(), &chunk));
             }
-            let mut buf = Vec::new();
-            if r.read_to_end(&mut buf).is_err() {
-                return;
-            }
-            buf
+            candidates
         };
-
-        let candidates = find_objstm_candidates(&file_bytes);
 
         let mut objstms_found = 0usize;
         let mut recovered = 0usize;
@@ -3704,6 +3742,17 @@ impl PdfDocument {
     /// println!("Document has {} pages", count);
     /// # Ok::<(), pdf_oxide::error::Error>(())
     /// ```
+    /// Drop the per-page span, character, and content caches.
+    ///
+    /// These exist to avoid redoing work when a page is touched more than once. A
+    /// forward-only page walk never touches one twice, so keeping them past a committed
+    /// page just holds budget.
+    pub fn release_page_scratch(&self) {
+        self.page_spans_cache.lock_or_recover().clear();
+        self.page_chars_cache.lock_or_recover().clear();
+        self.page_content_cache.lock_or_recover().clear();
+    }
+
     pub fn page_count(&self) -> Result<usize> {
         // Standard /Count reader, then a manual page-tree scan on failure.
         let primary: Result<usize> = match self.get_page_count_standard() {
@@ -14588,6 +14637,12 @@ impl PdfDocument {
         let content_data = match self.get_page_content_data(page_index) {
             Ok(data) => data,
             Err(e) => {
+                // Reporting a limit or a cancellation as "no content" tells the caller
+                // the page is empty, which is worse than telling them it failed: they
+                // stop looking. Degrading stays correct for a malformed stream.
+                if matches!(e, Error::ResourceLimit { .. } | Error::Cancelled) {
+                    return Err(e);
+                }
                 log::warn!(
                     "Failed to decode content stream for page {}: {}, returning empty",
                     page_index,
@@ -15043,6 +15098,12 @@ impl PdfDocument {
         let content_data = match self.get_page_content_data(page_index) {
             Ok(data) => data,
             Err(e) => {
+                // Reporting a limit or a cancellation as "no content" tells the caller
+                // the page is empty, which is worse than telling them it failed: they
+                // stop looking. Degrading stays correct for a malformed stream.
+                if matches!(e, Error::ResourceLimit { .. } | Error::Cancelled) {
+                    return Err(e);
+                }
                 log::warn!(
                     "Failed to decode content stream for page {}: {}, returning empty",
                     page_index,
@@ -15517,6 +15578,12 @@ impl PdfDocument {
         let content_data = match self.get_page_content_data(page_index) {
             Ok(data) => data,
             Err(e) => {
+                // Reporting a limit or a cancellation as "no content" tells the caller
+                // the page is empty, which is worse than telling them it failed: they
+                // stop looking. Degrading stays correct for a malformed stream.
+                if matches!(e, Error::ResourceLimit { .. } | Error::Cancelled) {
+                    return Err(e);
+                }
                 log::warn!(
                     "Failed to decode content stream for page {}: {}, returning empty",
                     page_index,
@@ -16194,6 +16261,13 @@ impl PdfDocument {
                             combined.push(b'\n');
                         }
                         Err(e) => {
+                            // Skipping is right for a malformed element, but a budget
+                            // refusal or a cancellation is not a property of the element:
+                            // swallowing it would report a truncated page as a complete
+                            // one and hide the limit that actually stopped the work.
+                            if matches!(e, Error::ResourceLimit { .. } | Error::Cancelled) {
+                                return Err(e);
+                            }
                             log::warn!(
                                 "Failed to decode content stream element on page {}: {}, skipping",
                                 page_index,
@@ -16230,6 +16304,9 @@ impl PdfDocument {
                         combined.push(b'\n');
                     }
                     Err(e) => {
+                        if matches!(e, Error::ResourceLimit { .. } | Error::Cancelled) {
+                            return Err(e);
+                        }
                         log::warn!(
                             "Failed to decode content stream element on page {}: {}, skipping",
                             page_index,
@@ -16821,15 +16898,7 @@ impl PdfDocument {
         } else {
             match self.decode_stream_with_encryption(&xobject, xobject_ref) {
                 Ok(data) => {
-                    const MAX_STREAM_CACHE_BYTES: usize = 50 * 1024 * 1024;
-                    let current = self.xobject_stream_cache_bytes.load(Ordering::Relaxed);
-                    if current + data.len() <= MAX_STREAM_CACHE_BYTES {
-                        self.xobject_stream_cache_bytes
-                            .store(current + data.len(), Ordering::Relaxed);
-                        self.xobject_stream_cache
-                            .lock_or_recover()
-                            .insert(xobject_ref, std::sync::Arc::new(data.clone()));
-                    }
+                    admit_xobject_stream(self, xobject_ref, &data);
                     data
                 }
                 Err(e) => {
@@ -19165,15 +19234,7 @@ impl PdfDocument {
         } else {
             match self.decode_stream_with_encryption(xobject, xobject_ref) {
                 Ok(data) => {
-                    const MAX_STREAM_CACHE_BYTES: usize = 50 * 1024 * 1024;
-                    let current_bytes = self.xobject_stream_cache_bytes.load(Ordering::Relaxed);
-                    if current_bytes + data.len() <= MAX_STREAM_CACHE_BYTES {
-                        self.xobject_stream_cache_bytes
-                            .store(current_bytes + data.len(), Ordering::Relaxed);
-                        self.xobject_stream_cache
-                            .lock_or_recover()
-                            .insert(xobject_ref, std::sync::Arc::new(data.clone()));
-                    }
+                    admit_xobject_stream(self, xobject_ref, &data);
                     data
                 }
                 Err(e) => {
@@ -19642,15 +19703,7 @@ impl PdfDocument {
         } else {
             match self.decode_stream_with_encryption(xobject, xobject_ref) {
                 Ok(data) => {
-                    const MAX_STREAM_CACHE_BYTES: usize = 50 * 1024 * 1024;
-                    let current_bytes = self.xobject_stream_cache_bytes.load(Ordering::Relaxed);
-                    if current_bytes + data.len() <= MAX_STREAM_CACHE_BYTES {
-                        self.xobject_stream_cache_bytes
-                            .store(current_bytes + data.len(), Ordering::Relaxed);
-                        self.xobject_stream_cache
-                            .lock_or_recover()
-                            .insert(xobject_ref, std::sync::Arc::new(data.clone()));
-                    }
+                    admit_xobject_stream(self, xobject_ref, &data);
                     data
                 }
                 Err(e) => {
@@ -20674,8 +20727,13 @@ pub fn parse_trailer<R: Read>(reader: &mut R) -> Result<Object> {
     // The reader should already be positioned after the xref table
     // We need to read until we find "trailer", then parse the dictionary
 
+    // Bounded rather than to EOF: the reader sits after the xref table, which in a
+    // linearized file is near byte 0, so reading to the end would buffer almost the whole
+    // document to find a dictionary that is a few hundred bytes long.
     let mut buffer = Vec::new();
-    reader.read_to_end(&mut buffer)?;
+    reader
+        .take(TRAILER_SCAN_BYTES as u64)
+        .read_to_end(&mut buffer)?;
 
     // Find "trailer" keyword
     let content = String::from_utf8_lossy(&buffer);
@@ -20714,4 +20772,74 @@ fn find_substring(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
+}
+
+/// Record every `N G obj` header in one scan window.
+///
+/// Split out of `scan_for_object` so the same byte-level matching runs over bounded
+/// windows instead of a whole-file buffer. Matches that begin inside the replayed
+/// overlap are skipped by `ScanChunk::absolute`, so a header straddling a window
+/// boundary is recorded exactly once.
+fn scan_object_headers(
+    content: &[u8],
+    chunk: &crate::xref_reconstruction::ScanChunk,
+    offsets: &mut HashMap<u32, u64>,
+) {
+    let mut pos = 0;
+    while pos < content.len() {
+        // Look for digit at a line start (after newline or at file start)
+        let valid_start = pos == 0 || content[pos - 1] == b'\n' || content[pos - 1] == b'\r';
+        if !valid_start || !content[pos].is_ascii_digit() {
+            pos += 1;
+            continue;
+        }
+
+        // Try to parse "N G obj" starting at pos
+        let start = pos;
+        // Parse object number (digits)
+        while pos < content.len() && content[pos].is_ascii_digit() {
+            pos += 1;
+        }
+        if pos >= content.len() || content[pos] != b' ' {
+            continue;
+        }
+        let obj_num_str = std::str::from_utf8(&content[start..pos]).unwrap_or("");
+        let obj_num: u32 = match obj_num_str.parse() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+
+        pos += 1; // skip space
+
+        // Parse generation number (digits)
+        let gen_start = pos;
+        while pos < content.len() && content[pos].is_ascii_digit() {
+            pos += 1;
+        }
+        if pos >= content.len() || content[pos] != b' ' {
+            continue;
+        }
+        let _gen_str = std::str::from_utf8(&content[gen_start..pos]).unwrap_or("");
+
+        pos += 1; // skip space
+
+        // Check for "obj" keyword
+        if pos + 3 <= content.len() && &content[pos..pos + 3] == b"obj" {
+            let after_obj = pos + 3;
+            // Verify "obj" is followed by whitespace, newline, or '<'
+            let valid_end = after_obj >= content.len() || {
+                let c = content[after_obj];
+                c == b'\n' || c == b'\r' || c == b' ' || c == b'\t' || c == b'<'
+            };
+            if valid_end {
+                if let Some(absolute) = chunk.absolute(start) {
+                    offsets.entry(obj_num).or_insert(absolute as u64);
+                }
+                pos = after_obj;
+                continue;
+            }
+        }
+        // Reset pos to just after the start to avoid infinite loop
+        pos = start + 1;
+    }
 }

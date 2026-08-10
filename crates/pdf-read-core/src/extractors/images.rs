@@ -691,6 +691,11 @@ pub fn extract_image_from_xobject(
         .and_then(|obj| obj.as_integer())
         .unwrap_or(8) as u8;
 
+    // Declared geometry is attacker-controlled and is used to size buffers further down,
+    // so it is checked here, before anything is allocated from it. A dictionary claiming
+    // 100000x100000 costs nothing to write and 30 GB to honour.
+    crate::budget::check_image_dimensions(width, height, bits_per_component)?;
+
     let color_space_obj = dict
         .get("ColorSpace")
         .ok_or_else(|| Error::Image("Image missing /ColorSpace".to_string()))?;

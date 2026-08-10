@@ -65,106 +65,111 @@ pub fn reconstruct_xref<R: Read + Seek>(
 ) -> Result<(CrossRefTable, Object, Vec<(ObjectRef, Object)>)> {
     log::info!("Reconstructing xref table by scanning file...");
 
-    // Read entire file into memory for scanning
-    reader.seek(SeekFrom::Start(0))?;
-    let mut contents = Vec::new();
-    reader.read_to_end(&mut contents)?;
-
-    log::debug!("File size: {} bytes", contents.len());
-
     let mut xref = CrossRefTable::new();
     let mut objects_found = 0;
+    let mut trailer_offsets = Vec::new();
 
     // Scan for "N G obj" patterns
     // Pattern: one or more digits, whitespace, one or more digits, whitespace, "obj"
-    for capture in RE_OBJ_PATTERN.captures_iter(&contents) {
-        let full_match = match capture.get(0) {
-            Some(m) => m,
-            None => continue,
-        };
-        let obj_num_bytes = match capture.get(1) {
-            Some(m) => m.as_bytes(),
-            None => continue,
-        };
-        let gen_num_bytes = match capture.get(2) {
-            Some(m) => m.as_bytes(),
-            None => continue,
-        };
-
-        // Parse object and generation numbers
-        let obj_num: u32 = match std::str::from_utf8(obj_num_bytes)
-            .ok()
-            .and_then(|s| s.parse().ok())
-        {
-            Some(n) => n,
-            None => {
-                log::warn!(
-                    "Failed to parse object number at offset {}",
-                    full_match.start()
-                );
+    for chunk in ScanChunks::new(reader)? {
+        let chunk = chunk?;
+        let contents = chunk.bytes.as_slice();
+        for mat in RE_TRAILER.find_iter(contents) {
+            if let Some(absolute) = chunk.absolute(mat.start()) {
+                trailer_offsets.push(absolute);
+            }
+        }
+        for capture in RE_OBJ_PATTERN.captures_iter(contents) {
+            let full_match = match capture.get(0) {
+                Some(m) => m,
+                None => continue,
+            };
+            let Some(absolute_start) = chunk.absolute(full_match.start()) else {
                 continue;
-            }
-        };
+            };
+            let obj_num_bytes = match capture.get(1) {
+                Some(m) => m.as_bytes(),
+                None => continue,
+            };
+            let gen_num_bytes = match capture.get(2) {
+                Some(m) => m.as_bytes(),
+                None => continue,
+            };
 
-        let gen_num: u16 = match std::str::from_utf8(gen_num_bytes)
-            .ok()
-            .and_then(|s| s.parse().ok())
-        {
-            Some(n) => n,
-            None => {
-                log::warn!(
-                    "Failed to parse generation number at offset {}",
-                    full_match.start()
-                );
-                continue;
-            }
-        };
+            // Parse object and generation numbers
+            let obj_num: u32 = match std::str::from_utf8(obj_num_bytes)
+                .ok()
+                .and_then(|s| s.parse().ok())
+            {
+                Some(n) => n,
+                None => {
+                    log::warn!(
+                        "Failed to parse object number at offset {}",
+                        full_match.start()
+                    );
+                    continue;
+                }
+            };
 
-        let offset = full_match.start() as u64;
+            let gen_num: u16 = match std::str::from_utf8(gen_num_bytes)
+                .ok()
+                .and_then(|s| s.parse().ok())
+            {
+                Some(n) => n,
+                None => {
+                    log::warn!(
+                        "Failed to parse generation number at offset {}",
+                        full_match.start()
+                    );
+                    continue;
+                }
+            };
 
-        // SPEC COMPLIANCE FIX: Validate that this is actually an object header
-        // PDF Spec: ISO 32000-1:2008, Section 7.5.4 - Cross-Reference Table
-        //
-        // Previous implementation would add ANY "N G obj" pattern to the xref table,
-        // even if it appeared inside strings, comments, or corrupted data.
-        //
-        // This creates security risks:
-        // 1. False positives can point to invalid object locations
-        // 2. Can cause crashes when trying to parse non-object data as objects
-        // 3. Malicious PDFs can craft fake object headers to confuse parsers
-        //
-        // Correct behavior: Validate that the pattern is followed by valid object syntax
+            let offset = absolute_start as u64;
 
-        // Check if the next bytes after "obj" form a valid PDF object
-        // We do basic validation: look for dictionary start, array start, or primitive values
-        let validation_start = offset + full_match.as_bytes().len() as u64;
-        if validation_start < contents.len() as u64 {
-            let remaining = &contents[validation_start as usize..];
+            // SPEC COMPLIANCE FIX: Validate that this is actually an object header
+            // PDF Spec: ISO 32000-1:2008, Section 7.5.4 - Cross-Reference Table
+            //
+            // Previous implementation would add ANY "N G obj" pattern to the xref table,
+            // even if it appeared inside strings, comments, or corrupted data.
+            //
+            // This creates security risks:
+            // 1. False positives can point to invalid object locations
+            // 2. Can cause crashes when trying to parse non-object data as objects
+            // 3. Malicious PDFs can craft fake object headers to confuse parsers
+            //
+            // Correct behavior: Validate that the pattern is followed by valid object syntax
 
-            // Skip whitespace
-            let mut i = 0;
-            while i < remaining.len() && remaining[i].is_ascii_whitespace() {
-                i += 1;
-            }
+            // Check if the next bytes after "obj" form a valid PDF object
+            // We do basic validation: look for dictionary start, array start, or primitive values
+            let validation_start = full_match.start() + full_match.as_bytes().len();
+            if validation_start < contents.len() {
+                let remaining = &contents[validation_start..];
 
-            if i < remaining.len() {
-                let next_byte = remaining[i];
+                // Skip whitespace
+                let mut i = 0;
+                while i < remaining.len() && remaining[i].is_ascii_whitespace() {
+                    i += 1;
+                }
 
-                // Valid object should start with:
-                // - << (dictionary)
-                // - [ (array)
-                // - < (hex string or dict - ambiguous at this point)
-                // - ( (literal string)
-                // - / (name)
-                // - t, f, n (true, false, null)
-                // - digit or - (number)
-                let is_valid_object_start = matches!(
-                    next_byte,
-                    b'<' | b'[' | b'(' | b'/' | b't' | b'f' | b'n' | b'-'
-                ) || next_byte.is_ascii_digit();
+                if i < remaining.len() {
+                    let next_byte = remaining[i];
 
-                if !is_valid_object_start {
-                    log::debug!(
+                    // Valid object should start with:
+                    // - << (dictionary)
+                    // - [ (array)
+                    // - < (hex string or dict - ambiguous at this point)
+                    // - ( (literal string)
+                    // - / (name)
+                    // - t, f, n (true, false, null)
+                    // - digit or - (number)
+                    let is_valid_object_start = matches!(
+                        next_byte,
+                        b'<' | b'[' | b'(' | b'/' | b't' | b'f' | b'n' | b'-'
+                    ) || next_byte.is_ascii_digit();
+
+                    if !is_valid_object_start {
+                        log::debug!(
                         "Skipping false positive object header at offset {} (next byte: 0x{:02x} '{}')",
                         offset,
                         next_byte,
@@ -174,22 +179,23 @@ pub fn reconstruct_xref<R: Read + Seek>(
                             '?'
                         }
                     );
-                    continue;
+                        continue;
+                    }
+
+                    log::debug!(
+                        "Validated object {} gen {} at offset {}",
+                        obj_num,
+                        gen_num,
+                        offset
+                    );
                 }
-
-                log::debug!(
-                    "Validated object {} gen {} at offset {}",
-                    obj_num,
-                    gen_num,
-                    offset
-                );
             }
-        }
 
-        // Add to xref table
-        let entry = XRefEntry::uncompressed(offset, gen_num);
-        xref.add_entry(obj_num, entry);
-        objects_found += 1;
+            // Add to xref table
+            let entry = XRefEntry::uncompressed(offset, gen_num);
+            xref.add_entry(obj_num, entry);
+            objects_found += 1;
+        }
     }
 
     log::info!("Reconstructed xref with {} objects", objects_found);
@@ -201,9 +207,135 @@ pub fn reconstruct_xref<R: Read + Seek>(
     }
 
     // Try to find the trailer dictionary
-    let (trailer, synthetic) = find_trailer(&contents, reader, &xref)?;
+    let (trailer, synthetic) = find_trailer(&trailer_offsets, reader, &xref)?;
 
     Ok((xref, trailer, synthetic))
+}
+
+/// Bytes read per scan step. Small enough that the buffer is negligible against the xref
+/// rebuild budget, large enough that the regex amortises across a whole file.
+const SCAN_CHUNK_BYTES: usize = 512 * 1024;
+/// Carried between chunks so an object header straddling a boundary is still matched.
+/// `4294967295 65535 obj` is 20 bytes; 64 leaves generous room for odd whitespace.
+const SCAN_OVERLAP_BYTES: usize = 64;
+/// Window read around a trailer keyword when parsing its dictionary.
+const TRAILER_WINDOW_BYTES: usize = 64 * 1024;
+
+pub(crate) struct ScanChunk {
+    pub(crate) bytes: Vec<u8>,
+    base: usize,
+    /// Matches starting before this were already reported by the previous chunk.
+    fresh_from: usize,
+}
+
+impl ScanChunk {
+    /// Absolute file offset for a match, or `None` if it lies in the replayed overlap.
+    pub(crate) fn absolute(&self, start: usize) -> Option<usize> {
+        (start >= self.fresh_from).then_some(self.base + start)
+    }
+}
+
+/// Streams a file in overlapping windows.
+///
+/// Reconstruction is reached from ordinary opening whenever `startxref` is damaged, so
+/// it is input-triggered. Reading the file whole made a second complete copy of
+/// attacker-controlled data — the one place the reader ever did — and ran a regex over
+/// it. Windowing keeps the peak at one chunk regardless of file size.
+pub(crate) struct ScanChunks<'reader, R: Read + Seek> {
+    reader: &'reader mut R,
+    buffer: Vec<u8>,
+    overlap: usize,
+    base: usize,
+    carried: usize,
+    finished: bool,
+}
+
+impl<'reader, R: Read + Seek> ScanChunks<'reader, R> {
+    pub(crate) fn new(reader: &'reader mut R) -> Result<Self> {
+        Self::with_overlap(reader, SCAN_OVERLAP_BYTES)
+    }
+
+    /// `overlap` must cover the longest lookahead the caller performs from a match, or a
+    /// pattern near a window boundary would be read against truncated bytes.
+    pub(crate) fn with_overlap(reader: &'reader mut R, overlap: usize) -> Result<Self> {
+        crate::budget::check_xref_rebuild(SCAN_CHUNK_BYTES + overlap)?;
+        reader.seek(SeekFrom::Start(0))?;
+        Ok(Self {
+            reader,
+            buffer: Vec::with_capacity(SCAN_CHUNK_BYTES + overlap),
+            overlap,
+            base: 0,
+            carried: 0,
+            finished: false,
+        })
+    }
+}
+
+impl<R: Read + Seek> Iterator for ScanChunks<'_, R> {
+    type Item = Result<ScanChunk>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+        if let Err(error) = crate::budget::check_cancelled() {
+            self.finished = true;
+            return Some(Err(error));
+        }
+
+        // Keep the tail of the previous window so a straddling match is still visible.
+        let carried = self.carried;
+        if carried > 0 {
+            let tail_start = self.buffer.len() - carried;
+            self.buffer.copy_within(tail_start.., 0);
+        }
+        self.buffer.truncate(carried);
+
+        let mut filled = carried;
+        let mut scratch = [0_u8; 64 * 1024];
+        while filled < SCAN_CHUNK_BYTES {
+            let want = scratch.len().min(SCAN_CHUNK_BYTES - filled);
+            match self.reader.read(&mut scratch[..want]) {
+                Ok(0) => {
+                    self.finished = true;
+                    break;
+                }
+                Ok(read) => {
+                    self.buffer.extend_from_slice(&scratch[..read]);
+                    filled += read;
+                }
+                Err(error) => {
+                    self.finished = true;
+                    return Some(Err(Error::Io(error)));
+                }
+            }
+        }
+        if self.buffer.len() <= carried && self.finished {
+            return None;
+        }
+
+        let chunk = ScanChunk {
+            bytes: self.buffer.clone(),
+            base: self.base.saturating_sub(carried),
+            fresh_from: carried,
+        };
+        self.base = chunk.base + self.buffer.len();
+        self.carried = if self.finished {
+            0
+        } else {
+            self.overlap.min(self.buffer.len())
+        };
+        Some(Ok(chunk))
+    }
+}
+
+/// Read a bounded window starting at `offset`, for parsing one trailer dictionary.
+fn read_window<R: Read + Seek>(reader: &mut R, offset: usize, bytes: usize) -> Result<Vec<u8>> {
+    crate::budget::check_xref_rebuild(bytes)?;
+    reader.seek(SeekFrom::Start(offset as u64))?;
+    let mut window = Vec::new();
+    reader.take(bytes as u64).read_to_end(&mut window)?;
+    Ok(window)
 }
 
 /// Find and parse the trailer dictionary.
@@ -212,7 +344,7 @@ pub fn reconstruct_xref<R: Read + Seek>(
 /// dictionary that follows. If not found, attempts to reconstruct a minimal
 /// trailer by finding the catalog object.
 fn find_trailer<R: Read + Seek>(
-    contents: &[u8],
+    trailer_offsets: &[usize],
     reader: &mut R,
     xref: &CrossRefTable,
 ) -> Result<(Object, Vec<(ObjectRef, Object)>)> {
@@ -234,12 +366,14 @@ fn find_trailer<R: Read + Seek>(
     // occurrence wins — including over a /Root-bearing trailer that appears
     // earlier in the file.
     let mut salvaged: HashMap<String, (Object, usize)> = HashMap::new();
-    for mat in RE_TRAILER.find_iter(contents) {
-        let trailer_start = mat.start();
+    for trailer_start in trailer_offsets.iter().copied() {
         log::debug!("Found trailer keyword at offset {}", trailer_start);
 
         let trailer_keyword_end = trailer_start + 7; // len("trailer")
-        let input = &contents[trailer_keyword_end..];
+                                                     // A trailer dictionary is small; reading a bounded window keeps this path from
+                                                     // reintroducing the whole-file buffer the scan just removed.
+        let window = read_window(reader, trailer_keyword_end, TRAILER_WINDOW_BYTES)?;
+        let input = window.as_slice();
         match parse_object(input) {
             Ok((_, obj)) => {
                 // Only accept a parsed trailer that actually carries /Root.

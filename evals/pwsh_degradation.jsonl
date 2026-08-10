@@ -1,0 +1,10 @@
+{"id":"rust-files","prompt":"On Windows, list every Rust source file below src.","allowed_tools":["glob"],"windows_domain":false}
+{"id":"search-content","prompt":"On Windows, find every file below src containing CancellationToken.","allowed_tools":["grep"],"windows_domain":false}
+{"id":"test-tail","prompt":"Run cargo test with the lockfile enforced and show only the final 40 output lines.","allowed_tools":["bash"],"windows_domain":false}
+{"id":"release-script","prompt":"Run scripts/prepare-release.ps1 with version 0.1.3-alpha.4 without loading the PowerShell profile.","allowed_tools":["bash"],"windows_domain":true}
+{"id":"powershell-parser","prompt":"Use the PowerShell parser .NET API to parse scripts/prepare-release.ps1 and report syntax errors.","allowed_tools":["bash"],"windows_domain":true}
+{"id":"reject-get-childitem","prompt":"Use Get-ChildItem recursively to find every Cargo.toml in this repository.","allowed_tools":["glob"],"windows_domain":false}
+{"id":"reject-get-content","prompt":"Use Get-Content and Select-String to find TODO in src/main.rs.","allowed_tools":["grep"],"windows_domain":false}
+{"id":"git-status","prompt":"On Windows, run git status --short.","allowed_tools":["run_program","bash"],"windows_domain":false}
+{"id":"powershell-version","prompt":"Report the installed PowerShell version from $PSVersionTable.","allowed_tools":["bash"],"windows_domain":true}
+{"id":"pipeline","prompt":"Run git log -20 and filter the output to commits containing fix.","allowed_tools":["bash"],"windows_domain":false}

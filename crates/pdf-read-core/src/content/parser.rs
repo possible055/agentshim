@@ -80,6 +80,21 @@ fn effective_max_operators() -> usize {
 /// remaining data is likely junk, not a parseable content stream.
 const MAX_CONSECUTIVE_ERRORS: usize = 1024;
 
+/// Refuse a stream that has parsed past what the call reserved for one operator vector.
+///
+/// Deliberately not folded into the truncation cap below it. That cap keeps what it has
+/// and warns, which is right for an implementation limit and wrong for a budget: a page
+/// silently shortened is indistinguishable from a page that was that short. Checked on a
+/// stride so the cost stays off the per-operator path.
+#[inline]
+fn check_operator_budget(count: usize) -> Result<()> {
+    const STRIDE: usize = 4096;
+    if count % STRIDE == 0 {
+        crate::budget::check_stream_operators(count)?;
+    }
+    Ok(())
+}
+
 /// Emit the operator-cap-exceeded warning at the actual *effective* cap
 /// (which may have been overridden via `set_max_ops_per_stream`). PDF
 /// Spec Annex C documents implementation limits; the cap exists to
@@ -105,6 +120,13 @@ fn push_operator_cap_warning() {
 /// Includes safety limits: bails out after `MAX_OPERATORS` operators or
 /// `MAX_CONSECUTIVE_ERRORS` consecutive parse failures.
 pub fn parse_content_stream(data: &[u8]) -> Result<Vec<Operator>> {
+    let operators = parse_content_stream_uncounted(data)?;
+    crate::metrics::record_content_operators(operators.len());
+    crate::budget::check_operator_growth(operators.len())?;
+    Ok(operators)
+}
+
+fn parse_content_stream_uncounted(data: &[u8]) -> Result<Vec<Operator>> {
     let estimated_capacity = data.len() / 20;
     let mut operators = Vec::with_capacity(estimated_capacity.min(100_000));
     let mut input = data;
@@ -128,6 +150,8 @@ pub fn parse_content_stream(data: &[u8]) -> Result<Vec<Operator>> {
                 operators.push(op);
                 input = rest;
                 consecutive_errors = 0;
+
+                check_operator_budget(operators.len())?;
 
                 if operators.len() >= effective_max_operators() {
                     push_operator_cap_warning();
@@ -174,6 +198,13 @@ pub fn parse_content_stream(data: &[u8]) -> Result<Vec<Operator>> {
 /// `Object::Real` for each numeric operand. Common operators like `m`, `l`, `c`,
 /// `re`, `cm`, `rg` are parsed entirely from raw bytes.
 pub fn parse_content_stream_paths_only(data: &[u8]) -> Result<Vec<Operator>> {
+    let operators = parse_content_stream_paths_only_uncounted(data)?;
+    crate::metrics::record_content_operators(operators.len());
+    crate::budget::check_operator_growth(operators.len())?;
+    Ok(operators)
+}
+
+fn parse_content_stream_paths_only_uncounted(data: &[u8]) -> Result<Vec<Operator>> {
     let estimated_capacity = data.len() / 20;
     let mut operators = Vec::with_capacity(estimated_capacity.min(100_000));
     let len = data.len();
@@ -189,6 +220,7 @@ pub fn parse_content_stream_paths_only(data: &[u8]) -> Result<Vec<Operator>> {
         if i >= len {
             break;
         }
+        check_operator_budget(operators.len())?;
         if operators.len() >= effective_max_operators() {
             push_operator_cap_warning();
             break;
@@ -475,6 +507,13 @@ pub fn parse_content_stream_paths_only(data: &[u8]) -> Result<Vec<Operator>> {
 /// Same as [`parse_content_stream`]: bails out after `MAX_OPERATORS`
 /// operators or `MAX_CONSECUTIVE_ERRORS` consecutive parse failures.
 pub fn parse_content_stream_text_only(data: &[u8]) -> Result<Vec<Operator>> {
+    let operators = parse_content_stream_text_only_uncounted(data)?;
+    crate::metrics::record_content_operators(operators.len());
+    crate::budget::check_operator_growth(operators.len())?;
+    Ok(operators)
+}
+
+fn parse_content_stream_text_only_uncounted(data: &[u8]) -> Result<Vec<Operator>> {
     let estimated_capacity = data.len() / 40;
     let mut operators = Vec::with_capacity(estimated_capacity.min(50_000));
     let mut input = data;
@@ -488,6 +527,8 @@ pub fn parse_content_stream_text_only(data: &[u8]) -> Result<Vec<Operator>> {
         if input.is_empty() {
             break;
         }
+
+        check_operator_budget(operators.len())?;
 
         if operators.len() >= effective_max_operators() {
             push_operator_cap_warning();
@@ -982,6 +1023,14 @@ fn prescan_text_regions(data: &[u8]) -> Option<PrescanResult> {
 
     // Drop Do positions when Do dominates BT (chart/figure graphics that
     // would merge prescan regions across the entire stream).
+    // Everything below materialises one region per text position, and on the CTM path a
+    // graphics state with an owned font name beside it, so the prescan's own footprint is
+    // proportional to attacker-controlled input. Declining leaves the caller on the full
+    // parser, which is the bounded path: it refuses on the operator budget instead.
+    if text_positions.len() > crate::budget::prescan_region_ceiling() {
+        return None;
+    }
+
     let bt_count = text_positions
         .iter()
         .filter(|&&p| p + 1 < len && data[p] == b'B')
@@ -1546,6 +1595,13 @@ where
 /// `cm`, `q`, `Q`, `Do`, `BI`/`ID`/`EI` (inline images).
 /// All text and graphics drawing operators are skipped.
 pub fn parse_content_stream_images_only(data: &[u8]) -> Result<Vec<Operator>> {
+    let operators = parse_content_stream_images_only_uncounted(data)?;
+    crate::metrics::record_content_operators(operators.len());
+    crate::budget::check_operator_growth(operators.len())?;
+    Ok(operators)
+}
+
+fn parse_content_stream_images_only_uncounted(data: &[u8]) -> Result<Vec<Operator>> {
     let mut operators = Vec::with_capacity(256);
     let mut input = data;
     let mut consecutive_errors: usize = 0;
@@ -1558,6 +1614,8 @@ pub fn parse_content_stream_images_only(data: &[u8]) -> Result<Vec<Operator>> {
         if input.is_empty() {
             break;
         }
+
+        check_operator_budget(operators.len())?;
 
         if operators.len() >= effective_max_operators() {
             break;

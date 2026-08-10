@@ -5,7 +5,10 @@ use std::{
     io,
     path::{Path, PathBuf},
     str::FromStr,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -138,6 +141,51 @@ enum ToolAdmission {
 enum ToolAdmissionFailure {
     Capacity(&'static str),
     Process(ProcessError),
+}
+
+fn first_shell_token(command: &str) -> Option<&str> {
+    let command = command.trim_start();
+    let first = command.as_bytes().first().copied()?;
+    if first == b'\'' || first == b'"' {
+        let end = command[1..].find(char::from(first))? + 1;
+        return Some(&command[1..end]);
+    }
+    command.split_whitespace().next()
+}
+
+fn shell_delegate(request: &CallToolRequestParams) -> &'static str {
+    if request.name.as_ref() != "bash" {
+        return "none";
+    }
+    let Some(command) = request
+        .arguments
+        .as_ref()
+        .and_then(|arguments| arguments.get("command"))
+        .and_then(Value::as_str)
+    else {
+        return "none";
+    };
+    let Some(token) = first_shell_token(command) else {
+        return "none";
+    };
+    let file_name = token
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(token)
+        .to_ascii_lowercase();
+    if file_name == "bash.exe" {
+        return "wsl";
+    }
+    let stem = file_name
+        .rsplit_once('.')
+        .map_or(file_name.as_str(), |(stem, _)| stem);
+    match stem {
+        "pwsh" | "powershell" => "pwsh",
+        "cmd" => "cmd",
+        "wsl" => "wsl",
+        "python" | "node" | "perl" | "ruby" => "other-interpreter",
+        _ => "none",
+    }
 }
 
 impl CodexShimBuilder {
@@ -353,6 +401,10 @@ impl CodexShim {
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
         let span = tracing::Span::current();
         let running = Instant::now();
+        let budgets = crate::tools::read::PdfMemoryBudgets::from_config(&self.resources.config());
+        let timed_out: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+        let mut pdf_admission: Option<PdfAdmission> = None;
+        let mut deadline = None;
         let mut result = None;
         for attempt_index in 0..2 {
             let prepare_access = access.clone();
@@ -361,10 +413,11 @@ impl CodexShim {
             let prepare_span = span.clone();
             let prepared = tokio::task::spawn_blocking(move || {
                 prepare_span.in_scope(|| {
-                    crate::tools::read::prepare(
+crate::tools::read::prepare(
                         &prepare_access,
                         &prepare_request,
                         &prepare_cancellation,
+                        budgets,
                     )
                 })
             })
@@ -386,25 +439,64 @@ impl CodexShim {
                     break;
                 }
             };
-            let Ok(memory) = self
-                .resources
-                .reserve_memory(prepared.memory_charge(), request_cancellation)
-                .await
-            else {
-                cancellation_relay.abort();
-                drop(permits);
-                return classified_tool_error(
-                    cancellation_class(
+            // A PDF holds its gate and reservation for the whole retry loop. Releasing
+            // between attempts would let another call take the gate, so a caller who hit
+            // `file_changed` once would come back with `resource_busy` instead — two
+            // unrelated failures reported as one.
+            let mut text_memory = None;
+            if prepared.pdf_mode().is_some() {
+                if pdf_admission.is_none() {
+                    match self
+                        .acquire_pdf_admission(&prepared, request_cancellation)
+                        .await
+                    {
+                        Ok(acquired) => pdf_admission = Some(acquired),
+                        Err(busy) => {
+                            cancellation_relay.abort();
+                            drop(permits);
+                            return busy;
+                        }
+                    }
+                }
+                deadline = prepared.runtime_limit();
+            } else {
+                let Ok(memory) = self
+                    .resources
+                    .reserve_memory(
+                        prepared.memory_charge(),
                         request_cancellation,
-                        &self.resources.shutdown_token(),
-                    ),
-                    "read cancelled while waiting for runtime capacity",
-                );
-            };
+                    )
+                    .await
+                else {
+                    cancellation_relay.abort();
+                    drop(permits);
+                    return classified_tool_error(
+                        cancellation_class(
+                            request_cancellation,
+                            &self.resources.shutdown_token(),
+                        ),
+                        "read cancelled while waiting for runtime capacity",
+                    );
+                };
+                text_memory = Some(memory);
+            }
             let execute_access = access.clone();
             let execute_request = read_request.clone();
             let execute_cancellation = cancellation.clone();
             let execute_span = span.clone();
+            let started = Instant::now();
+            let timer = deadline.map(|limit| {
+                let token = cancellation.clone();
+                let expired = Arc::clone(&timed_out);
+                tokio::spawn(async move {
+                    tokio::time::sleep(limit).await;
+                    // `spawn_blocking` cannot be preempted, so the ceiling is enforced by
+                    // cancelling at the same checkpoints the client cancellation uses. The
+                    // real stop latency is therefore checkpoint density, not this timer.
+                    expired.store(true, Ordering::SeqCst);
+                    token.cancel();
+                })
+            });
             let executed = tokio::task::spawn_blocking(move || {
                 execute_span.in_scope(|| {
                     crate::tools::read::execute_prepared(
@@ -416,7 +508,21 @@ impl CodexShim {
                 })
             })
             .await;
-            drop(memory);
+            if let Some(timer) = timer {
+                timer.abort();
+            }
+            drop(text_memory);
+            // The elapsed check is not redundant with the flag: the timer is a spawned
+            // task, so under load it can be scheduled after the work already overran. The
+            // ceiling is a property of how long the work took, not of when a task ran.
+            let overran = deadline.is_some_and(|limit| started.elapsed() > limit);
+            if timed_out.load(Ordering::SeqCst) || overran {
+                let limit = deadline.unwrap_or_default();
+                cancellation_relay.abort();
+                drop(pdf_admission);
+                drop(permits);
+                return pdf_timeout(limit, started.elapsed());
+            }
             match executed {
                 Ok(Ok(crate::tools::read::Attempt::Stable(output))) => {
                     result = Some(Ok(Ok(output)));
@@ -442,7 +548,36 @@ impl CodexShim {
         let result = result.expect("read attempt loop always produces a result");
         drop(permits);
         cancellation_relay.abort();
-        blocking_response("read", duration_ms(running.elapsed()), result)
+        // The PDF reservation outlives the response construction on purpose. Base64 image
+        // data is copied again into content blocks and again by the JSON serialiser, and
+        // that is the single largest allocation on the whole path. Releasing the
+        // reservation before it happens would leave the biggest number off the books.
+        let response = blocking_response("read", duration_ms(running.elapsed()), result);
+        drop(pdf_admission);
+        response
+    }
+
+    /// Acquire the PDF gate and this mode's memory reservation.
+    ///
+    /// The gate allows a bounded wait; the reservation does not. A waiting reservation is
+    /// exactly the head-of-line block this separation exists to remove — an ordinary text
+    /// read must never queue behind a PDF's share of the pool.
+    async fn acquire_pdf_admission(
+        &self,
+        prepared: &crate::tools::read::PreparedRead,
+        request_cancellation: &CancellationToken,
+    ) -> Result<PdfAdmission, CallToolResponse> {
+        let Some(gate) = self.resources.acquire_pdf_gate(request_cancellation).await else {
+            return Err(pdf_busy("pdf_concurrency"));
+        };
+        let Some(memory) = self.resources.try_reserve_memory(prepared.memory_charge())
+        else {
+            return Err(pdf_busy("memory_budget"));
+        };
+        Ok(PdfAdmission {
+            _gate: gate,
+            _memory: memory,
+        })
     }
 
     async fn call_glob(
@@ -888,8 +1023,23 @@ impl ServerHandler for CodexShim {
         }
         let call_id = Uuid::new_v4().to_string();
         let tool = request.name.to_string();
-        let span =
-            tracing::info_span!(target: "codexshim", "tool_call", call_id = %call_id, tool = %tool);
+        let span = if request.name.as_ref() == "bash" {
+            let shell_delegate = shell_delegate(&request);
+            tracing::info_span!(
+                target: "codexshim",
+                "tool_call",
+                call_id = %call_id,
+                tool = %tool,
+                shell_delegate
+            )
+        } else {
+            tracing::info_span!(
+                target: "codexshim",
+                "tool_call",
+                call_id = %call_id,
+                tool = %tool
+            )
+        };
         async move {
             tracing::info!(target: "codexshim", event = "tool_start", phase = "request");
             let response = self.dispatch_tool(request, &context, admission).await?;

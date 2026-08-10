@@ -7,6 +7,20 @@
 /// Result type alias for PDF library operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// How much of a call a refused allocation invalidates.
+///
+/// The distinction is what lets one unusually dense page be reported as unavailable
+/// while the rest of the selection is still delivered. Without it every refusal has to
+/// be treated as fatal, because continuing past an exhausted call budget would keep
+/// spending against a ceiling that already said no.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LimitScope {
+    /// The call's own budget is exhausted; continuing would spend past it.
+    Call,
+    /// Only this page exceeded what the budget covers; other pages are unaffected.
+    Page,
+}
+
 /// Error types that can occur during PDF processing.
 #[derive(Debug, thiserror::Error)]
 #[allow(clippy::enum_variant_names)] // "Invalid" prefix is intentional for clarity
@@ -102,6 +116,26 @@ pub enum Error {
     /// Recursion depth limit exceeded
     #[error("Recursion depth limit exceeded (max: {0})")]
     RecursionLimitExceeded(u32),
+
+    /// A resource ceiling refused an allocation before it happened.
+    ///
+    /// Carries which budget refused it so the caller can distinguish a payload cap from
+    /// a stream cap without parsing the message, and how far the refusal reaches.
+    #[error("PDF resource limit exceeded: {resource} allows {limit_bytes} bytes, needed {observed_bytes}")]
+    ResourceLimit {
+        /// Budget that refused the allocation.
+        resource: &'static str,
+        /// How much of the call the refusal invalidates.
+        scope: LimitScope,
+        /// Ceiling for that budget.
+        limit_bytes: u64,
+        /// Amount the operation required.
+        observed_bytes: u64,
+    },
+
+    /// The caller cancelled, or the mode runtime ceiling elapsed.
+    #[error("PDF work cancelled")]
+    Cancelled,
 
     /// Invalid operation (e.g., calling methods on uninitialized document)
     #[error("Invalid operation: {0}")]

@@ -23,7 +23,7 @@
             "type": "integer"
           },
           "pages": {
-            "description": "PDF only: one-based page or continuous page range, such as \"3\" or \"1-5\".",
+            "description": "PDF only: one-based page or continuous page range, such as \"3\" or \"1-5\". A range extending past the last page is clamped to it; a range starting past it is an error.",
             "pattern": "^[1-9][0-9]*(-[1-9][0-9]*)?$",
             "type": "string"
           },
@@ -33,13 +33,24 @@
             "type": "string"
           },
           "pdf_mode": {
-            "default": "text",
-            "description": "PDF only: return page Markdown or PNG image content blocks.",
+            "default": "auto",
+            "description": "PDF only: \"auto\" and \"text\" return page Markdown, \"image\" renders PNG content blocks. Without pages, text modes deliver the first 10 pages and image renders page 1, each with a continuation.",
             "enum": [
+              "auto",
               "text",
               "image"
             ],
             "type": "string"
+          },
+          "pdf_source_id": {
+            "description": "PDF only: opaque token from a previous response, replayed to prove the continuation targets the same source version.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "pdf_text_offset": {
+            "description": "PDF only: resume a single page's Markdown at this UTF-8 byte offset. Requires pages to name exactly one page, and a non-zero value requires pdf_source_id.",
+            "minimum": 0,
+            "type": "integer"
           },
           "start_line": {
             "default": 1,

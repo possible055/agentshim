@@ -4,13 +4,207 @@ mod tests {
 
     use super::{
         DEFAULT_GLOB_MEMORY_BYTES, DEFAULT_GREP_MEMORY_BYTES, DEFAULT_MEMORY_BYTES,
-        DEFAULT_PROCESS_CALLS, GLOB_MEMORY_BYTES_ENV, GREP_MEMORY_BYTES_ENV,
-        MAX_CONFIGURED_PROCESS_CALLS, MAX_READ_ONLY_CALLS, MAX_TOOL_MEMORY_BYTES,
-        MIN_TOOL_MEMORY_BYTES, MemoryReservation, RuntimeConfig, RuntimeResources,
-        blocking_threads, default_scheduler_threads, default_worker_lanes, global_memory_bytes,
-        parse_process_calls, parse_tool_memory_bytes,
+        DEFAULT_PDF_IMAGE_MEMORY_BYTES, DEFAULT_PDF_TEXT_MEMORY_BYTES, DEFAULT_PROCESS_CALLS,
+        GLOB_MEMORY_BYTES_ENV, GREP_MEMORY_BYTES_ENV, MAX_CONFIGURED_PROCESS_CALLS,
+        MAX_PDF_IMAGE_MEMORY_BYTES, MAX_PDF_TEXT_MEMORY_BYTES, MAX_READ_ONLY_CALLS,
+        MAX_TOOL_MEMORY_BYTES, MIN_PDF_IMAGE_MEMORY_BYTES, MIN_PDF_TEXT_MEMORY_BYTES,
+        MIN_TOOL_MEMORY_BYTES, MemoryReservation, PDF_IMAGE_MEMORY_BYTES_ENV,
+        PDF_TEXT_MEMORY_BYTES_ENV, RuntimeConfig, RuntimeResources, blocking_threads,
+        default_scheduler_threads, default_worker_lanes, global_memory_bytes,
+        parse_memory_bytes_in_range, parse_process_calls, parse_tool_memory_bytes,
     };
     use tokio_util::sync::CancellationToken;
+
+    /// The shared grep/glob parser fixes one 8 MiB–1 GiB range; the PDF variables need
+    /// narrower ones, and reusing that helper would silently accept out-of-range values.
+    #[test]
+    fn pdf_memory_variables_use_their_own_ranges() {
+        for (environment, default, minimum, maximum) in [
+            (
+                PDF_TEXT_MEMORY_BYTES_ENV,
+                DEFAULT_PDF_TEXT_MEMORY_BYTES,
+                MIN_PDF_TEXT_MEMORY_BYTES,
+                MAX_PDF_TEXT_MEMORY_BYTES,
+            ),
+            (
+                PDF_IMAGE_MEMORY_BYTES_ENV,
+                DEFAULT_PDF_IMAGE_MEMORY_BYTES,
+                MIN_PDF_IMAGE_MEMORY_BYTES,
+                MAX_PDF_IMAGE_MEMORY_BYTES,
+            ),
+        ] {
+            let parse = |value: String| {
+                parse_memory_bytes_in_range(
+                    Some(OsStr::new(&value)),
+                    environment,
+                    default,
+                    minimum,
+                    maximum,
+                )
+            };
+            assert_eq!(
+                parse_memory_bytes_in_range(None, environment, default, minimum, maximum)
+                    .expect("default"),
+                default
+            );
+            assert_eq!(parse(minimum.to_string()).expect("minimum"), minimum);
+            assert_eq!(parse(maximum.to_string()).expect("maximum"), maximum);
+            assert!(parse((minimum - 1).to_string()).is_err());
+            assert!(parse((maximum + 1).to_string()).is_err());
+            // Inside the shared helper's range but outside this variable's.
+            assert!(parse(MAX_TOOL_MEMORY_BYTES.to_string()).is_err());
+            assert!(
+                parse_tool_memory_bytes(
+                    Some(OsStr::new(&MAX_TOOL_MEMORY_BYTES.to_string())),
+                    environment,
+                    default
+                )
+                .is_ok(),
+                "the shared helper is the wrong range for {environment}"
+            );
+        }
+    }
+
+    /// Both mode reservations must fit the pool they are drawn from, or the call could
+    /// never be admitted.
+    #[test]
+    fn pdf_mode_reservations_fit_the_shared_pool() {
+        let config = RuntimeConfig::for_tests(1);
+        assert!(config.pdf_text_memory_bytes <= config.memory_bytes);
+        assert!(config.pdf_image_memory_bytes <= config.memory_bytes);
+        // Const-evaluable, so `assert!` would be optimised out; compare at runtime.
+        assert_eq!(
+            MAX_PDF_TEXT_MEMORY_BYTES.min(DEFAULT_MEMORY_BYTES),
+            MAX_PDF_TEXT_MEMORY_BYTES
+        );
+        assert_eq!(
+            MAX_PDF_IMAGE_MEMORY_BYTES.min(DEFAULT_MEMORY_BYTES),
+            MAX_PDF_IMAGE_MEMORY_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn the_pdf_gate_admits_one_call_and_recovers_on_drop() {
+        let resources = RuntimeResources::new(RuntimeConfig::for_tests(4));
+        let request = CancellationToken::new();
+
+        let first = resources
+            .acquire_pdf_gate(&request)
+            .await
+            .expect("first PDF call");
+        assert!(resources.try_acquire_pdf_gate().is_none());
+
+        // The bounded wait must fail rather than queue indefinitely.
+        let waited = std::time::Instant::now();
+        assert!(resources.acquire_pdf_gate(&request).await.is_none());
+        let waited = waited.elapsed();
+        assert!(
+            waited >= super::PDF_GATE_WAIT,
+            "gate returned before its bounded wait elapsed: {waited:?}"
+        );
+        assert!(
+            waited < super::PDF_GATE_WAIT * 4,
+            "gate waited far past its bound: {waited:?}"
+        );
+
+        drop(first);
+        assert!(resources.try_acquire_pdf_gate().is_some());
+    }
+
+    /// A text read must never queue behind a PDF's share of the pool. With the mode
+    /// reservations charged, the pool keeps enough headroom for one.
+    #[tokio::test]
+    async fn a_charged_pdf_reservation_leaves_room_for_text_reads() {
+        let resources =
+            RuntimeResources::new(RuntimeConfig::for_tests(4));
+        let config = resources.config();
+
+        let image = resources
+            .try_reserve_memory(config.pdf_image_memory_bytes)
+            .expect("image mode reservation");
+        let text = resources
+            .try_reserve_memory(256 * 1024)
+            .expect("a text read must not have to wait behind the PDF reservation");
+        assert!(config.pdf_image_memory_bytes < config.memory_bytes);
+        drop((image, text));
+    }
+
+    /// Mirrors the admission the server performs: a PDF takes its gate and mode
+    /// reservation, then an unrelated text read asks for its 256 KiB the waiting way.
+    ///
+    /// This is the defect the split exists to remove. A PDF that reserves the whole pool
+    /// makes the text read's wait unbounded in practice, so the assertion is that the
+    /// wait resolves promptly, not merely that it eventually resolves.
+    #[tokio::test]
+    async fn a_running_pdf_does_not_stall_a_concurrent_text_read() {
+        let resources =
+            RuntimeResources::new(RuntimeConfig::for_tests(4));
+        let request = CancellationToken::new();
+        let config = resources.config();
+
+        let gate = resources
+            .acquire_pdf_gate(&request)
+            .await
+            .expect("PDF gate");
+        let reservation = resources
+            .try_reserve_memory(config.pdf_image_memory_bytes)
+            .expect("image mode reservation");
+
+        let started = std::time::Instant::now();
+        let text = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            resources.reserve_memory(256 * 1024, &request),
+        )
+        .await
+        .expect("a text read must not wait on the PDF reservation")
+        .expect("text reservation");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "text read waited {:?} behind a PDF",
+            started.elapsed()
+        );
+
+        drop((gate, reservation, text));
+    }
+
+    /// The behaviour the split replaced: a call that reserves the whole pool starves
+    /// every other tool. Kept as the contrast case, and as the reason the PDF charge is
+    /// now a per-mode fraction rather than the pool.
+    #[tokio::test]
+    async fn a_whole_pool_reservation_would_block_text_reads() {
+        let resources = RuntimeResources::new(RuntimeConfig::for_tests(4));
+        let request = CancellationToken::new();
+
+        let whole_pool = resources
+            .try_reserve_memory(DEFAULT_MEMORY_BYTES)
+            .expect("whole-pool reservation");
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                resources.reserve_memory(256 * 1024, &request),
+            )
+            .await
+            .is_err(),
+            "a whole-pool reservation is supposed to starve everything else"
+        );
+        drop(whole_pool);
+    }
+
+    /// The per-mode charge is only truthful because the core refuses allocations above
+    /// the same ceilings. If the reservation is ever raised above what the parser
+    /// enforces, the scheduler goes back to describing rather than bounding.
+    #[test]
+    fn mode_reservations_match_the_ceilings_the_core_enforces() {
+        let config = RuntimeConfig::for_tests(1);
+        assert_eq!(
+            config.pdf_text_memory_bytes,
+            codexshim_pdf_read::PdfResourceLimits::text().call_total_bytes
+        );
+        assert_eq!(
+            config.pdf_image_memory_bytes,
+            codexshim_pdf_read::PdfResourceLimits::image().call_total_bytes
+        );
+    }
 
     #[test]
     fn default_workers_allow_bounded_io_overlap() {

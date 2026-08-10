@@ -100,6 +100,12 @@ pub enum SpaceSource {
     /// Space triggered by WordBoundaryDetector analysis
     /// Confidence: 0.85 (combines TJ offset, geometric, and CJK signals per PDF Spec 9.4.4)
     WordBoundaryAnalysis,
+
+    /// No space: a word split across two lines by a typesetter's hyphen.
+    /// Kept distinct from `NoSpace` so the merge site can drop the hyphen itself,
+    /// which is a rendering artefact rather than part of the word. Every other
+    /// no-space rule joins spans verbatim.
+    SoftHyphen,
 }
 
 /// Result of unified space decision process.
@@ -1185,6 +1191,49 @@ fn gap_has_intervening_glyph(ink_boxes: &[Rect], left: &Rect, right: &Rect) -> b
     })
 }
 
+/// Prefixes that form a real hyphenated compound rather than the first half of a word
+/// broken across lines. Drawn from the list in [`crate::text::hyphenation`], reduced to
+/// the entries that are not also a plausible opening syllable: `re-`, `co-`, and `over-`
+/// are omitted because `re-sults`, `co-ding`, and `over-lap` are ordinary line breaks.
+///
+/// These matter more than their length suggests on academic PDFs, where `pre-training`,
+/// `self-attention`, `multi-head`, and `fine-tuning` are high-frequency technical terms
+/// whose hyphen carries meaning.
+const COMPOUND_PREFIXES: [&str; 12] = [
+    "self", "non", "anti", "multi", "semi", "cross", "inter", "intra", "counter", "ultra", "pre",
+    "fine",
+];
+
+/// Whether a line-ending hyphen exists only because one word was split across two lines.
+///
+/// Removing it rejoins `implementa-` + `tion` into `implementation`, which is what the
+/// author wrote; keeping it leaves a hyphen the page never contained as a word character.
+///
+/// Two guards keep real hyphens. A hyphen is dropped only between two lowercase letters,
+/// which excludes capitalised compounds (`Fine-` + `Tuning`), number ranges
+/// (`2019-` + `2020`), and headings set in caps; and never after a
+/// [`COMPOUND_PREFIXES`] word, which excludes the technical compounds that carry meaning.
+///
+/// A lowercase compound outside that list which happens to break at its own hyphen —
+/// `state-` + `of-the-art` — is still rejoined wrongly. Telling it from a split word
+/// needs a lexicon; the failure costs a hyphen rather than a word, and a compound
+/// breaking exactly at its hyphen is far rarer in body text than ordinary hyphenation.
+pub(crate) fn splits_one_word(preceding: &str, following: &str) -> bool {
+    let Some(stem) = preceding.strip_suffix('-') else {
+        return false;
+    };
+    if !stem.chars().last().is_some_and(char::is_lowercase)
+        || !following.chars().next().is_some_and(char::is_lowercase)
+    {
+        return false;
+    }
+    let word = stem
+        .rsplit(|c: char| c.is_whitespace() || c == '-')
+        .next()
+        .unwrap_or(stem);
+    !COMPOUND_PREFIXES.contains(&word)
+}
+
 fn should_insert_space(
     preceding_text: &str,
     following_text: &str,
@@ -1326,7 +1375,7 @@ fn should_insert_space(
                         "Soft hyphen detected: '{}' ends with '-', suppressing space insertion",
                         preceding_text
                     );
-                    return SpaceDecision::no_space(SpaceSource::NoSpace, 1.0);
+                    return SpaceDecision::no_space(SpaceSource::SoftHyphen, 1.0);
                 } else {
                     log::debug!("Hard line break detected: inserting space for word continuation");
                     return SpaceDecision::insert(SpaceSource::GeometricGap, 0.9);
@@ -2587,6 +2636,14 @@ pub struct TextExtractor<'doc> {
     spans: Vec<TextSpan>,
     /// Extracted characters (for backward compatibility)
     chars: Vec<TextChar>,
+    /// Operators executed since the last budget checkpoint.
+    ///
+    /// The content-stream loop is where both time and page memory accumulate, and it was
+    /// the one loop with no checkpoint in it: a cancelled call could not stop until the
+    /// whole stream had been executed, and a dense page could accumulate spans without
+    /// limit. Counted rather than checked every operator because touching the budget
+    /// would otherwise cost more than executing a cheap operator.
+    operators_since_checkpoint: usize,
     /// Resources dictionary (for accessing XObjects and fonts)
     resources: Option<Object>,
     /// Reference to the document (for loading XObjects)
@@ -2795,6 +2852,7 @@ impl<'doc> TextExtractor<'doc> {
             fonts: HashMap::new(),
             spans: Vec::new(),
             chars: Vec::new(),
+            operators_since_checkpoint: 0,
             resources: None,
             document: None,
             processed_xobjects: HashSet::new(),
@@ -3762,6 +3820,7 @@ impl<'doc> TextExtractor<'doc> {
         // Enable span extraction mode
         self.extract_spans = true;
         self.spans.clear();
+        self.operators_since_checkpoint = 0;
         self.span_sequence_counter = 0; // Reset sequence counter for this page
                                         // Decide per page whether a whole-body `/PlacedPDF` region must be kept
                                         // rather than suppressed (see `placed_pdf_text_dominates`).
@@ -3781,6 +3840,10 @@ impl<'doc> TextExtractor<'doc> {
 
         // Flush any remaining Tj buffer at end of content stream
         self.flush_tj_span_buffer()?;
+
+        // The stride check can only refuse on a multiple of the stride, so a page that
+        // ends just past the ceiling would otherwise reach the layout stages unbounded.
+        crate::budget::check_page_spans(self.spans.len())?;
 
         // Detect RTL glyph DRAW DIRECTION on the raw stream order, BEFORE the
         // reading-order sort destroys it (ISO 32000-1 §14.8.2.3.3 method 1).
@@ -5158,6 +5221,11 @@ impl<'doc> TextExtractor<'doc> {
                             "No space insertion: decision source={:?}",
                             space_decision.source
                         );
+                        if space_decision.source == SpaceSource::SoftHyphen
+                            && splits_one_word(&current.text, &span.text)
+                        {
+                            current.text.pop();
+                        }
                         current.text.push_str(&span.text);
                     }
                 }
@@ -5518,10 +5586,33 @@ impl<'doc> TextExtractor<'doc> {
         }
     }
 
+    /// Stop between operators when the call was cancelled or this page has grown past
+    /// what the call reserved.
+    ///
+    /// The span count, not a byte count, is what the page budget bounds: a `TextSpan` is
+    /// a few hundred bytes, but every layout stage downstream — reading order, dedup,
+    /// merge, table detection — holds its own copy of the vector, so the page's real cost
+    /// is a multiple of the count that no single allocation reveals.
+    fn budget_checkpoint(&mut self) -> Result<()> {
+        /// Operators between checkpoints. Small enough that a cancelled call stops well
+        /// inside the response deadline, large enough that the check does not show up in
+        /// the profile of an ordinary page.
+        const STRIDE: usize = 512;
+
+        self.operators_since_checkpoint += 1;
+        if self.operators_since_checkpoint < STRIDE {
+            return Ok(());
+        }
+        self.operators_since_checkpoint = 0;
+        crate::budget::check_cancelled()?;
+        crate::budget::check_page_spans(self.spans.len().max(self.chars.len()))
+    }
+
     /// Execute a single operator.
     ///
     /// Updates the graphics state and extracts text as appropriate.
     fn execute_operator(&mut self, op: Operator) -> Result<()> {
+        self.budget_checkpoint()?;
         match op {
             // Text state operators
             Operator::Tf { font, size } => {
@@ -7064,21 +7155,7 @@ impl<'doc> TextExtractor<'doc> {
                 } else {
                     match doc.decode_stream_with_encryption(&xobject, xobject_ref) {
                         Ok(data) => {
-                            // Cache if under 50MB total
-                            const MAX_STREAM_CACHE_BYTES: usize = 50 * 1024 * 1024;
-                            let current = doc
-                                .xobject_stream_cache_bytes
-                                .load(std::sync::atomic::Ordering::Relaxed);
-                            if current + data.len() <= MAX_STREAM_CACHE_BYTES {
-                                doc.xobject_stream_cache_bytes.store(
-                                    current + data.len(),
-                                    std::sync::atomic::Ordering::Relaxed,
-                                );
-                                doc.xobject_stream_cache
-                                    .lock()
-                                    .unwrap()
-                                    .insert(xobject_ref, std::sync::Arc::new(data.clone()));
-                            }
+                            crate::document::admit_xobject_stream(doc, xobject_ref, &data);
                             data
                         }
                         Err(e) => {
@@ -12993,6 +13070,38 @@ mod tests {
             !decision.insert_space,
             "Hyphenated line break should not insert space"
         );
+        assert_eq!(
+            decision.source,
+            SpaceSource::SoftHyphen,
+            "the merge site drops the hyphen only when this source identifies it"
+        );
+    }
+
+    /// The hyphen is removed only where it is certainly an artefact of line breaking.
+    #[test]
+    fn soft_hyphen_removal_is_limited_to_lowercase_word_splits() {
+        // Split words: the hyphen belongs to the typesetter, not the word.
+        assert!(splits_one_word("implementa-", "tion"));
+        assert!(splits_one_word("effective trans-", "fer from"));
+
+        // Certainly real hyphens: capitalised compounds, ranges, and headings.
+        assert!(!splits_one_word("Fine-", "Tuning"));
+        assert!(!splits_one_word("2019-", "2020"));
+        assert!(!splits_one_word("PRE-", "TRAINING"));
+        assert!(!splits_one_word("multi-", "Head"));
+
+        // Technical compounds keep their hyphen even all-lowercase, and the prefix is
+        // matched as its own word rather than as a suffix of the preceding text.
+        assert!(!splits_one_word("we use pre-", "training"));
+        assert!(!splits_one_word("self-", "attention"));
+        assert!(!splits_one_word("multi-", "head"));
+        assert!(!splits_one_word("fine-", "tuning"));
+        assert!(splits_one_word("compre-", "hensive"), "not the pre- prefix");
+
+        // Nothing to remove.
+        assert!(!splits_one_word("no hyphen", "here"));
+        assert!(!splits_one_word("-", "orphan"));
+        assert!(!splits_one_word("", "empty"));
     }
 
     // ========================================================================

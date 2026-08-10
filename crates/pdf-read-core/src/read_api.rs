@@ -1,9 +1,11 @@
 use std::fs::File;
 
+use crate::budget::PdfResourceLimits;
 use crate::converters::ConversionOptions;
 use crate::document::PdfDocument;
+pub use crate::document::{PageTextAssessment, PageTextStatus, PageVisualAssessment};
 use crate::error::Error;
-use crate::extractors::PageKind;
+pub use crate::error::LimitScope;
 use crate::rendering::{render_page_fit, RenderOptions};
 
 const RENDER_DPI: f32 = 150.0;
@@ -25,6 +27,21 @@ pub enum PdfReadErrorKind {
     Processing,
     /// Reading the supplied file handle failed.
     Io,
+    /// The caller cancelled, or the mode runtime ceiling elapsed.
+    Cancelled,
+}
+
+/// Which budget refused an allocation, and by how much.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResourceLimitDetails {
+    /// Budget that refused the allocation.
+    pub resource: &'static str,
+    /// How much of the call the refusal invalidates.
+    pub scope: LimitScope,
+    /// Ceiling for that budget.
+    pub limit_bytes: u64,
+    /// Amount the operation required.
+    pub observed_bytes: u64,
 }
 
 /// Error returned by the read-only PDF interface.
@@ -33,6 +50,7 @@ pub enum PdfReadErrorKind {
 pub struct PdfReadError {
     kind: PdfReadErrorKind,
     message: String,
+    limit: Option<ResourceLimitDetails>,
 }
 
 impl PdfReadError {
@@ -42,17 +60,47 @@ impl PdfReadError {
         self.kind
     }
 
+    /// Which budget refused the allocation, when the error is a resource limit.
+    ///
+    /// A caller that can only read the message cannot tell a payload cap from a stream
+    /// cap, so the structured form travels with the error.
+    #[must_use]
+    pub fn limit(&self) -> Option<ResourceLimitDetails> {
+        self.limit
+    }
+
     fn resource_limit(message: impl Into<String>) -> Self {
         Self {
             kind: PdfReadErrorKind::ResourceLimit,
             message: message.into(),
+            limit: None,
         }
     }
 }
 
 impl From<Error> for PdfReadError {
     fn from(error: Error) -> Self {
+        if let Error::ResourceLimit {
+            resource,
+            scope,
+            limit_bytes,
+            observed_bytes,
+        } = error
+        {
+            return Self {
+                kind: PdfReadErrorKind::ResourceLimit,
+                message: error.to_string(),
+                limit: Some(ResourceLimitDetails {
+                    resource,
+                    scope,
+                    limit_bytes,
+                    observed_bytes,
+                }),
+            };
+        }
         let kind = match error {
+            Error::Cancelled => PdfReadErrorKind::Cancelled,
+            Error::ResourceLimit { .. } => PdfReadErrorKind::ResourceLimit,
             Error::Io(_) => PdfReadErrorKind::Io,
             Error::EncryptedPdf => PdfReadErrorKind::Encrypted,
             Error::UnsupportedVersion(_) | Error::Unsupported(_) | Error::UnsupportedFilter(_) => {
@@ -72,6 +120,7 @@ impl From<Error> for PdfReadError {
         Self {
             kind,
             message: error.to_string(),
+            limit: None,
         }
     }
 }
@@ -91,25 +140,13 @@ impl Default for ParserLimits {
     fn default() -> Self {
         Self {
             max_input_bytes: 32 * 1024 * 1024,
-            object_cache_bytes: 64 * 1024 * 1024,
+            // 16 MiB, not the former 64 MiB: the old default was the entire per-call
+            // reservation for text mode, so the cache alone could consume the budget the
+            // whole call is supposed to fit inside.
+            object_cache_bytes: PdfResourceLimits::text().object_cache_bytes,
             xobject_cache_entries: 1024,
         }
     }
-}
-
-/// High-level page content classification.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PageClass {
-    /// Usable native text dominates the page.
-    TextLayer,
-    /// A raster image dominates and no usable text layer exists.
-    Scanned,
-    /// Native text and image-contained text coexist.
-    ImageText,
-    /// The page contains heterogeneous text and graphical regions.
-    Mixed,
-    /// The page has no meaningful text, image, or path content.
-    Empty,
 }
 
 /// Visible page geometry in PDF points.
@@ -163,6 +200,17 @@ impl Default for RenderLimits {
             max_pixels: 4_000_000,
         }
     }
+}
+
+/// A window of one page's Markdown.
+#[derive(Clone, Debug)]
+pub struct MarkdownChunk {
+    /// Text for this window.
+    pub text: String,
+    /// Byte offset to resume at, or `None` when the page is complete.
+    pub next_offset: Option<usize>,
+    /// Total Markdown length for the page.
+    pub page_bytes: usize,
 }
 
 /// PNG output produced by `render_page_fit`.
@@ -219,6 +267,16 @@ impl PdfReadDocument {
         self.document.page_count().map_err(Into::into)
     }
 
+    /// Drop per-page scratch held from earlier pages.
+    ///
+    /// The span, character, and content caches exist so repeated work on one page is not
+    /// redone. A single forward pass never revisits a page, so once it is committed that
+    /// scratch is only occupying the call budget.
+    pub fn release_page_scratch(&self) {
+        self.document.release_page_scratch();
+        crate::budget::release_page_markdown();
+    }
+
     /// Extract one zero-based page as Markdown.
     pub fn page_to_markdown(&self, page_index: usize, options: &MarkdownOptions) -> Result<String> {
         let mut conversion = ConversionOptions::default();
@@ -226,21 +284,79 @@ impl PdfReadDocument {
         conversion.detect_headings = options.detect_headings;
         conversion.extract_tables = options.extract_tables;
         conversion.include_form_fields = options.include_form_fields;
+        let markdown = self.document.to_markdown(page_index, &conversion)?;
+        crate::budget::check_page_markdown(markdown.len())?;
+        Ok(markdown)
+    }
+
+    /// Extract a bounded window of one page's Markdown, starting at a byte offset.
+    ///
+    /// Offsets index the page's own Markdown, so the envelope a caller wraps around it —
+    /// path header, page heading, continuation metadata — never shifts them. The window
+    /// is trimmed down to a UTF-8 boundary, so concatenating successive chunks
+    /// reproduces `page_to_markdown` exactly.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error when `offset` is past the end of the page or lands
+    /// inside a multi-byte character.
+    pub fn page_to_markdown_chunk(
+        &self,
+        page_index: usize,
+        options: &MarkdownOptions,
+        offset: usize,
+        max_bytes: usize,
+    ) -> Result<MarkdownChunk> {
+        let markdown = self.page_to_markdown(page_index, options)?;
+        if offset > markdown.len() {
+            return Err(PdfReadError {
+                kind: PdfReadErrorKind::Invalid,
+                message: format!(
+                    "pdf_text_offset {offset} is past the end of page {} ({} bytes)",
+                    page_index + 1,
+                    markdown.len()
+                ),
+                limit: None,
+            });
+        }
+        if !markdown.is_char_boundary(offset) {
+            return Err(PdfReadError {
+                kind: PdfReadErrorKind::Invalid,
+                message: format!(
+                    "pdf_text_offset {offset} is not a character boundary on page {}",
+                    page_index + 1
+                ),
+                limit: None,
+            });
+        }
+
+        let remaining = &markdown[offset..];
+        let mut end = max_bytes.min(remaining.len());
+        while end > 0 && !remaining.is_char_boundary(end) {
+            end -= 1;
+        }
+        let next_offset = (end < remaining.len()).then_some(offset + end);
+        Ok(MarkdownChunk {
+            text: remaining[..end].to_owned(),
+            next_offset,
+            page_bytes: markdown.len(),
+        })
+    }
+
+    /// Judge one page's text usability, independent of anything visual.
+    pub fn assess_page_text(&self, page_index: usize) -> Result<PageTextAssessment> {
         self.document
-            .to_markdown(page_index, &conversion)
+            .assess_page_text(page_index)
             .map_err(Into::into)
     }
 
-    /// Classify one zero-based page without OCR or rasterization.
-    pub fn classify_page(&self, page_index: usize) -> Result<PageClass> {
-        let kind = self.document.classify_page(page_index)?.kind;
-        Ok(match kind {
-            PageKind::TextLayer => PageClass::TextLayer,
-            PageKind::Scanned => PageClass::Scanned,
-            PageKind::ImageText => PageClass::ImageText,
-            PageKind::Mixed => PageClass::Mixed,
-            PageKind::Empty => PageClass::Empty,
-        })
+    /// Judge what one page draws, from operators and resource dictionaries only.
+    ///
+    /// Never decompresses an image or rasterises, so it is safe on the text path.
+    pub fn assess_page_visual(&self, page_index: usize) -> Result<PageVisualAssessment> {
+        self.document
+            .assess_page_visual(page_index)
+            .map_err(Into::into)
     }
 
     /// Return visible geometry for one zero-based page.
@@ -257,8 +373,21 @@ impl PdfReadDocument {
     /// Render one zero-based page as PNG within fixed pixel bounds.
     pub fn render_page_fit(&self, page_index: usize, limits: RenderLimits) -> Result<RenderedPage> {
         let (width, height) = self.render_dimensions(page_index, limits)?;
+        // Estimated before the surface exists: RGBA output plus one scratch copy of the
+        // same size, which is what the rasteriser peaks at. Checking after allocation
+        // would already have spent what the check is meant to refuse.
+        let surface_bytes = u64::from(width)
+            .saturating_mul(u64::from(height))
+            .saturating_mul(4)
+            .saturating_mul(2);
+        crate::budget::check_render_surface(usize::try_from(surface_bytes).unwrap_or(usize::MAX))?;
+        crate::budget::check_cancelled()?;
         let options = RenderOptions::with_dpi(RENDER_DPI as u32);
         let rendered = render_page_fit(&self.document, page_index, width, height, &options)?;
+        // The surface is gone once the page is encoded; holding its bytes against the
+        // call total would make the second page of a render look like the first plus one.
+        crate::budget::release_render_surface();
+        crate::metrics::record_render(rendered.width, rendered.height, rendered.data.len());
         Ok(RenderedPage {
             png: rendered.data,
             width_pixels: rendered.width,
@@ -287,6 +416,7 @@ impl PdfReadDocument {
             return Err(PdfReadError {
                 kind: PdfReadErrorKind::Invalid,
                 message: "PDF page has invalid dimensions".to_string(),
+                limit: None,
             });
         }
 

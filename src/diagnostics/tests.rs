@@ -62,6 +62,7 @@ mod tests {
         }
         assert!(allowed_field("call_id"));
         assert!(allowed_field("error_class"));
+        assert!(allowed_field("shell_delegate"));
     }
 
     #[test]

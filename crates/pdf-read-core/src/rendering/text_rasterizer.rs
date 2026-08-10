@@ -126,6 +126,10 @@ static SYSTEM_FONTDB: std::sync::OnceLock<std::sync::Arc<fontdb::Database>> =
 fn system_fontdb() -> std::sync::Arc<fontdb::Database> {
     SYSTEM_FONTDB
         .get_or_init(|| {
+            // Scanning system fonts is the most expensive setup on the render path, and
+            // the text path must never pay for it. The counter makes "text mode does not
+            // start the renderer" a measured fact rather than a claim about call graphs.
+            crate::metrics::record_font_database_load();
             let mut db = fontdb::Database::new();
             db.load_system_fonts();
             std::sync::Arc::new(db)

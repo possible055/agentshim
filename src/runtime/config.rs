@@ -13,13 +13,33 @@ pub const DEFAULT_GREP_MEMORY_BYTES: usize = 256 * 1024 * 1024;
 pub const DEFAULT_GLOB_MEMORY_BYTES: usize = 32 * 1024 * 1024;
 pub const MIN_TOOL_MEMORY_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_TOOL_MEMORY_BYTES: usize = 1024 * 1024 * 1024;
+pub const DEFAULT_PDF_TEXT_MEMORY_BYTES: usize = 64 * 1024 * 1024;
+pub const MIN_PDF_TEXT_MEMORY_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_PDF_TEXT_MEMORY_BYTES: usize = 128 * 1024 * 1024;
+pub const DEFAULT_PDF_IMAGE_MEMORY_BYTES: usize = 96 * 1024 * 1024;
+pub const MIN_PDF_IMAGE_MEMORY_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_PDF_IMAGE_MEMORY_BYTES: usize = 192 * 1024 * 1024;
 const MEMORY_PERMIT_BYTES: usize = 1024;
 const MEMORY_GROWTH_BYTES: usize = 1024 * 1024;
+/// PDF work is expensive enough that one call at a time is the whole admission policy.
+/// Not configurable in this version: there is no demonstrated need to tune it, and an
+/// environment variable would be one more way to defeat the resource contract.
+const MAX_PDF_CALLS: usize = 1;
+pub const PDF_GATE_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
+/// Wall-clock ceilings for the PDF work inside `execute_prepared`, excluding queue time.
+///
+/// Byte ceilings bound how much one call may allocate, not how long it may run. With a
+/// single-slot gate, "runs forever" is identical to "no other PDF read can ever start",
+/// so a time bound is required for the gate to mean anything.
+pub const PDF_TEXT_RUNTIME_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+pub const PDF_IMAGE_RUNTIME_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
 const TRANSPORT_BLOCKING_THREADS: usize = 2;
 const WORKER_ENV: &str = "CODEXSHIM_IO_WORKERS";
 const PROCESS_CALLS_ENV: &str = "CODEXSHIM_PROCESS_CALLS";
 pub const GREP_MEMORY_BYTES_ENV: &str = "CODEXSHIM_GREP_MEMORY_BYTES";
 pub const GLOB_MEMORY_BYTES_ENV: &str = "CODEXSHIM_GLOB_MEMORY_BYTES";
+pub const PDF_TEXT_MEMORY_BYTES_ENV: &str = "CODEXSHIM_PDF_TEXT_MEMORY_BYTES";
+pub const PDF_IMAGE_MEMORY_BYTES_ENV: &str = "CODEXSHIM_PDF_IMAGE_MEMORY_BYTES";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeConfig {
@@ -31,6 +51,8 @@ pub struct RuntimeConfig {
     pub output_bytes: usize,
     pub grep_memory_bytes: usize,
     pub glob_memory_bytes: usize,
+    pub pdf_text_memory_bytes: usize,
+    pub pdf_image_memory_bytes: usize,
     pub memory_bytes: usize,
 }
 
@@ -71,6 +93,37 @@ impl RuntimeConfig {
             GLOB_MEMORY_BYTES_ENV,
             DEFAULT_GLOB_MEMORY_BYTES,
         )?;
+        let pdf_text_memory_bytes = parse_memory_bytes_in_range(
+            env::var_os(PDF_TEXT_MEMORY_BYTES_ENV).as_deref(),
+            PDF_TEXT_MEMORY_BYTES_ENV,
+            DEFAULT_PDF_TEXT_MEMORY_BYTES,
+            MIN_PDF_TEXT_MEMORY_BYTES,
+            MAX_PDF_TEXT_MEMORY_BYTES,
+        )?;
+        let pdf_image_memory_bytes = parse_memory_bytes_in_range(
+            env::var_os(PDF_IMAGE_MEMORY_BYTES_ENV).as_deref(),
+            PDF_IMAGE_MEMORY_BYTES_ENV,
+            DEFAULT_PDF_IMAGE_MEMORY_BYTES,
+            MIN_PDF_IMAGE_MEMORY_BYTES,
+            MAX_PDF_IMAGE_MEMORY_BYTES,
+        )?;
+        let memory_bytes = global_memory_bytes(grep_memory_bytes, glob_memory_bytes);
+        // A per-call reservation larger than the pool it is drawn from could never be
+        // satisfied, so the call would fail at admission on every attempt.
+        for (environment, bytes) in [
+            (PDF_TEXT_MEMORY_BYTES_ENV, pdf_text_memory_bytes),
+            (PDF_IMAGE_MEMORY_BYTES_ENV, pdf_image_memory_bytes),
+        ] {
+            if bytes > memory_bytes {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "{environment} is {bytes} bytes, above the {memory_bytes}-byte shared \
+                         runtime memory pool"
+                    ),
+                ));
+            }
+        }
         Ok(Self {
             worker_lanes,
             scheduler_threads: default_scheduler_threads(available),
@@ -80,7 +133,9 @@ impl RuntimeConfig {
             output_bytes: crate::output::configured_byte_limit()?,
             grep_memory_bytes,
             glob_memory_bytes,
-            memory_bytes: global_memory_bytes(grep_memory_bytes, glob_memory_bytes),
+            pdf_text_memory_bytes,
+            pdf_image_memory_bytes,
+            memory_bytes,
         })
     }
 
@@ -98,6 +153,8 @@ impl RuntimeConfig {
             output_bytes: crate::output::MODEL_BYTE_LIMIT,
             grep_memory_bytes: DEFAULT_GREP_MEMORY_BYTES,
             glob_memory_bytes: DEFAULT_GLOB_MEMORY_BYTES,
+            pdf_text_memory_bytes: DEFAULT_PDF_TEXT_MEMORY_BYTES,
+            pdf_image_memory_bytes: DEFAULT_PDF_IMAGE_MEMORY_BYTES,
             memory_bytes: DEFAULT_MEMORY_BYTES,
         }
     }
@@ -121,19 +178,34 @@ fn parse_tool_memory_bytes(
     environment: &str,
     default: usize,
 ) -> io::Result<usize> {
+    parse_memory_bytes_in_range(
+        value,
+        environment,
+        default,
+        MIN_TOOL_MEMORY_BYTES,
+        MAX_TOOL_MEMORY_BYTES,
+    )
+}
+
+/// The grep/glob helper fixes one 8 MiB–1 GiB range for every caller, which cannot
+/// express the narrower per-mode PDF ranges; reusing it would silently widen them.
+fn parse_memory_bytes_in_range(
+    value: Option<&OsStr>,
+    environment: &str,
+    default: usize,
+    minimum: usize,
+    maximum: usize,
+) -> io::Result<usize> {
     match value {
         None => Ok(default),
         Some(value) => value
             .to_str()
             .and_then(|value| value.parse::<usize>().ok())
-            .filter(|value| (MIN_TOOL_MEMORY_BYTES..=MAX_TOOL_MEMORY_BYTES).contains(value))
+            .filter(|value| (minimum..=maximum).contains(value))
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!(
-                        "{environment} must be an integer from {MIN_TOOL_MEMORY_BYTES} to \
-                         {MAX_TOOL_MEMORY_BYTES}"
-                    ),
+                    format!("{environment} must be an integer from {minimum} to {maximum}"),
                 )
             }),
     }

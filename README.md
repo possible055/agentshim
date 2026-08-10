@@ -159,6 +159,68 @@ Relative paths and absolute paths inside the repository always use the repositor
 
 `--read-scope` is the structured access range of `read`, `grep`, and `glob`. It is **not** a boundary on what a spawned process can reach: any program `run_program` or `bash` launches inherits the server user's ordinary filesystem access. The allowlist reduces accidental misuse and approval modes provide a policy gate, but neither isolates the child process; use an OS sandbox when isolation is required. The same flag is accepted by `codexshim doctor --read-scope <value>` for diagnostics.
 
+### Reading PDFs
+
+`read` detects a PDF from a `%PDF-` header at byte 0, so the routing does not depend on the file extension. PDF inputs reject `encoding`, `start_line`, and `line_count`.
+
+| Parameter | Values | Meaning |
+| --- | --- | --- |
+| `pdf_mode` | `auto` (default), `text`, `image` | `auto` and `text` return page Markdown; `image` renders PNG content blocks. |
+| `pages` | `"7"` or `"7-12"` | One page or one continuous range. Discrete page lists are not accepted. A range extending past the last page is clamped to it; a range starting past it is an error. |
+| `pdf_text_offset` | integer ≥ 0 | Resume one page's Markdown at a UTF-8 byte offset. |
+| `pdf_source_id` | opaque token | Replayed from a previous response to prove the continuation targets the same source version. |
+
+`auto` extracts text without rendering and never returns an image in the same call. `text` returns extracted text even when its quality is doubtful. `image` is an explicit render request; there is no OCR.
+
+Page counts bound the work of one call, not the size of the answer:
+
+| Mode | Without `pages` | Explicit range cap |
+| --- | --- | --- |
+| `auto`, `text` | first 10 pages | 20 pages |
+| `image` | page 1 | 4 pages |
+
+Whichever limit binds first, the response says how far it got and how to continue. The next range is as wide as what was actually delivered: if 6 of 20 requested pages fit the output budget, the continuation is `7-12`, not `7-26`.
+
+Image responses carry at most 8 MiB of base64 in total, independent of the text output budget. The cap is spent on whole pages only — a page that would not fit becomes the continuation rather than a truncated image. Embedded images are refused before allocation if they declare more than 80 million pixels or an edge longer than 20000, so an impossible `/Width` and `/Height` never reach a buffer.
+
+Every successful PDF response reports a `Source:` token. Pass it back as `pdf_source_id` on the follow-up call and a source replaced between rounds fails with `file_changed` instead of silently stitching two versions together. Omitting it falls back to the existing fingerprint check for that single call.
+
+PDF-specific error codes, all in the standard `{ error: { code, message, retryable, details } }` envelope:
+
+| Code | Meaning | `retryable` |
+| --- | --- | --- |
+| `pdf_image_required` | No selected page has usable text. `details.retry_with` carries the exact parameters that would work. | `false` |
+| `pdf_unsupported` | Unsupported filter, structure, or format capability. | `false` |
+| `pdf_invalid` | Not a structurally valid PDF. | `false` |
+| `pdf_encrypted` | Cannot be opened with reader-side capability alone. | `false` |
+| `pdf_processing` | Extraction or rendering failed for a reason other than a limit. | `false` |
+| `resource_limit` | A file, stream, cache, pixel, or payload budget was exceeded. `details` names the `resource`, its limit, and what was observed. | `false` |
+| `validation` | The mode, page range, or offset combination is not legal. | `false` |
+
+Every delivered page reports a state on the `Pages:` line:
+
+| State | Meaning |
+| --- | --- |
+| `text_ready` | Usable text of acceptable quality. |
+| `text_uncertain` | Text is present but its quality or coverage is doubtful. Returned *with* the text, never instead of it. |
+| `image_required` | No usable text, but something is drawn — including pages that are pure vector art with no embedded image. |
+| `blank` | Nothing drawn and no text. |
+| `unavailable` | This page could not be processed. Deliberately distinct from `blank`, which would tell you there was nothing left to read. |
+
+These describe what you can do next, not where the document came from. There is no `scanned` flag: the format carries no reliable origin signal, and one document routinely mixes extractable text, bare rasters, vector art, blank pages, and partial text layers. Deciding a page needs rendering costs no image decoding.
+
+A document that mixes readable and image-only pages is a success, not an error: readable pages come back as Markdown, the rest become placeholders, and each `image_required` page gets a `Retry:` line naming the `pdf_mode="image"` call that would render it. A single `unavailable` page does not fail the call. `pdf_image_required` is returned only when *every* selected page lacks usable text, and `pdf_processing` only when every selected page failed outright.
+
+**Admission.** PDF work is expensive, so one instance runs at most one PDF call at a time. A second concurrent call waits up to 300 ms for that slot and then returns a retryable `resource_busy` naming the permit (`pdf_concurrency` or `memory_budget`) and a `retry_after_ms` delay. Plain text reads never touch this gate and never queue behind a PDF's memory reservation, so a slow PDF cannot delay them.
+
+Each mode also has a wall-clock ceiling covering the PDF work itself, excluding queue time: 5 s for `auto` and `text`, 10 s for `image`. Exceeding it returns a retryable `resource_timeout` whose `details` carry the limit, the elapsed time, and confirmation that the work stopped without producing partial output. Both ceilings are internal constants.
+
+A `file_changed` retry keeps the slot and the reservation it already holds, so hitting `file_changed` once never turns into `resource_busy` on the second attempt.
+
+**The reservation is also the ceiling.** The bytes a call reserves from the shared pool are the same bytes the parser is held to: the object cache, decoded streams, the retained stream cache, one page of Markdown, and cross-reference rebuild scratch are each capped as a share of it, and their running total is capped at it. Configuring `CODEXSHIM_PDF_TEXT_MEMORY_BYTES` therefore configures what the parser may allocate, not only what the scheduler bills.
+
+Two of those ceilings are counts rather than byte figures, because the allocations they bound are many small ones rather than one large one: the text spans a page may accumulate, and the operators one content stream may parse at once. Both are derived from the reservation, so they move with it — `codexshim doctor` reports the resulting per-page span ceiling. A page past either one is reported as `unavailable` and the rest of the selection is still delivered; this is a property of the page, not of the call, so it never discards pages the caller can read.
+
 ### Environment variables
 
 | Variable | Default | Description |
@@ -171,6 +233,8 @@ Relative paths and absolute paths inside the repository always use the repositor
 | `CODEXSHIM_OUTPUT_BYTES` | `32000` | Per-call output ceiling in bytes; accepts integers from 4096 through 262144. |
 | `CODEXSHIM_GREP_MEMORY_BYTES` | `268435456` | Per-call hard limit for retained `grep` candidates; accepts integers from 8388608 through 1073741824. |
 | `CODEXSHIM_GLOB_MEMORY_BYTES` | `33554432` | Per-call hard limit for retained `glob` matches; accepts integers from 8388608 through 1073741824. |
+| `CODEXSHIM_PDF_TEXT_MEMORY_BYTES` | `67108864` | Per-call reservation *and* enforced ceiling for `auto` and `text` PDF reads; accepts integers from 33554432 through 134217728. |
+| `CODEXSHIM_PDF_IMAGE_MEMORY_BYTES` | `100663296` | Per-call reservation *and* enforced ceiling for `image` PDF reads; accepts integers from 67108864 through 201326592. |
 | `CODEXSHIM_BASH` | probed | Absolute path to a GNU bash. An explicit override that fails validation is an error, never a fallback. |
 | `CODEXSHIM_LOG_MODE` | `errors` | One of `off`, `errors`, `all`. |
 | `CODEXSHIM_LOG_DIR` | platform default | Override the log directory with an absolute path. |
@@ -189,7 +253,7 @@ codexshim logs status
 codexshim logs purge
 ```
 
-Records contain identifiers, phases, outcomes, timings, and error classes — never MCP arguments, grep patterns, process arguments or environment, stdin, file contents, or stdout/stderr.
+Records contain identifiers, phases, outcomes, timings, error classes, and the derived five-value `shell_delegate` classification for `bash` calls — never MCP arguments, grep patterns, process arguments or environment, stdin, file contents, or stdout/stderr. `shell_delegate` is derived only from the first command token and does not retain that token, the command, arguments, or paths.
 
 ## License
 

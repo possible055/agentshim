@@ -76,6 +76,71 @@ fn doctor_reports_overridden_search_and_global_memory_capacity() {
 }
 
 #[test]
+fn doctor_reports_pdf_mode_reservations_and_whether_they_are_charged() {
+    let output = Command::new(env!("CARGO_BIN_EXE_codexshim"))
+        .arg("doctor")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("CODEXSHIM_PDF_TEXT_MEMORY_BYTES", "33554432")
+        .env("CODEXSHIM_PDF_IMAGE_MEMORY_BYTES", "201326592")
+        .env("CODEXSHIM_LOG_MODE", "off")
+        .output()
+        .expect("run doctor");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("doctor stdout");
+    assert!(stdout.contains("pdf text memory bytes: 33554432"));
+    assert!(stdout.contains("pdf image memory bytes: 201326592"));
+
+    // The page ceilings are derived from those reservations, so reporting them proves
+    // end to end that configuring a reservation configures what the parser enforces —
+    // not just what the scheduler bills.
+    let spans = |label: &str| -> usize {
+        stdout
+            .lines()
+            .find_map(|line| line.strip_prefix(label))
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or_else(|| panic!("doctor must report {label}, got:\n{stdout}"))
+    };
+    let text_spans = spans("pdf text page spans:");
+    let image_spans = spans("pdf image page spans:");
+    assert!(text_spans > 0, "a page must always be allowed some text");
+    assert!(
+        text_spans < image_spans,
+        "the smaller reservation must yield the smaller page ceiling, got {text_spans} and {image_spans}"
+    );
+}
+
+/// Each PDF variable has its own range; a value legal for grep or glob is not
+/// automatically legal here.
+#[test]
+fn invalid_pdf_memory_configuration_fails_before_runtime_startup() {
+    for (variable, value, bound) in [
+        ("CODEXSHIM_PDF_TEXT_MEMORY_BYTES", "33554431", "33554432"),
+        ("CODEXSHIM_PDF_TEXT_MEMORY_BYTES", "134217729", "134217728"),
+        ("CODEXSHIM_PDF_TEXT_MEMORY_BYTES", "1073741824", "134217728"),
+        ("CODEXSHIM_PDF_IMAGE_MEMORY_BYTES", "67108863", "67108864"),
+        ("CODEXSHIM_PDF_IMAGE_MEMORY_BYTES", "201326593", "201326592"),
+        ("CODEXSHIM_PDF_IMAGE_MEMORY_BYTES", "8388608", "67108864"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_codexshim"))
+            .arg("doctor")
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .env(variable, value)
+            .env("CODEXSHIM_LOG_MODE", "off")
+            .output()
+            .expect("run doctor");
+        assert!(
+            !output.status.success(),
+            "{variable}={value} must be rejected"
+        );
+        let stderr = String::from_utf8(output.stderr).expect("doctor stderr");
+        assert!(
+            stderr.contains(variable) && stderr.contains(bound),
+            "unexpected error for {variable}={value}: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn invalid_process_capacity_fails_before_runtime_startup() {
     for value in ["0", "33", "-1", "many"] {
         let output = doctor(Some(value));

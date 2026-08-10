@@ -96,6 +96,29 @@ fn parse_command(args: impl IntoIterator<Item = OsString>) -> Result<CliCommand,
     }
 }
 
+/// Reports every per-tool reservation plus the pool they share.
+///
+/// The PDF reservations are also the ceilings the parser is held to, so the derived
+/// per-page span limits are reported beside them: they are the number that decides
+/// whether an unusually dense page is delivered or reported as unavailable, and it is
+/// not recoverable from the byte figures without knowing the derivation.
+fn print_memory_limits(limits: RuntimeLimits) {
+    println!("grep memory bytes: {}", limits.grep_memory_bytes);
+    println!("glob memory bytes: {}", limits.glob_memory_bytes);
+    println!("pdf text memory bytes: {}", limits.pdf_text_memory_bytes);
+    println!("pdf image memory bytes: {}", limits.pdf_image_memory_bytes);
+    println!(
+        "pdf text page spans: {}",
+        codexshim_pdf_read::PdfResourceLimits::text_within(limits.pdf_text_memory_bytes).page_spans
+    );
+    println!(
+        "pdf image page spans: {}",
+        codexshim_pdf_read::PdfResourceLimits::image_within(limits.pdf_image_memory_bytes)
+            .page_spans
+    );
+    println!("global memory bytes: {}", limits.memory_bytes);
+}
+
 fn flag_value<'a>(
     argument: &'a str,
     args: &mut impl Iterator<Item = OsString>,
@@ -165,18 +188,7 @@ async fn run(config: RuntimeLimits, command: CliCommand) -> Result<(), Box<dyn E
                 service.runtime_limits().detached_calls
             );
             println!("output bytes: {}", service.runtime_limits().output_bytes);
-            println!(
-                "grep memory bytes: {}",
-                service.runtime_limits().grep_memory_bytes
-            );
-            println!(
-                "glob memory bytes: {}",
-                service.runtime_limits().glob_memory_bytes
-            );
-            println!(
-                "global memory bytes: {}",
-                service.runtime_limits().memory_bytes
-            );
+            print_memory_limits(service.runtime_limits());
             println!("allowed programs: {}", allowed.describe());
             match bash_report() {
                 Ok((executable, locale)) => {
