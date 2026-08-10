@@ -239,6 +239,7 @@ struct Recorder {
     instance_id: String,
     ring: Mutex<VecDeque<Record>>,
     sender: SyncSender<QueuedBatch>,
+    writer: Option<Arc<LazyWriter>>,
     dropped: Arc<AtomicU64>,
     queued_bytes: Arc<AtomicUsize>,
 }
@@ -290,6 +291,12 @@ impl Recorder {
     }
 
     fn send(&self, mut batch: Batch) {
+        if let Some(writer) = &self.writer
+            && let Err(error) = writer.start()
+        {
+            writer.warn_once(&error);
+            return;
+        }
         let dropped = self.dropped.swap(0, Ordering::AcqRel);
         if dropped > 0 {
             if let Some(record) = batch.last_mut() {
@@ -328,6 +335,128 @@ impl Recorder {
                 self.queued_bytes.fetch_sub(charge, Ordering::AcqRel);
                 self.dropped.fetch_add(batch_len, Ordering::Relaxed);
             }
+        }
+    }
+}
+
+enum WriterState {
+    Pending(Receiver<QueuedBatch>),
+    Running(thread::JoinHandle<()>),
+    Disabled,
+}
+
+struct LazyWriter {
+    directory: PathBuf,
+    state: Mutex<WriterState>,
+    started: AtomicBool,
+    shutdown: Arc<AtomicBool>,
+    dropped: Arc<AtomicU64>,
+    queued_bytes: Arc<AtomicUsize>,
+    warned: AtomicBool,
+}
+
+impl LazyWriter {
+    fn new(
+        directory: PathBuf,
+        receiver: Receiver<QueuedBatch>,
+        dropped: Arc<AtomicU64>,
+        queued_bytes: Arc<AtomicUsize>,
+    ) -> Self {
+        Self {
+            directory,
+            state: Mutex::new(WriterState::Pending(receiver)),
+            started: AtomicBool::new(false),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            dropped,
+            queued_bytes,
+            warned: AtomicBool::new(false),
+        }
+    }
+
+    fn start(&self) -> io::Result<()> {
+        if self.started.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "diagnostics writer is shut down",
+            ));
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*state {
+            WriterState::Running(_) => {
+                self.started.store(true, Ordering::Release);
+                return Ok(());
+            }
+            WriterState::Disabled => {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "diagnostics writer is disabled",
+                ));
+            }
+            WriterState::Pending(_) => {}
+        }
+        if let Err(error) = prepare_directory(&self.directory) {
+            *state = WriterState::Disabled;
+            return Err(error);
+        }
+        let WriterState::Pending(receiver) =
+            std::mem::replace(&mut *state, WriterState::Disabled)
+        else {
+            unreachable!("pending diagnostics writer state changed while locked");
+        };
+        let directory = self.directory.clone();
+        let dropped = Arc::clone(&self.dropped);
+        let queued_bytes = Arc::clone(&self.queued_bytes);
+        let shutdown = Arc::clone(&self.shutdown);
+        let writer = thread::Builder::new()
+            .name("codexshim-log-writer".to_owned())
+            .spawn(move || {
+                let _ = automatic_maintenance(&directory);
+                let mut warned = false;
+                writer_loop(
+                    &directory,
+                    &receiver,
+                    &dropped,
+                    &queued_bytes,
+                    &shutdown,
+                    &mut warned,
+                );
+            })?;
+        *state = WriterState::Running(writer);
+        self.started.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    fn warn_once(&self, error: &io::Error) {
+        if !self.warned.swap(true, Ordering::AcqRel) {
+            eprintln!(
+                "{}",
+                crate::output::bounded_diagnostic(&format!(
+                    "codexshim diagnostics writer disabled output: {error}"
+                ))
+            );
+        }
+    }
+
+    fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+        let writer = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match std::mem::replace(&mut *state, WriterState::Disabled) {
+                WriterState::Running(writer) => Some(writer),
+                WriterState::Pending(_) | WriterState::Disabled => None,
+            }
+        };
+        if let Some(writer) = writer {
+            let _ = writer.join();
         }
     }
 }
@@ -413,9 +542,7 @@ where
 }
 
 pub struct DiagnosticsGuard {
-    sender: Option<SyncSender<QueuedBatch>>,
-    writer: Option<thread::JoinHandle<()>>,
-    shutdown: Option<Arc<AtomicBool>>,
+    writer: Option<Arc<LazyWriter>>,
     pub mode: LogMode,
     pub directory: PathBuf,
     pub instance_id: String,
@@ -425,9 +552,7 @@ impl DiagnosticsGuard {
     #[must_use]
     pub fn disabled(directory: PathBuf) -> Self {
         Self {
-            sender: None,
             writer: None,
-            shutdown: None,
             mode: LogMode::Off,
             directory,
             instance_id: String::new(),
@@ -438,49 +563,37 @@ impl DiagnosticsGuard {
     ///
     /// # Errors
     ///
-    /// Returns an I/O error when the configured directory cannot be prepared.
+    /// Returns an I/O error when an eager diagnostics writer cannot be started.
     pub fn start(config: DiagnosticsConfig) -> io::Result<(Self, Option<DiagnosticsLayer>)> {
         if config.mode == LogMode::Off {
             return Ok((Self::disabled(config.directory), None));
         }
-        prepare_directory(&config.directory)?;
         let (sender, receiver) = mpsc::sync_channel::<QueuedBatch>(CHANNEL_BATCHES);
-        let directory = config.directory.clone();
         let dropped = Arc::new(AtomicU64::new(0));
-        let writer_dropped = Arc::clone(&dropped);
         let queued_bytes = Arc::new(AtomicUsize::new(0));
-        let writer_queued_bytes = Arc::clone(&queued_bytes);
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let writer_shutdown = Arc::clone(&shutdown);
-        let writer = thread::Builder::new()
-            .name("codexshim-log-writer".to_owned())
-            .spawn(move || {
-                let _ = automatic_maintenance(&directory);
-                let mut warned = false;
-                writer_loop(
-                    &directory,
-                    &receiver,
-                    &writer_dropped,
-                    &writer_queued_bytes,
-                    &writer_shutdown,
-                    &mut warned,
-                );
-            })?;
+        let writer = Arc::new(LazyWriter::new(
+            config.directory.clone(),
+            receiver,
+            Arc::clone(&dropped),
+            Arc::clone(&queued_bytes),
+        ));
+        if config.mode == LogMode::All {
+            writer.start()?;
+        }
         let instance_id = Uuid::new_v4().to_string();
         let recorder = Arc::new(Recorder {
             mode: config.mode,
             instance_id: instance_id.clone(),
             ring: Mutex::new(VecDeque::with_capacity(FLIGHT_RECORDS)),
-            sender: sender.clone(),
+            sender,
+            writer: Some(Arc::clone(&writer)),
             dropped,
             queued_bytes,
         });
         let layer = DiagnosticsLayer::new(recorder);
         Ok((
             Self {
-                sender: Some(sender),
                 writer: Some(writer),
-                shutdown: Some(shutdown),
                 mode: config.mode,
                 directory: config.directory,
                 instance_id,
@@ -492,12 +605,8 @@ impl DiagnosticsGuard {
 
 impl Drop for DiagnosticsGuard {
     fn drop(&mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            shutdown.store(true, Ordering::Release);
-        }
-        self.sender.take();
         if let Some(writer) = self.writer.take() {
-            let _ = writer.join();
+            writer.shutdown();
         }
     }
 }

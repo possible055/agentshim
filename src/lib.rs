@@ -14,7 +14,6 @@ pub use diagnostics::{
 };
 pub use output::bounded_diagnostic;
 pub use path::ReadScope;
-pub use tools::run_program::AllowedPrograms;
 
 /// Report the probed bash for `codexshim doctor`, so a missing installation surfaces at
 /// deployment time instead of mid-task.

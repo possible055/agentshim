@@ -81,7 +81,6 @@ impl Session {
             .arg("serve")
             .current_dir(root)
             .env_remove("CODEXSHIM_MCP_COMPATIBILITY")
-            .env("CODEXSHIM_ALLOW_PROGRAMS", allowed_programs())
             .env_remove("CODEXSHIM_PROCESS_CALLS")
             .env_remove("CODEXSHIM_DETACHED_CALLS")
             .env_remove("CODEXSHIM_BASH")
@@ -1339,9 +1338,4 @@ fn default_compatibility_uses_native_legacy_initialize_lifecycle() {
         "legacy read success must not emit structured content"
     );
     session.close();
-}
-
-fn allowed_programs() -> String {
-    let executable = std::env::current_exe().expect("integration test executable");
-    format!("cargo,{}", executable.display())
 }

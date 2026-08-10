@@ -230,7 +230,6 @@ impl DiagnosticError for crate::tools::exec::ProcessError {
         match self {
             ProcessError::Validation(_) => "validation",
             ProcessError::Resolve(_) => "path",
-            ProcessError::NotPermitted(_) => "not_permitted",
             ProcessError::ResourceBusy(_) => "resource_busy",
             ProcessError::Io(_) | ProcessError::Unavailable(_) => "io",
             ProcessError::Timeout { .. } | ProcessError::TimeoutBeforeSpawn { .. } => {
@@ -648,14 +647,15 @@ fn glob_tool(read_scope: ReadScope) -> Tool {
 fn run_program_tool() -> Tool {
     Tool::new(
         "run_program",
-        "Run one permitted local program directly with literal arguments and no shell. There is \
-         no shell, so pipes, redirection, globbing, and variable expansion do not happen. \
-         Arguments are passed literally — do not add quoting. Prefer this when arguments contain \
-         characters a shell would mangle, such as Windows paths, regexes, and JSON. If the \
-         program is not permitted, this returns a not_permitted error — use bash instead; do not \
-         work around it. Cleanup owns a Windows Job Object or the Unix process group it created; \
-         a Unix program that starts a new session can escape that group. This is not a sandbox. \
-         This is an open-world, destructive operation and may require approval.",
+        "Run one local program directly with literal arguments and no shell. Use this by default \
+         whenever one executable is enough, including an interpreter whose script or command text \
+         is passed as one literal argument. Pipes, redirection, globbing, and variable expansion do \
+         not happen. Arguments are passed literally — do not add quoting. Prefer this when \
+         arguments contain characters a shell would mangle, such as Windows paths, regexes, and \
+         JSON. Use bash only when shell composition is required. Cleanup owns a Windows Job Object \
+         or the Unix process group it created; a Unix program that starts a new session can escape \
+         that group. This is not a sandbox. This is an open-world, destructive operation and may \
+         require approval.",
         schema(json!({
             "type": "object",
             "additionalProperties": false,
@@ -724,10 +724,14 @@ fn bash_tool() -> Tool {
          above the byte budget is truncated in the middle: redirect to a file and page it with \
          read when you need all of it. The default timeout is 120000 ms and the maximum is \
          600000 ms; for work that needs longer, set detach with a log_path and read that file \
-         instead of waiting. Do not issue state-changing commands against the same working \
-         tree in parallel calls. Cleanup owns a Windows Job Object or the Unix process group it \
-         created; a Unix program that starts a new session can escape that group. This is not a \
-         sandbox. This is an open-world, destructive operation and may require approval.",
+         instead of waiting. On Windows, prefer run_program for one native program with literal \
+         arguments. When Bash composition must pass slash-style switches such as /E or /C to a \
+         native program, set msys_argument_conversion to disabled. This setting applies to the \
+         whole Bash command; codexshim does not inspect subcommands or retry failures. Do not \
+         issue state-changing commands against the same working tree in parallel calls. Cleanup \
+         owns a Windows Job Object or the Unix process group it created; a Unix program that \
+         starts a new session can escape that group. This is not a sandbox. This is an \
+         open-world, destructive operation and may require approval.",
         schema(json!({
             "type": "object",
             "additionalProperties": false,
@@ -749,6 +753,12 @@ fn bash_tool() -> Tool {
                 "log_path": {
                     "type": "string",
                     "description": "Repository-relative or root-absolute file for the detached command's merged output, truncated at start. Its parent directory must already exist. Required when detach is true and rejected otherwise."
+                },
+                "msys_argument_conversion": {
+                    "type": "string",
+                    "enum": ["default", "disabled"],
+                    "default": "default",
+                    "description": "Windows Git Bash only. default leaves inherited MSYS settings and automatic argv path conversion unchanged. disabled sets MSYS2_ARG_CONV_EXCL=* for the whole Bash command so native child processes receive slash-prefixed arguments unchanged. It has no effect on macOS or Linux. Prefer run_program for a single native program."
                 },
                 "timeout_ms": {
                     "type": "integer",

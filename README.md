@@ -8,7 +8,6 @@ English | [简体中文](README.zh-CN.md)
 
 - **Bounded file access.** `read`, `grep`, and `glob` operate inside the repository by default, with optional access to Codex skill and plugin directories.
 - **Two execution shapes.** `run_program` takes an executable and a literal argument list, so no shell parses the arguments; `bash` takes a POSIX command line when composition is what you need.
-- **Allowlisted programs.** `run_program` denies everything until an operator names the programs it may launch. Bare names are convenient invocation policies; absolute entries pin canonical executable identity.
 - **Cross-platform.** Natively supports Windows, Linux, and macOS (Intel and Apple Silicon).
 
 ## Tools
@@ -18,7 +17,7 @@ English | [简体中文](README.zh-CN.md)
 | `read` | Read source files with line numbers. Supports UTF-8, BOM-detected UTF-16, and explicitly selected WHATWG encoding labels. |
 | `grep` | Search file contents with Rust regex or literal strings. |
 | `glob` | Find files while respecting repository ignore rules. |
-| `run_program` | Run one allowlisted program with a literal argument list, without a shell. |
+| `run_program` | Run one program with a literal argument list, without a shell. |
 | `bash` | Run a POSIX bash command line and return merged stdout and stderr. |
 
 Successful tools return bounded text results. Partial `read`, `grep`, and `glob` results include continuation metadata in the text rendering, `run_program` reports its exit status with separate stdout and stderr byte counts, and `bash` reports one merged output section. The output budget adapts to content: CJK-dense text is held to a smaller byte budget because the client tokenizes it about twice as densely as English. Tool failures also return a stable `{ error: { code, message, retryable, details } }` structured envelope.
@@ -85,7 +84,7 @@ Copy the matching example into `~/.codex/config.toml` (user-level) or a project'
 ```toml
 [mcp_servers.codexshim]
 command = "/absolute/path/to/codexshim"
-args = ["serve", "--allow-programs", "git,cargo,rustup,gh"]
+args = ["serve"]
 required = true
 supports_parallel_tool_calls = true
 startup_timeout_sec = 15
@@ -104,7 +103,7 @@ approval_mode = "prompt"
 mcp_2026_07_28 = true
 ```
 
-The two approval modes encode the difference between the tools: `run_program` is constrained by the allowlist and takes structured argv, so it can be approved on request, while `bash` accepts an arbitrary command line and always prompts. Neither the allowlist nor `bash` is a security sandbox.
+The two approval modes encode the difference between the tools: `run_program` launches one executable with structured argv, so it can be approved on request, while `bash` accepts an arbitrary command line and always prompts. Neither tool is a security sandbox.
 
 `tool_timeout_sec` must be at least the server's 600000 ms ceiling plus headroom, or the client gives up before the server does.
 
@@ -116,21 +115,17 @@ Start Codex in the repository you want to work on. `codexshim` treats that worki
 
 ## Options
 
-### `--allow-programs`
-
-Names the programs `run_program` may launch, as a comma-separated list. It is **empty by default, which denies every program**; there is no wildcard, because "run anything" is what `bash` is for.
-
-```toml
-args = ["serve", "--allow-programs", "git,cargo,rustup,gh"]
-```
-
-An entry is either a bare program name or an absolute path. A bare name matches the file stem of either the resolved invocation path or its canonical executable target, so Unix multicall proxies such as `cargo -> rustup` work and `git` covers `git.exe` under any install prefix. This convenience policy also means an executable invoked through an allowlisted alias is permitted; it is not an identity guarantee. An absolute entry is checked only against the canonical executable and pins that identity. Matching happens **after** PATH resolution on every call, including cache hits. Windows comparisons are ASCII case-insensitive. An empty entry, or a relative entry containing a path separator, prevents startup.
-
-`CODEXSHIM_ALLOW_PROGRAMS` is a secondary source with the same syntax; the startup flag wins when both are set. `codexshim doctor --allow-programs <value>` accepts the same flag and prints the resolved list.
-
-A denied call returns a non-retryable `not_permitted` error naming the resolved path and pointing at `bash`.
+### Windows Bash argument conversion
 
 On Windows, codexshim derives the Git-for-Windows toolchain directories from the bash it probed and prepends those directories to the inherited `PATH`. This lets the shell see its own `sleep`, `grep`, `sed`, and `locale`; it does not filter inherited entries or provide a configurable curated `PATH`.
+
+Git Bash automatically converts arguments that look like POSIX paths before launching native Windows programs. Prefer `run_program` for one native program because its argv stays literal. When Bash composition is required and slash-style switches such as `robocopy /E` must remain unchanged, set `msys_argument_conversion` to `disabled`:
+
+```json
+{ "command": "robocopy \"$source\" \"$destination\" /E && printf 'copied\\n'", "msys_argument_conversion": "disabled" }
+```
+
+The default mode leaves inherited MSYS settings and conversion behavior unchanged. The disabled mode sets `MSYS2_ARG_CONV_EXCL=*` for the entire Bash command, including detached commands; it does not parse subcommands, selectively classify programs, or retry failures. The field is accepted but has no effect on macOS and Linux.
 
 ### Long-running work
 
@@ -157,7 +152,7 @@ args = ["serve", "--read-scope", "unrestricted"]
 
 Relative paths and absolute paths inside the repository always use the repository capability in both modes.
 
-`--read-scope` is the structured access range of `read`, `grep`, and `glob`. It is **not** a boundary on what a spawned process can reach: any program `run_program` or `bash` launches inherits the server user's ordinary filesystem access. The allowlist reduces accidental misuse and approval modes provide a policy gate, but neither isolates the child process; use an OS sandbox when isolation is required. The same flag is accepted by `codexshim doctor --read-scope <value>` for diagnostics.
+`--read-scope` is the structured access range of `read`, `grep`, and `glob`. It is **not** a boundary on what a spawned process can reach: any program `run_program` or `bash` launches inherits the server user's ordinary filesystem access. Approval modes provide a policy gate, but neither tool isolates the child process; use an OS sandbox when isolation is required. The same flag is accepted by `codexshim doctor --read-scope <value>` for diagnostics.
 
 ### Reading PDFs
 
@@ -229,7 +224,6 @@ Two of those ceilings are counts rather than byte figures, because the allocatio
 | `CODEXSHIM_MCP_COMPATIBILITY` | `lenient` | Set to `strict` to reject legacy `2025-06-18` initialize clients. |
 | `CODEXSHIM_PROCESS_CALLS` | `16` | Per-instance concurrent process-call limit shared by `run_program` and `bash`; accepts integers from 1 through 32. |
 | `CODEXSHIM_DETACHED_CALLS` | `16` | Per-instance live detached `bash` trees; accepts integers from 1 through 16. |
-| `CODEXSHIM_ALLOW_PROGRAMS` | empty | Comma-separated `run_program` allowlist; the `--allow-programs` flag takes precedence. |
 | `CODEXSHIM_OUTPUT_BYTES` | `32000` | Per-call output ceiling in bytes; accepts integers from 4096 through 262144. |
 | `CODEXSHIM_GREP_MEMORY_BYTES` | `268435456` | Per-call hard limit for retained `grep` candidates; accepts integers from 8388608 through 1073741824. |
 | `CODEXSHIM_GLOB_MEMORY_BYTES` | `33554432` | Per-call hard limit for retained `glob` matches; accepts integers from 8388608 through 1073741824. |

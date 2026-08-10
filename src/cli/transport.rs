@@ -9,7 +9,7 @@ use std::{
 };
 
 use codexshim::{
-    AllowedPrograms, CodexShim, DiagnosticsConfig, DiagnosticsGuard, LogMode, MAX_READ_ONLY_CALLS,
+    CodexShim, DiagnosticsConfig, DiagnosticsGuard, LogMode, MAX_READ_ONLY_CALLS,
     ReadScope, RuntimeLimits, bash_report, bounded_diagnostic, capacity_bytes, purge,
     retention_days, status,
 };

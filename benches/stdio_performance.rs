@@ -519,7 +519,7 @@ impl Session {
             "id": id,
             "method": "tools/call",
             "params": {
-                "name": "run_process",
+                "name": "run_program",
                 "arguments": {
                     "program": env!("CARGO_BIN_EXE_codexshim"),
                     "args": ["--version"],

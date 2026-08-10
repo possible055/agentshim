@@ -61,36 +61,6 @@ mod tests {
     }
 
     #[test]
-    fn allowed_programs_default_to_deny_and_accept_both_argument_forms() {
-        assert!(
-            serve_options(parse(&["serve"]))
-                .allowed_programs
-                .is_empty()
-        );
-        assert_eq!(
-            serve_options(parse(&["serve", "--allow-programs", "git,cargo"]))
-                .allowed_programs
-                .describe(),
-            "git, cargo"
-        );
-        assert_eq!(
-            serve_options(parse(&["doctor", "--allow-programs=git"]))
-                .allowed_programs
-                .describe(),
-            "git"
-        );
-        for args in [
-            &["serve", "--allow-programs"][..],
-            &["serve", "--allow-programs="][..],
-            &["serve", "--allow-programs", "git,,cargo"][..],
-            &["serve", "--allow-programs", "tools/git"][..],
-            &["serve", "--allow-programs", "git", "--allow-programs", "cargo"][..],
-        ] {
-            assert!(parse(args).is_err(), "unexpectedly accepted {args:?}");
-        }
-    }
-
-    #[test]
     fn parses_log_management_commands() {
         assert_eq!(parse(&["logs", "status"]), Ok(CliCommand::LogsStatus));
         assert_eq!(parse(&["logs", "purge"]), Ok(CliCommand::LogsPurge));

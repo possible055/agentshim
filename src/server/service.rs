@@ -40,12 +40,12 @@ use crate::{
             locate::BashLocator,
         },
         exec::{ProcessError, ProcessResolver},
-        run_program::{AllowedPrograms, ProcessRequest},
+        run_program::ProcessRequest,
     },
 };
 
-pub const SERVER_INSTRUCTIONS: &str = "Local repository and Codex extension tools for reading source files, searching contents, finding paths, running one permitted program with literal arguments, and running POSIX bash command lines.";
-pub const UNRESTRICTED_SERVER_INSTRUCTIONS: &str = "Local filesystem tools for reading files, searching contents, and finding paths, plus one permitted program with literal arguments and POSIX bash command lines. Read scope is the structured access range of read, grep, and glob; it does not bound what a spawned process can reach.";
+pub const SERVER_INSTRUCTIONS: &str = "Local repository and Codex extension tools for reading source files, searching contents, finding paths, running one program with literal arguments, and running POSIX bash command lines.";
+pub const UNRESTRICTED_SERVER_INSTRUCTIONS: &str = "Local filesystem tools for reading files, searching contents, and finding paths, plus one program with literal arguments and POSIX bash command lines. Read scope is the structured access range of read, grep, and glob; it does not bound what a spawned process can reach.";
 pub const MCP_COMPATIBILITY_ENV: &str = "CODEXSHIM_MCP_COMPATIBILITY";
 
 const STRICT_PROTOCOLS: &[ProtocolVersion] = &[ProtocolVersion::V_2026_07_28];
@@ -113,7 +113,6 @@ pub struct CodexShim {
     file_access: Arc<FileAccess>,
     resources: RuntimeResources,
     process_resolver: ProcessResolver,
-    allowed_programs: AllowedPrograms,
     detached: DetachedTrees,
     bash_locator: BashLocator,
     protocol_compatibility: ProtocolCompatibility,
@@ -123,7 +122,6 @@ pub struct CodexShimBuilder {
     root: PathBuf,
     read_scope: ReadScope,
     runtime: RuntimeConfig,
-    allowed_programs: AllowedPrograms,
     protocol_compatibility: ProtocolCompatibility,
 }
 
@@ -199,7 +197,6 @@ impl CodexShimBuilder {
             root: root.into(),
             read_scope: ReadScope::default(),
             runtime: RuntimeConfig::from_env()?,
-            allowed_programs: AllowedPrograms::from_env()?,
             protocol_compatibility: ProtocolCompatibility::from_env()?,
         })
     }
@@ -213,12 +210,6 @@ impl CodexShimBuilder {
     #[must_use]
     pub fn runtime_limits(mut self, runtime: RuntimeConfig) -> Self {
         self.runtime = runtime;
-        self
-    }
-
-    #[must_use]
-    pub fn allowed_programs(mut self, allowed: AllowedPrograms) -> Self {
-        self.allowed_programs = allowed;
         self
     }
 
@@ -242,7 +233,6 @@ impl CodexShimBuilder {
             bash_locator: BashLocator::capture(),
             resources: RuntimeResources::new(self.runtime),
             process_resolver: ProcessResolver::capture(),
-            allowed_programs: self.allowed_programs,
             protocol_compatibility: self.protocol_compatibility,
         })
     }
@@ -313,9 +303,6 @@ impl CodexShim {
     /// Returns a resolution, launch, capture, cleanup, or unexpected-output error.
     pub fn verify_process_runtime(&self) -> io::Result<()> {
         let executable = std::env::current_exe()?;
-        // The lifecycle probe launches this binary, so it carries its own single-entry
-        // allowlist rather than depending on how the operator configured `run_program`.
-        let probe_allowlist = AllowedPrograms::parse(&executable.to_string_lossy())?;
         let request = ProcessRequest {
             program: executable.to_string_lossy().into_owned(),
             args: vec!["--version".to_owned()],
@@ -328,7 +315,6 @@ impl CodexShim {
         let output = crate::tools::run_program::execute(
             &self.root,
             &self.process_resolver,
-            &probe_allowlist,
             &request,
             Duration::from_secs(5),
             &CancellationToken::new(),
@@ -742,7 +728,6 @@ crate::tools::read::prepare(
         };
         let root = self.root.clone();
         let resolver = self.process_resolver.clone();
-        let allowed = self.allowed_programs.clone();
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
         let span = tracing::Span::current();
@@ -758,7 +743,6 @@ crate::tools::read::prepare(
                 let result = crate::tools::run_program::execute_output(
                     &root,
                     &resolver,
-                    &allowed,
                     &process_request,
                     remaining,
                     &cancellation,

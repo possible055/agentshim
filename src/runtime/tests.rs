@@ -327,8 +327,10 @@ mod tests {
         let resources = RuntimeResources::new(RuntimeConfig::for_tests(4));
         let pool = resources.file_work_pool();
         assert_eq!(pool.extra_capacity(), 3);
+        assert!(!pool.is_initialized());
         let credits = pool.try_credits(usize::MAX);
         assert_eq!(credits.len(), 3);
+        assert!(!pool.is_initialized());
         assert!(pool.try_credit().is_none());
         drop(credits);
         assert_eq!(pool.available_credits(), 3);
@@ -343,11 +345,13 @@ mod tests {
         let inline = RuntimeResources::new(RuntimeConfig::for_tests(1)).file_work_pool();
         assert_eq!(inline.extra_capacity(), 0);
         assert!(inline.try_credit().is_none());
+        assert!(!inline.is_initialized());
     }
 
     #[test]
     fn file_work_panic_poisoning_falls_back_to_inline() {
         let pool = RuntimeResources::new(RuntimeConfig::for_tests(2)).file_work_pool();
+        assert!(!pool.is_initialized());
         let credit = pool.try_credit().expect("extra credit");
         let (sent, received) = std::sync::mpsc::channel();
         assert!(
@@ -357,6 +361,7 @@ mod tests {
             })
             .is_ok()
         );
+        assert!(pool.is_initialized());
         received
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("worker started");

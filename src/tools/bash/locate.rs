@@ -270,6 +270,7 @@ fn probe(
     #[cfg(test)]
     if let Some(gate) = &inputs.probe_gate {
         gate.wait(cancellation, &budget)?;
+        return Ok((*gate.runtime).clone());
     }
     let executable = locate(inputs, &budget, cancellation)?;
     let path = toolchain_path(&executable, &inputs.inherited_path);
@@ -604,15 +605,17 @@ struct TestProbeGate {
     entered: std::sync::Barrier,
     released: (Mutex<bool>, Condvar),
     calls: std::sync::atomic::AtomicUsize,
+    runtime: Arc<BashRuntime>,
 }
 
 #[cfg(test)]
 impl TestProbeGate {
-    fn new() -> Self {
+    fn new(runtime: Arc<BashRuntime>) -> Self {
         Self {
             entered: std::sync::Barrier::new(2),
             released: (Mutex::new(false), Condvar::new()),
             calls: std::sync::atomic::AtomicUsize::new(0),
+            runtime,
         }
     }
 
@@ -701,7 +704,7 @@ mod tests {
         let Some(runtime) = available_bash() else {
             return;
         };
-        let gate = Arc::new(TestProbeGate::new());
+        let gate = Arc::new(TestProbeGate::new(Arc::clone(&runtime)));
         let locator = BashLocator::for_tests(
             Some(runtime.executable.clone().into_os_string()),
             Vec::new(),
@@ -727,7 +730,7 @@ mod tests {
         let Some(runtime) = available_bash() else {
             return;
         };
-        let gate = Arc::new(TestProbeGate::new());
+        let gate = Arc::new(TestProbeGate::new(Arc::clone(&runtime)));
         let locator = BashLocator::for_tests(
             Some(runtime.executable.clone().into_os_string()),
             Vec::new(),
@@ -753,7 +756,7 @@ mod tests {
         let Some(runtime) = available_bash() else {
             return;
         };
-        let gate = Arc::new(TestProbeGate::new());
+        let gate = Arc::new(TestProbeGate::new(Arc::clone(&runtime)));
         let locator = BashLocator::for_tests(
             Some(runtime.executable.clone().into_os_string()),
             Vec::new(),
@@ -781,7 +784,7 @@ mod tests {
         let Some(runtime) = available_bash() else {
             return;
         };
-        let gate = Arc::new(TestProbeGate::new());
+        let gate = Arc::new(TestProbeGate::new(Arc::clone(&runtime)));
         let locator = BashLocator::for_tests(
             Some(runtime.executable.clone().into_os_string()),
             Vec::new(),

@@ -19,11 +19,8 @@ use crate::{
     },
 };
 
-pub mod allowlist;
 #[cfg(test)]
 mod tests;
-
-pub use allowlist::AllowedPrograms;
 
 const MAX_STDIN_BYTES: usize = 1024 * 1024;
 const PROCESS_MEMORY_BYTES: usize = 2 * 1024 * 1024;
@@ -192,24 +189,20 @@ fn environment_keys_equal(left: &str, right: &str) -> bool {
 ///
 /// # Errors
 ///
-/// Returns validation, resolution, permission, spawn, I/O, cancellation, timeout, cleanup, or
-/// output errors.
+/// Returns validation, resolution, spawn, I/O, cancellation, timeout, cleanup, or output errors.
 pub fn execute(
     root: &Arc<RepositoryRoot>,
     resolver: &ProcessResolver,
-    allowed: &AllowedPrograms,
     request: &ProcessRequest,
     timeout: Duration,
     cancellation: &CancellationToken,
 ) -> Result<String, ProcessError> {
-    execute_output(root, resolver, allowed, request, timeout, cancellation)
-        .map(|result| result.text)
+    execute_output(root, resolver, request, timeout, cancellation).map(|result| result.text)
 }
 
 pub(crate) fn execute_output(
     root: &Arc<RepositoryRoot>,
     resolver: &ProcessResolver,
-    allowed: &AllowedPrograms,
     request: &ProcessRequest,
     timeout: Duration,
     cancellation: &CancellationToken,
@@ -225,16 +218,6 @@ pub(crate) fn execute_output(
     let cwd = spawn::resolve_cwd(root, request.cwd.as_deref()).map_err(invalid)?;
     ensure_before_spawn(deadline, request.timeout_ms())?;
     let program = resolver.resolve(&request.program, &cwd)?;
-    ensure_before_spawn(deadline, request.timeout_ms())?;
-    if !allowed.permits(&program) {
-        return Err(ProcessError::NotPermitted(format!(
-            "{:?} resolves to {}, which is not in the run_program allowlist. Use bash for this, \
-             or ask the operator to add it to --allow-programs (currently {}).",
-            request.program,
-            diagnostic_path(&program.executable),
-            allowed.describe()
-        )));
-    }
     ensure_before_spawn(deadline, request.timeout_ms())?;
     let timeout = deadline
         .checked_duration_since(std::time::Instant::now())

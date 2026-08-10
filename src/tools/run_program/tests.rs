@@ -24,8 +24,8 @@ use crate::{
 use crate::tools::exec::platform;
 
 use super::{
-    AllowedPrograms, CompletedProcess, MAX_STDIN_BYTES, PROCESS_MEMORY_BYTES, ProcessRequest,
-    TimedOutProcess, execute, execute_output, render_completed, render_timeout,
+    CompletedProcess, MAX_STDIN_BYTES, PROCESS_MEMORY_BYTES, ProcessRequest, TimedOutProcess,
+    execute, execute_output, render_completed, render_timeout,
 };
 fn request(program: String) -> ProcessRequest {
     ProcessRequest {
@@ -141,7 +141,6 @@ fn unix_multicall_proxy_preserves_resolved_argv0() {
     let output = execute(
         &root,
         &resolver,
-        &allow_program(&proxy_request),
         &proxy_request,
         Duration::from_secs(5),
         &CancellationToken::new(),
@@ -432,7 +431,6 @@ fn interleaved_child_output_stays_split_into_two_sections() {
     let output = execute(
         &root,
         &ProcessResolver::capture(),
-        &allow_program(&interleaved),
         &interleaved,
         Duration::from_secs(10),
         &CancellationToken::new(),
@@ -480,7 +478,6 @@ fn high_escaping_child_output_completes_within_the_result_budget() {
     let output = execute_output(
         &root,
         &ProcessResolver::capture(),
-        &allow_program(&high_output),
         &high_output,
         Duration::from_secs(10),
         &CancellationToken::new(),
@@ -499,7 +496,6 @@ fn execute_unix(request: &ProcessRequest) -> Result<String, ProcessError> {
     execute(
         &root,
         &ProcessResolver::capture(),
-        &allow_program(request),
         request,
         Duration::from_millis(request.timeout_ms()),
         &CancellationToken::new(),
@@ -557,6 +553,7 @@ fn unix_python_node_and_git_receive_literal_argument_corpus() {
     let expected = serde_json::to_string(&corpus).expect("expected JSON");
 
     let mut python = request("python3".to_owned());
+    python.timeout_ms = Some(10_000);
     python.args = vec![
         "-c".to_owned(),
         "import json,sys; print(json.dumps(sys.argv[1:], ensure_ascii=False, separators=(',', ':')))"
@@ -567,6 +564,7 @@ fn unix_python_node_and_git_receive_literal_argument_corpus() {
     assert!(output.contains(&expected));
 
     let mut node = request("node".to_owned());
+    node.timeout_ms = Some(10_000);
     node.args = vec![
         "-e".to_owned(),
         "console.log(JSON.stringify(process.argv.slice(1)))".to_owned(),
@@ -576,6 +574,7 @@ fn unix_python_node_and_git_receive_literal_argument_corpus() {
     assert!(output.contains(&expected));
 
     let mut git = request("git".to_owned());
+    git.timeout_ms = Some(10_000);
     git.args = vec![
         "rev-parse".to_owned(),
         "--sq-quote".to_owned(),
@@ -598,7 +597,6 @@ fn explicit_absolute_cwd_may_leave_root_but_relative_escape_is_rejected() {
     let output = execute(
         &root,
         &ProcessResolver::for_tests(Vec::new()),
-        &allow_program(&absolute),
         &absolute,
         Duration::from_secs(5),
         &CancellationToken::new(),
@@ -612,7 +610,6 @@ fn explicit_absolute_cwd_may_leave_root_but_relative_escape_is_rejected() {
         execute(
             &root,
             &ProcessResolver::for_tests(Vec::new()),
-            &allow_program(&absolute),
             &absolute,
             Duration::from_secs(5),
             &CancellationToken::new(),
@@ -660,7 +657,6 @@ fn unix_timeout_terminates_descendant_process_group() {
     let error = execute(
         &root,
         &resolver,
-        &allow_program(&timed),
         &timed,
         Duration::from_millis(150),
         &CancellationToken::new(),
@@ -708,7 +704,6 @@ fn unix_cancellation_terminates_running_process() {
     let error = execute(
         &root,
         &ProcessResolver::for_tests(Vec::new()),
-        &allow_program(&running),
         &running,
         Duration::from_secs(5),
         &cancellation,
@@ -790,7 +785,6 @@ fn unix_session_escape_does_not_detach_pipe_workers() {
     let error = execute(
         &root,
         &ProcessResolver::capture(),
-        &allow_program(&request),
         &request,
         Duration::from_secs(10),
         &CancellationToken::new(),
@@ -949,7 +943,6 @@ fn windows_primary_exit_terminates_lingering_grandchild() {
     let output = execute(
         &root,
         &ProcessResolver::capture(),
-        &allow_program(&request),
         &request,
         Duration::from_secs(5),
         &CancellationToken::new(),
@@ -993,7 +986,6 @@ fn windows_timeout_terminates_grandchild_job_tree() {
     let error = execute(
         &root,
         &ProcessResolver::capture(),
-        &allow_program(&timed),
         &timed,
         Duration::from_millis(750),
         &CancellationToken::new(),
@@ -1021,212 +1013,4 @@ fn windows_timeout_terminates_grandchild_job_tree() {
         !windows_process_is_running(pid),
         "grandchild process survived job termination"
     );
-}
-
-fn allowlist(entries: &[&str]) -> AllowedPrograms {
-    AllowedPrograms::parse(&entries.join(",")).expect("allowlist")
-}
-
-fn allow_program(request: &ProcessRequest) -> AllowedPrograms {
-    allowlist(&[request.program.as_str()])
-}
-
-fn resolved(invocation: impl Into<PathBuf>, executable: impl Into<PathBuf>) -> ResolvedProgram {
-    ResolvedProgram {
-        absolute: invocation.into(),
-        executable: executable.into(),
-        launcher: Launcher::Native,
-    }
-}
-
-#[test]
-fn an_empty_allowlist_denies_every_program() {
-    let fixture = tempfile::tempdir().expect("fixture");
-    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
-    let executable = std::env::current_exe().expect("test executable");
-    let mut denied = request(executable.to_string_lossy().into_owned());
-    denied.args = vec!["--version".to_owned()];
-
-    let error = execute(
-        &root,
-        &ProcessResolver::capture(),
-        &AllowedPrograms::default(),
-        &denied,
-        Duration::from_secs(5),
-        &CancellationToken::new(),
-    )
-    .expect_err("the default allowlist denies everything");
-
-    assert!(matches!(error, ProcessError::NotPermitted(_)));
-    let message = error.to_string();
-    assert!(message.contains("Use bash"), "{message}");
-    assert!(message.contains("--allow-programs"), "{message}");
-}
-
-#[test]
-fn allowlist_entries_are_parsed_and_validated_at_startup() {
-    assert!(AllowedPrograms::parse("").expect("empty list").is_empty());
-    assert!(AllowedPrograms::parse("  ").expect("blank list").is_empty());
-    assert_eq!(
-        AllowedPrograms::parse("git, cargo")
-            .expect("names")
-            .describe(),
-        "git, cargo"
-    );
-    for invalid in ["git,,cargo", "tools/git", r"tools\git", ","] {
-        assert!(
-            AllowedPrograms::parse(invalid).is_err(),
-            "{invalid} must be rejected"
-        );
-    }
-}
-
-/// The allowlist is checked after resolution against the canonical executable, so renaming a
-/// copy to a name that is not on the list gains nothing.
-#[test]
-fn a_renamed_copy_is_denied_while_the_listed_name_is_permitted() {
-    let fixture = tempfile::tempdir().expect("fixture");
-    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
-    let source = std::env::current_exe().expect("test executable");
-    #[cfg(windows)]
-    let (permitted_name, renamed_name) = ("allowedprobe.exe", "renamedprobe.exe");
-    #[cfg(unix)]
-    let (permitted_name, renamed_name) = ("allowedprobe", "renamedprobe");
-    for name in [permitted_name, renamed_name] {
-        std::fs::copy(&source, fixture.path().join(name)).expect("copy probe");
-    }
-    let resolver = ProcessResolver::for_tests(vec![fixture.path().to_owned()]);
-    let allowed = allowlist(&["allowedprobe"]);
-    let call = |program: &str| {
-        let mut probe = request(program.to_owned());
-        probe.args = vec!["--version".to_owned()];
-        execute(
-            &root,
-            &resolver,
-            &allowed,
-            &probe,
-            Duration::from_secs(10),
-            &CancellationToken::new(),
-        )
-    };
-
-    assert!(call("allowedprobe").is_ok());
-    assert!(matches!(
-        call("renamedprobe"),
-        Err(ProcessError::NotPermitted(_))
-    ));
-}
-
-#[test]
-fn an_absolute_allowlist_entry_pins_one_executable() {
-    let fixture = tempfile::tempdir().expect("fixture");
-    let other = tempfile::tempdir().expect("second fixture");
-    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
-    let source = std::env::current_exe().expect("test executable");
-    #[cfg(windows)]
-    let name = "pinnedprobe.exe";
-    #[cfg(unix)]
-    let name = "pinnedprobe";
-    let pinned = fixture.path().join(name);
-    std::fs::copy(&source, &pinned).expect("copy pinned probe");
-    std::fs::copy(&source, other.path().join(name)).expect("copy impostor");
-    let allowed = allowlist(&[pinned.to_string_lossy().as_ref()]);
-    let call = |directory: &std::path::Path| {
-        let mut probe = request("pinnedprobe".to_owned());
-        probe.args = vec!["--version".to_owned()];
-        execute(
-            &root,
-            &ProcessResolver::for_tests(vec![directory.to_owned()]),
-            &allowed,
-            &probe,
-            Duration::from_secs(10),
-            &CancellationToken::new(),
-        )
-    };
-
-    assert!(call(fixture.path()).is_ok());
-    assert!(matches!(
-        call(other.path()),
-        Err(ProcessError::NotPermitted(_))
-    ));
-}
-
-#[test]
-fn a_bare_name_allows_either_the_invocation_alias_or_the_canonical_target() {
-    let proxy = resolved("toolchain/cargo", "toolchain/rustup");
-
-    assert!(allowlist(&["cargo"]).permits(&proxy));
-    assert!(allowlist(&["rustup"]).permits(&proxy));
-    assert!(!allowlist(&["unrelated"]).permits(&proxy));
-}
-
-#[test]
-fn a_bare_alias_explicitly_allows_an_arbitrary_canonical_target() {
-    let aliased = resolved("bin/reviewer-approved", "elsewhere/arbitrary-target");
-
-    assert!(allowlist(&["reviewer-approved"]).permits(&aliased));
-}
-
-#[test]
-fn an_absolute_entry_ignores_the_invocation_alias_and_pins_only_canonical_identity() {
-    let fixture = tempfile::tempdir().expect("fixture");
-    let source = std::env::current_exe().expect("test executable");
-    let pinned = fixture.path().join(if cfg!(windows) {
-        "pinned.exe"
-    } else {
-        "pinned"
-    });
-    let copy = fixture
-        .path()
-        .join(if cfg!(windows) { "copy.exe" } else { "copy" });
-    std::fs::copy(&source, &pinned).expect("pinned copy");
-    std::fs::copy(&source, &copy).expect("other copy");
-    let pinned = std::fs::canonicalize(pinned).expect("canonical pinned copy");
-    let copy = std::fs::canonicalize(copy).expect("canonical other copy");
-    let allowed = allowlist(&[pinned.to_string_lossy().as_ref()]);
-
-    assert!(allowed.permits(&resolved("another-alias", pinned.clone())));
-    assert!(!allowed.permits(&resolved(pinned, copy)));
-}
-
-#[cfg(windows)]
-#[test]
-fn windows_allowlist_names_are_ascii_case_insensitive() {
-    let allowed = allowlist(&["GiT"]);
-    assert!(allowed.permits(&resolved(r"C:\tools\git.exe", r"C:\tools\git.exe")));
-    assert!(allowed.permits(&resolved(r"C:\tools\GIT.EXE", r"C:\tools\GIT.EXE")));
-    assert!(!allowed.permits(&resolved(r"C:\tools\gitk.exe", r"C:\tools\gitk.exe")));
-}
-
-/// The resolver caches successful lookups, so the allowlist must be consulted per call rather
-/// than folded into the cached entry.
-#[test]
-fn a_cached_resolution_is_still_checked_against_the_allowlist() {
-    let fixture = tempfile::tempdir().expect("fixture");
-    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
-    let source = std::env::current_exe().expect("test executable");
-    #[cfg(windows)]
-    let name = "cachedallowprobe.exe";
-    #[cfg(unix)]
-    let name = "cachedallowprobe";
-    std::fs::copy(&source, fixture.path().join(name)).expect("copy probe");
-    let resolver = ProcessResolver::for_tests(vec![fixture.path().to_owned()]);
-    let call = |allowed: &AllowedPrograms| {
-        let mut probe = request("cachedallowprobe".to_owned());
-        probe.args = vec!["--version".to_owned()];
-        execute(
-            &root,
-            &resolver,
-            allowed,
-            &probe,
-            Duration::from_secs(10),
-            &CancellationToken::new(),
-        )
-    };
-
-    assert!(call(&allowlist(&["cachedallowprobe"])).is_ok());
-    assert!(matches!(
-        call(&AllowedPrograms::default()),
-        Err(ProcessError::NotPermitted(_))
-    ));
 }

@@ -113,6 +113,7 @@ mod tests {
                 instance_id: "test-instance".to_owned(),
                 ring: Mutex::new(VecDeque::with_capacity(FLIGHT_RECORDS)),
                 sender,
+                writer: None,
                 dropped: Arc::new(AtomicU64::new(0)),
                 queued_bytes,
             },
@@ -153,6 +154,45 @@ mod tests {
         let summary = receiver.recv().expect("summary").records;
         assert_eq!(summary[0]["event"], "summary");
         assert_eq!(summary[0]["dropped_since_last"], 1);
+    }
+
+    #[test]
+    fn errors_mode_starts_writer_only_when_an_error_is_recorded() {
+        let parent = tempfile::tempdir().expect("parent");
+        let directory = parent.path().join("logs");
+        let (guard, layer) = DiagnosticsGuard::start(DiagnosticsConfig {
+            mode: LogMode::Errors,
+            directory: directory.clone(),
+        })
+        .expect("lazy diagnostics");
+        let layer = layer.expect("diagnostics layer");
+
+        assert!(!directory.exists());
+        layer.recorder.record("INFO", fields("context"));
+        assert!(!directory.exists());
+        layer.recorder.record("ERROR", fields("trigger"));
+        drop(guard);
+
+        let logs = list_logs(&directory).expect("logs");
+        assert_eq!(logs.len(), 1);
+        let lines = BufReader::new(File::open(&logs[0].path).expect("log"))
+            .lines()
+            .collect::<io::Result<Vec<_>>>()
+            .expect("lines");
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn all_mode_starts_writer_eagerly() {
+        let parent = tempfile::tempdir().expect("parent");
+        let directory = parent.path().join("logs");
+        let (guard, _) = DiagnosticsGuard::start(DiagnosticsConfig {
+            mode: LogMode::All,
+            directory: directory.clone(),
+        })
+        .expect("eager diagnostics");
+        assert!(directory.exists());
+        drop(guard);
     }
 
     #[test]

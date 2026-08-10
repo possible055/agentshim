@@ -8,7 +8,6 @@
 
 - **受限的文件访问。** `read`、`grep`、`glob` 默认仅在仓库内操作，可选访问 Codex skill 和 plugin 目录。
 - **两种执行形态。** `run_program` 接收可执行文件与字面量参数列表，参数不经任何 shell 解析；需要组合命令时使用 `bash`，它接收 POSIX 命令行。
-- **程序白名单。** 在运维方指定可启动的程序之前，`run_program` 一律拒绝；裸名称是便利的调用名称政策，绝对路径项目则钉住 canonical executable identity。
 - **跨平台。** 原生支持 Windows、Linux 和 macOS（Intel 与 Apple Silicon）。
 
 ## 工具
@@ -18,7 +17,7 @@
 | `read` | 读取源文件并附带行号。支持 UTF-8、带 BOM 的 UTF-16，以及通过参数明确指定的 WHATWG 编码标签。 |
 | `grep` | 使用 Rust 正则或字面字符串搜索文件内容。 |
 | `glob` | 查找文件，并遵循仓库忽略规则。 |
-| `run_program` | 以字面量参数列表运行单个白名单内程序，不经 shell。 |
+| `run_program` | 以字面量参数列表运行单个程序，不经 shell。 |
 | `bash` | 运行 POSIX bash 命令行，返回合并后的 stdout 与 stderr。 |
 
 工具成功时返回受大小限制的文本结果。`read`、`grep` 和 `glob` 的部分结果会在文本中提供续读信息；`run_program` 报告退出状态及分离的 stdout/stderr 字节统计，`bash` 则只有一段合并输出。输出预算会随内容调整：CJK 密集的文本会被压到更小的字节预算，因为客户端对它的 token 消耗约为英文的两倍。工具失败时还会返回统一的 `{ error: { code, message, retryable, details } }` 结构化错误。
@@ -85,7 +84,7 @@ cargo run --locked -- doctor
 ```toml
 [mcp_servers.codexshim]
 command = "/absolute/path/to/codexshim"
-args = ["serve", "--allow-programs", "git,cargo,rustup,gh"]
+args = ["serve"]
 required = true
 supports_parallel_tool_calls = true
 startup_timeout_sec = 15
@@ -104,7 +103,7 @@ approval_mode = "prompt"
 mcp_2026_07_28 = true
 ```
 
-两级审批对应两个工具的差异：`run_program` 受白名单约束且参数是结构化 argv，因此可以按需审批；`bash` 接收任意命令行，一律提示。白名单与 `bash` 都不是安全 sandbox。
+两级审批对应两个工具的差异：`run_program` 启动单个可执行文件并接收结构化 argv，因此可以按需审批；`bash` 接收任意命令行，一律提示。两个工具都不是安全 sandbox。
 
 `tool_timeout_sec` 必须不小于服务端 600000 ms 上限并留出余量，否则客户端会先于服务端超时。
 
@@ -116,21 +115,17 @@ mcp_2026_07_28 = true
 
 ## 选项
 
-### `--allow-programs`
-
-以逗号分隔列出 `run_program` 可启动的程序。**默认为空，即默认拒绝**；不提供万用字元，因为「什么都能跑」正是 `bash` 的职责。
-
-```toml
-args = ["serve", "--allow-programs", "git,cargo,rustup,gh"]
-```
-
-清单项可以是裸程序名或绝对路径。裸名称会与解析后的 invocation path 或 canonical executable target 任一方的 file stem 比对，因此 Unix 上的 `cargo -> rustup` multicall proxy 可正常使用，`git` 也覆盖任何安装前缀下的 `git.exe`。这项便利政策也表示：经白名单别名调用的任意 target 会被允许，不能把裸名称当作 identity 保证。绝对路径项目只与 canonical executable 比对，用来钉住该 identity。每次调用都在 PATH 解析后重新检查，包含 resolution cache 命中。Windows 上的比对为 ASCII 大小写不敏感。空项目、以及含路径分隔符的相对项目都会阻止启动。
-
-`CODEXSHIM_ALLOW_PROGRAMS` 是语法相同的次要来源；两者同时存在时以启动旗标为准。`codexshim doctor --allow-programs <value>` 接受同一旗标并打印解析后的清单。
-
-被拒绝的调用返回不可重试的 `not_permitted` 错误，其中列出解析到的路径并指向 `bash`。
+### Windows Bash 参数转换
 
 Windows 上，codexshim 会从探测到的 Git for Windows bash 推导其工具链目录，并前置到继承的 `PATH`，让 shell 找得到自身附带的 `sleep`、`grep`、`sed` 与 `locale`。这不会过滤继承项目，也不是可设置的 curated `PATH`。
+
+Git Bash 在启动 Windows 原生程序前，会自动转换看起来像 POSIX 路径的参数。运行单个原生程序时应优先使用 `run_program`，因为它会保持 argv 的字面值。必须使用 Bash 组合命令、同时需要原样传递 `robocopy /E` 等斜杠式选项时，将 `msys_argument_conversion` 设为 `disabled`：
+
+```json
+{ "command": "robocopy \"$source\" \"$destination\" /E && printf 'copied\\n'", "msys_argument_conversion": "disabled" }
+```
+
+默认模式保留继承的 MSYS 设置与转换行为。停用模式会为整段 Bash 命令（包括 detached 命令）设置 `MSYS2_ARG_CONV_EXCL=*`；它不会解析子命令、逐一判断程序或在失败后重试。macOS 和 Linux 接受该字段但不会改变行为。
 
 ### 长时间任务
 
@@ -157,7 +152,7 @@ args = ["serve", "--read-scope", "unrestricted"]
 
 相对路径和仓库内的绝对路径在两种模式下都使用仓库能力域。
 
-`--read-scope` 是 `read`、`grep`、`glob` 的结构化访问范围，**不是**行程能碰到什么的边界：`run_program` 或 `bash` 启动的任何程序都继承服务用户的一般文件系统权限。白名单降低误用，审批模式提供政策闸门，但两者都不隔离子行程；需要隔离时应使用 OS sandbox。`codexshim doctor --read-scope <value>` 在诊断时接受同一标志。
+`--read-scope` 是 `read`、`grep`、`glob` 的结构化访问范围，**不是**行程能碰到什么的边界：`run_program` 或 `bash` 启动的任何程序都继承服务用户的一般文件系统权限。审批模式提供政策闸门，但两个工具都不隔离子行程；需要隔离时应使用 OS sandbox。`codexshim doctor --read-scope <value>` 在诊断时接受同一标志。
 
 ### 读取 PDF
 
@@ -229,7 +224,6 @@ PDF 专属错误码，全部使用统一的 `{ error: { code, message, retryable
 | `CODEXSHIM_MCP_COMPATIBILITY` | `lenient` | 设为 `strict` 以拒绝旧版 `2025-06-18` initialize 客户端。 |
 | `CODEXSHIM_PROCESS_CALLS` | `16` | 每个实例的进程调用并行上限，由 `run_program` 与 `bash` 共用；接受 1 到 32 的整数。 |
 | `CODEXSHIM_DETACHED_CALLS` | `16` | 每个实例存活中的 detached `bash` 行程树数量；接受 1 到 16 的整数。 |
-| `CODEXSHIM_ALLOW_PROGRAMS` | 空 | 逗号分隔的 `run_program` 白名单；`--allow-programs` 旗标优先。 |
 | `CODEXSHIM_OUTPUT_BYTES` | `32000` | 每次呼叫的输出上限（位元组）；接受 4096 到 262144 的整数。 |
 | `CODEXSHIM_GREP_MEMORY_BYTES` | `268435456` | 每次 `grep` 呼叫保留候选项目的记忆体硬上限；接受 8388608 到 1073741824 的整数。 |
 | `CODEXSHIM_GLOB_MEMORY_BYTES` | `33554432` | 每次 `glob` 呼叫保留匹配项目的记忆体硬上限；接受 8388608 到 1073741824 的整数。 |

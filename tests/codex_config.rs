@@ -18,7 +18,7 @@ const REQUIRED_SETTINGS: [&str; 4] = [
     "supports_parallel_tool_calls = true",
     "tool_timeout_sec = 610",
     r#"enabled_tools = ["read", "grep", "glob", "run_program", "bash"]"#,
-    r#"args = ["serve", "--allow-programs", "git,cargo,rustup,gh"]"#,
+    r#"args = ["serve"]"#,
 ];
 
 #[test]

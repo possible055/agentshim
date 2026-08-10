@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{path::RepositoryRoot, tools::exec::ProcessError};
 
 use super::{
-    BASH_ENVIRONMENT, BashRequest,
+    BASH_ENVIRONMENT, BashRequest, MsysArgumentConversion,
     detached::DetachedTrees,
     environment, execute_output,
     locate::{self, BashLocator},
@@ -18,6 +18,7 @@ fn request(command: &str) -> BashRequest {
         timeout_ms: Some(20_000),
         detach: false,
         log_path: None,
+        msys_argument_conversion: MsysArgumentConversion::Default,
     }
 }
 
@@ -44,6 +45,33 @@ fn bash_is_available() -> bool {
     BashLocator::capture()
         .resolve(&CancellationToken::new())
         .is_ok()
+}
+
+#[cfg(windows)]
+fn windows_argument_echo_command(root: &std::path::Path) -> String {
+    let script = root.join("echo-argument.ps1");
+    std::fs::write(&script, "[Console]::Write($args[0])").expect("PowerShell fixture");
+    let script = script
+        .to_string_lossy()
+        .replace('\\', "/")
+        .replace('\'', "'\"'\"'");
+    format!("powershell.exe -NoProfile -File '{script}' /E")
+}
+
+#[test]
+fn omitted_msys_argument_conversion_uses_the_default_and_unknown_values_are_rejected() {
+    let request: BashRequest =
+        serde_json::from_str(r#"{"command":"true"}"#).expect("request without mode");
+    assert_eq!(
+        request.msys_argument_conversion,
+        MsysArgumentConversion::Default
+    );
+
+    let error = serde_json::from_str::<BashRequest>(
+        r#"{"command":"true","msys_argument_conversion":"unexpected"}"#,
+    )
+    .expect_err("unknown conversion mode");
+    assert!(error.to_string().contains("unknown variant"), "{error}");
 }
 
 #[test]
@@ -103,7 +131,7 @@ fn runtime_fixture(path: Option<&str>) -> locate::BashRuntime {
 
 #[test]
 fn injected_environment_carries_the_probed_locale_and_no_colour_defaults() {
-    let plan = environment(&runtime_fixture(None));
+    let plan = environment(&runtime_fixture(None), MsysArgumentConversion::Default);
     let injected = |key: &str| {
         plan.injected
             .iter()
@@ -124,13 +152,62 @@ fn injected_environment_carries_the_probed_locale_and_no_colour_defaults() {
 /// `Path`, and an injected duplicate would lose to it.
 #[test]
 fn a_probed_toolchain_path_replaces_the_inherited_one() {
-    let plan = environment(&runtime_fixture(Some("/toolchain/bin")));
+    let plan = environment(
+        &runtime_fixture(Some("/toolchain/bin")),
+        MsysArgumentConversion::Default,
+    );
 
     assert_eq!(
         plan.overrides,
         vec![("PATH".to_owned(), "/toolchain/bin".to_owned())]
     );
     assert!(plan.injected.iter().all(|(name, _)| name != "PATH"));
+}
+
+#[test]
+fn the_default_msys_mode_does_not_change_the_inherited_conversion_environment() {
+    let plan = environment(&runtime_fixture(None), MsysArgumentConversion::Default);
+
+    assert!(
+        plan.injected
+            .iter()
+            .all(|(name, _)| name != "MSYS2_ARG_CONV_EXCL")
+    );
+    assert!(
+        plan.removed
+            .iter()
+            .all(|name| name != "MSYS2_ARG_CONV_EXCL")
+    );
+    assert!(
+        plan.overrides
+            .iter()
+            .all(|(name, _)| name != "MSYS2_ARG_CONV_EXCL")
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn disabled_msys_conversion_overrides_the_runtime_for_the_whole_bash_command() {
+    let plan = environment(
+        &runtime_fixture(Some("/toolchain/bin")),
+        MsysArgumentConversion::Disabled,
+    );
+
+    assert_eq!(
+        plan.overrides,
+        vec![
+            ("PATH".to_owned(), "/toolchain/bin".to_owned()),
+            ("MSYS2_ARG_CONV_EXCL".to_owned(), "*".to_owned()),
+        ]
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn disabled_msys_conversion_is_a_noop_outside_windows() {
+    let plan = environment(&runtime_fixture(None), MsysArgumentConversion::Disabled);
+
+    assert!(plan.overrides.is_empty());
 }
 
 /// The failure this reproduces is a shell that cannot see its own coreutils: on Windows a
@@ -215,6 +292,46 @@ fn the_injected_environment_reaches_the_command() {
     assert!(output.contains("Exit code: 0"));
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_native_arguments_can_keep_slash_switches_literal() {
+    if !bash_is_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("fixture");
+    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+    let locator = BashLocator::capture();
+    let native_command = windows_argument_echo_command(fixture.path());
+
+    let default_command = format!("unset MSYS_NO_PATHCONV MSYS2_ARG_CONV_EXCL; {native_command}");
+    let default_output = execute_output(
+        &root,
+        &locator,
+        None,
+        &request(&default_command),
+        Duration::from_secs(20),
+        &CancellationToken::new(),
+    )
+    .expect("default conversion output")
+    .text;
+    assert!(default_output.contains("E:/"), "{default_output}");
+
+    let mut disabled = request(&native_command);
+    disabled.msys_argument_conversion = MsysArgumentConversion::Disabled;
+    let disabled_output = execute_output(
+        &root,
+        &locator,
+        None,
+        &disabled,
+        Duration::from_secs(20),
+        &CancellationToken::new(),
+    )
+    .expect("disabled conversion output")
+    .text;
+    assert!(disabled_output.contains("/E"), "{disabled_output}");
+    assert!(!disabled_output.contains("E:/"), "{disabled_output}");
+}
+
 #[test]
 fn a_login_shell_profile_is_never_sourced() {
     if !bash_is_available() {
@@ -288,6 +405,7 @@ fn detach_request(command: &str, log_path: &str) -> BashRequest {
         timeout_ms: None,
         detach: true,
         log_path: Some(log_path.to_owned()),
+        msys_argument_conversion: MsysArgumentConversion::Default,
     }
 }
 
@@ -351,6 +469,43 @@ fn a_detached_tree_outlives_the_call_and_dies_with_the_instance() {
 
     trees.terminate_all();
     assert_eq!(trees.live_count(), 0);
+}
+
+#[cfg(windows)]
+#[test]
+fn detached_windows_commands_share_the_disabled_msys_conversion_mode() {
+    if !bash_is_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("fixture");
+    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+    let trees = trees();
+    let command = windows_argument_echo_command(fixture.path());
+    let mut request = detach_request(&command, "argument.log");
+    request.msys_argument_conversion = MsysArgumentConversion::Disabled;
+    let admission = trees.admit().expect("detached admission");
+    execute_output(
+        &root,
+        &BashLocator::capture(),
+        Some(admission),
+        &request,
+        Duration::ZERO,
+        &CancellationToken::new(),
+    )
+    .expect("detached bash");
+
+    let log = fixture.path().join("argument.log");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if std::fs::read_to_string(&log).is_ok_and(|body| body.contains("/E")) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let output = std::fs::read_to_string(log).expect("argument log");
+    assert!(output.contains("/E"), "{output}");
+    assert!(!output.contains("E:/"), "{output}");
+    trees.terminate_all();
 }
 
 #[test]

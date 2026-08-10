@@ -9,7 +9,7 @@
   "capabilities": {
     "tools": {}
   },
-  "instructions": "Local repository and Codex extension tools for reading source files, searching contents, finding paths, running one permitted program with literal arguments, and running POSIX bash command lines.",
+  "instructions": "Local repository and Codex extension tools for reading source files, searching contents, finding paths, running one program with literal arguments, and running POSIX bash command lines.",
   "resultType": "complete",
   "supportedVersions": [
     "2026-07-28",

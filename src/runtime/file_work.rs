@@ -1,13 +1,17 @@
 use std::{
     fmt,
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
 };
 
 use rayon::{ThreadPool, ThreadPoolBuilder};
 
 pub struct FileWorkPool {
-    pool: Option<ThreadPool>,
+    pool: OnceLock<Option<ThreadPool>>,
+    extra_threads: usize,
     credits: Arc<FileWorkCredits>,
     poisoned: Arc<AtomicBool>,
     poison_warning_emitted: Arc<AtomicBool>,
@@ -19,24 +23,9 @@ impl FileWorkPool {
         let extra_threads = parallelism.saturating_sub(1);
         let poisoned = Arc::new(AtomicBool::new(false));
         let poison_warning_emitted = Arc::new(AtomicBool::new(false));
-        let pool = if extra_threads == 0 {
-            None
-        } else {
-            let panic_poisoned = Arc::clone(&poisoned);
-            let built = ThreadPoolBuilder::new()
-                .num_threads(extra_threads)
-                .thread_name(|index| format!("codexshim-file-{index}"))
-                .panic_handler(move |_| {
-                    panic_poisoned.store(true, Ordering::Release);
-                })
-                .build();
-            if built.is_err() {
-                poisoned.store(true, Ordering::Release);
-            }
-            built.ok()
-        };
         Self {
-            pool,
+            pool: OnceLock::new(),
+            extra_threads,
             credits: Arc::new(FileWorkCredits {
                 capacity: extra_threads,
                 available: AtomicUsize::new(extra_threads),
@@ -111,7 +100,7 @@ impl FileWorkPool {
     where
         J: FnOnce(FileWorkCredit) + Send + 'static,
     {
-        let Some(pool) = &self.pool else {
+        let Some(pool) = self.pool() else {
             return Err((credit, job));
         };
         if self.poisoned.load(Ordering::Acquire) {
@@ -126,9 +115,36 @@ impl FileWorkPool {
         Ok(())
     }
 
+    fn pool(&self) -> Option<&ThreadPool> {
+        self.pool
+            .get_or_init(|| {
+                if self.extra_threads == 0 {
+                    return None;
+                }
+                let panic_poisoned = Arc::clone(&self.poisoned);
+                let built = ThreadPoolBuilder::new()
+                    .num_threads(self.extra_threads)
+                    .thread_name(|index| format!("codexshim-file-{index}"))
+                    .panic_handler(move |_| {
+                        panic_poisoned.store(true, Ordering::Release);
+                    })
+                    .build();
+                if built.is_err() {
+                    self.poisoned.store(true, Ordering::Release);
+                }
+                built.ok()
+            })
+            .as_ref()
+    }
+
     #[cfg(test)]
     fn available_credits(&self) -> usize {
         self.credits.available.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    fn is_initialized(&self) -> bool {
+        self.pool.get().is_some()
     }
 
     #[cfg(test)]

@@ -1,13 +1,12 @@
 fn usage() {
     eprintln!(
-        "Usage: codexshim <serve|doctor> [--read-scope <normal|unrestricted>] [--allow-programs <comma-separated>] | logs <status|purge> | --version"
+        "Usage: codexshim <serve|doctor> [--read-scope <normal|unrestricted>] | logs <status|purge> | --version"
     );
 }
 
 #[derive(Clone, Debug, PartialEq)]
 struct ServeOptions {
     read_scope: ReadScope,
-    allowed_programs: AllowedPrograms,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -50,7 +49,6 @@ fn parse_command(args: impl IntoIterator<Item = OsString>) -> Result<CliCommand,
     }
 
     let mut read_scope = None;
-    let mut allow_programs = None;
     while let Some(argument) = args.next() {
         let argument = argument
             .to_str()
@@ -67,27 +65,12 @@ fn parse_command(args: impl IntoIterator<Item = OsString>) -> Result<CliCommand,
                         .map_err(|error| error.to_string())?,
                 );
             }
-            "--allow-programs" => {
-                if allow_programs.is_some() {
-                    return Err("--allow-programs may be specified only once".to_owned());
-                }
-                allow_programs = Some(
-                    AllowedPrograms::parse(&value).map_err(|error| error.to_string())?,
-                );
-            }
             _ => return Err(format!("unknown argument: {argument}")),
         }
     }
 
-    // The startup flag wins over the environment so a deployment can pin the allowlist even
-    // when an inherited variable disagrees.
-    let allowed_programs = match allow_programs {
-        Some(allowed) => allowed,
-        None => AllowedPrograms::from_env().map_err(|error| error.to_string())?,
-    };
     let options = ServeOptions {
         read_scope: read_scope.unwrap_or_default(),
-        allowed_programs,
     };
     match kind {
         "serve" => Ok(CliCommand::Serve(options)),
@@ -144,7 +127,6 @@ async fn run(config: RuntimeLimits, command: CliCommand) -> Result<(), Box<dyn E
             let service = CodexShim::builder(std::env::current_dir()?)?
                 .runtime_limits(config)
                 .read_scope(read_scope)
-                .allowed_programs(options.allowed_programs)
                 .build()?;
             let (stdin, stdout) = stdio();
             let reader = ShutdownReader {
@@ -162,11 +144,9 @@ async fn run(config: RuntimeLimits, command: CliCommand) -> Result<(), Box<dyn E
             tracing::info!(target: "codexshim", event = "server_stop", phase = "lifecycle");
         }
         CliCommand::Doctor(options) => {
-            let allowed = options.allowed_programs.clone();
             let service = CodexShim::builder(std::env::current_dir()?)?
                 .runtime_limits(config)
                 .read_scope(options.read_scope)
-                .allowed_programs(options.allowed_programs)
                 .build()?;
             service.verify_root()?;
             service.verify_process_runtime()?;
@@ -189,7 +169,6 @@ async fn run(config: RuntimeLimits, command: CliCommand) -> Result<(), Box<dyn E
             );
             println!("output bytes: {}", service.runtime_limits().output_bytes);
             print_memory_limits(service.runtime_limits());
-            println!("allowed programs: {}", allowed.describe());
             match bash_report() {
                 Ok((executable, locale)) => {
                     println!("bash: {}", executable.display());

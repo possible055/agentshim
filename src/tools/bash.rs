@@ -30,6 +30,8 @@ pub(crate) mod locate;
 mod tests;
 
 const BASH_MEMORY_BYTES: usize = 2 * 1024 * 1024;
+#[cfg(windows)]
+const MSYS2_ARG_CONV_EXCL: &str = "MSYS2_ARG_CONV_EXCL";
 
 /// Injected as constants rather than sourced from a profile, so the invariants are testable in
 /// Rust instead of living in a shell script the operator can edit.
@@ -49,6 +51,14 @@ const BASH_ENVIRONMENT: [(&str, &str); 13] = [
     ("PYTHONIOENCODING", "utf-8"),
 ];
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MsysArgumentConversion {
+    #[default]
+    Default,
+    Disabled,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BashRequest {
@@ -58,6 +68,8 @@ pub struct BashRequest {
     #[serde(default)]
     pub detach: bool,
     pub log_path: Option<String>,
+    #[serde(default)]
+    pub msys_argument_conversion: MsysArgumentConversion,
 }
 
 impl BashRequest {
@@ -123,7 +135,10 @@ fn invalid(message: impl Into<String>) -> ProcessError {
     ProcessError::Validation(message.into())
 }
 
-fn environment(runtime: &locate::BashRuntime) -> EnvironmentPlan {
+fn environment(
+    runtime: &locate::BashRuntime,
+    msys_argument_conversion: MsysArgumentConversion,
+) -> EnvironmentPlan {
     let mut plan = EnvironmentPlan::from_defaults(&BASH_ENVIRONMENT);
     plan.injected
         .push(("LANG".to_owned(), runtime.locale.clone()));
@@ -134,6 +149,13 @@ fn environment(runtime: &locate::BashRuntime) -> EnvironmentPlan {
     if let Some(path) = &runtime.path {
         plan.overrides.push(("PATH".to_owned(), path.clone()));
     }
+    #[cfg(windows)]
+    if msys_argument_conversion == MsysArgumentConversion::Disabled {
+        plan.overrides
+            .push((MSYS2_ARG_CONV_EXCL.to_owned(), "*".to_owned()));
+    }
+    #[cfg(not(windows))]
+    let _ = msys_argument_conversion;
     plan
 }
 
@@ -182,7 +204,7 @@ pub(crate) fn execute_output(
         launcher: launcher_for(&runtime.executable)?,
     };
     ensure_before_spawn(deadline, request.timeout_ms())?;
-    let environment = environment(&runtime);
+    let environment = environment(&runtime, request.msys_argument_conversion);
     let args = vec![
         "--noprofile".to_owned(),
         "--norc".to_owned(),

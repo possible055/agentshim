@@ -25,8 +25,6 @@ pub enum ProcessError {
     Validation(String),
     #[error("failed to resolve program: {0}")]
     Resolve(String),
-    #[error("{0}")]
-    NotPermitted(String),
     #[error("failed to launch or communicate with process: {0}")]
     Io(#[from] std::io::Error),
     /// An interpreter this server instance settled on at startup is not present. Retrying the

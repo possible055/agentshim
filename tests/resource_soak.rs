@@ -27,7 +27,6 @@ impl Session {
             .arg("serve")
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .env_remove("CODEXSHIM_MCP_COMPATIBILITY")
-            .env("CODEXSHIM_ALLOW_PROGRAMS", allowed_programs())
             .env_remove("CODEXSHIM_PROCESS_CALLS")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1012,9 +1011,4 @@ mod platform {
         descendants.sort_unstable();
         Ok(descendants)
     }
-}
-
-fn allowed_programs() -> String {
-    let executable = std::env::current_exe().expect("integration test executable");
-    format!("cargo,{}", executable.display())
 }
