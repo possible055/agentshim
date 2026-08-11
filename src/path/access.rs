@@ -1,5 +1,4 @@
 use std::{
-    cmp::Ordering,
     env,
     fmt::Display,
     io,
@@ -13,9 +12,12 @@ use cap_std::{
     fs::{Dir, File, OpenOptions},
 };
 
+use super::resolved::{
+    PathBackend, PathError, ResolvedPath, normalize_absolute, normalize_relative, reject_nul,
+    relative_from_absolute,
+};
 #[cfg(windows)]
-static VALIDATED_VOLUMES: std::sync::OnceLock<std::sync::Mutex<Vec<Vec<u16>>>> =
-    std::sync::OnceLock::new();
+use super::resolved::{validate_ambient_path, validate_platform_root};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ReadScope {
@@ -125,9 +127,7 @@ impl RepositoryRoot {
     /// through a link or names a directory that does not exist.
     pub fn create_truncated(&self, path: &ResolvedPath) -> io::Result<std::fs::File> {
         let key = path.capability_key();
-        if let Some(parent) = key
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
+        if let Some(parent) = key.parent().filter(|parent| !parent.as_os_str().is_empty())
             && !self
                 .capability
                 .metadata(parent)
@@ -183,7 +183,7 @@ impl FileAccess {
     }
 
     #[cfg(test)]
-    fn with_codex_roots(root: Arc<RepositoryRoot>, roots: &[&Path]) -> io::Result<Self> {
+    pub(super) fn with_codex_roots(root: Arc<RepositoryRoot>, roots: &[&Path]) -> io::Result<Self> {
         let codex_roots = roots
             .iter()
             .map(RepositoryRoot::open)
@@ -304,9 +304,10 @@ impl FileAccess {
         }
 
         match operation_root.backend {
-            PathBackend::Repository => {
-                Ok(ResolvedPath::repository(absolute.to_path_buf(), key.to_path_buf()))
-            }
+            PathBackend::Repository => Ok(ResolvedPath::repository(
+                absolute.to_path_buf(),
+                key.to_path_buf(),
+            )),
             PathBackend::Codex(index) => {
                 let operation_key = operation_root.capability_key();
                 let capability_key =
@@ -494,9 +495,9 @@ impl FileAccess {
     ) -> io::Result<SameParentReader<'_>> {
         let parent = batch_parent(first)?.to_path_buf();
         let directory = match first.backend {
-            PathBackend::Repository => Some(self.root.capability().open_dir(batch_parent_key(
-                &parent,
-            ))?),
+            PathBackend::Repository => {
+                Some(self.root.capability().open_dir(batch_parent_key(&parent))?)
+            }
             PathBackend::Codex(index) => Some(
                 self.codex_roots[index]
                     .capability()
@@ -562,7 +563,7 @@ fn capability_identity_options() -> OpenOptions {
     options
 }
 
-fn batch_parent(path: &ResolvedPath) -> io::Result<&Path> {
+pub(super) fn batch_parent(path: &ResolvedPath) -> io::Result<&Path> {
     let path = if path.backend == PathBackend::Ambient {
         path.absolute()
     } else {

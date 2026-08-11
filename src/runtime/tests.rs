@@ -2,7 +2,7 @@
 mod tests {
     use std::ffi::{OsStr, OsString};
 
-    use super::{
+    use crate::runtime::{
         DEFAULT_GLOB_MEMORY_BYTES, DEFAULT_GREP_MEMORY_BYTES, DEFAULT_MEMORY_BYTES,
         DEFAULT_PDF_IMAGE_MEMORY_BYTES, DEFAULT_PDF_TEXT_MEMORY_BYTES, DEFAULT_PROCESS_CALLS,
         GLOB_MEMORY_BYTES_ENV, GREP_MEMORY_BYTES_ENV, MAX_CONFIGURED_PROCESS_CALLS,
@@ -99,11 +99,11 @@ mod tests {
         assert!(resources.acquire_pdf_gate(&request).await.is_none());
         let waited = waited.elapsed();
         assert!(
-            waited >= super::PDF_GATE_WAIT,
+            waited >= crate::runtime::PDF_GATE_WAIT,
             "gate returned before its bounded wait elapsed: {waited:?}"
         );
         assert!(
-            waited < super::PDF_GATE_WAIT * 4,
+            waited < crate::runtime::PDF_GATE_WAIT * 4,
             "gate waited far past its bound: {waited:?}"
         );
 
@@ -115,8 +115,7 @@ mod tests {
     /// reservations charged, the pool keeps enough headroom for one.
     #[tokio::test]
     async fn a_charged_pdf_reservation_leaves_room_for_text_reads() {
-        let resources =
-            RuntimeResources::new(RuntimeConfig::for_tests(4));
+        let resources = RuntimeResources::new(RuntimeConfig::for_tests(4));
         let config = resources.config();
 
         let image = resources
@@ -137,8 +136,7 @@ mod tests {
     /// wait resolves promptly, not merely that it eventually resolves.
     #[tokio::test]
     async fn a_running_pdf_does_not_stall_a_concurrent_text_read() {
-        let resources =
-            RuntimeResources::new(RuntimeConfig::for_tests(4));
+        let resources = RuntimeResources::new(RuntimeConfig::for_tests(4));
         let request = CancellationToken::new();
         let config = resources.config();
 
@@ -217,10 +215,10 @@ mod tests {
         }
         #[cfg(not(windows))]
         {
-        assert_eq!(default_worker_lanes(1), 2);
-        assert_eq!(default_worker_lanes(2), 4);
-        assert_eq!(default_worker_lanes(4), 8);
-        assert_eq!(default_worker_lanes(64), 8);
+            assert_eq!(default_worker_lanes(1), 2);
+            assert_eq!(default_worker_lanes(2), 4);
+            assert_eq!(default_worker_lanes(4), 8);
+            assert_eq!(default_worker_lanes(64), 8);
         }
         assert_eq!(default_scheduler_threads(1), 1);
         assert_eq!(default_scheduler_threads(64), 2);
@@ -235,10 +233,7 @@ mod tests {
         for (value, expected_threads) in [("1", 35), ("16", 50), ("32", 66)] {
             let calls = parse_process_calls(Some(OsStr::new(value))).expect("valid process calls");
             assert_eq!(
-                blocking_threads(
-                    calls,
-                    crate::tools::bash::detached::DEFAULT_DETACHED_CALLS
-                ),
+                blocking_threads(calls, crate::tools::bash::detached::DEFAULT_DETACHED_CALLS),
                 expected_threads
             );
         }
@@ -474,7 +469,11 @@ mod tests {
 
         assert!(resources.try_admit_process().is_none());
         task.abort();
-        assert!(task.await.expect_err("task must be cancelled").is_cancelled());
+        assert!(
+            task.await
+                .expect_err("task must be cancelled")
+                .is_cancelled()
+        );
         assert!(resources.try_admit_process().is_some());
     }
 

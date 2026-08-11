@@ -349,7 +349,7 @@ fn modern_lifecycle_serves_a_tool_call_and_shuts_down_at_eof() {
         .as_str()
         .expect("read text");
     assert!(read_text.contains("Path: "));
-    assert!(read_text.contains("1\tinclude!(\"cli/transport.rs\");"));
+    assert!(read_text.contains("1\tmod cli;"));
     assert!(read_text.ends_with("Complete."));
     assert!(
         response["result"].get("structuredContent").is_none(),
@@ -1196,7 +1196,7 @@ fn default_compatibility_uses_native_legacy_initialize_lifecycle() {
         read["result"]["content"][0]["text"]
             .as_str()
             .expect("read text")
-            .contains("1\tinclude!(\"cli/transport.rs\");")
+            .contains("1\tmod cli;")
     );
     assert!(
         read["result"].get("structuredContent").is_none(),

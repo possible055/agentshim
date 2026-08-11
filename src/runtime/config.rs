@@ -1,7 +1,4 @@
-use std::{env, ffi::OsStr, io, sync::Arc};
-
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tokio_util::sync::CancellationToken;
+use std::{env, ffi::OsStr, io};
 
 pub const MAX_READ_ONLY_CALLS: usize = 16;
 pub const MAX_SEARCH_LANES: usize = 16;
@@ -19,12 +16,12 @@ pub const MAX_PDF_TEXT_MEMORY_BYTES: usize = 128 * 1024 * 1024;
 pub const DEFAULT_PDF_IMAGE_MEMORY_BYTES: usize = 96 * 1024 * 1024;
 pub const MIN_PDF_IMAGE_MEMORY_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_PDF_IMAGE_MEMORY_BYTES: usize = 192 * 1024 * 1024;
-const MEMORY_PERMIT_BYTES: usize = 1024;
-const MEMORY_GROWTH_BYTES: usize = 1024 * 1024;
+pub(super) const MEMORY_PERMIT_BYTES: usize = 1024;
+pub(super) const MEMORY_GROWTH_BYTES: usize = 1024 * 1024;
 /// PDF work is expensive enough that one call at a time is the whole admission policy.
 /// Not configurable in this version: there is no demonstrated need to tune it, and an
 /// environment variable would be one more way to defeat the resource contract.
-const MAX_PDF_CALLS: usize = 1;
+pub(super) const MAX_PDF_CALLS: usize = 1;
 pub const PDF_GATE_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
 /// Wall-clock ceilings for the PDF work inside `execute_prepared`, excluding queue time.
 ///
@@ -160,7 +157,10 @@ impl RuntimeConfig {
     }
 }
 
-const fn global_memory_bytes(grep_memory_bytes: usize, glob_memory_bytes: usize) -> usize {
+pub(super) const fn global_memory_bytes(
+    grep_memory_bytes: usize,
+    glob_memory_bytes: usize,
+) -> usize {
     let search_memory = if grep_memory_bytes > glob_memory_bytes {
         grep_memory_bytes
     } else {
@@ -173,7 +173,7 @@ const fn global_memory_bytes(grep_memory_bytes: usize, glob_memory_bytes: usize)
     }
 }
 
-fn parse_tool_memory_bytes(
+pub(super) fn parse_tool_memory_bytes(
     value: Option<&OsStr>,
     environment: &str,
     default: usize,
@@ -189,7 +189,7 @@ fn parse_tool_memory_bytes(
 
 /// The grep/glob helper fixes one 8 MiB–1 GiB range for every caller, which cannot
 /// express the narrower per-mode PDF ranges; reusing it would silently widen them.
-fn parse_memory_bytes_in_range(
+pub(super) fn parse_memory_bytes_in_range(
     value: Option<&OsStr>,
     environment: &str,
     default: usize,
@@ -211,7 +211,7 @@ fn parse_memory_bytes_in_range(
     }
 }
 
-fn parse_process_calls(value: Option<&OsStr>) -> io::Result<usize> {
+pub(super) fn parse_process_calls(value: Option<&OsStr>) -> io::Result<usize> {
     match value {
         None => Ok(DEFAULT_PROCESS_CALLS),
         Some(value) => value
@@ -230,20 +230,20 @@ fn parse_process_calls(value: Option<&OsStr>) -> io::Result<usize> {
     }
 }
 
-fn blocking_threads(process_calls: usize, detached_calls: usize) -> usize {
+pub(super) fn blocking_threads(process_calls: usize, detached_calls: usize) -> usize {
     process_calls + MAX_READ_ONLY_CALLS + detached_calls + TRANSPORT_BLOCKING_THREADS
 }
 
 #[cfg(windows)]
-fn default_worker_lanes(available: usize) -> usize {
+pub(super) fn default_worker_lanes(available: usize) -> usize {
     available.saturating_mul(4).clamp(1, MAX_SEARCH_LANES)
 }
 
 #[cfg(not(windows))]
-fn default_worker_lanes(available: usize) -> usize {
+pub(super) fn default_worker_lanes(available: usize) -> usize {
     available.saturating_mul(2).clamp(1, 8)
 }
 
-fn default_scheduler_threads(available: usize) -> usize {
+pub(super) fn default_scheduler_threads(available: usize) -> usize {
     available.clamp(1, 2)
 }

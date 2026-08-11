@@ -1,11 +1,23 @@
+use std::{
+    cmp::Ordering,
+    io,
+    path::{Component, Path, PathBuf},
+};
+
+use super::access::batch_parent;
+
+#[cfg(windows)]
+static VALIDATED_VOLUMES: std::sync::OnceLock<std::sync::Mutex<Vec<Vec<u16>>>> =
+    std::sync::OnceLock::new();
+
 #[derive(Clone, Debug)]
 pub struct ResolvedPath {
-    key: PathBuf,
+    pub(super) key: PathBuf,
     capability_key: Option<PathBuf>,
-    absolute: PathBuf,
+    pub(super) absolute: PathBuf,
     sort_key: PathSortKey,
     slash_path: std::sync::OnceLock<Option<String>>,
-    backend: PathBackend,
+    pub(super) backend: PathBackend,
 }
 
 impl PartialEq for ResolvedPath {
@@ -21,7 +33,7 @@ impl PartialEq for ResolvedPath {
 impl Eq for ResolvedPath {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PathBackend {
+pub(super) enum PathBackend {
     Repository,
     Codex(usize),
     Ambient,
@@ -92,11 +104,11 @@ impl ResolvedPath {
         }
     }
 
-    fn capability_key(&self) -> &Path {
+    pub(super) fn capability_key(&self) -> &Path {
         self.capability_key.as_deref().unwrap_or(&self.key)
     }
 
-    fn repository(absolute: PathBuf, key: PathBuf) -> Self {
+    pub(super) fn repository(absolute: PathBuf, key: PathBuf) -> Self {
         Self {
             sort_key: PathSortKey::new(&key),
             slash_path: std::sync::OnceLock::new(),
@@ -107,7 +119,7 @@ impl ResolvedPath {
         }
     }
 
-    fn ambient(absolute: PathBuf, key: PathBuf) -> Self {
+    pub(super) fn ambient(absolute: PathBuf, key: PathBuf) -> Self {
         Self {
             sort_key: PathSortKey::new(&key),
             slash_path: std::sync::OnceLock::new(),
@@ -118,7 +130,12 @@ impl ResolvedPath {
         }
     }
 
-    fn codex(absolute: PathBuf, key: PathBuf, capability_key: PathBuf, index: usize) -> Self {
+    pub(super) fn codex(
+        absolute: PathBuf,
+        key: PathBuf,
+        capability_key: PathBuf,
+        index: usize,
+    ) -> Self {
         Self {
             sort_key: PathSortKey::new(&key),
             slash_path: std::sync::OnceLock::new(),
@@ -219,7 +236,7 @@ pub enum PathError {
     UnsupportedLocation,
 }
 
-fn normalize_relative(path: &Path) -> Result<PathBuf, PathError> {
+pub(super) fn normalize_relative(path: &Path) -> Result<PathBuf, PathError> {
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
@@ -236,7 +253,7 @@ fn normalize_relative(path: &Path) -> Result<PathBuf, PathError> {
     Ok(normalized)
 }
 
-fn normalize_absolute(path: &Path) -> Result<PathBuf, PathError> {
+pub(super) fn normalize_absolute(path: &Path) -> Result<PathBuf, PathError> {
     if !path.is_absolute() {
         return Err(PathError::AmbiguousPrefix);
     }
@@ -264,7 +281,7 @@ fn normalize_absolute(path: &Path) -> Result<PathBuf, PathError> {
 }
 
 #[cfg(windows)]
-fn validate_ambient_path(path: &Path) -> Result<(), PathError> {
+pub(super) fn validate_ambient_path(path: &Path) -> Result<(), PathError> {
     use std::path::Prefix;
 
     let Some(Component::Prefix(prefix)) = path.components().next() else {
@@ -277,7 +294,7 @@ fn validate_ambient_path(path: &Path) -> Result<(), PathError> {
 }
 
 #[cfg(not(windows))]
-fn relative_from_absolute(root: &Path, absolute: &Path) -> Result<PathBuf, PathError> {
+pub(super) fn relative_from_absolute(root: &Path, absolute: &Path) -> Result<PathBuf, PathError> {
     absolute
         .strip_prefix(root)
         .map(Path::to_path_buf)
@@ -285,7 +302,7 @@ fn relative_from_absolute(root: &Path, absolute: &Path) -> Result<PathBuf, PathE
 }
 
 #[cfg(windows)]
-fn relative_from_absolute(root: &Path, absolute: &Path) -> Result<PathBuf, PathError> {
+pub(super) fn relative_from_absolute(root: &Path, absolute: &Path) -> Result<PathBuf, PathError> {
     let root_components = root.components().collect::<Vec<_>>();
     let absolute_components = absolute.components().collect::<Vec<_>>();
     if absolute_components.len() < root_components.len()
@@ -370,7 +387,7 @@ fn platform_sort_key(path: &Path) -> String {
 }
 
 #[cfg(unix)]
-fn reject_nul(path: &Path) -> Result<(), PathError> {
+pub(super) fn reject_nul(path: &Path) -> Result<(), PathError> {
     use std::os::unix::ffi::OsStrExt;
 
     if path.as_os_str().as_bytes().contains(&0) {
@@ -381,7 +398,7 @@ fn reject_nul(path: &Path) -> Result<(), PathError> {
 }
 
 #[cfg(windows)]
-fn reject_nul(path: &Path) -> Result<(), PathError> {
+pub(super) fn reject_nul(path: &Path) -> Result<(), PathError> {
     use std::os::windows::ffi::OsStrExt;
 
     if path.as_os_str().encode_wide().any(|unit| unit == 0) {
@@ -392,7 +409,7 @@ fn reject_nul(path: &Path) -> Result<(), PathError> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn reject_nul(path: &Path) -> Result<(), PathError> {
+pub(super) fn reject_nul(path: &Path) -> Result<(), PathError> {
     if path.to_string_lossy().contains('\0') {
         Err(PathError::Nul)
     } else {
@@ -401,7 +418,7 @@ fn reject_nul(path: &Path) -> Result<(), PathError> {
 }
 
 #[cfg(windows)]
-fn windows_component_eq(left: Component<'_>, right: Component<'_>) -> bool {
+pub(super) fn windows_component_eq(left: Component<'_>, right: Component<'_>) -> bool {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use std::path::Prefix;
@@ -452,7 +469,7 @@ fn windows_component_eq(left: Component<'_>, right: Component<'_>) -> bool {
 }
 
 #[cfg(windows)]
-fn validate_platform_root(path: &Path) -> io::Result<()> {
+pub(super) fn validate_platform_root(path: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         GetDriveTypeW, GetVolumeInformationW, GetVolumePathNameW,
@@ -557,5 +574,3 @@ fn validate_windows_version() -> io::Result<()> {
     }
     Ok(())
 }
-
-include!("tests.rs");

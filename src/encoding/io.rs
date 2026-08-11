@@ -1,11 +1,9 @@
-use std::{
-    borrow::Cow,
-    io::{self, Read},
-};
+use std::io::{self, Read};
 
-use chardetng::{EncodingDetector, Iso2022JpDetection, Utf8Detection};
-use encoding_rs::{BIG5, Decoder, DecoderResult, Encoding, GBK, UTF_8, UTF_16BE, UTF_16LE};
+use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE};
 use tokio_util::sync::CancellationToken;
+
+use super::decoder::{StrictDecoder, detect_encoding};
 
 const DECODE_CHUNK_BYTES: usize = 64 * 1024;
 
@@ -28,7 +26,7 @@ impl SourceEncoding {
         }
     }
 
-    fn encoding(self) -> &'static Encoding {
+    pub(super) fn encoding(self) -> &'static Encoding {
         match self {
             Self::Utf8 => UTF_8,
             Self::Utf16Le => UTF_16LE,

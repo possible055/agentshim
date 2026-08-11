@@ -2,7 +2,7 @@ use std::{
     fmt,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
-        OnceLock,
+        Arc, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
@@ -19,7 +19,7 @@ pub struct FileWorkPool {
 }
 
 impl FileWorkPool {
-    fn new(parallelism: usize) -> Self {
+    pub(super) fn new(parallelism: usize) -> Self {
         let extra_threads = parallelism.saturating_sub(1);
         let poisoned = Arc::new(AtomicBool::new(false));
         let poison_warning_emitted = Arc::new(AtomicBool::new(false));
@@ -44,10 +44,7 @@ impl FileWorkPool {
     #[must_use]
     pub fn try_credit(&self) -> Option<FileWorkCredit> {
         if self.poisoned.load(Ordering::Acquire) {
-            if !self
-                .poison_warning_emitted
-                .swap(true, Ordering::AcqRel)
-            {
+            if !self.poison_warning_emitted.swap(true, Ordering::AcqRel) {
                 tracing::warn!(target: "codexshim", event = "file_work_pool_poisoned", outcome = "inline_fallback");
             }
             return None;
@@ -138,12 +135,12 @@ impl FileWorkPool {
     }
 
     #[cfg(test)]
-    fn available_credits(&self) -> usize {
+    pub(super) fn available_credits(&self) -> usize {
         self.credits.available.load(Ordering::Acquire)
     }
 
     #[cfg(test)]
-    fn is_initialized(&self) -> bool {
+    pub(super) fn is_initialized(&self) -> bool {
         self.pool.get().is_some()
     }
 

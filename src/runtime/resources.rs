@@ -1,3 +1,16 @@
+use std::sync::Arc;
+
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio_util::sync::CancellationToken;
+
+use super::{
+    config::{
+        MAX_OPEN_FILES, MAX_PDF_CALLS, MAX_READ_ONLY_CALLS, MEMORY_GROWTH_BYTES,
+        MEMORY_PERMIT_BYTES, PDF_GATE_WAIT, RuntimeConfig,
+    },
+    file_work::FileWorkPool,
+};
+
 #[derive(Clone, Debug)]
 pub struct RuntimeResources {
     config: RuntimeConfig,
@@ -187,7 +200,6 @@ impl RuntimeResources {
 }
 
 impl RuntimeResources {
-
     #[must_use]
     pub fn try_reserve_memory(&self, bytes: usize) -> Option<OwnedSemaphorePermit> {
         let permits = bytes
@@ -223,5 +235,3 @@ async fn acquire(
         }
     }
 }
-
-include!("tests.rs");

@@ -1,3 +1,10 @@
+use std::borrow::Cow;
+
+use chardetng::{EncodingDetector, Iso2022JpDetection, Utf8Detection};
+use encoding_rs::{BIG5, Decoder, DecoderResult, Encoding, GBK, UTF_8, UTF_16BE, UTF_16LE};
+
+use super::io::{DecodeError, SourceEncoding};
+
 const MIN_AUTODETECT_NON_ASCII_BYTES: usize = 8;
 
 pub(crate) fn detect_legacy_encoding(
@@ -43,7 +50,7 @@ fn prefix_is_utf8(prefix: &[u8]) -> bool {
     }
 }
 
-fn detect_encoding(
+pub(super) fn detect_encoding(
     prefix: &[u8],
     explicit: Option<&str>,
 ) -> Result<(SourceEncoding, usize), DecodeError> {
@@ -79,13 +86,13 @@ fn detect_encoding(
     Ok((source, 0))
 }
 
-enum StrictDecoder {
+pub(super) enum StrictDecoder {
     Utf8 { carry: Vec<u8> },
     Other(Decoder),
 }
 
 impl StrictDecoder {
-    fn new(source: SourceEncoding) -> Self {
+    pub(super) fn new(source: SourceEncoding) -> Self {
         if source == SourceEncoding::Utf8 {
             Self::Utf8 {
                 carry: Vec::with_capacity(3),
@@ -95,7 +102,7 @@ impl StrictDecoder {
         }
     }
 
-    fn decode<'input>(
+    pub(super) fn decode<'input>(
         &mut self,
         input: &'input [u8],
         is_last: bool,
@@ -167,5 +174,3 @@ fn decode_other(decoder: &mut Decoder, input: &[u8], is_last: bool) -> Result<St
         }
     }
 }
-
-include!("tests.rs");

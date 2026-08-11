@@ -1,40 +1,39 @@
 use std::{
     collections::{BTreeMap, VecDeque},
-    env, fs,
-    fs::{File, OpenOptions},
-    io,
-    io::{BufRead, BufReader, Write},
-    path::{Path, PathBuf},
+    env, io,
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-        mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
+        mpsc::{self, Receiver, SyncSender, TrySendError},
     },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
-use chrono::{Days, NaiveDate, Utc};
+use chrono::Utc;
 use serde_json::{Map, Value, json};
 use tracing::{Event, Subscriber};
 use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
 use uuid::Uuid;
+
+use super::storage::{automatic_maintenance, prepare_directory, writer_loop};
 
 pub const LOG_MODE_ENV: &str = "CODEXSHIM_LOG_MODE";
 pub const LOG_DIR_ENV: &str = "CODEXSHIM_LOG_DIR";
 const SCHEMA_VERSION: u64 = 1;
 const FLIGHT_RECORDS: usize = 64;
 const CHANNEL_BATCHES: usize = 1_024;
-const MAX_BATCH_RECORDS: usize = FLIGHT_RECORDS + 1;
+pub(super) const MAX_BATCH_RECORDS: usize = FLIGHT_RECORDS + 1;
 const MAX_QUEUED_BYTES: usize = 8 * 1024 * 1024;
-const WRITER_BATCH_WAIT: Duration = Duration::from_millis(10);
-const LOCK_WAIT: Duration = Duration::from_secs(1);
-const LOCK_RETRY: Duration = Duration::from_millis(5);
-const PART_BYTES: u64 = 64 * 1024 * 1024;
-const DAY_BYTES: u64 = 128 * 1024 * 1024;
-const TOTAL_BYTES: u64 = 512 * 1024 * 1024;
-const RETENTION_DAYS: u64 = 30;
-const LINE_BYTES: usize = 8 * 1024;
+pub(super) const WRITER_BATCH_WAIT: Duration = Duration::from_millis(10);
+pub(super) const LOCK_WAIT: Duration = Duration::from_secs(1);
+pub(super) const LOCK_RETRY: Duration = Duration::from_millis(5);
+pub(super) const PART_BYTES: u64 = 64 * 1024 * 1024;
+pub(super) const DAY_BYTES: u64 = 128 * 1024 * 1024;
+pub(super) const TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+pub(super) const RETENTION_DAYS: u64 = 30;
+pub(super) const LINE_BYTES: usize = 8 * 1024;
 const DIAGNOSTIC_BYTES: usize = 2 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -226,12 +225,12 @@ fn truncate_utf8(value: &str, limit: usize) -> String {
     format!("{}...", &value[..end])
 }
 
-type Record = Map<String, Value>;
+pub(super) type Record = Map<String, Value>;
 type Batch = Vec<Record>;
 
-struct QueuedBatch {
-    records: Batch,
-    charge: usize,
+pub(super) struct QueuedBatch {
+    pub(super) records: Batch,
+    pub(super) charge: usize,
 }
 
 struct Recorder {
@@ -404,8 +403,7 @@ impl LazyWriter {
             *state = WriterState::Disabled;
             return Err(error);
         }
-        let WriterState::Pending(receiver) =
-            std::mem::replace(&mut *state, WriterState::Disabled)
+        let WriterState::Pending(receiver) = std::mem::replace(&mut *state, WriterState::Disabled)
         else {
             unreachable!("pending diagnostics writer state changed while locked");
         };
@@ -610,3 +608,7 @@ impl Drop for DiagnosticsGuard {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests;

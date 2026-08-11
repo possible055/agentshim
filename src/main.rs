@@ -1,5 +1,13 @@
-include!("cli/transport.rs");
-include!("cli.rs");
+mod cli;
+
+use std::{env, process::ExitCode};
+
+use cli::{CliCommand, parse_command, run, usage};
+use codexshim::{
+    DiagnosticsConfig, DiagnosticsGuard, LogMode, MAX_READ_ONLY_CALLS, RuntimeLimits,
+    bounded_diagnostic, capacity_bytes, purge, retention_days, status,
+};
+use tracing_subscriber::prelude::*;
 
 fn main() -> ExitCode {
     let command = match parse_command(env::args_os().skip(1)) {
@@ -130,5 +138,3 @@ fn run_logs_command(command: &CliCommand) -> ExitCode {
         }
     }
 }
-
-include!("cli/tests.rs");

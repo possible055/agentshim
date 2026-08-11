@@ -1,2 +1,11 @@
-include!("encoding/io.rs");
-include!("encoding/decoder.rs");
+mod decoder;
+mod io;
+
+pub(crate) use decoder::detect_legacy_encoding;
+pub(crate) use io::{DecodeControl, DecodeError, SourceEncoding, decode_stream};
+
+#[cfg(test)]
+use io::decode_to_string;
+
+#[cfg(test)]
+mod tests;

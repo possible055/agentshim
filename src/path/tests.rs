@@ -2,7 +2,7 @@
 mod tests {
     use std::{fs, path::Path, sync::Arc};
 
-    use super::{FileAccess, PathError, ReadScope, RepositoryRoot};
+    use crate::path::{FileAccess, PathError, ReadScope, RepositoryRoot};
 
     #[test]
     fn read_scope_parsing_is_explicit_and_fail_closed() {
@@ -65,21 +65,14 @@ mod tests {
         assert!(!skill.is_ambient());
         assert!(access.metadata_kind(&skill).expect("metadata").is_file);
         let walked = access
-            .resolve_walked_entry(
-                &skill_root,
-                Path::new("example/SKILL.md"),
-                skill.absolute(),
-            )
+            .resolve_walked_entry(&skill_root, Path::new("example/SKILL.md"), skill.absolute())
             .expect("walked skill entry");
         let external = access
             .resolve_external_entry(&skill_root, skill.absolute())
             .expect("external skill entry");
         assert_eq!(walked, external);
         assert_eq!(walked.capability_key(), external.capability_key());
-        assert_eq!(
-            external.key(),
-            Path::new("example/SKILL.md")
-        );
+        assert_eq!(external.key(), Path::new("example/SKILL.md"));
         assert_eq!(
             access
                 .resolve(&unmanaged.path().join("secret.txt"))
@@ -127,8 +120,7 @@ mod tests {
     fn walked_repository_entries_match_general_resolution() {
         let fixture = tempfile::tempdir().expect("create fixture");
         fs::create_dir(fixture.path().join("src")).expect("create src");
-        fs::write(fixture.path().join("src/lib.rs"), "pub fn fixture() {}")
-            .expect("write fixture");
+        fs::write(fixture.path().join("src/lib.rs"), "pub fn fixture() {}").expect("write fixture");
         let access = FileAccess::new(
             Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
             ReadScope::Normal,
@@ -150,8 +142,7 @@ mod tests {
     fn walked_repository_entries_with_curdir_use_normalized_resolution() {
         let fixture = tempfile::tempdir().expect("create fixture");
         fs::create_dir(fixture.path().join("src")).expect("create src");
-        fs::write(fixture.path().join("src/lib.rs"), "pub fn fixture() {}")
-            .expect("write fixture");
+        fs::write(fixture.path().join("src/lib.rs"), "pub fn fixture() {}").expect("write fixture");
         let access = FileAccess::new(
             Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
             ReadScope::Normal,
@@ -171,8 +162,7 @@ mod tests {
     fn walked_repository_absolute_path_with_curdir_is_normalized_even_when_key_is_clean() {
         let fixture = tempfile::tempdir().expect("create fixture");
         fs::create_dir(fixture.path().join("src")).expect("create src");
-        fs::write(fixture.path().join("src/lib.rs"), "pub fn fixture() {}")
-            .expect("write fixture");
+        fs::write(fixture.path().join("src/lib.rs"), "pub fn fixture() {}").expect("write fixture");
         let access = FileAccess::new(
             Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
             ReadScope::Normal,
@@ -316,7 +306,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_prefix_equivalence_is_narrow() {
-        use super::windows_component_eq;
+        use crate::path::resolved::windows_component_eq;
 
         fn prefix(path: &Path) -> std::path::Component<'_> {
             path.components().next().expect("path prefix")

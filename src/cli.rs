@@ -1,16 +1,28 @@
-fn usage() {
+use std::{error::Error, ffi::OsString};
+
+use codexshim::{CodexShim, MAX_READ_ONLY_CALLS, ReadScope, RuntimeLimits, bash_report};
+use rmcp::{ServiceExt, transport::stdio};
+
+use self::transport::{DiagnosticWriter, ReceiveFrameReader, ShutdownReader};
+
+mod transport;
+
+#[cfg(test)]
+mod tests;
+
+pub(super) fn usage() {
     eprintln!(
         "Usage: codexshim <serve|doctor> [--read-scope <normal|unrestricted>] | logs <status|purge> | --version"
     );
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct ServeOptions {
+pub(super) struct ServeOptions {
     read_scope: ReadScope,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum CliCommand {
+pub(super) enum CliCommand {
     Serve(ServeOptions),
     Doctor(ServeOptions),
     LogsStatus,
@@ -18,7 +30,9 @@ enum CliCommand {
     Version,
 }
 
-fn parse_command(args: impl IntoIterator<Item = OsString>) -> Result<CliCommand, String> {
+pub(super) fn parse_command(
+    args: impl IntoIterator<Item = OsString>,
+) -> Result<CliCommand, String> {
     let mut args = args.into_iter();
     let command = args.next().ok_or_else(|| "missing command".to_owned())?;
     if command == "--version" || command == "-V" {
@@ -120,7 +134,7 @@ fn flag_value<'a>(
     Ok((argument, value))
 }
 
-async fn run(config: RuntimeLimits, command: CliCommand) -> Result<(), Box<dyn Error>> {
+pub(super) async fn run(config: RuntimeLimits, command: CliCommand) -> Result<(), Box<dyn Error>> {
     match command {
         CliCommand::Serve(options) => {
             let read_scope = options.read_scope;
@@ -159,10 +173,7 @@ async fn run(config: RuntimeLimits, command: CliCommand) -> Result<(), Box<dyn E
             );
             println!("read scope: {}", service.read_scope());
             println!("read-only calls: {MAX_READ_ONLY_CALLS}");
-            println!(
-                "process calls: {}",
-                service.runtime_limits().process_calls
-            );
+            println!("process calls: {}", service.runtime_limits().process_calls);
             println!(
                 "detached calls: {}",
                 service.runtime_limits().detached_calls
@@ -177,10 +188,7 @@ async fn run(config: RuntimeLimits, command: CliCommand) -> Result<(), Box<dyn E
                 Err(error) => println!("bash: unavailable ({error})"),
             }
             println!("process lifecycle: ok");
-            println!(
-                "worker lanes: {}",
-                service.runtime_limits().worker_lanes
-            );
+            println!("worker lanes: {}", service.runtime_limits().worker_lanes);
             println!(
                 "blocking threads: {}",
                 service.runtime_limits().blocking_threads

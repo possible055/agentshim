@@ -1,33 +1,22 @@
 use std::{
-    env,
-    error::Error,
-    ffi::OsString,
     io,
     pin::Pin,
-    process::ExitCode,
     task::{Context, Poll},
 };
 
-use codexshim::{
-    CodexShim, DiagnosticsConfig, DiagnosticsGuard, LogMode, MAX_READ_ONLY_CALLS,
-    ReadScope, RuntimeLimits, bash_report, bounded_diagnostic, capacity_bytes, purge,
-    retention_days, status,
-};
-use rmcp::{ServiceExt, transport::stdio};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_util::sync::CancellationToken;
-use tracing_subscriber::prelude::*;
 
-const MAX_RECEIVE_FRAME_BYTES: usize = 8 * 1024 * 1024;
+pub(super) const MAX_RECEIVE_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
-struct ReceiveFrameReader<R> {
+pub(super) struct ReceiveFrameReader<R> {
     inner: R,
     frame_bytes: usize,
     failed: bool,
 }
 
 impl<R> ReceiveFrameReader<R> {
-    fn new(inner: R) -> Self {
+    pub(super) fn new(inner: R) -> Self {
         Self {
             inner,
             frame_bytes: 0,
@@ -71,16 +60,14 @@ impl<R: AsyncRead + Unpin> AsyncRead for ReceiveFrameReader<R> {
 fn frame_too_large() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        format!(
-            "encoded JSON-RPC frame exceeds {MAX_RECEIVE_FRAME_BYTES} bytes before delimiter"
-        ),
+        format!("encoded JSON-RPC frame exceeds {MAX_RECEIVE_FRAME_BYTES} bytes before delimiter"),
     )
 }
 
-struct ShutdownReader<R> {
-    inner: R,
-    shutdown: CancellationToken,
-    termination_reported: bool,
+pub(super) struct ShutdownReader<R> {
+    pub(super) inner: R,
+    pub(super) shutdown: CancellationToken,
+    pub(super) termination_reported: bool,
 }
 
 impl<R: AsyncRead + Unpin> AsyncRead for ShutdownReader<R> {
@@ -112,7 +99,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for ShutdownReader<R> {
     }
 }
 
-struct DiagnosticWriter<W>(W);
+pub(super) struct DiagnosticWriter<W>(pub(super) W);
 
 impl<W: AsyncWrite + Unpin> AsyncWrite for DiagnosticWriter<W> {
     fn poll_write(

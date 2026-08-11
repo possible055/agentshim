@@ -1,4 +1,24 @@
-fn writer_loop(
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{self, BufRead, BufReader, Write},
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        mpsc::{Receiver, RecvTimeoutError},
+    },
+    thread,
+    time::{Duration, Instant},
+};
+
+use chrono::{Days, NaiveDate, Utc};
+use serde_json::{Value, json};
+
+use super::core::{
+    DAY_BYTES, DiagnosticsConfig, LINE_BYTES, LOCK_RETRY, LOCK_WAIT, LogMode, MAX_BATCH_RECORDS,
+    PART_BYTES, QueuedBatch, RETENTION_DAYS, Record, TOTAL_BYTES, WRITER_BATCH_WAIT,
+};
+
+pub(super) fn writer_loop(
     directory: &Path,
     receiver: &Receiver<QueuedBatch>,
     dropped: &AtomicU64,
@@ -56,7 +76,7 @@ fn writer_loop(
     }
 }
 
-fn prepare_directory(directory: &Path) -> io::Result<()> {
+pub(super) fn prepare_directory(directory: &Path) -> io::Result<()> {
     fs::create_dir_all(directory)?;
     #[cfg(unix)]
     {
@@ -66,7 +86,7 @@ fn prepare_directory(directory: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn serialize_batch(batch: &[Record]) -> io::Result<Vec<u8>> {
+pub(super) fn serialize_batch(batch: &[Record]) -> io::Result<Vec<u8>> {
     let mut output = Vec::new();
     for record in batch {
         let mut line = serde_json::to_vec(record).map_err(io::Error::other)?;
@@ -91,7 +111,7 @@ fn serialize_batch(batch: &[Record]) -> io::Result<Vec<u8>> {
     Ok(output)
 }
 
-fn write_batch(directory: &Path, batch: &[Record]) -> io::Result<()> {
+pub(super) fn write_batch(directory: &Path, batch: &[Record]) -> io::Result<()> {
     if batch.is_empty() {
         return Ok(());
     }
@@ -105,7 +125,7 @@ fn write_batch(directory: &Path, batch: &[Record]) -> io::Result<()> {
     result.and(unlock)
 }
 
-fn append_rotated(directory: &Path, date: NaiveDate, bytes: &[u8]) -> io::Result<()> {
+pub(super) fn append_rotated(directory: &Path, date: NaiveDate, bytes: &[u8]) -> io::Result<()> {
     let incoming = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     let mut daily = 0_u64;
     for part in 1..=2 {
@@ -125,7 +145,7 @@ fn append_rotated(directory: &Path, date: NaiveDate, bytes: &[u8]) -> io::Result
     Err(io::Error::other("daily diagnostic log limit reached"))
 }
 
-fn log_path(directory: &Path, date: NaiveDate, part: u8) -> PathBuf {
+pub(super) fn log_path(directory: &Path, date: NaiveDate, part: u8) -> PathBuf {
     directory.join(format!("codexshim-{date}.{part:04}.jsonl"))
 }
 
@@ -236,13 +256,13 @@ fn unlock_file(file: &File) -> io::Result<()> {
 }
 
 #[derive(Clone, Debug)]
-struct LogFile {
-    path: PathBuf,
-    date: NaiveDate,
-    bytes: u64,
+pub(super) struct LogFile {
+    pub(super) path: PathBuf,
+    pub(super) date: NaiveDate,
+    pub(super) bytes: u64,
 }
 
-fn list_logs(directory: &Path) -> io::Result<Vec<LogFile>> {
+pub(super) fn list_logs(directory: &Path) -> io::Result<Vec<LogFile>> {
     let mut logs = Vec::new();
     if !directory.exists() {
         return Ok(logs);
@@ -271,7 +291,7 @@ fn list_logs(directory: &Path) -> io::Result<Vec<LogFile>> {
     Ok(logs)
 }
 
-fn parse_log_date(name: &str) -> Option<NaiveDate> {
+pub(super) fn parse_log_date(name: &str) -> Option<NaiveDate> {
     let remainder = name.strip_prefix("codexshim-")?;
     let (date, suffix) = remainder.split_at_checked(10)?;
     let part = suffix.strip_prefix('.')?.strip_suffix(".jsonl")?;
@@ -281,7 +301,7 @@ fn parse_log_date(name: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()
 }
 
-fn automatic_maintenance(directory: &Path) -> io::Result<()> {
+pub(super) fn automatic_maintenance(directory: &Path) -> io::Result<()> {
     let lock = open_private_append(&directory.join(".maintenance.lock"))?;
     if !try_lock_file(&lock)? {
         return Ok(());
@@ -320,7 +340,7 @@ pub struct PurgeReport {
     pub bytes: u64,
 }
 
-fn purge_directory(directory: &Path, today: NaiveDate) -> io::Result<PurgeReport> {
+pub(super) fn purge_directory(directory: &Path, today: NaiveDate) -> io::Result<PurgeReport> {
     let cutoff = today
         .checked_sub_days(Days::new(RETENTION_DAYS))
         .unwrap_or(NaiveDate::MIN);
@@ -413,5 +433,3 @@ pub const fn retention_days() -> u64 {
 pub const fn capacity_bytes() -> u64 {
     TOTAL_BYTES
 }
-
-include!("tests.rs");
