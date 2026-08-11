@@ -1,5 +1,5 @@
-struct PageLine {
-    text: String,
+pub(super) struct PageLine {
+    pub(super) text: String,
     fallback: Option<String>,
 }
 
@@ -11,19 +11,19 @@ impl PageLine {
     }
 }
 
-struct Page {
-    lines: Vec<PageLine>,
-    total: usize,
+pub(super) struct Page {
+    pub(super) lines: Vec<PageLine>,
+    pub(super) total: usize,
     skipped: usize,
     offset: usize,
     retain: usize,
-    charged: usize,
-    retaining: bool,
+    pub(super) charged: usize,
+    pub(super) retaining: bool,
     traversal: TraversalSummary,
 }
 
 impl Page {
-    fn new(request: &GrepRequest, traversal: TraversalSummary) -> Self {
+    pub(super) fn new(request: &GrepRequest, traversal: TraversalSummary) -> Self {
         Self {
             lines: Vec::new(),
             total: 0,
@@ -36,7 +36,7 @@ impl Page {
         }
     }
 
-    fn reduce(
+    pub(super) fn reduce(
         &mut self,
         outcome: FileOutcome,
         mode: GrepMode,
@@ -81,8 +81,8 @@ impl Page {
                         '-'
                     };
                     self.push_entry_lazy(|| {
-                        let absolute = absolute
-                            .get_or_insert_with(|| display_outcome_path(path.as_deref()));
+                        let absolute =
+                            absolute.get_or_insert_with(|| display_outcome_path(path.as_deref()));
                         let fallback = format!(
                             "{absolute}{separator}{}{separator}{CONTENT_OMISSION}",
                             record.line
@@ -104,7 +104,7 @@ impl Page {
     }
 
     #[cfg(test)]
-    fn push_entry(&mut self, line: String, detailed_fallback: Option<String>) {
+    pub(super) fn push_entry(&mut self, line: String, detailed_fallback: Option<String>) {
         self.push_entry_lazy(|| (line, detailed_fallback));
     }
 
@@ -168,7 +168,7 @@ fn pagination_tail(total_skipped: usize, next_offset: Option<usize>) -> Vec<Stri
     tail
 }
 
-fn render(
+pub(super) fn render(
     request: &GrepRequest,
     page: &Page,
     cancellation: &CancellationToken,
@@ -184,8 +184,8 @@ fn render(
     let mut cap = available;
     loop {
         let total_skipped = page.skipped.saturating_add(page.traversal.skipped());
-        let next_offset = (page.offset.saturating_add(cap) < page.total)
-            .then(|| page.offset.saturating_add(cap));
+        let next_offset =
+            (page.offset.saturating_add(cap) < page.total).then(|| page.offset.saturating_add(cap));
         let tail = pagination_tail(total_skipped, next_offset);
         let mut formatter = OutputFormatter::new(String::new(), tail, limits)?;
         let mut shown = 0_usize;
@@ -230,4 +230,21 @@ fn render(
     }
 }
 
-include!("tests.rs");
+use std::io;
+
+use tokio_util::sync::CancellationToken;
+
+use crate::{
+    output::{OutputFormatter, OutputLimits},
+    path::ResolvedPath,
+    tools::ToolOutput,
+    traversal::TraversalSummary,
+};
+
+use super::{
+    file_search::{FileOutcome, RecordKind},
+    request::{
+        CONTENT_OMISSION, DEFAULT_LIMIT, GENERIC_OMISSION, GrepError, GrepMode, GrepRequest,
+        PAGE_MEMORY_BYTES,
+    },
+};

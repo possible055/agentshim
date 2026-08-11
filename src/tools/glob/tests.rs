@@ -5,12 +5,12 @@ mod tests {
     use globset::GlobBuilder;
     use tokio_util::sync::CancellationToken;
 
-    use super::{
-        GlobEntryType, GlobError, GlobMatch, GlobRequest, GlobTraversal, MAX_MATCHES, PATH_OMISSION,
-        TopK, execute, execute_with_traversal, memory_charge, record_match, render,
-    };
     #[cfg(feature = "bench-internals")]
-    use super::execute_profiled_with_traversal;
+    use crate::tools::glob::execute_profiled_with_traversal;
+    use crate::tools::glob::{
+        GlobEntryType, GlobError, GlobMatch, GlobRequest, GlobTraversal, MAX_MATCHES,
+        PATH_OMISSION, TopK, execute, execute_with_traversal, memory_charge, record_match, render,
+    };
     use crate::{
         path::{FileAccess, ReadScope, RepositoryRoot, slash_path},
         runtime::{
@@ -55,15 +55,15 @@ mod tests {
                 .absolute(),
         );
 
-        let default = execute(&root, &request("**/*"), &CancellationToken::new())
-            .expect("default glob");
+        let default =
+            execute(&root, &request("**/*"), &CancellationToken::new()).expect("default glob");
         assert!(default.lines().any(|line| line == file));
         assert!(!default.lines().any(|line| line == directory));
 
         let mut directories = request("**/*");
         directories.entry_type = Some(GlobEntryType::Directory);
-        let directories = execute(&root, &directories, &CancellationToken::new())
-            .expect("directory glob");
+        let directories =
+            execute(&root, &directories, &CancellationToken::new()).expect("directory glob");
         assert!(directories.lines().any(|line| line == directory));
         assert!(!directories.lines().any(|line| line == file));
 
@@ -110,9 +110,13 @@ mod tests {
         query.limit = Some(100);
         let output = execute(&root, &query, &CancellationToken::new()).expect("glob");
         assert!(!output.contains("Pattern:"));
-        assert!(output.starts_with(&crate::path::display_path(
-            root.resolve(std::path::Path::new("a.rs")).expect("a").absolute()
-        )));
+        assert!(
+            output.starts_with(&crate::path::display_path(
+                root.resolve(std::path::Path::new("a.rs"))
+                    .expect("a")
+                    .absolute()
+            ))
+        );
         assert!(output.ends_with("Complete."));
     }
 
@@ -156,31 +160,18 @@ mod tests {
         query.offset = Some(137);
         query.limit = Some(71);
         let cancellation = CancellationToken::new();
-        let serial = execute_with_traversal(
-            &root,
-            &query,
-            &cancellation,
-            GlobTraversal::Serial,
-        )
-        .expect("serial glob");
-        let parallel = execute_with_traversal(
-            &root,
-            &query,
-            &cancellation,
-            GlobTraversal::ParallelBatched,
-        )
-        .expect("parallel glob");
+        let serial = execute_with_traversal(&root, &query, &cancellation, GlobTraversal::Serial)
+            .expect("serial glob");
+        let parallel =
+            execute_with_traversal(&root, &query, &cancellation, GlobTraversal::ParallelBatched)
+                .expect("parallel glob");
         assert_eq!(parallel, serial);
     }
 
     #[test]
     fn literal_prefix_glob_preserves_serial_and_parallel_output() {
         let fixture = tempfile::tempdir().expect("fixture");
-        fs::write(
-            fixture.path().join(".gitignore"),
-            "src/deep/ignored.rs\n",
-        )
-        .expect("ignore");
+        fs::write(fixture.path().join(".gitignore"), "src/deep/ignored.rs\n").expect("ignore");
         fs::create_dir_all(fixture.path().join("src/deep")).expect("deep");
         fs::create_dir_all(fixture.path().join("src/sibling")).expect("sibling");
         fs::write(fixture.path().join("src/deep/a.rs"), "source").expect("a");
@@ -189,13 +180,8 @@ mod tests {
         let root = access(fixture.path());
         let query = request("src/deep/*.rs");
         let cancellation = CancellationToken::new();
-        let expected = execute_with_traversal(
-            &root,
-            &query,
-            &cancellation,
-            GlobTraversal::Serial,
-        )
-        .expect("serial glob");
+        let expected = execute_with_traversal(&root, &query, &cancellation, GlobTraversal::Serial)
+            .expect("serial glob");
 
         for traversal in [
             GlobTraversal::SerialLiteralPrefix,
@@ -234,13 +220,8 @@ mod tests {
         let root = access(fixture.path());
         let query = request("**/*.rs");
         let cancellation = CancellationToken::new();
-        let expected = execute_with_traversal(
-            &root,
-            &query,
-            &cancellation,
-            GlobTraversal::Serial,
-        )
-        .expect("serial glob");
+        let expected = execute_with_traversal(&root, &query, &cancellation, GlobTraversal::Serial)
+            .expect("serial glob");
         let profile = execute_profiled_with_traversal(
             &root,
             &query,

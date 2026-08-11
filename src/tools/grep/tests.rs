@@ -4,17 +4,15 @@ mod tests {
 
     use tokio_util::sync::CancellationToken;
 
-    use super::{
-        CANDIDATE_SOFT_TARGET_BYTES, CandidateCollection, CandidatePolicy, CaseMode,
-        GrepBenchmarkVariant,
-        GrepError, GrepMode, GrepRequest, GrepSourcePolicy, GrepTraversal, PAGE_MEMORY_BYTES, Page,
-        PathnameReopenPolicy, PlanSink, SearchPlan, build_matcher, candidate, execute,
-        execute_with_traversal,
-        execute_with_variant, render,
-        search_file, search_file_with_hook, search_file_with_variant_hook,
-    };
     #[cfg(feature = "bench-internals")]
-    use super::execute_profiled;
+    use crate::tools::grep::execute_profiled;
+    use crate::tools::grep::{
+        CANDIDATE_SOFT_TARGET_BYTES, CandidateCollection, CandidatePolicy, CaseMode,
+        GrepBenchmarkVariant, GrepError, GrepMode, GrepRequest, GrepSourcePolicy, GrepTraversal,
+        PAGE_MEMORY_BYTES, Page, PathnameReopenPolicy, PlanSink, SearchPlan, build_matcher,
+        candidate, execute, execute_with_traversal, execute_with_variant, render, search_file,
+        search_file_with_hook, search_file_with_variant_hook,
+    };
     use crate::{
         path::{FileAccess, ReadScope, RepositoryRoot},
         runtime::{MIN_TOOL_MEMORY_BYTES, MemoryReservation, RuntimeConfig, RuntimeResources},
@@ -112,8 +110,7 @@ mod tests {
         query.mode = Some(GrepMode::Count);
         let cancellation = CancellationToken::new();
         let expected = execute(&root, &query, 4, &cancellation).expect("grep");
-        let profile =
-            execute_profiled(&root, &query, 4, &cancellation).expect("profiled grep");
+        let profile = execute_profiled(&root, &query, 4, &cancellation).expect("profiled grep");
 
         assert_eq!(profile.output, expected);
         assert_eq!(profile.timings.candidate_count, 2);
@@ -137,14 +134,8 @@ mod tests {
         query.fixed_strings = Some(true);
         query.mode = Some(GrepMode::Count);
         let cancellation = CancellationToken::new();
-        let serial = execute_with_traversal(
-            &root,
-            &query,
-            4,
-            &cancellation,
-            GrepTraversal::Serial,
-        )
-        .expect("serial grep");
+        let serial = execute_with_traversal(&root, &query, 4, &cancellation, GrepTraversal::Serial)
+            .expect("serial grep");
         let parallel = execute_with_traversal(
             &root,
             &query,
@@ -167,14 +158,9 @@ mod tests {
         query.mode = Some(GrepMode::Count);
         query.glob = Some("src/*.rs".to_owned());
         let cancellation = CancellationToken::new();
-        let expected = execute_with_traversal(
-            &root,
-            &query,
-            4,
-            &cancellation,
-            GrepTraversal::Serial,
-        )
-        .expect("serial grep");
+        let expected =
+            execute_with_traversal(&root, &query, 4, &cancellation, GrepTraversal::Serial)
+                .expect("serial grep");
 
         for traversal in [
             GrepTraversal::SerialLiteralPrefix,
@@ -209,7 +195,9 @@ mod tests {
             CandidateCollection::new(CandidatePolicy::SoftTarget, usize::MAX, None);
         collection.path_retained_bytes = CANDIDATE_SOFT_TARGET_BYTES;
 
-        collection.admit(candidate).expect("soft target is not fatal");
+        collection
+            .admit(candidate)
+            .expect("soft target is not fatal");
         assert_eq!(collection.soft_target_crossings, 1);
         assert_eq!(collection.candidates.len(), 1);
     }
@@ -223,7 +211,9 @@ mod tests {
             CandidateCollection::new(CandidatePolicy::FatalCeiling, usize::MAX, None);
         collection.path_retained_bytes = CANDIDATE_SOFT_TARGET_BYTES;
 
-        let error = collection.admit(candidate).expect_err("fatal benchmark policy");
+        let error = collection
+            .admit(candidate)
+            .expect_err("fatal benchmark policy");
         assert!(matches!(error, GrepError::CandidateMemory));
     }
 
@@ -232,8 +222,7 @@ mod tests {
         let (_fixture, root) = fixture();
         let path = root.resolve(Path::new("src/a.rs")).expect("candidate path");
         let candidate = candidate(path).expect("candidate");
-        let mut oracle =
-            CandidateCollection::new(CandidatePolicy::SoftTarget, usize::MAX, None);
+        let mut oracle = CandidateCollection::new(CandidatePolicy::SoftTarget, usize::MAX, None);
         oracle.admit(candidate.clone()).expect("oracle admission");
         let limit = oracle.estimated_retained_bytes - 1;
         let mut limited = CandidateCollection::new(CandidatePolicy::SoftTarget, limit, None);
@@ -457,13 +446,7 @@ mod tests {
             GrepTraversal::ParallelBatched,
         ] {
             assert!(matches!(
-                execute_with_traversal(
-                    &root,
-                    &request("needle"),
-                    1,
-                    &cancellation,
-                    traversal
-                ),
+                execute_with_traversal(&root, &request("needle"), 1, &cancellation, traversal),
                 Err(GrepError::Cancelled)
             ));
         }
@@ -689,11 +672,7 @@ mod tests {
                 },
             )
             .expect("delete recreate outcome");
-            assert_eq!(
-                outcome.skipped,
-                pathname_reopen == PathnameReopenPolicy::On
-            );
+            assert_eq!(outcome.skipped, pathname_reopen == PathnameReopenPolicy::On);
         }
     }
-
 }

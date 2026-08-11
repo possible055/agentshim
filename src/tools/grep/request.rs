@@ -1,50 +1,41 @@
-use std::{
-    cmp::Ordering,
-    collections::{BTreeMap, VecDeque},
-    io::{self, Read, Seek, SeekFrom},
-    path::Path,
-    sync::{Arc, Condvar, Mutex},
-};
+use std::{io, sync::Arc};
 
-use cap_std::fs::File;
 use globset::GlobBuilder;
-use grep_matcher::{LineTerminator, Matcher};
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
-use grep_searcher::{
-    BinaryDetection, MmapChoice, Searcher, SearcherBuilder, Sink, SinkContext, SinkError, SinkMatch,
-};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(feature = "bench-internals")]
+use super::profile::ProfiledGrep;
+use super::{
+    candidates::{Candidate, collect_candidates},
+    file_search::SearchPlan,
+    ordered::{OrderedSearchContext, ordered_search},
+    profile::{GrepProfiler, GrepStage},
+    result::render,
+};
 use crate::{
-    output::{OutputFormatter, OutputLimits},
-    path::{FileAccess, PathError, ResolvedPath},
+    path::{FileAccess, PathError},
     runtime::{MemoryReservation, RuntimeResources},
-    sorting,
     tools::ToolOutput,
-    tools::read::FileFingerprint,
-    traversal::{
-        OwnedTraversalEntry, ParallelTraversal, TraversalControl, TraversalError, TraversalSummary,
-        prefer_parallel_root, walk, walk_parallel_batched,
-        walk_parallel_batched_with_literal_prefix, walk_with_literal_prefix,
-    },
+    traversal::TraversalError,
 };
 
-const DEFAULT_LIMIT: usize = 200;
+pub(super) const DEFAULT_LIMIT: usize = 200;
 const MAX_LIMIT: usize = 1_000;
 const MAX_CONTEXT: usize = 20;
 #[cfg(any(test, feature = "bench-internals"))]
-pub(crate) const CANDIDATE_SOFT_TARGET_BYTES: usize = 64 * 1024 * 1024;
-const MEMORY_SOURCE_BYTES: usize = 16 * 1024;
-const SEARCH_HEAP_BYTES: usize = 1024 * 1024;
-const CAPTURE_MEMORY_BYTES: usize = 1024 * 1024;
-const PAGE_MEMORY_BYTES: usize = 48 * 1024;
-const PARALLEL_BATCH_SIZE: usize = 256;
-const CONTENT_SEARCH_BATCH_SIZE: usize = 8;
-const STREAM_SEARCH_BATCH_SIZE: usize = 16;
-const UNSTABLE_SORT_MIN_CANDIDATES: usize = 10_000;
-const GENERIC_OMISSION: &str = "[grep result omitted: exceeds output budget]";
-const CONTENT_OMISSION: &str = "[line text omitted: exceeds output budget]";
+pub(super) const CANDIDATE_SOFT_TARGET_BYTES: usize = 64 * 1024 * 1024;
+pub(super) const MEMORY_SOURCE_BYTES: usize = 16 * 1024;
+pub(super) const SEARCH_HEAP_BYTES: usize = 1024 * 1024;
+pub(super) const CAPTURE_MEMORY_BYTES: usize = 1024 * 1024;
+pub(super) const PAGE_MEMORY_BYTES: usize = 48 * 1024;
+pub(super) const PARALLEL_BATCH_SIZE: usize = 256;
+pub(super) const CONTENT_SEARCH_BATCH_SIZE: usize = 8;
+pub(super) const STREAM_SEARCH_BATCH_SIZE: usize = 16;
+pub(super) const UNSTABLE_SORT_MIN_CANDIDATES: usize = 10_000;
+pub(super) const GENERIC_OMISSION: &str = "[grep result omitted: exceeds output budget]";
+pub(super) const CONTENT_OMISSION: &str = "[line text omitted: exceeds output budget]";
 #[cfg(feature = "bench-internals")]
 const BENCH_SOURCE_ENV: &str = "CODEXSHIM_BENCH_GREP_SOURCE";
 #[cfg(feature = "bench-internals")]
@@ -625,7 +616,7 @@ fn normalize_cancellation(error: GrepError) -> GrepError {
     }
 }
 
-fn build_matcher(request: &GrepRequest) -> Result<RegexMatcher, GrepError> {
+pub(super) fn build_matcher(request: &GrepRequest) -> Result<RegexMatcher, GrepError> {
     let mut builder = RegexMatcherBuilder::new();
     builder
         .fixed_strings(request.fixed_strings.unwrap_or(false))

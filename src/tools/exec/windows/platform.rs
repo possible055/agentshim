@@ -1,11 +1,67 @@
-struct PreparedStdio {
-    stdin: Pipe,
-    outputs: Vec<Pipe>,
-    attributes: AttributeList,
-    startup: STARTUPINFOEXW,
+use std::{
+    cmp::Ordering,
+    ffi::{OsStr, OsString, c_void},
+    fs::File,
+    io,
+    mem::{self, size_of},
+    os::windows::{
+        ffi::{OsStrExt, OsStringExt},
+        io::{FromRawHandle, RawHandle},
+    },
+    path::{Path, PathBuf},
+    ptr::{null, null_mut},
+    thread,
+    time::Instant,
+};
+
+use windows_sys::Win32::{
+    Foundation::{
+        CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+        WAIT_OBJECT_0, WAIT_TIMEOUT,
+    },
+    Globalization::{CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN, CompareStringOrdinal},
+    Security::SECURITY_ATTRIBUTES,
+    System::{
+        IO::{CreateIoCompletionPort, GetQueuedCompletionStatus},
+        JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_ASSOCIATE_COMPLETION_PORT, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectAssociateCompletionPortInformation,
+            JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
+            QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
+        },
+        Pipes::CreatePipe,
+        SystemInformation::GetSystemDirectoryW,
+        Threading::{
+            DeleteProcThreadAttributeList, GetExitCodeProcess, InitializeProcThreadAttributeList,
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION, ResumeThread,
+            STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
+            WaitForSingleObject,
+        },
+    },
+};
+
+use super::super::{
+    ProcessError,
+    capture::Capture,
+    resolve::{Launcher, ResolvedProgram},
+    spawn::{CLEANUP_DEADLINE, EnvironmentPlan, Streams, ThreadCompletion},
+};
+#[cfg(test)]
+use super::runner::{FailurePoint, inject_failure};
+
+const NATIVE_COMMAND_LINE_LIMIT: usize = 32_767;
+pub(super) const BATCH_COMMAND_LINE_LIMIT: usize = 8_191;
+pub(super) const TERMINATION_EXIT_CODE: u32 = 0xC0DE_CACE;
+
+pub(super) struct PreparedStdio {
+    pub(super) stdin: Pipe,
+    pub(super) outputs: Vec<Pipe>,
+    pub(super) attributes: AttributeList,
+    pub(super) startup: STARTUPINFOEXW,
 }
 
-fn prepare_stdio(streams: Streams) -> io::Result<PreparedStdio> {
+pub(super) fn prepare_stdio(streams: Streams) -> io::Result<PreparedStdio> {
     let stdin = Pipe::stdin()?;
     let outputs = (0..streams.count())
         .map(|_| Pipe::stdout())
@@ -34,7 +90,10 @@ fn prepare_stdio(streams: Streams) -> io::Result<PreparedStdio> {
     })
 }
 
-fn startup_info(inherited: [HANDLE; 3], attributes: &AttributeList) -> io::Result<STARTUPINFOEXW> {
+pub(super) fn startup_info(
+    inherited: [HANDLE; 3],
+    attributes: &AttributeList,
+) -> io::Result<STARTUPINFOEXW> {
     let mut startup = STARTUPINFOEXW::default();
     startup.StartupInfo.cb = u32::try_from(size_of::<STARTUPINFOEXW>())
         .map_err(|_| io::Error::other("STARTUPINFOEXW size overflow"))?;
@@ -48,7 +107,7 @@ fn startup_info(inherited: [HANDLE; 3], attributes: &AttributeList) -> io::Resul
 
 type ThreadResults = (io::Result<()>, Vec<Capture>);
 
-fn settle_threads(
+pub(super) fn settle_threads(
     completion: &ThreadCompletion,
     stdin: thread::JoinHandle<io::Result<()>>,
     drains: Vec<thread::JoinHandle<io::Result<Capture>>>,
@@ -70,13 +129,13 @@ fn settle_threads(
     Ok((stdin, captures))
 }
 
-struct LaunchEncoding {
-    application: Vec<u16>,
-    command_line: Vec<u16>,
+pub(super) struct LaunchEncoding {
+    pub(super) application: Vec<u16>,
+    pub(super) command_line: Vec<u16>,
 }
 
 impl LaunchEncoding {
-    fn new(resolved: &ResolvedProgram, args: &[String]) -> Result<Self, ProcessError> {
+    pub(super) fn new(resolved: &ResolvedProgram, args: &[String]) -> Result<Self, ProcessError> {
         match resolved.launcher {
             Launcher::Native => {
                 let application = nul_terminated(resolved.executable.as_os_str());
@@ -114,7 +173,7 @@ impl LaunchEncoding {
     }
 }
 
-fn finish_native_command_line(mut encoded: Vec<u16>) -> Result<Vec<u16>, ProcessError> {
+pub(super) fn finish_native_command_line(mut encoded: Vec<u16>) -> Result<Vec<u16>, ProcessError> {
     if encoded.len().saturating_add(1) > NATIVE_COMMAND_LINE_LIMIT {
         return Err(ProcessError::Validation(format!(
             "encoded command line exceeds the {NATIVE_COMMAND_LINE_LIMIT} UTF-16 code-unit limit"
@@ -124,7 +183,7 @@ fn finish_native_command_line(mut encoded: Vec<u16>) -> Result<Vec<u16>, Process
     Ok(encoded)
 }
 
-fn finish_batch_command_line(mut encoded: Vec<u16>) -> Result<Vec<u16>, ProcessError> {
+pub(super) fn finish_batch_command_line(mut encoded: Vec<u16>) -> Result<Vec<u16>, ProcessError> {
     if encoded.len() > BATCH_COMMAND_LINE_LIMIT {
         return Err(ProcessError::Validation(format!(
             "encoded batch command line exceeds the {BATCH_COMMAND_LINE_LIMIT} UTF-16 code-unit limit"
@@ -134,7 +193,7 @@ fn finish_batch_command_line(mut encoded: Vec<u16>) -> Result<Vec<u16>, ProcessE
     Ok(encoded)
 }
 
-fn append_native_argument(output: &mut Vec<u16>, argument: &OsStr) {
+pub(super) fn append_native_argument(output: &mut Vec<u16>, argument: &OsStr) {
     let encoded = argument.encode_wide().collect::<Vec<_>>();
     let quote = encoded.is_empty() || encoded.iter().any(|unit| matches!(*unit, 0x09 | 0x20));
     if quote {
@@ -162,7 +221,7 @@ fn append_native_argument(output: &mut Vec<u16>, argument: &OsStr) {
     }
 }
 
-fn append_native_argv0(output: &mut Vec<u16>, argument: &OsStr) {
+pub(super) fn append_native_argv0(output: &mut Vec<u16>, argument: &OsStr) {
     output.push(u16::from(b'"'));
     output.extend(argument.encode_wide());
     output.push(u16::from(b'"'));
@@ -255,7 +314,7 @@ fn nul_terminated(value: &OsStr) -> Vec<u16> {
     value.encode_wide().chain(Some(0)).collect()
 }
 
-fn create_process_cwd(path: &Path) -> Result<Vec<u16>, ProcessError> {
+pub(super) fn create_process_cwd(path: &Path) -> Result<Vec<u16>, ProcessError> {
     let encoded = path.as_os_str().encode_wide().collect::<Vec<_>>();
     let user = strip_verbatim_prefix(&encoded).unwrap_or(encoded);
     if user.len().saturating_add(1) > NATIVE_COMMAND_LINE_LIMIT {
@@ -291,7 +350,7 @@ fn strip_verbatim_prefix(path: &[u16]) -> Option<Vec<u16>> {
     None
 }
 
-fn environment_block(plan: &EnvironmentPlan) -> Vec<u16> {
+pub(super) fn environment_block(plan: &EnvironmentPlan) -> Vec<u16> {
     let mut variables = std::env::vars_os().collect::<Vec<_>>();
     for (key, value) in &plan.injected {
         set_environment(&mut variables, OsStr::new(key), OsStr::new(value));
@@ -341,9 +400,9 @@ fn environment_key_order(left: &OsStr, right: &OsStr) -> Ordering {
     }
 }
 
-struct Pipe {
-    parent: OwnedHandle,
-    child: OwnedHandle,
+pub(super) struct Pipe {
+    pub(super) parent: OwnedHandle,
+    pub(super) child: OwnedHandle,
 }
 
 impl Pipe {
@@ -381,13 +440,13 @@ impl Pipe {
     }
 }
 
-struct AttributeList {
+pub(super) struct AttributeList {
     storage: Vec<usize>,
     handles: Box<[HANDLE]>,
 }
 
 impl AttributeList {
-    fn new(handles: &[HANDLE]) -> io::Result<Self> {
+    pub(super) fn new(handles: &[HANDLE]) -> io::Result<Self> {
         let mut bytes = 0_usize;
         unsafe {
             InitializeProcThreadAttributeList(null_mut(), 1, 0, &raw mut bytes);
@@ -433,7 +492,7 @@ impl Drop for AttributeList {
     }
 }
 
-struct Lifecycle {
+pub(super) struct Lifecycle {
     process: OwnedHandle,
     thread: Option<OwnedHandle>,
     job: Option<OwnedHandle>,
@@ -450,7 +509,7 @@ enum LifecycleState {
 }
 
 impl Lifecycle {
-    fn new(info: PROCESS_INFORMATION) -> io::Result<Self> {
+    pub(super) fn new(info: PROCESS_INFORMATION) -> io::Result<Self> {
         let process = OwnedHandle::new(info.hProcess)?;
         let thread = match OwnedHandle::new(info.hThread) {
             Ok(thread) => thread,
@@ -470,7 +529,7 @@ impl Lifecycle {
         })
     }
 
-    fn install_job(&mut self) -> io::Result<()> {
+    pub(super) fn install_job(&mut self) -> io::Result<()> {
         if self.state != LifecycleState::SpawnedSuspended {
             return Err(io::Error::other(
                 "invalid lifecycle transition to JobAssigned",
@@ -511,7 +570,7 @@ impl Lifecycle {
         Ok(())
     }
 
-    fn resume(&mut self) -> io::Result<()> {
+    pub(super) fn resume(&mut self) -> io::Result<()> {
         if self.state != LifecycleState::JobAssigned {
             return Err(io::Error::other("invalid lifecycle transition to Running"));
         }
@@ -527,7 +586,7 @@ impl Lifecycle {
         Ok(())
     }
 
-    fn primary_exit_code(&self) -> io::Result<Option<u32>> {
+    pub(super) fn primary_exit_code(&self) -> io::Result<Option<u32>> {
         let wait = unsafe { WaitForSingleObject(self.process.raw(), 0) };
         match wait {
             WAIT_OBJECT_0 => {}
@@ -541,7 +600,7 @@ impl Lifecycle {
         Ok(Some(code))
     }
 
-    fn active_processes(&self) -> io::Result<u32> {
+    pub(super) fn active_processes(&self) -> io::Result<u32> {
         let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
         let job = self
             .job
@@ -563,7 +622,7 @@ impl Lifecycle {
         Ok(accounting.ActiveProcesses)
     }
 
-    fn poll_completion_hint(&self, wait_ms: u32) {
+    pub(super) fn poll_completion_hint(&self, wait_ms: u32) {
         let Some(completion) = &self.completion else {
             return;
         };
@@ -581,7 +640,7 @@ impl Lifecycle {
         }
     }
 
-    fn terminate_and_wait(&mut self) -> Result<(), ProcessError> {
+    pub(super) fn terminate_and_wait(&mut self) -> Result<(), ProcessError> {
         let job = self
             .job
             .as_ref()
@@ -599,14 +658,14 @@ impl Lifecycle {
         Err(ProcessError::OutcomeUncertain)
     }
 
-    fn finish(&mut self) {
+    pub(super) fn finish(&mut self) {
         debug_assert_eq!(self.state, LifecycleState::Running);
         self.state = LifecycleState::Complete;
     }
 
     /// Hand the job over to a longer-lived owner. The lifecycle stops managing the tree, so
     /// dropping it no longer terminates the processes inside the job.
-    fn release_job(&mut self) -> OwnedHandle {
+    pub(super) fn release_job(&mut self) -> OwnedHandle {
         let job = self.job.take().expect("job installed before release");
         self.state = LifecycleState::Complete;
         job
@@ -633,101 +692,6 @@ impl Drop for Lifecycle {
     }
 }
 
-/// Spawn a process tree whose lifetime outlives this call, writing both output streams
-/// directly to `log`. The job handle keeps `KILL_ON_JOB_CLOSE`, so the tree dies with the
-/// server instance that owns the returned value.
-pub(crate) fn spawn_detached(
-    plan: &ExecPlan<'_>,
-    environment: &EnvironmentPlan,
-    log: File,
-) -> Result<DetachedTree, ProcessError> {
-    let launch = LaunchEncoding::new(plan.resolved, plan.args)?;
-    let block = environment_block(environment);
-    let cwd_wide = create_process_cwd(plan.cwd)?;
-    let null_input = File::open("NUL")?;
-    let log_handle = log.as_raw_handle() as HANDLE;
-    let input_handle = null_input.as_raw_handle() as HANDLE;
-    for handle in [input_handle, log_handle] {
-        if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 {
-            return Err(io::Error::last_os_error().into());
-        }
-    }
-    let inherited = [input_handle, log_handle];
-    let attributes = AttributeList::new(&inherited)?;
-    let startup = startup_info([input_handle, log_handle, log_handle], &attributes)?;
-
-    let mut command_line = launch.command_line;
-    let mut process_info = PROCESS_INFORMATION::default();
-    let created = unsafe {
-        CreateProcessW(
-            launch.application.as_ptr(),
-            command_line.as_mut_ptr(),
-            null(),
-            null(),
-            1,
-            CREATE_UNICODE_ENVIRONMENT
-                | CREATE_NO_WINDOW
-                | CREATE_SUSPENDED
-                | EXTENDED_STARTUPINFO_PRESENT,
-            block.as_ptr().cast::<c_void>(),
-            cwd_wide.as_ptr(),
-            &raw const startup.StartupInfo,
-            &raw mut process_info,
-        )
-    };
-    if created == 0 {
-        return Err(io::Error::last_os_error().into());
-    }
-    drop(attributes);
-    let mut lifecycle = Lifecycle::new(process_info)?;
-    lifecycle.install_job()?;
-    lifecycle.resume()?;
-    let pid = process_info.dwProcessId;
-    let job = lifecycle.release_job();
-    drop(log);
-    drop(null_input);
-    Ok(DetachedTree { pid, job })
-}
-
-pub(crate) struct DetachedTree {
-    pid: u32,
-    job: OwnedHandle,
-}
-
-impl DetachedTree {
-    pub(crate) fn pid(&self) -> u32 {
-        self.pid
-    }
-
-    pub(crate) fn is_running(&mut self) -> bool {
-        job_active_processes(self.job.raw()).unwrap_or(0) > 0
-    }
-
-    pub(crate) fn terminate(&mut self) {
-        unsafe {
-            TerminateJobObject(self.job.raw(), TERMINATION_EXIT_CODE);
-        }
-    }
-}
-
-fn job_active_processes(job: HANDLE) -> io::Result<u32> {
-    let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
-    if unsafe {
-        QueryInformationJobObject(
-            job,
-            JobObjectBasicAccountingInformation,
-            (&raw mut accounting).cast::<c_void>(),
-            u32::try_from(size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>())
-                .map_err(|_| io::Error::other("job accounting size overflow"))?,
-            null_mut(),
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(accounting.ActiveProcesses)
-}
-
 fn set_job_information<T>(handle: HANDLE, class: i32, value: &T) -> io::Result<()> {
     if unsafe {
         SetInformationJobObject(
@@ -744,7 +708,7 @@ fn set_job_information<T>(handle: HANDLE, class: i32, value: &T) -> io::Result<(
     Ok(())
 }
 
-struct OwnedHandle(HANDLE);
+pub(super) struct OwnedHandle(HANDLE);
 
 // The wrapper owns exactly one HANDLE and transfers that ownership when moved to a drain thread.
 unsafe impl Send for OwnedHandle {}
@@ -758,11 +722,11 @@ impl OwnedHandle {
         }
     }
 
-    fn raw(&self) -> HANDLE {
+    pub(super) fn raw(&self) -> HANDLE {
         self.0
     }
 
-    fn into_file(self) -> File {
+    pub(super) fn into_file(self) -> File {
         let raw = self.0;
         mem::forget(self);
         unsafe { File::from_raw_handle(raw as RawHandle) }
@@ -776,5 +740,3 @@ impl Drop for OwnedHandle {
         }
     }
 }
-
-include!("tests.rs");

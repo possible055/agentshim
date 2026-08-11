@@ -1,5 +1,7 @@
+use super::{candidates::CandidateMetrics, request::GrepSourcePolicy};
+
 #[derive(Clone, Copy)]
-enum GrepStage {
+pub(super) enum GrepStage {
     #[cfg(feature = "bench-internals")]
     Total,
     Setup,
@@ -196,22 +198,22 @@ impl Default for GrepProfileCounters {
 
 #[cfg(feature = "bench-internals")]
 #[derive(Clone)]
-enum GrepProfiler {
+pub(super) enum GrepProfiler {
     Disabled,
     Enabled(Arc<GrepProfileCounters>),
 }
 
 #[cfg(feature = "bench-internals")]
 impl GrepProfiler {
-    fn disabled() -> Self {
+    pub(super) fn disabled() -> Self {
         Self::Disabled
     }
 
-    fn enabled() -> Self {
+    pub(super) fn enabled() -> Self {
         Self::Enabled(Arc::default())
     }
 
-    fn span(&self, stage: GrepStage) -> GrepSpan<'_> {
+    pub(super) fn span(&self, stage: GrepStage) -> GrepSpan<'_> {
         let Self::Enabled(counters) = self else {
             return GrepSpan { active: None };
         };
@@ -220,7 +222,7 @@ impl GrepProfiler {
         }
     }
 
-    fn set_workload(&self, candidate_count: usize, lanes: usize) {
+    pub(super) fn set_workload(&self, candidate_count: usize, lanes: usize) {
         let Self::Enabled(counters) = self else {
             return;
         };
@@ -232,7 +234,7 @@ impl GrepProfiler {
             .store(lanes, std::sync::atomic::Ordering::Relaxed);
     }
 
-    fn record_candidate_metrics(&self, metrics: CandidateMetrics) {
+    pub(super) fn record_candidate_metrics(&self, metrics: CandidateMetrics) {
         let Self::Enabled(counters) = self else {
             return;
         };
@@ -288,7 +290,7 @@ impl GrepProfiler {
         );
     }
 
-    fn record_search_reader(&self) {
+    pub(super) fn record_search_reader(&self) {
         if let Self::Enabled(counters) = self {
             counters
                 .search_reader_files
@@ -296,7 +298,7 @@ impl GrepProfiler {
         }
     }
 
-    fn record_search_slice(&self) {
+    pub(super) fn record_search_slice(&self) {
         if let Self::Enabled(counters) = self {
             counters
                 .search_slice_files
@@ -304,7 +306,7 @@ impl GrepProfiler {
         }
     }
 
-    fn record_search_file(&self, source: GrepSourcePolicy) {
+    pub(super) fn record_search_file(&self, source: GrepSourcePolicy) {
         if let Self::Enabled(counters) = self {
             counters
                 .search_file_files
@@ -320,7 +322,7 @@ impl GrepProfiler {
         }
     }
 
-    fn record_searched_candidate(&self) {
+    pub(super) fn record_searched_candidate(&self) {
         if let Self::Enabled(counters) = self {
             counters
                 .searched_candidates
@@ -328,7 +330,7 @@ impl GrepProfiler {
         }
     }
 
-    fn record_matched_candidate(&self) {
+    pub(super) fn record_matched_candidate(&self) {
         if let Self::Enabled(counters) = self {
             counters
                 .matched_candidates
@@ -336,7 +338,7 @@ impl GrepProfiler {
         }
     }
 
-    fn record_pathname_reopen(&self) {
+    pub(super) fn record_pathname_reopen(&self) {
         if let Self::Enabled(counters) = self {
             counters
                 .pathname_reopens
@@ -344,7 +346,7 @@ impl GrepProfiler {
         }
     }
 
-    fn add_render_copy_bytes(&self, bytes: usize) {
+    pub(super) fn add_render_copy_bytes(&self, bytes: usize) {
         if let Self::Enabled(counters) = self {
             let _ = counters.render_copy_bytes.fetch_update(
                 std::sync::atomic::Ordering::Relaxed,
@@ -354,7 +356,7 @@ impl GrepProfiler {
         }
     }
 
-    fn snapshot(&self) -> GrepStageTimings {
+    pub(super) fn snapshot(&self) -> GrepStageTimings {
         let Self::Enabled(counters) = self else {
             unreachable!("disabled profiler has no snapshot");
         };
@@ -385,9 +387,7 @@ impl GrepProfiler {
             search_after_fingerprint_worker_ns: load_u64(
                 &counters.search_after_fingerprint_worker_ns,
             ),
-            search_pathname_reopen_worker_ns: load_u64(
-                &counters.search_pathname_reopen_worker_ns,
-            ),
+            search_pathname_reopen_worker_ns: load_u64(&counters.search_pathname_reopen_worker_ns),
             search_pathname_fingerprint_worker_ns: load_u64(
                 &counters.search_pathname_fingerprint_worker_ns,
             ),
@@ -411,9 +411,7 @@ impl GrepProfiler {
                     .saturating_mul(std::mem::size_of::<Candidate>()),
             ),
             candidate_vec_capacity,
-            candidate_soft_target_crossings: load_usize(
-                &counters.candidate_soft_target_crossings,
-            ),
+            candidate_soft_target_crossings: load_usize(&counters.candidate_soft_target_crossings),
             candidate_key_bytes: load_usize(&counters.candidate_key_bytes),
             candidate_key_capacity: load_usize(&counters.candidate_key_capacity),
             candidate_capability_key_bytes: load_usize(&counters.candidate_capability_key_bytes),
@@ -425,9 +423,7 @@ impl GrepProfiler {
             candidate_sort_key_bytes: load_usize(&counters.candidate_sort_key_bytes),
             candidate_sort_key_capacity: load_usize(&counters.candidate_sort_key_capacity),
             candidate_slash_path_bytes: load_usize(&counters.candidate_slash_path_bytes),
-            candidate_slash_path_capacity: load_usize(
-                &counters.candidate_slash_path_capacity,
-            ),
+            candidate_slash_path_capacity: load_usize(&counters.candidate_slash_path_capacity),
             lanes: load_usize(&counters.lanes),
         }
     }
@@ -444,7 +440,7 @@ fn load_usize(counter: &std::sync::atomic::AtomicUsize) -> usize {
 }
 
 #[cfg(feature = "bench-internals")]
-struct GrepSpan<'a> {
+pub(super) struct GrepSpan<'a> {
     active: Option<(&'a GrepProfileCounters, GrepStage, std::time::Instant)>,
 }
 
@@ -463,9 +459,7 @@ impl Drop for GrepSpan<'_> {
             GrepStage::SearchWall => &counters.search_wall_ns,
             GrepStage::SearchOpenWorker => &counters.search_open_worker_ns,
             GrepStage::SearchOpenHandleWorker => &counters.search_open_handle_worker_ns,
-            GrepStage::SearchSymlinkMetadataWorker => {
-                &counters.search_symlink_metadata_worker_ns
-            }
+            GrepStage::SearchSymlinkMetadataWorker => &counters.search_symlink_metadata_worker_ns,
             GrepStage::SearchScanWorker => &counters.search_scan_worker_ns,
             GrepStage::CaptureReadWorker => &counters.capture_read_worker_ns,
             GrepStage::ClassificationWorker => &counters.classification_worker_ns,
@@ -475,12 +469,8 @@ impl Drop for GrepSpan<'_> {
             GrepStage::SearchBeforeFingerprintWorker => {
                 &counters.search_before_fingerprint_worker_ns
             }
-            GrepStage::SearchAfterFingerprintWorker => {
-                &counters.search_after_fingerprint_worker_ns
-            }
-            GrepStage::SearchPathnameReopenWorker => {
-                &counters.search_pathname_reopen_worker_ns
-            }
+            GrepStage::SearchAfterFingerprintWorker => &counters.search_after_fingerprint_worker_ns,
+            GrepStage::SearchPathnameReopenWorker => &counters.search_pathname_reopen_worker_ns,
             GrepStage::SearchPathnameFingerprintWorker => {
                 &counters.search_pathname_fingerprint_worker_ns
             }
@@ -501,8 +491,7 @@ impl Drop for GrepSpan<'_> {
 static GREP_WORKERS_SPAWNED: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 #[cfg(feature = "bench-internals")]
-static ACTIVE_GREP_WORKERS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static ACTIVE_GREP_WORKERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 #[cfg(feature = "bench-internals")]
 static PEAK_ACTIVE_GREP_WORKERS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
@@ -523,11 +512,11 @@ pub fn worker_metrics() -> GrepWorkerMetrics {
 }
 
 #[cfg(feature = "bench-internals")]
-struct GrepWorkerActivity;
+pub(super) struct GrepWorkerActivity;
 
 #[cfg(feature = "bench-internals")]
 impl GrepWorkerActivity {
-    fn enter() -> Self {
+    pub(super) fn enter() -> Self {
         GREP_WORKERS_SPAWNED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let active = ACTIVE_GREP_WORKERS
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
@@ -546,59 +535,59 @@ impl Drop for GrepWorkerActivity {
 
 #[cfg(not(feature = "bench-internals"))]
 #[derive(Clone, Default)]
-struct GrepProfiler;
+pub(super) struct GrepProfiler;
 
 #[cfg(not(feature = "bench-internals"))]
 impl GrepProfiler {
-    fn disabled() -> Self {
+    pub(super) fn disabled() -> Self {
         Self
     }
 
-    fn span(&self, _stage: GrepStage) -> GrepSpan {
+    pub(super) fn span(&self, _stage: GrepStage) -> GrepSpan {
         let _ = self;
         GrepSpan
     }
 
-    fn set_workload(&self, _candidate_count: usize, _lanes: usize) {
+    pub(super) fn set_workload(&self, _candidate_count: usize, _lanes: usize) {
         let _ = self;
     }
 
-    fn record_candidate_metrics(&self, _metrics: CandidateMetrics) {
+    pub(super) fn record_candidate_metrics(&self, _metrics: CandidateMetrics) {
         let _ = self;
     }
 
-    fn record_search_reader(&self) {
+    pub(super) fn record_search_reader(&self) {
         let _ = self;
     }
 
-    fn record_search_slice(&self) {
+    pub(super) fn record_search_slice(&self) {
         let _ = self;
     }
 
-    fn record_search_file(&self, _source: GrepSourcePolicy) {
+    pub(super) fn record_search_file(&self, _source: GrepSourcePolicy) {
         let _ = self;
     }
 
-    fn record_searched_candidate(&self) {
+    pub(super) fn record_searched_candidate(&self) {
         let _ = self;
     }
 
-    fn record_matched_candidate(&self) {
+    pub(super) fn record_matched_candidate(&self) {
         let _ = self;
     }
 
     #[cfg(test)]
-    fn record_pathname_reopen(&self) {
+    pub(super) fn record_pathname_reopen(&self) {
         let _ = self;
     }
 
-    fn add_render_copy_bytes(&self, _bytes: usize) {
+    pub(super) fn add_render_copy_bytes(&self, _bytes: usize) {
         let _ = self;
     }
 }
 
 #[cfg(not(feature = "bench-internals"))]
-struct GrepSpan;
+pub(super) struct GrepSpan;
 
 #[cfg(not(feature = "bench-internals"))]
 impl Drop for GrepSpan {
@@ -606,11 +595,11 @@ impl Drop for GrepSpan {
 }
 
 #[cfg(not(feature = "bench-internals"))]
-struct GrepWorkerActivity;
+pub(super) struct GrepWorkerActivity;
 
 #[cfg(not(feature = "bench-internals"))]
 impl GrepWorkerActivity {
-    fn enter() -> Self {
+    pub(super) fn enter() -> Self {
         Self
     }
 }

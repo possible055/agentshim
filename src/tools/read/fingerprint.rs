@@ -1,256 +1,364 @@
-pub(crate) enum Attempt<T> {
-    Stable(T),
-    Changed,
+use std::io;
+
+use cap_std::fs::File;
+
+#[cfg(test)]
+pub(super) use super::prepared::has_binary_magic;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FileFingerprint {
+    pub(crate) regular: bool,
+    platform: PlatformFingerprint,
 }
 
-enum PreparedKind {
-    /// The mode is resolved here so admission knows which reservation and which runtime
-    /// ceiling apply before any PDF work starts.
-    Pdf {
-        mode: PdfMode,
-        /// Bytes this call reserves, and therefore the ceiling the core enforces.
-        ///
-        /// Resolved once, here, so the number charged against the shared pool and the
-        /// number the parser is held to are the same number. Keeping them as two
-        /// independent constants is how a configured reservation ends up describing
-        /// nothing.
-        call_bytes: usize,
-    },
-    Text {
-        detected_encoding: Option<&'static str>,
-    },
+#[cfg(feature = "bench-internals")]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FingerprintMetrics {
+    pub file_id_calls: usize,
+    pub file_id_ns: u64,
+    pub standard_calls: usize,
+    pub standard_ns: u64,
+    pub basic_calls: usize,
+    pub basic_ns: u64,
 }
 
-pub(crate) struct PreparedRead {
-    resolved: ResolvedPath,
-    absolute: String,
-    file: File,
-    before: FileFingerprint,
-    prefix: Vec<u8>,
-    kind: PreparedKind,
-}
+#[cfg(all(feature = "bench-internals", windows))]
+static FINGERPRINT_FILE_ID_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(all(feature = "bench-internals", windows))]
+static FINGERPRINT_FILE_ID_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "bench-internals", windows))]
+static FINGERPRINT_STANDARD_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(all(feature = "bench-internals", windows))]
+static FINGERPRINT_STANDARD_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "bench-internals", windows))]
+static FINGERPRINT_BASIC_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(all(feature = "bench-internals", windows))]
+static FINGERPRINT_BASIC_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Per-mode reservations.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct PdfMemoryBudgets {
-    pub(crate) text_bytes: usize,
-    pub(crate) image_bytes: usize,
-}
-
-impl PdfMemoryBudgets {
-    pub(crate) fn from_config(config: &crate::runtime::RuntimeConfig) -> Self {
-        Self {
-            text_bytes: config.pdf_text_memory_bytes,
-            image_bytes: config.pdf_image_memory_bytes,
+#[cfg(feature = "bench-internals")]
+pub fn reset_fingerprint_metrics() {
+    #[cfg(windows)]
+    {
+        for counter in [
+            &FINGERPRINT_FILE_ID_CALLS,
+            &FINGERPRINT_STANDARD_CALLS,
+            &FINGERPRINT_BASIC_CALLS,
+        ] {
+            counter.store(0, std::sync::atomic::Ordering::Relaxed);
         }
-    }
-
-    /// The shipped defaults, for paths that resolve a read without a running server.
-    #[cfg(any(test, feature = "bench-internals"))]
-    pub(crate) const fn defaults() -> Self {
-        Self {
-            text_bytes: crate::runtime::DEFAULT_PDF_TEXT_MEMORY_BYTES,
-            image_bytes: crate::runtime::DEFAULT_PDF_IMAGE_MEMORY_BYTES,
-        }
-    }
-
-    fn for_mode(self, mode: PdfMode) -> usize {
-        match mode {
-            PdfMode::Image => self.image_bytes,
-            PdfMode::Auto | PdfMode::Text => self.text_bytes,
+        for counter in [
+            &FINGERPRINT_FILE_ID_NS,
+            &FINGERPRINT_STANDARD_NS,
+            &FINGERPRINT_BASIC_NS,
+        ] {
+            counter.store(0, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
 
-impl PreparedRead {
-    pub(crate) fn pdf_mode(&self) -> Option<PdfMode> {
-        match self.kind {
-            PreparedKind::Pdf { mode, .. } => Some(mode),
-            PreparedKind::Text { .. } => None,
-        }
-    }
-
-    /// Bytes this call reserves from the shared pool.
-    ///
-    /// For a PDF this is the same number the core is held to, so the pool's view of the
-    /// call and the parser's ceiling cannot drift apart.
-    pub(crate) fn memory_charge(&self) -> usize {
-        match self.kind {
-            PreparedKind::Pdf { call_bytes, .. } => call_bytes,
-            PreparedKind::Text { .. } => TEXT_READ_MEMORY_BYTES,
-        }
-    }
-
-    pub(crate) fn runtime_limit(&self) -> Option<std::time::Duration> {
-        let configured = match self.kind {
-            PreparedKind::Pdf {
-                mode: PdfMode::Image,
-                ..
-            } => crate::runtime::PDF_IMAGE_RUNTIME_LIMIT,
-            PreparedKind::Pdf { .. } => crate::runtime::PDF_TEXT_RUNTIME_LIMIT,
-            PreparedKind::Text { .. } => return None,
-        };
-        Some(forced_runtime_limit().unwrap_or(configured))
+#[cfg(all(feature = "bench-internals", windows))]
+pub fn fingerprint_metrics() -> FingerprintMetrics {
+    FingerprintMetrics {
+        file_id_calls: FINGERPRINT_FILE_ID_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+        file_id_ns: FINGERPRINT_FILE_ID_NS.load(std::sync::atomic::Ordering::Relaxed),
+        standard_calls: FINGERPRINT_STANDARD_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+        standard_ns: FINGERPRINT_STANDARD_NS.load(std::sync::atomic::Ordering::Relaxed),
+        basic_calls: FINGERPRINT_BASIC_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+        basic_ns: FINGERPRINT_BASIC_NS.load(std::sync::atomic::Ordering::Relaxed),
     }
 }
 
-pub(crate) fn prepare(
-    access: &FileAccess,
-    request: &ReadRequest,
-    cancellation: &CancellationToken,
-    budgets: PdfMemoryBudgets,
-) -> Result<PreparedRead, ReadError> {
-    request.validate()?;
-    if cancellation.is_cancelled() {
-        return Err(ReadError::Cancelled);
-    }
-    let resolved = access.resolve(Path::new(&request.path))?;
-    let absolute = crate::path::display_path(resolved.absolute());
-    let mut file = open_regular(access, &resolved)?;
-    let before = FileFingerprint::from_file(&file)?;
-    run_before_read_hook();
+#[cfg(all(feature = "bench-internals", not(windows)))]
+pub fn fingerprint_metrics() -> FingerprintMetrics {
+    FingerprintMetrics::default()
+}
 
-    let mut prefix = Vec::with_capacity(PREFIX_BYTES);
-    file.by_ref()
-        .take(PREFIX_BYTES as u64)
-        .read_to_end(&mut prefix)?;
-    let kind = if has_pdf_header(&prefix) || has_pdf_parameters(request) {
-        let mode = request.pdf_mode.unwrap_or(PdfMode::Auto);
-        PreparedKind::Pdf {
-            mode,
-            call_bytes: budgets.for_mode(mode),
-        }
+#[cfg(all(feature = "bench-internals", windows))]
+fn record_fingerprint_query(class: i32, elapsed: std::time::Duration) {
+    use windows_sys::Win32::Storage::FileSystem::{FileBasicInfo, FileIdInfo, FileStandardInfo};
+
+    let elapsed = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
+    let (calls, nanoseconds) = if class == FileIdInfo {
+        (&FINGERPRINT_FILE_ID_CALLS, &FINGERPRINT_FILE_ID_NS)
+    } else if class == FileStandardInfo {
+        (&FINGERPRINT_STANDARD_CALLS, &FINGERPRINT_STANDARD_NS)
+    } else if class == FileBasicInfo {
+        (&FINGERPRINT_BASIC_CALLS, &FINGERPRINT_BASIC_NS)
     } else {
-        if has_binary_magic(&prefix) {
-            return Err(ReadError::Binary);
-        }
-        let detected_encoding = detect_legacy_encoding(
-            &prefix,
-            request.encoding.as_deref(),
-            before.length() <= prefix.len() as u64,
-        )?;
-        PreparedKind::Text { detected_encoding }
+        return;
     };
-    Ok(PreparedRead {
-        resolved,
-        absolute,
-        file,
-        before,
-        prefix,
-        kind,
-    })
+    calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let _ = nanoseconds.fetch_update(
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+        |current| Some(current.saturating_add(elapsed)),
+    );
 }
 
-pub(crate) fn execute_prepared(
-    access: &FileAccess,
-    request: &ReadRequest,
-    mut prepared: PreparedRead,
-    cancellation: &CancellationToken,
-) -> Result<Attempt<ToolOutput>, ReadError> {
-    if cancellation.is_cancelled() {
-        return Err(ReadError::Cancelled);
+#[cfg(unix)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PlatformFingerprint {
+    device: u64,
+    inode: u64,
+    nlink: u64,
+    length: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
+}
+
+#[cfg(windows)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PlatformFingerprint {
+    volume: u64,
+    file_id: [u8; 16],
+    length: i64,
+    last_write_time: i64,
+    change_time: i64,
+}
+
+#[cfg(not(any(unix, windows)))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PlatformFingerprint {
+    length: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+/// FNV-1a. Chosen over `DefaultHasher` because the token has to mean the same thing in
+/// a later process, and `DefaultHasher`'s output is explicitly not guaranteed stable
+/// across toolchain releases. This is a mix-up guard, not a security digest.
+fn stable_hash(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    if let PreparedKind::Pdf { call_bytes, .. } = prepared.kind {
-        let output = read_pdf(
-            &prepared.file,
-            &prepared.absolute,
-            request,
-            &prepared.before.source_id(),
-            cancellation,
-            call_bytes,
-        )?;
-        run_after_read_hook();
-        if take_forced_change() {
-            return Ok(Attempt::Changed);
+    hash
+}
+
+impl FileFingerprint {
+    /// Opaque token identifying this exact source version.
+    ///
+    /// Continuation requests carry it back so a source replaced between rounds is
+    /// rejected instead of silently stitching two different documents together. It is
+    /// derived from the same fingerprint the retry logic already trusts, and is
+    /// deliberately a hash so identity and timestamps are not exposed to the caller.
+    pub(crate) fn source_id(&self) -> String {
+        let mut material = Vec::with_capacity(64);
+        material.push(u8::from(self.regular));
+        #[cfg(unix)]
+        {
+            material.extend_from_slice(&self.platform.device.to_le_bytes());
+            material.extend_from_slice(&self.platform.inode.to_le_bytes());
+            material.extend_from_slice(&self.platform.length.to_le_bytes());
+            material.extend_from_slice(&self.platform.modified_seconds.to_le_bytes());
+            material.extend_from_slice(&self.platform.modified_nanoseconds.to_le_bytes());
         }
-        return if source_is_unchanged(
-            access,
-            &prepared.resolved,
-            &prepared.file,
-            &prepared.before,
-        )? {
-            Ok(Attempt::Stable(output))
-        } else {
-            Ok(Attempt::Changed)
+        #[cfg(windows)]
+        {
+            material.extend_from_slice(&self.platform.volume.to_le_bytes());
+            material.extend_from_slice(&self.platform.file_id);
+            material.extend_from_slice(&self.platform.length.to_le_bytes());
+            material.extend_from_slice(&self.platform.last_write_time.to_le_bytes());
+            material.extend_from_slice(&self.platform.change_time.to_le_bytes());
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            material.extend_from_slice(&self.platform.length.to_le_bytes());
+            if let Some(modified) = self.platform.modified
+                && let Ok(since) = modified.duration_since(std::time::UNIX_EPOCH)
+            {
+                material.extend_from_slice(&since.as_nanos().to_le_bytes());
+            }
+        }
+        format!("{:016x}", stable_hash(&material))
+    }
+
+    #[must_use]
+    pub(crate) fn length(&self) -> u64 {
+        #[cfg(windows)]
+        {
+            u64::try_from(self.platform.length).unwrap_or(0)
+        }
+        #[cfg(not(windows))]
+        {
+            self.platform.length
+        }
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn from_dir(directory: &cap_std::fs::Dir) -> io::Result<Self> {
+        let file = File::from_std(directory.try_clone()?.into_std_file());
+        Self::from_file(&file)
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn same_file(&self, other: &Self) -> bool {
+        #[cfg(unix)]
+        {
+            self.platform.device == other.platform.device
+                && self.platform.inode == other.platform.inode
+        }
+        #[cfg(windows)]
+        {
+            self.platform.volume == other.platform.volume
+                && self.platform.file_id == other.platform.file_id
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            self == other
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn matches_current_state(&self, file: &File) -> io::Result<bool> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_BASIC_INFO, FILE_STANDARD_INFO, FileBasicInfo, FileStandardInfo,
         };
-    }
-    let PreparedKind::Text { detected_encoding } = prepared.kind else {
-        unreachable!("PDF reads return before text decoding");
-    };
-    let reader = io::Cursor::new(prepared.prefix).chain(&mut prepared.file);
-    let mut collector = LineCollector::new(request.start_line.unwrap_or(1), request.line_count);
-    let summary = decode_stream(
-        reader,
-        request.encoding.as_deref().or(detected_encoding),
-        usize::MAX,
-        cancellation,
-        |chunk| Ok(collector.push(chunk)),
-    )?;
-    collector.finish_eof();
-    run_after_read_hook();
 
-    if !source_is_unchanged(
-        access,
-        &prepared.resolved,
-        &prepared.file,
-        &prepared.before,
-    )? {
-        return Ok(Attempt::Changed);
+        let handle = file.as_raw_handle();
+        let standard: FILE_STANDARD_INFO = query_file_information(handle, FileStandardInfo)?;
+        let basic: FILE_BASIC_INFO = query_file_information(handle, FileBasicInfo)?;
+        Ok(self.regular != standard.Directory
+            && self.platform.length == standard.EndOfFile
+            && self.platform.last_write_time == basic.LastWriteTime
+            && self.platform.change_time == basic.ChangeTime)
     }
 
-    render(
-        &prepared.absolute,
-        request,
-        summary.source_encoding,
-        &collector,
-        cancellation,
-    )
-    .map(Attempt::Stable)
+    #[cfg(unix)]
+    pub(crate) fn matches_current_state(&self, file: &File) -> io::Result<bool> {
+        let current = Self::from_file(file)?;
+        let state_unchanged = self.regular == current.regular
+            && self.platform.length == current.platform.length
+            && self.platform.modified_seconds == current.platform.modified_seconds
+            && self.platform.modified_nanoseconds == current.platform.modified_nanoseconds;
+        if !state_unchanged {
+            return Ok(false);
+        }
+
+        // Unlinking an open Unix file updates ctime while leaving the handle's contents stable.
+        Ok(
+            (self.platform.changed_seconds == current.platform.changed_seconds
+                && self.platform.changed_nanoseconds == current.platform.changed_nanoseconds)
+                || current.platform.nlink == 0,
+        )
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    pub(crate) fn matches_current_state(&self, file: &File) -> io::Result<bool> {
+        Self::from_file(file).map(|current| current == *self)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn from_file(file: &File) -> io::Result<Self> {
+        use cap_std::fs::MetadataExt;
+
+        let metadata = file.metadata()?;
+        Ok(Self {
+            regular: metadata.is_file(),
+            platform: PlatformFingerprint {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                nlink: metadata.nlink(),
+                length: metadata.len(),
+                modified_seconds: metadata.mtime(),
+                modified_nanoseconds: metadata.mtime_nsec(),
+                changed_seconds: metadata.ctime(),
+                changed_nanoseconds: metadata.ctime_nsec(),
+            },
+        })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn from_file(file: &File) -> io::Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_BASIC_INFO, FILE_ID_INFO, FILE_STANDARD_INFO, FileBasicInfo, FileIdInfo,
+            FileStandardInfo,
+        };
+
+        let handle = file.as_raw_handle();
+        let id: FILE_ID_INFO = query_file_information(handle, FileIdInfo)?;
+        let standard: FILE_STANDARD_INFO = query_file_information(handle, FileStandardInfo)?;
+        let basic: FILE_BASIC_INFO = query_file_information(handle, FileBasicInfo)?;
+        Ok(Self {
+            regular: !standard.Directory,
+            platform: PlatformFingerprint {
+                volume: id.VolumeSerialNumber,
+                file_id: id.FileId.Identifier,
+                length: standard.EndOfFile,
+                last_write_time: basic.LastWriteTime,
+                change_time: basic.ChangeTime,
+            },
+        })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn from_file_state(file: &File) -> io::Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_BASIC_INFO, FILE_STANDARD_INFO, FileBasicInfo, FileStandardInfo,
+        };
+
+        let handle = file.as_raw_handle();
+        let standard: FILE_STANDARD_INFO = query_file_information(handle, FileStandardInfo)?;
+        let basic: FILE_BASIC_INFO = query_file_information(handle, FileBasicInfo)?;
+        Ok(Self {
+            regular: !standard.Directory,
+            platform: PlatformFingerprint {
+                volume: 0,
+                file_id: [0; 16],
+                length: standard.EndOfFile,
+                last_write_time: basic.LastWriteTime,
+                change_time: basic.ChangeTime,
+            },
+        })
+    }
+
+    #[cfg(not(windows))]
+    pub(crate) fn from_file_state(file: &File) -> io::Result<Self> {
+        Self::from_file(file)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    pub(crate) fn from_file(file: &File) -> io::Result<Self> {
+        let metadata = file.metadata()?;
+        Ok(Self {
+            regular: metadata.is_file(),
+            platform: PlatformFingerprint {
+                length: metadata.len(),
+                modified: metadata.modified().ok().map(Into::into),
+            },
+        })
+    }
 }
 
-fn source_is_unchanged(
-    access: &FileAccess,
-    path: &ResolvedPath,
-    file: &File,
-    before: &FileFingerprint,
-) -> Result<bool, ReadError> {
-    if before != &FileFingerprint::from_file(file)? {
-        return Ok(false);
-    }
-    match open_regular(access, path) {
-        Ok(identity) => Ok(before == &FileFingerprint::from_file(&identity)?),
-        Err(ReadError::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
-    }
-}
+#[cfg(windows)]
+fn query_file_information<T: Default>(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    class: i32,
+) -> io::Result<T> {
+    use std::mem::size_of;
+    use windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandleEx;
 
-fn open_regular(access: &FileAccess, path: &ResolvedPath) -> Result<File, ReadError> {
-    let metadata = access.symlink_metadata_kind(path)?;
-    if metadata.is_dir {
-        return Err(ReadError::Directory);
+    let mut value = T::default();
+    let size = u32::try_from(size_of::<T>()).expect("file information size fits DWORD");
+    #[cfg(feature = "bench-internals")]
+    let started = std::time::Instant::now();
+    // SAFETY: `handle` is borrowed from a live file, and `value` is writable for the structure
+    // size corresponding to `class` at each call site.
+    let succeeded =
+        unsafe { GetFileInformationByHandleEx(handle, class, (&raw mut value).cast(), size) };
+    #[cfg(feature = "bench-internals")]
+    record_fingerprint_query(class, started.elapsed());
+    if succeeded == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(value)
     }
-    if path.is_ambient() && metadata.is_symlink {
-        return Err(ReadError::NotRegular);
-    }
-    if !metadata.is_file && !metadata.is_symlink {
-        return Err(ReadError::NotRegular);
-    }
-    let file = access.open_read(path)?;
-    if !FileFingerprint::from_file(&file)?.regular {
-        return Err(ReadError::NotRegular);
-    }
-    Ok(file)
-}
-
-fn has_binary_magic(prefix: &[u8]) -> bool {
-    prefix.starts_with(b"\x7FELF")
-        || prefix.starts_with(b"MZ")
-        || prefix.starts_with(b"\x89PNG\r\n\x1A\n")
-        || prefix.starts_with(&[0xFF, 0xD8, 0xFF])
-        || prefix.starts_with(b"GIF87a")
-        || prefix.starts_with(b"GIF89a")
-        || prefix.starts_with(b"BM")
-        || prefix.starts_with(b"II*\0")
-        || prefix.starts_with(b"MM\0*")
-        || prefix.starts_with(b"RIFF") && prefix.get(8..12) == Some(b"WEBP")
 }

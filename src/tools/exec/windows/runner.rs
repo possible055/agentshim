@@ -1,71 +1,42 @@
 use std::{
-    cmp::Ordering,
-    ffi::{OsStr, OsString, c_void},
+    ffi::c_void,
     fs::File,
     io,
-    mem::{self, size_of},
-    os::windows::{
-        ffi::{OsStrExt, OsStringExt},
-        io::{AsRawHandle, FromRawHandle, RawHandle},
+    ptr::null,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
     },
-    path::{Path, PathBuf},
-    ptr::{null, null_mut},
     thread,
     time::Instant,
 };
 
 use tokio_util::sync::CancellationToken;
 use windows_sys::Win32::{
-    Foundation::{
-        CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
-        WAIT_OBJECT_0, WAIT_TIMEOUT,
-    },
-    Globalization::{
-        CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN, CompareStringOrdinal, GetOEMCP,
-    },
-    Security::SECURITY_ATTRIBUTES,
-    System::{
-        IO::{CreateIoCompletionPort, GetQueuedCompletionStatus},
-        JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-            JOBOBJECT_ASSOCIATE_COMPLETION_PORT, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectAssociateCompletionPortInformation,
-            JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
-            QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
-        },
-        Pipes::CreatePipe,
-        SystemInformation::GetSystemDirectoryW,
-        Threading::{
-            CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
-            DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess,
-            InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-            PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW,
-            TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
-        },
+    Globalization::GetOEMCP,
+    System::Threading::{
+        CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+        EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
     },
 };
 
-use super::{
+use super::super::{
     ProcessError,
     capture::{Capture, capture_bytes_per_stream, drain, write_stdin},
-    resolve::{Launcher, ResolvedProgram},
+    resolve::Launcher,
     spawn::{
-        CLEANUP_DEADLINE, DESCENDANT_EXIT_GRACE, EnvironmentPlan, ExecFailure, ExecOutcome,
-        ExecPlan, Streams, ThreadCompletion, spawn_monitored,
+        DESCENDANT_EXIT_GRACE, ExecFailure, ExecOutcome, ExecPlan, ThreadCompletion,
+        spawn_monitored,
     },
 };
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering as AtomicOrdering},
+use super::platform::{
+    LaunchEncoding, Lifecycle, PreparedStdio, create_process_cwd, environment_block, prepare_stdio,
+    settle_threads,
 };
-
-const NATIVE_COMMAND_LINE_LIMIT: usize = 32_767;
-const BATCH_COMMAND_LINE_LIMIT: usize = 8_191;
-const TERMINATION_EXIT_CODE: u32 = 0xC0DE_CACE;
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FailurePoint {
+pub(super) enum FailurePoint {
     SpawnedSuspended,
     JobReady,
     JobAssigned,
@@ -74,11 +45,11 @@ enum FailurePoint {
 
 #[cfg(test)]
 thread_local! {
-    static FAILURE_POINT: std::cell::Cell<Option<FailurePoint>> = const { std::cell::Cell::new(None) };
+    pub(super) static FAILURE_POINT: std::cell::Cell<Option<FailurePoint>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
-fn inject_failure(point: FailurePoint) -> io::Result<()> {
+pub(super) fn inject_failure(point: FailurePoint) -> io::Result<()> {
     if FAILURE_POINT.with(std::cell::Cell::get) == Some(point) {
         Err(io::Error::other(format!(
             "injected lifecycle failure at {point:?}"
@@ -88,7 +59,7 @@ fn inject_failure(point: FailurePoint) -> io::Result<()> {
     }
 }
 
-pub(super) fn run(
+pub(crate) fn run(
     plan: &ExecPlan<'_>,
     cancellation: &CancellationToken,
 ) -> Result<ExecOutcome, ExecFailure> {
@@ -117,11 +88,9 @@ pub(super) fn run(
         )
     };
     if created == 0 {
-        return Err(ProcessError::from(io_context(
-            "CreateProcessW",
-            &io::Error::last_os_error(),
-        ))
-        .into());
+        return Err(
+            ProcessError::from(io_context("CreateProcessW", &io::Error::last_os_error())).into(),
+        );
     }
     let mut lifecycle = Lifecycle::new(process_info)
         .map_err(|error| ProcessError::from(io_context("create lifecycle", &error)))?;
@@ -289,10 +258,7 @@ fn terminate_after_io_failure(
     let (stdin_result, _) = settle_threads(completion, stdin, drains)?;
     stdin_result.map_err(ProcessError::Io)?;
     lifecycle.finish();
-    Err(ProcessError::Io(io::Error::other(
-        "process I/O task failed without an error",
-    ))
-    .into())
+    Err(ProcessError::Io(io::Error::other("process I/O task failed without an error")).into())
 }
 
 fn terminate_after_cancellation(

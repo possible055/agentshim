@@ -1,5 +1,5 @@
 #[derive(Clone, Copy)]
-enum GlobStage {
+pub(super) enum GlobStage {
     #[cfg(feature = "bench-internals")]
     Total,
     Setup,
@@ -50,22 +50,22 @@ struct GlobProfileCounters {
 }
 
 #[cfg(feature = "bench-internals")]
-enum GlobProfiler {
+pub(super) enum GlobProfiler {
     Disabled,
     Enabled(GlobProfileCounters),
 }
 
 #[cfg(feature = "bench-internals")]
 impl GlobProfiler {
-    fn disabled() -> Self {
+    pub(super) fn disabled() -> Self {
         Self::Disabled
     }
 
-    fn enabled() -> Self {
+    pub(super) fn enabled() -> Self {
         Self::Enabled(GlobProfileCounters::default())
     }
 
-    fn span(&self, stage: GlobStage) -> GlobSpan<'_> {
+    pub(super) fn span(&self, stage: GlobStage) -> GlobSpan<'_> {
         let Self::Enabled(counters) = self else {
             return GlobSpan { active: None };
         };
@@ -74,7 +74,7 @@ impl GlobProfiler {
         }
     }
 
-    fn record_batch(&self, matched_entries: usize) {
+    pub(super) fn record_batch(&self, matched_entries: usize) {
         let Self::Enabled(counters) = self else {
             return;
         };
@@ -86,7 +86,7 @@ impl GlobProfiler {
             .fetch_add(matched_entries, std::sync::atomic::Ordering::Relaxed);
     }
 
-    fn record_retained(&self, retained_entries: usize, retained_memory_bytes: usize) {
+    pub(super) fn record_retained(&self, retained_entries: usize, retained_memory_bytes: usize) {
         let Self::Enabled(counters) = self else {
             return;
         };
@@ -98,13 +98,12 @@ impl GlobProfiler {
             .store(retained_memory_bytes, std::sync::atomic::Ordering::Relaxed);
     }
 
-    fn snapshot(&self) -> GlobStageTimings {
+    pub(super) fn snapshot(&self) -> GlobStageTimings {
         let Self::Enabled(counters) = self else {
             unreachable!("disabled profiler has no snapshot");
         };
-        let load_u64 = |value: &std::sync::atomic::AtomicU64| {
-            value.load(std::sync::atomic::Ordering::Relaxed)
-        };
+        let load_u64 =
+            |value: &std::sync::atomic::AtomicU64| value.load(std::sync::atomic::Ordering::Relaxed);
         GlobStageTimings {
             total_ns: load_u64(&counters.total_ns),
             setup_ns: load_u64(&counters.setup_ns),
@@ -113,9 +112,7 @@ impl GlobProfiler {
             render_ns: load_u64(&counters.render_ns),
             merge_wait_worker_ns: load_u64(&counters.merge_wait_worker_ns),
             merge_work_worker_ns: load_u64(&counters.merge_work_worker_ns),
-            batches: counters
-                .batches
-                .load(std::sync::atomic::Ordering::Relaxed),
+            batches: counters.batches.load(std::sync::atomic::Ordering::Relaxed),
             matched_entries: counters
                 .matched_entries
                 .load(std::sync::atomic::Ordering::Relaxed),
@@ -130,7 +127,7 @@ impl GlobProfiler {
 }
 
 #[cfg(feature = "bench-internals")]
-struct GlobSpan<'a> {
+pub(super) struct GlobSpan<'a> {
     active: Option<(&'a GlobProfileCounters, GlobStage, std::time::Instant)>,
 }
 
@@ -160,30 +157,30 @@ impl Drop for GlobSpan<'_> {
 
 #[cfg(not(feature = "bench-internals"))]
 #[derive(Default)]
-struct GlobProfiler;
+pub(super) struct GlobProfiler;
 
 #[cfg(not(feature = "bench-internals"))]
 impl GlobProfiler {
-    fn disabled() -> Self {
+    pub(super) fn disabled() -> Self {
         Self
     }
 
-    fn span(&self, _stage: GlobStage) -> GlobSpan {
+    pub(super) fn span(&self, _stage: GlobStage) -> GlobSpan {
         let _ = self;
         GlobSpan
     }
 
-    fn record_batch(&self, _matched_entries: usize) {
+    pub(super) fn record_batch(&self, _matched_entries: usize) {
         let _ = self;
     }
 
-    fn record_retained(&self, _retained_entries: usize, _retained_memory_bytes: usize) {
+    pub(super) fn record_retained(&self, _retained_entries: usize, _retained_memory_bytes: usize) {
         let _ = self;
     }
 }
 
 #[cfg(not(feature = "bench-internals"))]
-struct GlobSpan;
+pub(super) struct GlobSpan;
 
 #[cfg(not(feature = "bench-internals"))]
 impl Drop for GlobSpan {

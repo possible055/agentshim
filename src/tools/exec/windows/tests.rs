@@ -2,14 +2,19 @@
 mod tests {
     use std::{ffi::OsStr, path::PathBuf, time::Duration};
 
-    use super::super::{
+    use crate::tools::exec::{
         resolve::launcher_for,
         spawn::{EnvironmentPlan, ExecPlan, Streams},
     };
-    use super::{
-        BATCH_COMMAND_LINE_LIMIT, FAILURE_POINT, FailurePoint, LaunchEncoding, Launcher,
-        ResolvedProgram, append_native_argument, append_native_argv0, finish_batch_command_line,
-        finish_native_command_line, run,
+    use crate::tools::exec::{
+        resolve::{Launcher, ResolvedProgram},
+        windows::{
+            platform::{
+                BATCH_COMMAND_LINE_LIMIT, LaunchEncoding, append_native_argument,
+                append_native_argv0, finish_batch_command_line, finish_native_command_line,
+            },
+            runner::{FAILURE_POINT, FailurePoint, run},
+        },
     };
 
     fn fixture_args(args: Vec<&str>) -> Vec<String> {
@@ -132,10 +137,9 @@ mod tests {
                 "--nocapture",
             ]);
             let mut environment = EnvironmentPlan::default();
-            environment.overrides.push((
-                "CODEXSHIM_PROCESS_FIXTURE".to_owned(),
-                "child".to_owned(),
-            ));
+            environment
+                .overrides
+                .push(("CODEXSHIM_PROCESS_FIXTURE".to_owned(), "child".to_owned()));
             environment.overrides.push((
                 "CODEXSHIM_PROCESS_PID_FILE".to_owned(),
                 pid_file.to_string_lossy().into_owned(),
@@ -161,8 +165,8 @@ mod tests {
 
     #[test]
     fn powershell_scripts_report_a_missing_launcher_capability() {
-        let error = launcher_for(PathBuf::from("script.ps1").as_path())
-            .expect_err(".ps1 has no launcher");
+        let error =
+            launcher_for(PathBuf::from("script.ps1").as_path()).expect_err(".ps1 has no launcher");
         assert!(error.to_string().contains("not implemented"));
     }
 

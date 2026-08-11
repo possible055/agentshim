@@ -1,2 +1,6 @@
-include!("server/service.rs");
-include!("server/contract.rs");
+mod catalog;
+mod dispatch;
+mod response;
+mod service;
+
+pub use service::{CodexShim, CodexShimBuilder, ProtocolCompatibility};

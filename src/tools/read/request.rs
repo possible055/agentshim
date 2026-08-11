@@ -1,26 +1,21 @@
-use std::{
-    io::{self, Read},
-    path::Path,
-};
+use std::io;
 
-use cap_std::fs::File;
 use serde::Deserialize;
+#[cfg(any(test, feature = "bench-internals"))]
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    encoding::{
-        DecodeControl, DecodeError, SourceEncoding, decode_stream, detect_legacy_encoding,
-    },
-    output::{OutputFormatter, OutputLimits},
-    path::{FileAccess, PathError, ResolvedPath},
-    tools::ToolOutput,
-};
+use super::pdf::parse_page_selector;
+#[cfg(any(test, feature = "bench-internals"))]
+use super::prepared::{Attempt, PdfMemoryBudgets, execute_prepared, prepare};
+use crate::{encoding::DecodeError, path::PathError};
+#[cfg(any(test, feature = "bench-internals"))]
+use crate::{path::FileAccess, tools::ToolOutput};
 
-const PREFIX_BYTES: usize = 8 * 1024;
-const CANDIDATE_BYTES: usize = 64 * 1024;
-const LINE_PREFIX_BYTES: usize = 8 * 1024;
-const MAX_LINE_COUNT: usize = 2_000;
-const TEXT_READ_MEMORY_BYTES: usize = 256 * 1024;
+pub(super) const PREFIX_BYTES: usize = 8 * 1024;
+pub(super) const CANDIDATE_BYTES: usize = 64 * 1024;
+pub(super) const LINE_PREFIX_BYTES: usize = 8 * 1024;
+pub(super) const MAX_LINE_COUNT: usize = 2_000;
+pub(super) const TEXT_READ_MEMORY_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]

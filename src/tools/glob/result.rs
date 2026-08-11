@@ -1,8 +1,22 @@
+use std::{cmp::Ordering, collections::BinaryHeap};
+
+use tokio_util::sync::CancellationToken;
+
+use crate::{
+    output::{OutputFormatter, OutputLimits},
+    path::{PathSortKey, ResolvedPath},
+    sorting,
+    tools::ToolOutput,
+    traversal::{TraversalError, TraversalSummary},
+};
+
+use super::request::{DEFAULT_LIMIT, GlobError, GlobRequest, PATH_OMISSION};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct GlobMatch {
-    sort_key: PathSortKey,
-    absolute: String,
-    charge: usize,
+pub(super) struct GlobMatch {
+    pub(super) sort_key: PathSortKey,
+    pub(super) absolute: String,
+    pub(super) charge: usize,
 }
 
 impl Ord for GlobMatch {
@@ -19,7 +33,7 @@ impl PartialOrd for GlobMatch {
     }
 }
 
-struct TopK {
+pub(super) struct TopK {
     capacity: usize,
     heap: BinaryHeap<GlobMatch>,
     charged: usize,
@@ -28,7 +42,7 @@ struct TopK {
 }
 
 impl TopK {
-    fn new(
+    pub(super) fn new(
         capacity: usize,
         memory_limit: usize,
         mut reservation: Option<crate::runtime::MemoryReservation>,
@@ -55,18 +69,18 @@ impl TopK {
         })
     }
 
-    fn threshold(&self) -> TopKThreshold {
+    pub(super) fn threshold(&self) -> TopKThreshold {
         TopKThreshold {
             has_capacity: self.capacity > 0 && self.heap.len() < self.capacity,
             worst: self.heap.peek().map(|entry| entry.sort_key.clone()),
         }
     }
 
-    fn might_admit(&self, sort_key: &PathSortKey) -> bool {
+    pub(super) fn might_admit(&self, sort_key: &PathSortKey) -> bool {
         self.threshold().might_admit(sort_key)
     }
 
-    fn admit(&mut self, path: &ResolvedPath) -> Result<(), GlobError> {
+    pub(super) fn admit(&mut self, path: &ResolvedPath) -> Result<(), GlobError> {
         if self.capacity == 0 {
             return Ok(());
         }
@@ -104,11 +118,11 @@ impl TopK {
         Ok(())
     }
 
-    fn len(&self) -> usize {
+    pub(super) fn len(&self) -> usize {
         self.heap.len()
     }
 
-    fn retained_memory_bytes(&self) -> usize {
+    pub(super) fn retained_memory_bytes(&self) -> usize {
         self.charged
     }
 
@@ -133,7 +147,10 @@ impl TopK {
         Ok(())
     }
 
-    fn into_sorted(self, cancellation: &CancellationToken) -> Result<Vec<GlobMatch>, GlobError> {
+    pub(super) fn into_sorted(
+        self,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<GlobMatch>, GlobError> {
         let mut retained = self.heap.into_vec();
         sorting::sort_by(&mut retained, cancellation, Ord::cmp)
             .map_err(|_| TraversalError::Cancelled)?;
@@ -142,22 +159,18 @@ impl TopK {
 }
 
 #[derive(Clone)]
-struct TopKThreshold {
+pub(super) struct TopKThreshold {
     has_capacity: bool,
     worst: Option<PathSortKey>,
 }
 
 impl TopKThreshold {
-    fn might_admit(&self, sort_key: &PathSortKey) -> bool {
-        self.has_capacity
-            || self
-                .worst
-                .as_ref()
-                .is_some_and(|worst| sort_key <= worst)
+    pub(super) fn might_admit(&self, sort_key: &PathSortKey) -> bool {
+        self.has_capacity || self.worst.as_ref().is_some_and(|worst| sort_key <= worst)
     }
 }
 
-fn render(
+pub(super) fn render(
     request: &GlobRequest,
     retained: &[GlobMatch],
     total: usize,
@@ -176,8 +189,7 @@ fn render(
     );
     let mut cap = available;
     loop {
-        let next_offset = (offset.saturating_add(cap) < total)
-            .then(|| offset.saturating_add(cap));
+        let next_offset = (offset.saturating_add(cap) < total).then(|| offset.saturating_add(cap));
         let mut tail = Vec::new();
         if let Some(line) = summary.model_line() {
             tail.push(line);
@@ -230,5 +242,3 @@ fn render(
         cap -= 1;
     }
 }
-
-include!("tests.rs");

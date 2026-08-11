@@ -1,9 +1,14 @@
 use std::{
-    cmp::Ordering,
-    collections::BinaryHeap,
     io,
     path::Path,
     sync::{Arc, Mutex},
+};
+
+#[cfg(feature = "bench-internals")]
+use super::profile::ProfiledGlob;
+use super::{
+    profile::{GlobProfiler, GlobStage},
+    result::{GlobMatch, TopK, render},
 };
 
 use globset::GlobBuilder;
@@ -11,23 +16,21 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    output::{OutputFormatter, OutputLimits},
     path::{FileAccess, PathError, PathSortKey, ResolvedPath},
     runtime::{FileWorkCredit, FileWorkPool, RuntimeResources},
-    sorting,
     tools::ToolOutput,
     traversal::{
-        ParallelTraversal, TraversalControl, TraversalError, TraversalSummary, prefer_parallel_root,
-        walk, walk_parallel_batched,
+        ParallelTraversal, TraversalControl, TraversalError, TraversalSummary,
+        prefer_parallel_root, walk, walk_parallel_batched,
         walk_parallel_batched_with_literal_prefix, walk_with_literal_prefix,
     },
 };
 
-const DEFAULT_LIMIT: usize = 200;
+pub(super) const DEFAULT_LIMIT: usize = 200;
 const MAX_LIMIT: usize = 1_000;
-const MAX_MATCHES: usize = 100_000;
+pub(super) const MAX_MATCHES: usize = 100_000;
 const MEMORY_SAFETY_BYTES: usize = 8 * 1024 * 1024;
-const PATH_OMISSION: &str = "[glob path omitted: exceeds output budget]";
+pub(super) const PATH_OMISSION: &str = "[glob path omitted: exceeds output budget]";
 const PARALLEL_BATCH_SIZE: usize = 256;
 
 #[derive(Clone, Copy)]
@@ -208,7 +211,7 @@ pub fn execute_with_traversal(
         &GlobProfiler::disabled(),
         None,
     )
-        .map(|output| output.text)
+    .map(|output| output.text)
 }
 
 #[cfg(feature = "bench-internals")]
@@ -226,16 +229,15 @@ pub fn execute_profiled_with_traversal(
 ) -> Result<ProfiledGlob, GlobError> {
     let profiler = GlobProfiler::enabled();
     let total_span = profiler.span(GlobStage::Total);
-    let result =
-        execute_inner_with_traversal(
-            access,
-            request,
-            benchmark_resources(),
-            cancellation,
-            traversal,
-            &profiler,
-            None,
-        );
+    let result = execute_inner_with_traversal(
+        access,
+        request,
+        benchmark_resources(),
+        cancellation,
+        traversal,
+        &profiler,
+        None,
+    );
     drop(total_span);
     let output = result?;
     Ok(ProfiledGlob {
@@ -273,11 +275,7 @@ fn execute_inner_with_traversal(
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT);
     let retain = offset.saturating_add(limit).min(MAX_MATCHES);
     let collection = GlobCollection {
-        store: TopK::new(
-            retain,
-            resources.config().glob_memory_bytes,
-            memory,
-        )?,
+        store: TopK::new(retain, resources.config().glob_memory_bytes, memory)?,
         total: 0,
         terminal_error: None,
     };
@@ -421,10 +419,7 @@ fn regular_collect_plan(
     }
 }
 
-fn matches_entry_type(
-    entry_type: GlobEntryType,
-    file_type: Option<std::fs::FileType>,
-) -> bool {
+fn matches_entry_type(entry_type: GlobEntryType, file_type: Option<std::fs::FileType>) -> bool {
     match entry_type {
         GlobEntryType::File => {
             file_type.is_some_and(|file_type| file_type.is_file() || file_type.is_symlink())
@@ -443,32 +438,30 @@ fn collect_serial(
     plan: GlobCollectPlan<'_>,
 ) -> Result<(GlobCollection, TraversalSummary), GlobError> {
     let mut visit = |entry: crate::traversal::TraversalEntry<'_>| {
-            if !matches_entry_type(plan.entry_type, entry.file_type)
-                || !matcher.is_match(entry.key)
-            {
-                return TraversalControl::Continue;
-            }
-            if let Err(error) = record_match(&mut collection.total) {
-                collection.terminal_error = Some(error);
+        if !matches_entry_type(plan.entry_type, entry.file_type) || !matcher.is_match(entry.key) {
+            return TraversalControl::Continue;
+        }
+        if let Err(error) = record_match(&mut collection.total) {
+            collection.terminal_error = Some(error);
+            return TraversalControl::Stop;
+        }
+        let sort_key = PathSortKey::new(entry.key);
+        if !collection.store.might_admit(&sort_key) {
+            return TraversalControl::Continue;
+        }
+        let path = match access.resolve_walked_entry(base, entry.key, entry.absolute) {
+            Ok(path) => path,
+            Err(error) => {
+                collection.terminal_error = Some(error.into());
                 return TraversalControl::Stop;
             }
-            let sort_key = PathSortKey::new(entry.key);
-            if !collection.store.might_admit(&sort_key) {
-                return TraversalControl::Continue;
-            }
-            let path = match access.resolve_walked_entry(base, entry.key, entry.absolute) {
-                Ok(path) => path,
-                Err(error) => {
-                    collection.terminal_error = Some(error.into());
-                    return TraversalControl::Stop;
-                }
-            };
-            if let Err(error) = collection.store.admit(&path) {
-                collection.terminal_error = Some(error);
-                return TraversalControl::Stop;
-            }
-            TraversalControl::Continue
         };
+        if let Err(error) = collection.store.admit(&path) {
+            collection.terminal_error = Some(error);
+            return TraversalControl::Stop;
+        }
+        TraversalControl::Continue
+    };
     let summary = if let Some(literal_prefix) = plan.literal_prefix {
         walk_with_literal_prefix(
             access,
@@ -479,13 +472,7 @@ fn collect_serial(
             &mut visit,
         )?
     } else {
-        walk(
-            access,
-            base,
-            plan.include_ignored,
-            cancellation,
-            &mut visit,
-        )?
+        walk(access, base, plan.include_ignored, cancellation, &mut visit)?
     };
     Ok((collection, summary))
 }
@@ -501,67 +488,67 @@ fn collect_parallel(
 ) -> Result<(GlobCollection, TraversalSummary), GlobError> {
     let collection = Mutex::new(collection);
     let visit = |batch: &[crate::traversal::OwnedTraversalEntry]| {
-            let threshold = {
-                let wait_span = profiler.span(GlobStage::MergeWaitWorker);
-                let collection = collection
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                drop(wait_span);
-                collection.store.threshold()
-            };
-            let mut found = Vec::new();
-            let mut matched_entries = 0_usize;
-            for entry in batch {
-                if !matches_entry_type(plan.entry_type, entry.file_type)
-                    || !matcher.is_match(&entry.key)
-                {
-                    continue;
-                }
-                matched_entries = matched_entries.saturating_add(1);
-                let sort_key = PathSortKey::new(&entry.key);
-                if !threshold.might_admit(&sort_key) {
-                    continue;
-                }
-                match access.resolve_walked_entry(base, &entry.key, &entry.absolute) {
-                    Ok(path) => found.push(path),
-                    Err(error) => {
-                        let wait_span = profiler.span(GlobStage::MergeWaitWorker);
-                        let mut collection = collection
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        drop(wait_span);
-                        let hold_span = profiler.span(GlobStage::MergeWorkWorker);
-                        collection.terminal_error = Some(error.into());
-                        drop(hold_span);
-                        return TraversalControl::Stop;
-                    }
-                }
-            }
-            profiler.record_batch(matched_entries);
+        let threshold = {
             let wait_span = profiler.span(GlobStage::MergeWaitWorker);
-            let mut collection = collection
+            let collection = collection
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             drop(wait_span);
-            let hold_span = profiler.span(GlobStage::MergeWorkWorker);
-            if collection.terminal_error.is_some() {
+            collection.store.threshold()
+        };
+        let mut found = Vec::new();
+        let mut matched_entries = 0_usize;
+        for entry in batch {
+            if !matches_entry_type(plan.entry_type, entry.file_type)
+                || !matcher.is_match(&entry.key)
+            {
+                continue;
+            }
+            matched_entries = matched_entries.saturating_add(1);
+            let sort_key = PathSortKey::new(&entry.key);
+            if !threshold.might_admit(&sort_key) {
+                continue;
+            }
+            match access.resolve_walked_entry(base, &entry.key, &entry.absolute) {
+                Ok(path) => found.push(path),
+                Err(error) => {
+                    let wait_span = profiler.span(GlobStage::MergeWaitWorker);
+                    let mut collection = collection
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    drop(wait_span);
+                    let hold_span = profiler.span(GlobStage::MergeWorkWorker);
+                    collection.terminal_error = Some(error.into());
+                    drop(hold_span);
+                    return TraversalControl::Stop;
+                }
+            }
+        }
+        profiler.record_batch(matched_entries);
+        let wait_span = profiler.span(GlobStage::MergeWaitWorker);
+        let mut collection = collection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        drop(wait_span);
+        let hold_span = profiler.span(GlobStage::MergeWorkWorker);
+        if collection.terminal_error.is_some() {
+            return TraversalControl::Stop;
+        }
+        for _ in 0..matched_entries {
+            if let Err(error) = record_match(&mut collection.total) {
+                collection.terminal_error = Some(error);
                 return TraversalControl::Stop;
             }
-            for _ in 0..matched_entries {
-                if let Err(error) = record_match(&mut collection.total) {
-                    collection.terminal_error = Some(error);
-                    return TraversalControl::Stop;
-                }
+        }
+        for path in found {
+            if let Err(error) = collection.store.admit(&path) {
+                collection.terminal_error = Some(error);
+                return TraversalControl::Stop;
             }
-            for path in found {
-                if let Err(error) = collection.store.admit(&path) {
-                    collection.terminal_error = Some(error);
-                    return TraversalControl::Stop;
-                }
-            }
-            drop(hold_span);
-            TraversalControl::Continue
-        };
+        }
+        drop(hold_span);
+        TraversalControl::Continue
+    };
     let summary = if let Some(literal_prefix) = plan.literal_prefix {
         walk_parallel_batched_with_literal_prefix(
             access,
@@ -604,7 +591,7 @@ fn benchmark_resources() -> &'static RuntimeResources {
     })
 }
 
-fn record_match(total: &mut usize) -> Result<(), GlobError> {
+pub(super) fn record_match(total: &mut usize) -> Result<(), GlobError> {
     if *total >= MAX_MATCHES {
         return Err(GlobError::TooManyMatches);
     }

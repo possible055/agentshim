@@ -2,17 +2,17 @@
 mod tests {
     use std::{fmt::Write as _, fs, sync::Arc};
 
-    use encoding_rs::{BIG5, GB18030, GBK};
     use base64::Engine as _;
+    use encoding_rs::{BIG5, GB18030, GBK};
     use tokio_util::sync::CancellationToken;
 
-    use super::{
-        AFTER_READ_HOOK, BEFORE_READ_HOOK, DecodeError, MAX_LINE_COUNT, MAX_IMAGE_BASE64_BYTES,
-        MAX_IMAGE_PAGES, PdfMemoryBudgets, PdfMode, ReadError, ReadRequest,
-        TEXT_READ_MEMORY_BYTES, execute, execute_output, prepare,
-    };
     use crate::path::{FileAccess, ReadScope, RepositoryRoot};
     use crate::runtime::{DEFAULT_PDF_IMAGE_MEMORY_BYTES, DEFAULT_PDF_TEXT_MEMORY_BYTES};
+    use crate::tools::read::{
+        AFTER_READ_HOOK, BEFORE_READ_HOOK, DecodeError, MAX_IMAGE_BASE64_BYTES, MAX_IMAGE_PAGES,
+        MAX_LINE_COUNT, PdfMemoryBudgets, PdfMode, ReadError, ReadRequest, TEXT_READ_MEMORY_BYTES,
+        execute, execute_output, prepare,
+    };
 
     fn budgets() -> PdfMemoryBudgets {
         PdfMemoryBudgets::defaults()
@@ -91,10 +91,7 @@ mod tests {
             pdf.extend_from_slice(b"\nendobj\n");
         };
         object(1, b"<< /Type /Catalog /Pages 2 0 R >>");
-        object(
-            2,
-            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        );
+        object(2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
         object(
             3,
             b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
@@ -144,8 +141,7 @@ mod tests {
                 .into_bytes(),
             );
             let content = format!("BT /F1 18 Tf 20 150 Td (Page {} body) Tj ET", index + 1);
-            let mut stream =
-                format!("<< /Length {} >>\nstream\n", content.len()).into_bytes();
+            let mut stream = format!("<< /Length {} >>\nstream\n", content.len()).into_bytes();
             stream.extend_from_slice(content.as_bytes());
             stream.extend_from_slice(b"\nendstream");
             bodies.push(stream);
@@ -164,8 +160,7 @@ mod tests {
         image.extend_from_slice(&pixels);
         image.extend_from_slice(b"\nendstream");
         let operations = b"q 200 0 0 200 0 0 cm /Im0 Do Q";
-        let mut content =
-            format!("<< /Length {} >>\nstream\n", operations.len()).into_bytes();
+        let mut content = format!("<< /Length {} >>\nstream\n", operations.len()).into_bytes();
         content.extend_from_slice(operations);
         content.extend_from_slice(b"\nendstream");
 
@@ -508,7 +503,8 @@ mod tests {
         let access = access(fixture.path());
         let cancellation = CancellationToken::new();
 
-        let prepared = prepare(&access, &request("source.txt"), &cancellation, budgets()).expect("prepare");
+        let prepared =
+            prepare(&access, &request("source.txt"), &cancellation, budgets()).expect("prepare");
         assert_eq!(prepared.pdf_mode(), None);
         assert_eq!(prepared.runtime_limit(), None);
         assert_eq!(prepared.memory_charge(), TEXT_READ_MEMORY_BYTES);
@@ -522,9 +518,11 @@ mod tests {
         let access = access(fixture.path());
         let cancellation = CancellationToken::new();
 
-        let text = prepare(&access, &request("source.txt"), &cancellation, budgets()).expect("prepare text");
+        let text = prepare(&access, &request("source.txt"), &cancellation, budgets())
+            .expect("prepare text");
         assert_eq!(text.memory_charge(), TEXT_READ_MEMORY_BYTES);
-        let pdf = prepare(&access, &request("document.bin"), &cancellation, budgets()).expect("prepare PDF");
+        let pdf = prepare(&access, &request("document.bin"), &cancellation, budgets())
+            .expect("prepare PDF");
         assert_eq!(pdf.memory_charge(), DEFAULT_PDF_TEXT_MEMORY_BYTES);
     }
 
@@ -576,10 +574,7 @@ mod tests {
             "the fixture must deliver some but not all pages, got {shown}"
         );
         let expected = format!("pages=\"{}-{}\"", shown + 1, shown * 2);
-        assert!(
-            text.contains(&expected),
-            "expected {expected} in {text}"
-        );
+        assert!(text.contains(&expected), "expected {expected} in {text}");
     }
 
     #[test]
@@ -652,7 +647,8 @@ mod tests {
         // not know the page count yet, so this is how a whole document gets asked for.
         let mut past_the_end = request("long.pdf");
         past_the_end.pages = Some("1-21".to_owned());
-        let text = execute(&access, &past_the_end, &cancellation).expect("clamped to the last page");
+        let text =
+            execute(&access, &past_the_end, &cancellation).expect("clamped to the last page");
         assert!(text.contains(" of 14 as Markdown"));
 
         // The cap still bounds a selection the document can actually satisfy.
@@ -764,7 +760,9 @@ mod tests {
         let text = execute(&access, &request("mixed.pdf"), &cancellation).expect("partial success");
         assert!(text.contains("PDF read heading"));
         assert!(text.contains("Pages: 1=text_ready 2=image_required"));
-        assert!(text.contains("(no extractable text; retry with pdf_mode=\"image\" and pages=\"2\")"));
+        assert!(
+            text.contains("(no extractable text; retry with pdf_mode=\"image\" and pages=\"2\")")
+        );
         assert!(text.contains("Retry: pdf_mode=\"image\" pages=\"2\""));
     }
 
@@ -1066,8 +1064,7 @@ mod tests {
             .expect("pdf");
             let mut probe = request(&name);
             probe.pages = Some(format!("1-{pages}"));
-            let output =
-                execute_output(&access, &probe, &cancellation).expect("bounded response");
+            let output = execute_output(&access, &probe, &cancellation).expect("bounded response");
             assert!(
                 output.fits_content_budget(),
                 "{name} produced an over-budget envelope of {} bytes",
@@ -1300,10 +1297,7 @@ mod tests {
     #[test]
     fn the_image_payload_ceiling_is_eight_mebibytes() {
         assert_eq!(MAX_IMAGE_BASE64_BYTES, 8 * 1024 * 1024);
-        assert_eq!(
-            MAX_IMAGE_BASE64_BYTES / MAX_IMAGE_PAGES,
-            2 * 1024 * 1024
-        );
+        assert_eq!(MAX_IMAGE_BASE64_BYTES / MAX_IMAGE_PAGES, 2 * 1024 * 1024);
     }
 
     /// Rendering must not change what the text path initialises or how long it takes.
@@ -1375,7 +1369,9 @@ mod tests {
         valid.pdf_text_offset = Some(512);
         valid.pages = Some("2".to_owned());
         valid.pdf_source_id = Some("abcdef0123456789".to_owned());
-        valid.validate().expect("a complete resume request is valid");
+        valid
+            .validate()
+            .expect("a complete resume request is valid");
 
         let mut zero_offset = request("document.pdf");
         zero_offset.pdf_text_offset = Some(0);
@@ -1399,13 +1395,11 @@ mod tests {
 
         let (simplified, _, simplified_errors) = GBK.encode(simplified_text);
         assert!(!simplified_errors);
-        fs::write(fixture.path().join("simplified.txt"), simplified.as_ref())
-            .expect("GBK fixture");
+        fs::write(fixture.path().join("simplified.txt"), simplified.as_ref()).expect("GBK fixture");
 
         let (gb18030, _, gb18030_errors) = GB18030.encode(gb18030_text);
         assert!(!gb18030_errors);
-        fs::write(fixture.path().join("gb18030.txt"), gb18030.as_ref())
-            .expect("GB18030 fixture");
+        fs::write(fixture.path().join("gb18030.txt"), gb18030.as_ref()).expect("GB18030 fixture");
 
         let (ambiguous, _, ambiguous_errors) = BIG5.encode("中文\n");
         assert!(!ambiguous_errors);
@@ -1414,12 +1408,12 @@ mod tests {
 
         let root = access(fixture.path());
         let cancellation = CancellationToken::new();
-        let traditional = execute(&root, &request("traditional.txt"), &cancellation)
-            .expect("auto-detect Big5");
+        let traditional =
+            execute(&root, &request("traditional.txt"), &cancellation).expect("auto-detect Big5");
         assert!(traditional.contains("Encoding: Big5\n1\t繁體中文測試資料"));
 
-        let simplified = execute(&root, &request("simplified.txt"), &cancellation)
-            .expect("auto-detect GBK");
+        let simplified =
+            execute(&root, &request("simplified.txt"), &cancellation).expect("auto-detect GBK");
         assert!(simplified.contains("Encoding: GBK\n1\t简体中文测试数据"));
 
         let gb18030 =
@@ -1573,8 +1567,12 @@ mod tests {
 
     #[test]
     fn webp_magic_requires_riff_container() {
-        assert!(!super::has_binary_magic(b"abcdefghWEBP source text"));
-        assert!(super::has_binary_magic(b"RIFF1234WEBP"));
+        assert!(!crate::tools::read::fingerprint::has_binary_magic(
+            b"abcdefghWEBP source text"
+        ));
+        assert!(crate::tools::read::fingerprint::has_binary_magic(
+            b"RIFF1234WEBP"
+        ));
     }
 
     #[test]

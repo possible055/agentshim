@@ -207,28 +207,12 @@ const OVERSIZED_EXCEPTIONS: &[Exception] = &[
         reason: "Phase 5 xref reconstruction split pending",
     },
     Exception {
-        path: "src/server/contract.rs",
-        reason: "Phase 3 response and catalog split pending",
-    },
-    Exception {
-        path: "src/server/service.rs",
-        reason: "Phase 3 server dispatch split pending",
-    },
-    Exception {
         path: "src/tools/bash/locate.rs",
         reason: "Phase 3 locator test split pending",
     },
     Exception {
         path: "src/tools/bash/tests.rs",
         reason: "Phase 3 bash test split pending",
-    },
-    Exception {
-        path: "src/tools/grep/search.rs",
-        reason: "Phase 3 grep pipeline split pending",
-    },
-    Exception {
-        path: "src/tools/read/pdf.rs",
-        reason: "Phase 3 PDF adapter split pending",
     },
     Exception {
         path: "src/tools/read/tests.rs",
@@ -247,48 +231,7 @@ const OVERSIZED_EXCEPTIONS: &[Exception] = &[
         reason: "Phase 3 resource soak split pending",
     },
 ];
-const TEXTUAL_INCLUDE_EXCEPTIONS: &[Exception] = &[
-    Exception {
-        path: "src/server/contract.rs",
-        reason: "Phase 2 server tests moduleization pending",
-    },
-    Exception {
-        path: "src/server.rs",
-        reason: "Phase 2 server moduleization pending",
-    },
-    Exception {
-        path: "src/tools/exec/windows/platform.rs",
-        reason: "Phase 2 Windows exec tests moduleization pending",
-    },
-    Exception {
-        path: "src/tools/exec/windows.rs",
-        reason: "Phase 2 Windows exec moduleization pending",
-    },
-    Exception {
-        path: "src/tools/glob/result.rs",
-        reason: "Phase 2 glob tests moduleization pending",
-    },
-    Exception {
-        path: "src/tools/glob.rs",
-        reason: "Phase 2 glob moduleization pending",
-    },
-    Exception {
-        path: "src/tools/grep/result.rs",
-        reason: "Phase 2 grep tests moduleization pending",
-    },
-    Exception {
-        path: "src/tools/grep.rs",
-        reason: "Phase 2 grep moduleization pending",
-    },
-    Exception {
-        path: "src/tools/read/collector.rs",
-        reason: "Phase 2 read tests moduleization pending",
-    },
-    Exception {
-        path: "src/tools/read.rs",
-        reason: "Phase 2 read moduleization pending",
-    },
-];
+const TEXTUAL_INCLUDE_EXCEPTIONS: &[Exception] = &[];
 
 #[test]
 fn handwritten_rust_files_respect_the_architecture_constraints() {
