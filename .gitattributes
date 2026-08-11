@@ -1,2 +1,5 @@
+.gitattributes text eol=lf
 *.sh text eol=lf
 *.ps1 text eol=crlf
+crates/gigatoken-core/assets/*.tiktoken binary
+crates/gigatoken-core/tests/fixtures/replacement_large_corpus_seed.txt text eol=lf

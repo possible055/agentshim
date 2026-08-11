@@ -2,8 +2,20 @@ use std::time::Instant;
 
 use codexshim_gigatoken::{CountUpTo, CounterLimits, O200kPrototype};
 
+fn replacement_corpus_seed() -> Vec<u8> {
+    let source = include_bytes!("fixtures/replacement_large_corpus_seed.txt");
+    let mut bytes = Vec::with_capacity(source.len() * 2);
+    for &byte in source {
+        if byte == b'\n' && bytes.last() != Some(&b'\r') {
+            bytes.push(b'\r');
+        }
+        bytes.push(byte);
+    }
+    bytes
+}
+
 fn corpus() -> String {
-    let mut bytes = include_bytes!("../../../crates/pdf-read-core/src/content/parser.rs").to_vec();
+    let mut bytes = replacement_corpus_seed();
     while bytes.len() < 246_384 {
         bytes.extend_from_slice(include_bytes!("../../../README.md"));
     }
