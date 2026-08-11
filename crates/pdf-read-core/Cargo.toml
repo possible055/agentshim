@@ -10,7 +10,6 @@ description = "Internal read-only PDF core for codexshim"
 [lib]
 name = "codexshim_pdf_read"
 doctest = false
-test = false
 
 [dependencies]
 aes = "0.9"

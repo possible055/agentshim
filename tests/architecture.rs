@@ -11,56 +11,12 @@ struct Exception {
 
 const OVERSIZED_EXCEPTIONS: &[Exception] = &[
     Exception {
-        path: "crates/pdf-read-core/src/annotation_types.rs",
-        reason: "Phase 5 annotation type split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/annotations.rs",
-        reason: "Phase 5 annotation processing split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/color/mod.rs",
-        reason: "Phase 5 color responsibility split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/content/graphics_state.rs",
-        reason: "Phase 5 graphics state split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/content/operators.rs",
-        reason: "Phase 5 content operator split pending",
-    },
-    Exception {
         path: "crates/pdf-read-core/src/content/parser.rs",
         reason: "Phase 5 content parser split pending",
     },
     Exception {
-        path: "crates/pdf-read-core/src/decoders/ccitt.rs",
-        reason: "Phase 5 CCITT decoder test split pending",
-    },
-    Exception {
         path: "crates/pdf-read-core/src/document.rs",
         reason: "Phase 5 document aggregate split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/elements/path.rs",
-        reason: "Phase 5 path element split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/extractors/forms.rs",
-        reason: "Phase 5 form extractor split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/extractors/gap_statistics.rs",
-        reason: "Phase 5 gap statistics split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/extractors/images.rs",
-        reason: "Phase 5 image extractor split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/extractors/paths.rs",
-        reason: "Phase 5 path extractor split pending",
     },
     Exception {
         path: "crates/pdf-read-core/src/extractors/text.rs",
@@ -69,14 +25,6 @@ const OVERSIZED_EXCEPTIONS: &[Exception] = &[
     Exception {
         path: "crates/pdf-read-core/src/fonts/adobe_glyph_list.rs",
         reason: "immutable Adobe glyph mapping data with pinned upstream provenance",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/fonts/cff_encoding.rs",
-        reason: "Phase 5 CFF data and lookup split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/fonts/character_mapper.rs",
-        reason: "Phase 5 character mapper split pending",
     },
     Exception {
         path: "crates/pdf-read-core/src/fonts/cid_mappings/adobe_cns1.rs",
@@ -95,108 +43,12 @@ const OVERSIZED_EXCEPTIONS: &[Exception] = &[
         reason: "immutable Adobe Korea1 mapping data with pinned upstream provenance",
     },
     Exception {
-        path: "crates/pdf-read-core/src/fonts/cmap.rs",
-        reason: "Phase 5 CMap split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/fonts/font_dict.rs",
-        reason: "Phase 5 font dictionary aggregate split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/fonts/truetype_cmap.rs",
-        reason: "Phase 5 TrueType CMap split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/functions/mod.rs",
-        reason: "Phase 5 PDF function split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/layout/text_block.rs",
-        reason: "Phase 5 text block split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/lexer.rs",
-        reason: "Phase 5 lexer test split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/object.rs",
-        reason: "Phase 5 object type split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/parser.rs",
-        reason: "Phase 5 object parser split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/pipeline/config.rs",
-        reason: "Phase 5 pipeline configuration split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/pipeline/converters/markdown.rs",
-        reason: "Phase 5 markdown converter split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/pipeline/reading_order/xycut.rs",
-        reason: "Phase 5 XY-cut split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/rendering/mesh_shading.rs",
-        reason: "Phase 5 mesh shading split pending",
-    },
-    Exception {
         path: "crates/pdf-read-core/src/rendering/page_renderer.rs",
         reason: "Phase 5 page renderer aggregate split pending",
     },
     Exception {
-        path: "crates/pdf-read-core/src/rendering/resolution/color.rs",
-        reason: "Phase 5 color resolution split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/rendering/resolution/separation_backend.rs",
-        reason: "Phase 5 separation backend split pending",
-    },
-    Exception {
         path: "crates/pdf-read-core/src/rendering/separation_renderer.rs",
         reason: "Phase 5 separation renderer split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/rendering/sidecar.rs",
-        reason: "Phase 5 rendering sidecar split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/rendering/text_rasterizer.rs",
-        reason: "Phase 5 text rasterizer split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/structure/parser.rs",
-        reason: "Phase 5 structure parser split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/structure/spatial_table_detector.rs",
-        reason: "Phase 5 spatial table detector split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/structure/table_extractor.rs",
-        reason: "Phase 5 table extractor split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/structure/traversal.rs",
-        reason: "Phase 5 structure traversal split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/text/bidi.rs",
-        reason: "Phase 5 bidirectional text split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/text/word_boundary.rs",
-        reason: "Phase 5 word boundary split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/xref.rs",
-        reason: "Phase 5 xref split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/xref_reconstruction.rs",
-        reason: "Phase 5 xref reconstruction split pending",
     },
 ];
 const TEXTUAL_INCLUDE_EXCEPTIONS: &[Exception] = &[];
