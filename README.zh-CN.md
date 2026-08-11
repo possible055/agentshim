@@ -88,7 +88,7 @@ args = ["serve"]
 required = true
 supports_parallel_tool_calls = true
 startup_timeout_sec = 15
-tool_timeout_sec = 610
+tool_timeout_sec = 600
 enabled_tools = ["read", "grep", "glob", "run_program", "bash"]
 default_tools_approval_mode = "writes"
 env = { CODEX_MCP_PROTOCOL_VERSION = "2026-07-28" }
@@ -105,7 +105,7 @@ mcp_2026_07_28 = true
 
 两级审批对应两个工具的差异：`run_program` 启动单个可执行文件并接收结构化 argv，因此可以按需审批；`bash` 接收任意命令行，一律提示。两个工具都不是安全 sandbox。
 
-`tool_timeout_sec` 必须不小于服务端 600000 ms 上限并留出余量，否则客户端会先于服务端超时。
+`tool_timeout_sec` 必须不小于服务端 590000 ms 上限并留出余量，否则客户端会先于服务端超时。示例使用 600，即服务端保持在其下方的整數上限。
 
 在 Windows 上，使用单引号 TOML 路径，例如 `'C:\Users\me\AppData\Local\codexshim\bin\codexshim.exe'`，以避免转义反斜杠。
 

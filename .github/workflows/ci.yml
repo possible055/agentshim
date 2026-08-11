@@ -21,7 +21,7 @@ env:
 
 jobs:
   linux-validation:
-    name: Linux quality gate
+    name: Linux x86-64 CI
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -63,7 +63,7 @@ jobs:
         run: cargo metadata --locked --no-deps --format-version 1
 
   windows-validation:
-    name: Windows quality gate
+    name: Windows x86-64 CI
     runs-on: windows-2025
     timeout-minutes: 20
     steps:
@@ -95,12 +95,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Linux ARM64 tests
+          - name: Linux ARM64 CI
             os: ubuntu-24.04-arm
             system: Linux
             machine: aarch64
             runner_arch: ARM64
-          - name: macOS Apple Silicon tests
+          - name: macOS ARM64 CI
             os: macos-15
             system: Darwin
             machine: arm64

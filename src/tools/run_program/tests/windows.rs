@@ -155,6 +155,7 @@ fn windows_timeout_terminates_grandchild_job_tree() {
         pid_file.to_string_lossy().into_owned(),
     );
     timed.timeout_ms = Some(750);
+    let started = std::time::Instant::now();
     let error = execute(
         &root,
         &ProcessResolver::capture(),
@@ -163,6 +164,10 @@ fn windows_timeout_terminates_grandchild_job_tree() {
         &CancellationToken::new(),
     )
     .expect_err("timeout");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "timeout cleanup waited for inherited output pipes"
+    );
     assert!(
         matches!(&error, ProcessError::Timeout { .. }),
         "unexpected process error: {error}"

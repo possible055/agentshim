@@ -60,6 +60,7 @@ pub fn reset_fingerprint_metrics() {
 }
 
 #[cfg(all(feature = "bench-internals", windows))]
+#[must_use]
 pub fn fingerprint_metrics() -> FingerprintMetrics {
     FingerprintMetrics {
         file_id_calls: FINGERPRINT_FILE_ID_CALLS.load(std::sync::atomic::Ordering::Relaxed),
@@ -72,6 +73,7 @@ pub fn fingerprint_metrics() -> FingerprintMetrics {
 }
 
 #[cfg(all(feature = "bench-internals", not(windows)))]
+#[must_use]
 pub fn fingerprint_metrics() -> FingerprintMetrics {
     FingerprintMetrics::default()
 }

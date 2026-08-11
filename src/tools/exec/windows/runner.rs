@@ -116,6 +116,7 @@ pub(crate) fn run(
     lifecycle
         .resume()
         .map_err(|error| ProcessError::from(io_context("resume primary process", &error)))?;
+    trace_process_started(&lifecycle);
     #[cfg(test)]
     inject_failure(FailurePoint::Running).map_err(ProcessError::Io)?;
 
@@ -150,6 +151,7 @@ pub(crate) fn run(
             );
         }
         if started.elapsed() >= plan.timeout {
+            trace_timeout_state(&lifecycle, primary.is_none(), active);
             return terminate_after_timeout(
                 &mut lifecycle,
                 (completion, stdin_thread, drains),
@@ -164,6 +166,27 @@ pub(crate) fn run(
         exit_code,
         started,
     )
+}
+
+fn trace_process_started(lifecycle: &Lifecycle) {
+    tracing::info!(
+        target: "codexshim",
+        event = "process_started",
+        phase = "execution",
+        primary_pid = lifecycle.primary_pid(),
+        containment = "job"
+    );
+}
+
+fn trace_timeout_state(lifecycle: &Lifecycle, primary_running: bool, active_processes: u32) {
+    tracing::error!(
+        target: "codexshim",
+        event = "process_timeout_state",
+        phase = "cleanup",
+        primary_pid = lifecycle.primary_pid(),
+        primary_running,
+        active_processes
+    );
 }
 
 fn io_context(context: &str, error: &io::Error) -> io::Error {

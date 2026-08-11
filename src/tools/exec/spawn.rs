@@ -26,10 +26,27 @@ use super::{
 };
 
 pub(crate) const DEFAULT_TIMEOUT_MS: u64 = 120_000;
-pub(crate) const MAX_TIMEOUT_MS: u64 = 600_000;
+/// The `tool_timeout_sec` ceiling the client examples and READMEs document. The server's own
+/// execution ceiling stays below this so a client configured at the shelf always receives the
+/// server's Timeout response before its `tool_timeout_sec` fires.
+pub(super) const TOOL_TIMEOUT_SHELF: Duration = Duration::from_secs(600);
+/// Round-trip slack beyond `CLEANUP_DEADLINE` for the MCP response carrying the Timeout.
+pub(super) const PROTOCOL_SLACK: Duration = Duration::from_secs(5);
+/// Maximum execution time the caller may request. Derived below `TOOL_TIMEOUT_SHELF` by the
+/// cleanup deadline plus protocol slack, so the client never gives up before the server does.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "TOOL_TIMEOUT_SHELF is 600 s, far below u64::MAX ms"
+)]
+pub(crate) const MAX_TIMEOUT_MS: u64 = TOOL_TIMEOUT_SHELF
+    .saturating_sub(CLEANUP_DEADLINE)
+    .saturating_sub(PROTOCOL_SLACK)
+    .as_millis() as u64;
 #[cfg(unix)]
 pub(super) const TERM_GRACE: Duration = Duration::from_millis(250);
 pub(super) const CLEANUP_DEADLINE: Duration = Duration::from_secs(5);
+#[cfg(windows)]
+pub(super) const IO_CANCELLATION_DEADLINE: Duration = Duration::from_secs(1);
 /// How long descendants may outlive the primary process before the owned containment is
 /// terminated. A detached tree is how a command intentionally outlives its call.
 pub(super) const DESCENDANT_EXIT_GRACE: Duration = Duration::from_millis(250);

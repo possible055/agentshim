@@ -7,6 +7,7 @@ use crate::{
     tools::exec::{
         ProcessError,
         capture::{Capture, capture_bytes_per_stream},
+        spawn::MAX_TIMEOUT_MS,
     },
 };
 

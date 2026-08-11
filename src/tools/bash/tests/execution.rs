@@ -53,14 +53,14 @@ fn validation_rejects_empty_commands_and_unsupported_detach_combinations() {
     ));
 
     let mut over_limit = request("true");
-    over_limit.timeout_ms = Some(600_001);
+    over_limit.timeout_ms = Some(MAX_TIMEOUT_MS + 1);
     assert!(matches!(
         over_limit.validate(),
         Err(ProcessError::Validation(_))
     ));
 
     let mut at_limit = request("true");
-    at_limit.timeout_ms = Some(600_000);
+    at_limit.timeout_ms = Some(MAX_TIMEOUT_MS);
     assert!(at_limit.validate().is_ok());
 }
 

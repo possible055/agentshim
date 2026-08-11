@@ -3,7 +3,10 @@ use std::sync::{Arc, OnceLock};
 use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Value, json};
 
-use crate::path::ReadScope;
+use crate::{
+    path::ReadScope,
+    tools::exec::spawn::{DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS},
+};
 
 pub(super) fn tool_catalog(read_scope: ReadScope) -> &'static [Tool; 5] {
     static NORMAL_TOOLS: OnceLock<[Tool; 5]> = OnceLock::new();
@@ -113,17 +116,20 @@ fn grep_tool(read_scope: ReadScope) -> Tool {
                 "case": {
                     "type": "string",
                     "enum": ["smart", "sensitive", "insensitive"],
-                    "default": "smart"
+                    "default": "smart",
+                    "description": "Case sensitivity. smart is case-sensitive when the pattern contains an uppercase letter, otherwise case-insensitive."
                 },
                 "context_lines": {
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 20,
-                    "default": 0
+                    "default": 0,
+                    "description": "Lines of context to show before and after each match."
                 },
                 "fixed_strings": {
                     "type": "boolean",
-                    "default": false
+                    "default": false,
+                    "description": "Treat pattern as a literal string instead of a Rust regex."
                 },
                 "glob": {
                     "type": "string",
@@ -133,17 +139,20 @@ fn grep_tool(read_scope: ReadScope) -> Tool {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 1000,
-                    "default": 200
+                    "default": 200,
+                    "description": "Maximum matching entries to return."
                 },
                 "mode": {
                     "type": "string",
                     "enum": ["content", "files", "count"],
-                    "default": "content"
+                    "default": "content",
+                    "description": "content returns matching lines, files returns only paths with matches, count returns path:count summaries."
                 },
                 "offset": {
                     "type": "integer",
                     "minimum": 0,
-                    "default": 0
+                    "default": 0,
+                    "description": "Skip this many matching entries before returning results, for pagination."
                 },
                 "path": {
                     "type": "string",
@@ -182,18 +191,21 @@ fn glob_tool(read_scope: ReadScope) -> Tool {
             "properties": {
                 "include_ignored": {
                     "type": "boolean",
-                    "default": false
+                    "default": false,
+                    "description": "Include entries matched by gitignore; .git internals remain excluded."
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 1000,
-                    "default": 200
+                    "default": 200,
+                    "description": "Maximum paths to return."
                 },
                 "offset": {
                     "type": "integer",
                     "minimum": 0,
-                    "default": 0
+                    "default": 0,
+                    "description": "Skip this many matching paths before returning results, for pagination."
                 },
                 "path": {
                     "type": "string",
@@ -226,10 +238,11 @@ fn run_program_tool() -> Tool {
          is passed as one literal argument. Pipes, redirection, globbing, and variable expansion do \
          not happen. Arguments are passed literally — do not add quoting. Prefer this when \
          arguments contain characters a shell would mangle, such as Windows paths, regexes, and \
-         JSON. Use bash only when shell composition is required. Cleanup owns a Windows Job Object \
-         or the Unix process group it created; a Unix program that starts a new session can escape \
-         that group. This is not a sandbox. This is an open-world, destructive operation and may \
-         require approval.",
+         JSON. Use bash only when shell composition is required. Do not issue state-changing \
+         commands against the same working tree in parallel calls. Cleanup owns a Windows Job \
+         Object or the Unix process group it created; a Unix program that starts a new session can \
+         escape that group. This is not a sandbox. This is an open-world, destructive operation \
+         and may require approval.",
         schema(json!({
             "type": "object",
             "additionalProperties": false,
@@ -263,8 +276,9 @@ fn run_program_tool() -> Tool {
                 "timeout_ms": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 600_000,
-                    "default": 120_000
+                    "maximum": MAX_TIMEOUT_MS,
+                    "default": DEFAULT_TIMEOUT_MS,
+                    "description": "Execution timeout in milliseconds. On timeout the owned process containment is terminated and a Timeout error is returned."
                 },
                 "unset_env": {
                     "type": "array",
@@ -286,8 +300,7 @@ fn run_program_tool() -> Tool {
 }
 
 fn bash_tool() -> Tool {
-    Tool::new(
-        "bash",
+    let description = format!(
         "Run a POSIX bash command line and return merged stdout and stderr with the exit code. \
          Write POSIX bash, never PowerShell, on every platform. The command runs \
          non-interactively with no TTY and stdin closed, so pass flags such as -y or --no-edit \
@@ -296,16 +309,20 @@ fn bash_tool() -> Tool {
          order and cannot be attributed to a stream; a program that buffers stdout but not \
          stderr can still interleave them differently from what a terminal would show. Output \
          above the byte budget is truncated in the middle: redirect to a file and page it with \
-         read when you need all of it. The default timeout is 120000 ms and the maximum is \
-         600000 ms; for work that needs longer, set detach with a log_path and read that file \
-         instead of waiting. On Windows, prefer run_program for one native program with literal \
-         arguments. When Bash composition must pass slash-style switches such as /E or /C to a \
-         native program, set msys_argument_conversion to disabled. This setting applies to the \
-         whole Bash command; codexshim does not inspect subcommands or retry failures. Do not \
-         issue state-changing commands against the same working tree in parallel calls. Cleanup \
-         owns a Windows Job Object or the Unix process group it created; a Unix program that \
-         starts a new session can escape that group. This is not a sandbox. This is an \
-         open-world, destructive operation and may require approval.",
+         read when you need all of it. The default timeout is {DEFAULT_TIMEOUT_MS} ms and the \
+         maximum is {MAX_TIMEOUT_MS} ms; for work that needs longer, set detach with a log_path \
+         and read that file instead of waiting. On Windows, prefer run_program for one native \
+         program with literal arguments. When Bash composition must pass slash-style switches \
+         such as /E or /C to a native program, set msys_argument_conversion to disabled. This \
+         setting applies to the whole Bash command; codexshim does not inspect subcommands or \
+         retry failures. Do not issue state-changing commands against the same working tree in \
+         parallel calls. Cleanup owns a Windows Job Object or the Unix process group it \
+         created; a Unix program that starts a new session can escape that group. This is not \
+         a sandbox. This is an open-world, destructive operation and may require approval."
+    );
+    Tool::new(
+        "bash",
+        description,
         schema(json!({
             "type": "object",
             "additionalProperties": false,
@@ -337,8 +354,9 @@ fn bash_tool() -> Tool {
                 "timeout_ms": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 600_000,
-                    "default": 120_000
+                    "maximum": MAX_TIMEOUT_MS,
+                    "default": DEFAULT_TIMEOUT_MS,
+                    "description": "Execution timeout in milliseconds. On timeout the owned process group is terminated and a Timeout error is returned. Forbidden when detach is true."
                 }
             },
             "required": ["command"]

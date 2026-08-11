@@ -88,7 +88,7 @@ args = ["serve"]
 required = true
 supports_parallel_tool_calls = true
 startup_timeout_sec = 15
-tool_timeout_sec = 610
+tool_timeout_sec = 600
 enabled_tools = ["read", "grep", "glob", "run_program", "bash"]
 default_tools_approval_mode = "writes"
 env = { CODEX_MCP_PROTOCOL_VERSION = "2026-07-28" }
@@ -105,7 +105,7 @@ mcp_2026_07_28 = true
 
 The two approval modes encode the difference between the tools: `run_program` launches one executable with structured argv, so it can be approved on request, while `bash` accepts an arbitrary command line and always prompts. Neither tool is a security sandbox.
 
-`tool_timeout_sec` must be at least the server's 600000 ms ceiling plus headroom, or the client gives up before the server does.
+`tool_timeout_sec` must be at least the server's 590000 ms ceiling plus headroom, or the client gives up before the server does. The examples use 600, which is the round shelf the server stays below.
 
 On Windows, use a single-quoted TOML path such as `'C:\Users\me\AppData\Local\codexshim\bin\codexshim.exe'` to avoid escaping backslashes.
 

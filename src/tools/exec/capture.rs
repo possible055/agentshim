@@ -4,6 +4,8 @@ use std::path::Path;
 use std::io::{self, Read, Write};
 
 use tokio_util::sync::CancellationToken;
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::ERROR_OPERATION_ABORTED;
 
 use super::ProcessError;
 
@@ -394,7 +396,13 @@ pub(super) fn drain(
     );
     let mut chunk = vec![0_u8; DRAIN_CHUNK_BYTES].into_boxed_slice();
     loop {
-        let count = reader.read(&mut chunk)?;
+        let count = match reader.read(&mut chunk) {
+            Ok(count) => count,
+            Err(error) if is_operation_aborted(&error) => {
+                return Ok(capture);
+            }
+            Err(error) => return Err(error),
+        };
         if count == 0 {
             return Ok(capture);
         }
@@ -405,9 +413,21 @@ pub(super) fn drain(
 #[cfg(windows)]
 pub(super) fn write_stdin(mut writer: impl Write, input: Option<&str>) -> io::Result<()> {
     if let Some(input) = input {
-        writer.write_all(input.as_bytes())?;
+        if let Err(error) = writer.write_all(input.as_bytes()) {
+            if !is_operation_aborted(&error) {
+                return Err(error);
+            }
+        }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn is_operation_aborted(error: &io::Error) -> bool {
+    error
+        .raw_os_error()
+        .and_then(|code| u32::try_from(code).ok())
+        == Some(ERROR_OPERATION_ABORTED)
 }
 
 /// Grow every capture together, then grow each one individually, until the assembled result

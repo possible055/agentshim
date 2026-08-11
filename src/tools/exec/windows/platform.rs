@@ -6,12 +6,12 @@ use std::{
     mem::{self, size_of},
     os::windows::{
         ffi::{OsStrExt, OsStringExt},
-        io::{FromRawHandle, RawHandle},
+        io::{AsRawHandle, FromRawHandle, RawHandle},
     },
     path::{Path, PathBuf},
     ptr::{null, null_mut},
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use windows_sys::Win32::{
@@ -22,7 +22,7 @@ use windows_sys::Win32::{
     Globalization::{CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN, CompareStringOrdinal},
     Security::SECURITY_ATTRIBUTES,
     System::{
-        IO::{CreateIoCompletionPort, GetQueuedCompletionStatus},
+        IO::{CancelSynchronousIo, CreateIoCompletionPort, GetQueuedCompletionStatus},
         JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             JOBOBJECT_ASSOCIATE_COMPLETION_PORT, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
@@ -45,7 +45,9 @@ use super::super::{
     ProcessError,
     capture::Capture,
     resolve::{Launcher, ResolvedProgram},
-    spawn::{CLEANUP_DEADLINE, EnvironmentPlan, Streams, ThreadCompletion},
+    spawn::{
+        CLEANUP_DEADLINE, EnvironmentPlan, IO_CANCELLATION_DEADLINE, Streams, ThreadCompletion,
+    },
 };
 #[cfg(test)]
 use super::runner::{FailurePoint, inject_failure};
@@ -112,8 +114,30 @@ pub(super) fn settle_threads(
     stdin: thread::JoinHandle<io::Result<()>>,
     drains: Vec<thread::JoinHandle<io::Result<Capture>>>,
 ) -> Result<ThreadResults, ProcessError> {
-    if !completion.wait_for(drains.len() + 1, CLEANUP_DEADLINE) {
-        return Err(ProcessError::OutcomeUncertain);
+    settle_threads_with_deadlines(
+        completion,
+        stdin,
+        drains,
+        CLEANUP_DEADLINE,
+        IO_CANCELLATION_DEADLINE,
+    )
+}
+
+pub(super) fn settle_threads_with_deadlines(
+    completion: &ThreadCompletion,
+    stdin: thread::JoinHandle<io::Result<()>>,
+    drains: Vec<thread::JoinHandle<io::Result<Capture>>>,
+    settlement_deadline: Duration,
+    cancellation_deadline: Duration,
+) -> Result<ThreadResults, ProcessError> {
+    if !completion.wait_for(drains.len() + 1, settlement_deadline) {
+        cancel_thread_io(&stdin);
+        for drain in &drains {
+            cancel_thread_io(drain);
+        }
+        if !completion.wait_for(drains.len() + 1, cancellation_deadline) {
+            return Err(ProcessError::OutcomeUncertain);
+        }
     }
     let stdin = stdin
         .join()
@@ -127,6 +151,12 @@ pub(super) fn settle_threads(
         );
     }
     Ok((stdin, captures))
+}
+
+fn cancel_thread_io<T>(thread: &thread::JoinHandle<T>) {
+    unsafe {
+        CancelSynchronousIo(thread.as_raw_handle());
+    }
 }
 
 pub(super) struct LaunchEncoding {
@@ -410,7 +440,7 @@ impl Pipe {
         Self::create(true)
     }
 
-    fn stdout() -> io::Result<Self> {
+    pub(super) fn stdout() -> io::Result<Self> {
         Self::create(false)
     }
 
@@ -493,6 +523,7 @@ impl Drop for AttributeList {
 }
 
 pub(super) struct Lifecycle {
+    pid: u32,
     process: OwnedHandle,
     thread: Option<OwnedHandle>,
     job: Option<OwnedHandle>,
@@ -521,12 +552,17 @@ impl Lifecycle {
             }
         };
         Ok(Self {
+            pid: info.dwProcessId,
             process,
             thread: Some(thread),
             job: None,
             completion: None,
             state: LifecycleState::SpawnedSuspended,
         })
+    }
+
+    pub(super) fn primary_pid(&self) -> u32 {
+        self.pid
     }
 
     pub(super) fn install_job(&mut self) -> io::Result<()> {

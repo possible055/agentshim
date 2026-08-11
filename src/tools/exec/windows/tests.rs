@@ -1,20 +1,28 @@
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsStr, path::PathBuf, time::Duration};
+    use std::{
+        ffi::OsStr,
+        path::PathBuf,
+        sync::{Arc, Barrier, atomic::AtomicBool},
+        time::{Duration, Instant},
+    };
 
     use crate::tools::exec::{
-        resolve::launcher_for,
-        spawn::{EnvironmentPlan, ExecPlan, Streams},
-    };
-    use crate::tools::exec::{
+        capture::drain,
         resolve::{Launcher, ResolvedProgram},
+        spawn::{ThreadCompletion, spawn_monitored},
         windows::{
             platform::{
-                BATCH_COMMAND_LINE_LIMIT, LaunchEncoding, append_native_argument,
+                BATCH_COMMAND_LINE_LIMIT, LaunchEncoding, Pipe, append_native_argument,
                 append_native_argv0, finish_batch_command_line, finish_native_command_line,
+                settle_threads_with_deadlines,
             },
             runner::{FAILURE_POINT, FailurePoint, run},
         },
+    };
+    use crate::tools::exec::{
+        resolve::launcher_for,
+        spawn::{EnvironmentPlan, ExecPlan, Streams},
     };
 
     fn fixture_args(args: Vec<&str>) -> Vec<String> {
@@ -34,6 +42,36 @@ mod tests {
             "\"C:\\tool.exe\" \"\" \"a b\" q\\\"r trail\\ \"a b\\\\\""
         );
         assert!(finish_native_command_line(vec![u16::from(b'x'); 32_767]).is_err());
+    }
+
+    #[test]
+    fn blocked_output_drain_is_cancelled_and_joined() {
+        let pipe = Pipe::stdout().expect("output pipe");
+        let reader = pipe.parent.into_file();
+        let _writer = pipe.child.into_file();
+        let completion = ThreadCompletion::new();
+        let failed = Arc::new(AtomicBool::new(false));
+        let stdin = spawn_monitored(Arc::clone(&failed), completion.clone(), || Ok(()));
+        let entered = Arc::new(Barrier::new(2));
+        let drain_entered = Arc::clone(&entered);
+        let drain = spawn_monitored(failed, completion.clone(), move || {
+            drain_entered.wait();
+            drain(reader, 1024, None)
+        });
+        entered.wait();
+        let started = Instant::now();
+
+        let (_, captures) = settle_threads_with_deadlines(
+            &completion,
+            stdin,
+            vec![drain],
+            Duration::from_millis(100),
+            Duration::from_secs(1),
+        )
+        .expect("cancel blocked output drain");
+
+        assert_eq!(captures.len(), 1);
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
@@ -133,7 +171,7 @@ mod tests {
             let pid_file = fixture.path().join(format!("{point:?}.pid"));
             let args = fixture_args(vec![
                 "--exact",
-                "tools::run_program::tests::windows_grandchild_child_fixture",
+                "tools::run_program::tests::windows::windows_grandchild_child_fixture",
                 "--nocapture",
             ]);
             let mut environment = EnvironmentPlan::default();

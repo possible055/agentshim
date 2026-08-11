@@ -4,16 +4,8 @@ If the tools are not visible, first call `tool_search` for "codexshim local repo
 - Call `read` when you need the contents of a known file.
 - Call `grep` when you need to search file contents.
 - Call `glob` when you need to find files or discover paths.
-- Call `run_program` by default when one executable with literal arguments is enough. Pass
-  exactly one executable in `program` and each literal argument separately in `args`. An
-  interpreter's script or command text may be one literal argument. Never pass pipelines,
-  redirections, or other shell composition as a program name.
-- Call `bash` only when you need shell composition: pipelines, redirection, globbing, variable
-  expansion, or several steps in one call. Write POSIX bash, never PowerShell. It runs
-  non-interactively with no TTY, so pass flags such as `-y` instead of expecting a prompt. On
-  Windows, when composition must pass slash-style switches such as `/E` or `/C` unchanged to a
-  native program, set `msys_argument_conversion` to `disabled`. For work longer than the timeout,
-  set `detach` with a `log_path` and page that file with `read`.
+- Call `run_program` by default when one executable with literal arguments is enough.
+- Call `bash` only when you need shell composition: pipelines, redirection, globbing, variable expansion, or several steps in one call. Write POSIX bash, never PowerShell.
 
 Do not issue state-changing commands against the same working tree in parallel calls.
 
