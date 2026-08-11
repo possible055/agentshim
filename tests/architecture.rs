@@ -11,18 +11,6 @@ struct Exception {
 
 const OVERSIZED_EXCEPTIONS: &[Exception] = &[
     Exception {
-        path: "crates/pdf-read-core/src/content/parser.rs",
-        reason: "Phase 5 content parser split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/document.rs",
-        reason: "Phase 5 document aggregate split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/extractors/text.rs",
-        reason: "Phase 5 text extractor split pending",
-    },
-    Exception {
         path: "crates/pdf-read-core/src/fonts/adobe_glyph_list.rs",
         reason: "immutable Adobe glyph mapping data with pinned upstream provenance",
     },
@@ -41,14 +29,6 @@ const OVERSIZED_EXCEPTIONS: &[Exception] = &[
     Exception {
         path: "crates/pdf-read-core/src/fonts/cid_mappings/adobe_korea1.rs",
         reason: "immutable Adobe Korea1 mapping data with pinned upstream provenance",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/rendering/page_renderer.rs",
-        reason: "Phase 5 page renderer aggregate split pending",
-    },
-    Exception {
-        path: "crates/pdf-read-core/src/rendering/separation_renderer.rs",
-        reason: "Phase 5 separation renderer split pending",
     },
 ];
 const TEXTUAL_INCLUDE_EXCEPTIONS: &[Exception] = &[];
