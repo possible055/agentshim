@@ -11,14 +11,6 @@ struct Exception {
 
 const OVERSIZED_EXCEPTIONS: &[Exception] = &[
     Exception {
-        path: "benches/performance.rs",
-        reason: "Phase 3 benchmark responsibility split pending",
-    },
-    Exception {
-        path: "benches/stdio_performance.rs",
-        reason: "Phase 3 stdio benchmark responsibility split pending",
-    },
-    Exception {
         path: "crates/pdf-read-core/src/annotation_types.rs",
         reason: "Phase 5 annotation type split pending",
     },
@@ -205,30 +197,6 @@ const OVERSIZED_EXCEPTIONS: &[Exception] = &[
     Exception {
         path: "crates/pdf-read-core/src/xref_reconstruction.rs",
         reason: "Phase 5 xref reconstruction split pending",
-    },
-    Exception {
-        path: "src/tools/bash/locate.rs",
-        reason: "Phase 3 locator test split pending",
-    },
-    Exception {
-        path: "src/tools/bash/tests.rs",
-        reason: "Phase 3 bash test split pending",
-    },
-    Exception {
-        path: "src/tools/read/tests.rs",
-        reason: "Phase 3 read test split pending",
-    },
-    Exception {
-        path: "src/tools/run_program/tests.rs",
-        reason: "Phase 3 process test split pending",
-    },
-    Exception {
-        path: "tests/modern_stdio.rs",
-        reason: "Phase 3 stdio integration split pending",
-    },
-    Exception {
-        path: "tests/resource_soak.rs",
-        reason: "Phase 3 resource soak split pending",
     },
 ];
 const TEXTUAL_INCLUDE_EXCEPTIONS: &[Exception] = &[];

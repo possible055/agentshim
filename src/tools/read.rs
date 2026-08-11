@@ -15,7 +15,7 @@ pub(crate) use prepared::{Attempt, PdfMemoryBudgets, PreparedRead, execute_prepa
 use request::PdfMode;
 #[cfg(any(test, feature = "bench-internals"))]
 pub use request::execute;
-#[cfg(any(test, feature = "bench-internals"))]
+#[cfg(test)]
 pub(crate) use request::execute_output;
 pub use request::{ReadError, ReadRequest};
 
@@ -29,5 +29,5 @@ use pdf::{MAX_IMAGE_BASE64_BYTES, MAX_IMAGE_PAGES};
 use request::{MAX_LINE_COUNT, TEXT_READ_MEMORY_BYTES};
 
 #[cfg(test)]
-#[path = "read/tests.rs"]
+#[path = "read/tests/mod.rs"]
 mod test_suite;

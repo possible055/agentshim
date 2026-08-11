@@ -43,7 +43,7 @@ const BENCH_PATHNAME_REOPEN_ENV: &str = "CODEXSHIM_BENCH_GREP_PATHNAME_REOPEN";
 #[cfg(feature = "bench-internals")]
 const BENCH_CANDIDATE_POLICY_ENV: &str = "CODEXSHIM_BENCH_GREP_CANDIDATE_POLICY";
 #[cfg(feature = "bench-internals")]
-const BENCH_SORT_ENV: &str = "CODEXSHIM_BENCH_GREP_SORT";
+pub(super) const BENCH_SORT_ENV: &str = "CODEXSHIM_BENCH_GREP_SORT";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GrepTraversal {
     Adaptive,

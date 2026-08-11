@@ -35,7 +35,7 @@ pub struct ProfiledGlob {
 
 #[cfg(feature = "bench-internals")]
 #[derive(Default)]
-struct GlobProfileCounters {
+pub(super) struct GlobProfileCounters {
     total_ns: std::sync::atomic::AtomicU64,
     setup_ns: std::sync::atomic::AtomicU64,
     traversal_wall_ns: std::sync::atomic::AtomicU64,

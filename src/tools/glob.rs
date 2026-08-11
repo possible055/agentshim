@@ -4,11 +4,13 @@ mod result;
 
 #[cfg(feature = "bench-internals")]
 pub use profile::{GlobStageTimings, ProfiledGlob};
+#[cfg(test)]
+pub use request::GlobEntryType;
 pub use request::GlobError;
+#[cfg(any(test, feature = "bench-internals"))]
+pub use request::GlobRequest;
 #[cfg(feature = "bench-internals")]
 pub use request::execute_profiled_with_traversal;
-#[cfg(any(test, feature = "bench-internals"))]
-pub use request::{GlobEntryType, GlobRequest};
 #[cfg(any(test, feature = "bench-internals"))]
 pub use request::{GlobTraversal, execute, execute_with_traversal};
 pub(crate) use request::{execute_output, memory_charge};

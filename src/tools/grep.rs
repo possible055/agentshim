@@ -9,10 +9,12 @@ mod result;
 pub use profile::{
     GrepStageTimings, GrepWorkerMetrics, ProfiledGrep, reset_worker_metrics, worker_metrics,
 };
+#[cfg(test)]
+pub use request::CaseMode;
 #[cfg(any(test, feature = "bench-internals"))]
 pub use request::{
-    CaseMode, GrepBenchmarkVariant, GrepMode, GrepSourcePolicy, GrepTraversal,
-    PathnameReopenPolicy, execute, execute_with_traversal, execute_with_variant,
+    GrepBenchmarkVariant, GrepMode, GrepSourcePolicy, GrepTraversal, PathnameReopenPolicy, execute,
+    execute_with_traversal, execute_with_variant,
 };
 pub use request::{GrepError, GrepRequest};
 pub(crate) use request::{base_memory_charge, execute_output};

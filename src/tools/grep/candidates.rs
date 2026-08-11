@@ -17,6 +17,8 @@ use crate::{
     },
 };
 
+#[cfg(feature = "bench-internals")]
+use super::request::BENCH_SORT_ENV;
 #[cfg(any(test, feature = "bench-internals"))]
 use super::request::CANDIDATE_SOFT_TARGET_BYTES;
 use super::{

@@ -1,3 +1,8 @@
+#[cfg(feature = "bench-internals")]
+use std::sync::Arc;
+
+#[cfg(feature = "bench-internals")]
+use super::candidates::Candidate;
 use super::{candidates::CandidateMetrics, request::GrepSourcePolicy};
 
 #[derive(Clone, Copy)]
@@ -95,7 +100,7 @@ pub struct GrepWorkerMetrics {
 }
 
 #[cfg(feature = "bench-internals")]
-struct GrepProfileCounters {
+pub(super) struct GrepProfileCounters {
     total_ns: std::sync::atomic::AtomicU64,
     setup_ns: std::sync::atomic::AtomicU64,
     candidate_traversal_ns: std::sync::atomic::AtomicU64,
