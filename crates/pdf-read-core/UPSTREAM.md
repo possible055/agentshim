@@ -32,6 +32,37 @@ garbled text layers the same value.
 not start the renderer" is therefore a runtime property, enforced by counters,
 not a claim about binary size.
 
+## Local module map
+
+The retained upstream responsibilities are mapped to local modules as follows:
+
+- `document.rs` remains the aggregate facade and state owner. Its
+  `document/*` modules group opening/encryption, object loading, page trees,
+  structure and ActualText ordering, span normalization, column/block ordering,
+  text/word/line/vector/region extraction, fonts, images, tables, and embedded
+  files without changing the public `PdfDocument` surface.
+- `content/parser/*`, `object/*`, `xref/*`, and `xref_reconstruction/*`
+  retain parsing, object decoding, cross-reference loading, and bounded recovery.
+- `extractors/text/*`, `markdown_converter/*`, and
+  `spatial_table_detector/*` retain text execution, Markdown conversion, and
+  spatial table detection.
+- `rendering/page_renderer/*`, `rendering/resolution/*`, and
+  `rendering/separation_renderer/*` retain page operator execution, colour and
+  ICC resolution, image/form/shading rendering, overprint, soft masks, and
+  separation output.
+- `fonts/dictionary/*` and the other `fonts/*` modules retain font parsing,
+  mapping, and fallback. The five oversized Adobe glyph/CID mapping files are
+  immutable data exceptions; their lookup semantics remain static.
+
+The local split is structural: upstream methods keep their names and can be
+matched to these responsibility modules when importing a future upstream fix.
+
+## Edition decision
+
+`pdf-read-core` remains on Rust edition 2021. Moving this selective upstream
+derivative to edition 2024 is not required by the responsibility split and must
+be evaluated and verified as a separate Cargo edition migration.
+
 ## Patch ledger
 
 | Date | Upstream basis | Change |
@@ -61,6 +92,7 @@ not a claim about binary size.
 | 2026-08-10 | `10b87f153200cd5c4d4a4defee471757091e6559` | Re-enabled `dead_code` and `clippy::all` on the files added by this work; the crate-wide allow exists for retained upstream source and was silently covering them too. |
 | 2026-08-10 | `10b87f153200cd5c4d4a4defee471757091e6559` | Removed the always-`None` `image_area_hint` field from `PageVisualAssessment`. |
 | 2026-08-10 | `10b87f153200cd5c4d4a4defee471757091e6559` | Rejoined words split across lines by a typesetter's hyphen. Upstream suppressed the space at a soft-hyphen line break but kept the hyphen, so `implementa-` + `tion` reached callers as `implementa-tion`; on academic PDFs this affected several words per page. Added `SpaceSource::SoftHyphen` so the merge site can identify the case, and drop the hyphen only between two lowercase letters and never after a compound prefix — capitalised compounds, number ranges, headings, and terms such as `pre-training` and `self-attention` keep theirs. The prefix list is taken from the dead `text::hyphenation` module, whose own rule defaults the other way (both-lowercase means compound) and was never wired into any extraction path. A lowercase compound outside that list breaking at its own hyphen (`state-` + `of-the-art`) is still rejoined wrongly; that is undecidable without a lexicon and costs a hyphen rather than a word. Verified against the full 2757-test suite plus a new boundary test. |
+| 2026-08-11 | `10b87f153200cd5c4d4a4defee471757091e6559` | Reorganized retained parser, object, xref, document, text, table, font, colour, image, and renderer code into responsibility modules. Public facades, output bytes, resource limits, and algorithms are unchanged; direct PDF unit tests and the architecture limit protect the split. |
 
 Future upstream fixes must be recorded here with their source commit, affected
 modules, local adaptation, and verification results. Do not replace the source
