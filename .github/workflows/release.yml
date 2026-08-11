@@ -134,16 +134,7 @@ jobs:
             binary: codexshim
             config: config/codex.linux.toml.example
             format: tar.gz
-          - os: macos-15-intel
-            platform: macos
-            system: Darwin
-            machine: x86_64
-            runner_arch: X64
-            target: x86_64-apple-darwin
-            binary: codexshim
-            config: config/codex.macos.toml.example
-            format: tar.gz
-          - os: macos-15
+          - os: macos-26
             platform: macos
             system: Darwin
             machine: arm64
@@ -165,7 +156,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
-        if: matrix.platform != 'macos'
+        with:
+          save-if: "false"
       - name: Unix runner preflight
         if: matrix.platform != 'windows'
         shell: bash
@@ -223,8 +215,8 @@ jobs:
           stage="dist/$name"
           mkdir -p "$stage/config"
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "$stage/"
-          cp README.md LICENSE config/AGENTS.codexshim.md "$stage/"
-          cp config/codex.linux.toml.example config/codex.windows.toml.example "$stage/config/"
+          cp README.md LICENSE "$stage/"
+          cp config/AGENTS.codexshim.md config/codex.linux.toml.example config/codex.windows.toml.example "$stage/config/"
           if [[ "${{ matrix.platform }}" == macos ]]; then
             cp config/codex.macos.toml.example "$stage/config/"
           fi
@@ -256,8 +248,8 @@ jobs:
           $configStage = Join-Path $stage "config"
           New-Item -ItemType Directory -Force $configStage | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" $stage
-          Copy-Item README.md, LICENSE, config/AGENTS.codexshim.md $stage
-          Copy-Item config/codex.linux.toml.example, config/codex.windows.toml.example $configStage
+          Copy-Item README.md, LICENSE $stage
+          Copy-Item config/AGENTS.codexshim.md, config/codex.linux.toml.example, config/codex.windows.toml.example $configStage
           Copy-Item "${{ matrix.config }}" (Join-Path $stage "codex.toml.example")
           $stagePath = (Resolve-Path $stage).Path
           $expected = @(

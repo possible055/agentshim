@@ -27,6 +27,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
@@ -69,6 +71,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: Runner preflight
         shell: pwsh
         run: |
@@ -101,7 +105,7 @@ jobs:
             machine: aarch64
             runner_arch: ARM64
           - name: macOS ARM64 CI
-            os: macos-15
+            os: macos-26
             system: Darwin
             machine: arm64
             runner_arch: ARM64
@@ -110,6 +114,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
       - uses: actions/setup-node@v7
         with:
           node-version: "24"

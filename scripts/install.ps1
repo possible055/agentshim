@@ -54,7 +54,6 @@ if (-not $InstallDir) {
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $target = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
     X64 { "x86_64-pc-windows-msvc"; break }
-    Arm64 { "aarch64-pc-windows-msvc"; break }
     default { throw "Unsupported Windows architecture: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)" }
 }
 $temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ("codexshim-install-" + [guid]::NewGuid().ToString("N"))

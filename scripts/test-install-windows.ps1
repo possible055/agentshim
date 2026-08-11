@@ -13,7 +13,6 @@ $fixtureDirectory = $null
 try {
     $target = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
         X64 { "x86_64-pc-windows-msvc"; break }
-        Arm64 { "aarch64-pc-windows-msvc"; break }
         default { throw "Unsupported Windows architecture: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)" }
     }
     if (-not $ReleaseDirectory) {
