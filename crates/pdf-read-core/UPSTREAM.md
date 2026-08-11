@@ -43,14 +43,14 @@ The retained upstream responsibilities are mapped to local modules as follows:
   files without changing the public `PdfDocument` surface.
 - `content/parser/*`, `object/*`, `xref/*`, and `xref_reconstruction/*`
   retain parsing, object decoding, cross-reference loading, and bounded recovery.
-- `extractors/text/*`, `markdown_converter/*`, and
-  `spatial_table_detector/*` retain text execution, Markdown conversion, and
-  spatial table detection.
+- `extractors/text/*`, `pipeline/converters/markdown/*`, and
+  `structure/spatial_table_detector/*` retain text execution, Markdown
+  conversion, and spatial table detection.
 - `rendering/page_renderer/*`, `rendering/resolution/*`, and
   `rendering/separation_renderer/*` retain page operator execution, colour and
   ICC resolution, image/form/shading rendering, overprint, soft masks, and
   separation output.
-- `fonts/dictionary/*` and the other `fonts/*` modules retain font parsing,
+- `fonts/font_dict/*` and the other `fonts/*` modules retain font parsing,
   mapping, and fallback. The five oversized Adobe glyph/CID mapping files are
   immutable data exceptions; their lookup semantics remain static.
 

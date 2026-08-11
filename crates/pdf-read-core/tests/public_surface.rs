@@ -1,20 +1,20 @@
-//! The crate's public surface must stay read-only.
+//! The supported facade must stay read-only.
 //!
 //! This is a derivative of a full-featured PDF library. Everything that could write,
-//! edit, sign, redact, convert, or OCR was removed, and nothing may reappear by
-//! accident: a re-export added while chasing a compile error is easy to miss in review
-//! and hard to notice at runtime.
+//! edit, sign, redact, convert, or OCR was removed. `src/lib.rs` is the review boundary
+//! for new re-exports; these tests catch removals and signature drift in the facade that
+//! `codexshim` already consumes.
 
 use std::io::{Seek, SeekFrom, Write};
 
 use codexshim_pdf_read::{
-    MarkdownChunk, MarkdownOptions, PageInfo, PageTextAssessment, PageTextStatus,
-    PageVisualAssessment, ParserLimits, PdfReadDocument, PdfReadError, PdfReadErrorKind,
-    PdfReadMetrics, PdfResourceLimits, RenderLimits, RenderedPage, ResourceLimitDetails,
+    current_metrics, enter_budget, measure, CancelSignal, LimitScope, MarkdownChunk,
+    MarkdownOptions, PageInfo, PageTextAssessment, PageTextStatus, PageVisualAssessment,
+    ParserLimits, PdfReadDocument, PdfReadError, PdfReadErrorKind, PdfReadMetrics,
+    PdfResourceLimits, RenderLimits, RenderedPage, ResourceLimitDetails, DEFAULT_IMAGE_CALL_BYTES,
+    DEFAULT_TEXT_CALL_BYTES, MAX_IMAGE_EDGE_PIXELS, MAX_IMAGE_PIXELS, NAME, VERSION,
 };
 
-/// Every public entry point, named explicitly. Adding one to the crate without adding it
-/// here is fine; removing one, or adding a mutating one, is what this is watching for.
 #[test]
 fn the_public_surface_is_read_only() {
     let _: fn(std::fs::File, ParserLimits) -> Result<PdfReadDocument, PdfReadError> =
@@ -38,13 +38,30 @@ fn the_public_surface_is_read_only() {
     let _: fn(&PdfReadDocument, usize, RenderLimits) -> Result<RenderedPage, PdfReadError> =
         PdfReadDocument::render_page_fit;
     let _: fn(&PdfReadDocument) = PdfReadDocument::release_page_scratch;
+    let _: fn(&PdfReadError) -> PdfReadErrorKind = PdfReadError::kind;
+    let _: fn(&PdfReadError) -> Option<ResourceLimitDetails> = PdfReadError::limit;
+    let _: fn() -> PdfResourceLimits = PdfResourceLimits::text;
+    let _: fn() -> PdfResourceLimits = PdfResourceLimits::image;
+    let _: fn(usize) -> PdfResourceLimits = PdfResourceLimits::text_within;
+    let _: fn(usize) -> PdfResourceLimits = PdfResourceLimits::image_within;
 
     let _ = PdfReadErrorKind::ResourceLimit;
+    let _ = LimitScope::Call;
     let _ = PageTextStatus::Ready;
-    let _ = PdfResourceLimits::text();
-    let _ = PdfResourceLimits::image();
     let _ = PdfReadMetrics::default();
-    let _: Option<ResourceLimitDetails> = None;
+    let (_, measured) = measure(|| ());
+    assert_eq!(measured, PdfReadMetrics::default());
+    assert_eq!(current_metrics(), PdfReadMetrics::default());
+
+    let cancel: CancelSignal = std::sync::Arc::new(|| false);
+    let _budget = enter_budget(PdfResourceLimits::text(), Some(cancel));
+
+    assert_eq!(DEFAULT_TEXT_CALL_BYTES, 64 * 1024 * 1024);
+    assert_eq!(DEFAULT_IMAGE_CALL_BYTES, 96 * 1024 * 1024);
+    assert!(MAX_IMAGE_EDGE_PIXELS > 0);
+    assert!(MAX_IMAGE_PIXELS > 0);
+    assert_eq!(NAME, "codexshim-pdf-read");
+    assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
 }
 
 /// A document is opened from a handle the caller already holds. There is deliberately no

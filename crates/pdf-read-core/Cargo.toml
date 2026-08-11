@@ -9,6 +9,8 @@ description = "Internal read-only PDF core for codexshim"
 
 [lib]
 name = "codexshim_pdf_read"
+# Retained upstream docs describe private APIs removed from this read-only derivative.
+# The supported facade is compile-checked by tests/public_surface.rs instead.
 doctest = false
 
 [dependencies]

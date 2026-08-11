@@ -11,14 +11,23 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: performance-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   windows-11-ntfs:
     runs-on: [self-hosted, Windows, X64, codexshim-windows11-ntfs]
+    timeout-minutes: 30
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}\codexshim-performance-target
+      CODEXSHIM_BENCH_COMMIT: ${{ github.sha }}
+      CODEXSHIM_BENCH_WORKTREE: github-actions
     steps:
       - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
       - name: Benchmark repository tools
         env:
-          CARGO_TARGET_DIR: ${{ runner.workspace }}\..\codexshim-performance-target
           CODEXSHIM_BENCH_SCALES: ${{ inputs.scales }}
           CODEXSHIM_BENCH_MAX_GLOB_P95_MS_PER_1K: "250"
           CODEXSHIM_BENCH_MAX_GREP_P95_MS_PER_1K: "2000"
@@ -26,14 +35,12 @@ jobs:
         run: cargo bench --locked --features bench-internals --bench performance
       - name: Benchmark diagnostics through stdio
         env:
-          CARGO_TARGET_DIR: ${{ runner.workspace }}\..\codexshim-performance-target
           CODEXSHIM_BENCH_MAX_STDIO_COLD_MS: "750"
           CODEXSHIM_BENCH_MAX_STDIO_P95_MS: "10"
           CODEXSHIM_BENCH_MAX_PROCESS_MS: "300"
         run: cargo bench --locked --bench stdio_performance
       - name: Four-instance aggregate process soak
         env:
-          CARGO_TARGET_DIR: ${{ runner.workspace }}\..\codexshim-performance-target
           CODEXSHIM_AGGREGATE_SOAK_ITERATIONS: "60"
           CODEXSHIM_AGGREGATE_SOAK_OUTPUT: ${{ github.workspace }}\target\resource-soak\windows-four-instance.jsonl
         run: cargo test --locked --test resource_soak four_instance_aggregate_process_soak -- --ignored --nocapture
@@ -45,9 +52,11 @@ jobs:
           if-no-files-found: error
 
   linux-aggregate-soak:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
       - name: Four-instance aggregate process soak
         env:
           CODEXSHIM_AGGREGATE_SOAK_ITERATIONS: "60"

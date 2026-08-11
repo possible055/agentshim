@@ -1,8 +1,10 @@
 use std::{
     cmp::Ordering,
-    io,
     path::{Component, Path, PathBuf},
 };
+
+#[cfg(windows)]
+use std::io;
 
 use super::access::batch_parent;
 

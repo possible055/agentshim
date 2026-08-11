@@ -86,5 +86,7 @@ fn shown_bytes(output: &str, stream: &str) -> usize {
 }
 
 mod output;
+#[cfg(unix)]
 mod unix;
+#[cfg(windows)]
 mod windows;
