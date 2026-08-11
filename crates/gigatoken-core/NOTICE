@@ -1,0 +1,14 @@
+codexshim-gigatoken
+Copyright 2026 codexshim contributors
+
+This crate contains a modified, selective derivative of Gigatoken source code.
+
+Gigatoken
+Copyright (c) 2026 Marcel Rød
+
+Gigatoken is available under the MIT License. The local package name identifies
+this derivative and does not imply endorsement by the upstream author.
+
+The embedded o200k_base mergeable ranks are published by OpenAI and are pinned
+by their upstream SHA-256 digest. They contain tokenizer data, not executable
+Gigatoken source.

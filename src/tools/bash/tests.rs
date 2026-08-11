@@ -2,14 +2,47 @@ use std::{sync::Arc, time::Duration};
 
 use tokio_util::sync::CancellationToken;
 
-use crate::{path::RepositoryRoot, tools::exec::ProcessError};
+use crate::{
+    path::RepositoryRoot,
+    tools::exec::{
+        ProcessError,
+        capture::{Capture, capture_bytes_per_stream},
+    },
+};
 
 use super::{
-    BASH_ENVIRONMENT, BashRequest, MsysArgumentConversion,
+    BASH_ENVIRONMENT, BashRequest, CompletedBash, MsysArgumentConversion,
     detached::DetachedTrees,
     environment, execute_output,
     locate::{self, BashLocator},
+    render_completed,
 };
+
+#[test]
+fn token_dense_bash_output_keeps_head_tail_and_metadata() {
+    let mut capture = Capture::new(capture_bytes_per_stream(1));
+    capture.push(format!("HEAD\n{}\nTAIL\n", " x".repeat(20_000)).as_bytes());
+    let cancellation = CancellationToken::new();
+    let output = render_completed(
+        &CompletedBash {
+            bash: "/usr/bin/bash".into(),
+            cwd: "workspace".into(),
+            exit: "7".to_owned(),
+            duration: Duration::from_millis(2),
+            output: capture,
+        },
+        &cancellation,
+    )
+    .expect("bounded bash output");
+
+    assert!(output.fits_budget());
+    assert!(output.fits_model_budget(&cancellation));
+    assert!(output.contains("HEAD"));
+    assert!(output.contains("TAIL"));
+    assert!(output.contains("bytes omitted"));
+    assert!(output.contains("Exit code: 7"));
+    assert!(output.ends_with("Complete."));
+}
 
 fn request(command: &str) -> BashRequest {
     BashRequest {
@@ -473,15 +506,14 @@ fn a_detached_tree_outlives_the_call_and_dies_with_the_instance() {
 
 #[cfg(windows)]
 #[test]
-fn detached_windows_commands_share_the_disabled_msys_conversion_mode() {
+fn detached_windows_bash_receives_the_disabled_argument_conversion_environment() {
     if !bash_is_available() {
         return;
     }
     let fixture = tempfile::tempdir().expect("fixture");
     let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
     let trees = trees();
-    let command = windows_argument_echo_command(fixture.path());
-    let mut request = detach_request(&command, "argument.log");
+    let mut request = detach_request("printf '%s\\n' \"$MSYS2_ARG_CONV_EXCL\"", "argument.log");
     request.msys_argument_conversion = MsysArgumentConversion::Disabled;
     let admission = trees.admit().expect("detached admission");
     execute_output(
@@ -497,14 +529,13 @@ fn detached_windows_commands_share_the_disabled_msys_conversion_mode() {
     let log = fixture.path().join("argument.log");
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
-        if std::fs::read_to_string(&log).is_ok_and(|body| body.contains("/E")) {
+        if std::fs::read_to_string(&log).is_ok_and(|body| body.trim() == "*") {
             break;
         }
         std::thread::sleep(Duration::from_millis(25));
     }
     let output = std::fs::read_to_string(log).expect("argument log");
-    assert!(output.contains("/E"), "{output}");
-    assert!(!output.contains("E:/"), "{output}");
+    assert_eq!(output.trim(), "*");
     trees.terminate_all();
 }
 

@@ -41,12 +41,24 @@ pub enum GlobTraversal {
     ParallelBatchedLiteralPrefix,
 }
 
+/// Filesystem entry kind returned by glob.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GlobEntryType {
+    #[default]
+    File,
+    Directory,
+    Any,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GlobRequest {
     pub pattern: String,
     pub path: Option<String>,
     pub include_ignored: Option<bool>,
+    #[serde(rename = "type")]
+    pub entry_type: Option<GlobEntryType>,
     pub offset: Option<usize>,
     pub limit: Option<usize>,
 }
@@ -269,14 +281,11 @@ fn execute_inner_with_traversal(
         total: 0,
         terminal_error: None,
     };
-    let regular_plan = GlobCollectPlan {
-        include_ignored: request.include_ignored.unwrap_or(false),
-        literal_prefix: None,
-        traversal_threads: selection.threads,
-    };
+    let regular_plan = regular_collect_plan(request, selection.threads);
     #[cfg(any(test, feature = "bench-internals"))]
     let prefix_plan = GlobCollectPlan {
         include_ignored: regular_plan.include_ignored,
+        entry_type: regular_plan.entry_type,
         literal_prefix: literal_prefix.as_deref(),
         traversal_threads: selection.threads,
     };
@@ -395,8 +404,34 @@ struct GlobCollection {
 #[derive(Clone, Copy)]
 struct GlobCollectPlan<'a> {
     include_ignored: bool,
+    entry_type: GlobEntryType,
     literal_prefix: Option<&'a Path>,
     traversal_threads: usize,
+}
+
+fn regular_collect_plan(
+    request: &GlobRequest,
+    traversal_threads: usize,
+) -> GlobCollectPlan<'static> {
+    GlobCollectPlan {
+        include_ignored: request.include_ignored.unwrap_or(false),
+        entry_type: request.entry_type.unwrap_or_default(),
+        literal_prefix: None,
+        traversal_threads,
+    }
+}
+
+fn matches_entry_type(
+    entry_type: GlobEntryType,
+    file_type: Option<std::fs::FileType>,
+) -> bool {
+    match entry_type {
+        GlobEntryType::File => {
+            file_type.is_some_and(|file_type| file_type.is_file() || file_type.is_symlink())
+        }
+        GlobEntryType::Directory => file_type.is_some_and(|file_type| file_type.is_dir()),
+        GlobEntryType::Any => true,
+    }
 }
 
 fn collect_serial(
@@ -408,7 +443,9 @@ fn collect_serial(
     plan: GlobCollectPlan<'_>,
 ) -> Result<(GlobCollection, TraversalSummary), GlobError> {
     let mut visit = |entry: crate::traversal::TraversalEntry<'_>| {
-            if !matcher.is_match(entry.key) {
+            if !matches_entry_type(plan.entry_type, entry.file_type)
+                || !matcher.is_match(entry.key)
+            {
                 return TraversalControl::Continue;
             }
             if let Err(error) = record_match(&mut collection.total) {
@@ -475,7 +512,9 @@ fn collect_parallel(
             let mut found = Vec::new();
             let mut matched_entries = 0_usize;
             for entry in batch {
-                if !matcher.is_match(&entry.key) {
+                if !matches_entry_type(plan.entry_type, entry.file_type)
+                    || !matcher.is_match(&entry.key)
+                {
                     continue;
                 }
                 matched_entries = matched_entries.saturating_add(1);

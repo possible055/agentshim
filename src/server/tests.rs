@@ -70,6 +70,27 @@ mod tests {
     }
 
     #[test]
+    fn occupied_pdf_gate_rejects_pdf_without_blocking_text_reads() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        fs::write(fixture.path().join("document.pdf"), pdf_fixture()).expect("pdf");
+        fs::write(fixture.path().join("notes.txt"), "alpha\nbeta\n").expect("text");
+        let server = CodexShim::from_path(fixture.path()).expect("server");
+        let _occupied = server
+            .resources
+            .try_acquire_pdf_gate()
+            .expect("PDF gate fixture");
+
+        let CallToolResponse::Complete(text) = read_path_call(&server, "notes.txt") else {
+            panic!("text read response must be complete");
+        };
+        assert_eq!(text.is_error, Some(false));
+
+        let error = error_details(read_path_call(&server, "document.pdf"));
+        assert_eq!(error["code"], "resource_busy");
+        assert_eq!(error["details"]["permit"], "pdf_concurrency");
+    }
+
+    #[test]
     fn pdf_timeout_reports_the_limit_and_that_nothing_was_produced() {
         let details = error_details(pdf_timeout(
             std::time::Duration::from_secs(5),
@@ -83,7 +104,7 @@ mod tests {
         assert_eq!(details["details"]["partial_output"], false);
     }
 
-    fn read_pdf_call(server: &CodexShim, path: &str) -> CallToolResponse {
+    fn read_path_call(server: &CodexShim, path: &str) -> CallToolResponse {
         let admission = server
             .resources
             .try_admit_read_only()
@@ -104,9 +125,9 @@ mod tests {
             ))
     }
 
-    /// The second attempt after `file_changed` must not have to re-take the gate. With a
-    /// single slot, re-taking inside the same call would time out and surface as
-    /// `resource_busy`, turning one retryable condition into an unrelated one.
+    // The second attempt after `file_changed` must not have to re-take the gate. With a
+    // single slot, re-taking inside the same call would time out and surface as
+    // `resource_busy`, turning one retryable condition into an unrelated one.
     #[test]
     fn a_file_changed_retry_holds_the_pdf_gate_instead_of_re_taking_it() {
         let _serialised = crate::tools::read::global_read_state_guard();
@@ -114,9 +135,9 @@ mod tests {
         fs::write(fixture.path().join("document.pdf"), pdf_fixture()).expect("pdf");
         let server = CodexShim::from_path(fixture.path()).expect("server");
 
-        let before = crate::runtime::pdf_gate_acquisitions();
+        let before = server.resources.pdf_gate_acquisitions();
         crate::tools::read::FORCED_CHANGES.store(1, std::sync::atomic::Ordering::SeqCst);
-        let response = read_pdf_call(&server, "document.pdf");
+        let response = read_path_call(&server, "document.pdf");
         crate::tools::read::FORCED_CHANGES.store(0, std::sync::atomic::Ordering::SeqCst);
 
         let CallToolResponse::Complete(result) = response else {
@@ -129,16 +150,16 @@ mod tests {
             result.structured_content
         );
         assert_eq!(
-            crate::runtime::pdf_gate_acquisitions() - before,
+            server.resources.pdf_gate_acquisitions() - before,
             1,
             "the gate was taken more than once across the retry loop"
         );
         assert_eq!(server.resources.available_pdf_slots(), 1);
     }
 
-    /// The ceiling is enforced by cancelling at the same checkpoints client cancellation
-    /// uses, because `spawn_blocking` cannot be preempted. A cancellation the server
-    /// initiated must surface as `resource_timeout`, not as the client's cancellation.
+    // The ceiling is enforced by cancelling at the same checkpoints client cancellation
+    // uses, because `spawn_blocking` cannot be preempted. A cancellation the server
+    // initiated must surface as `resource_timeout`, not as the client's cancellation.
     #[test]
     fn a_mode_runtime_ceiling_reports_resource_timeout_and_frees_the_gate() {
         let _serialised = crate::tools::read::global_read_state_guard();
@@ -148,7 +169,7 @@ mod tests {
 
         crate::tools::read::FORCED_PDF_RUNTIME_LIMIT
             .store(1, std::sync::atomic::Ordering::SeqCst);
-        let response = read_pdf_call(&server, "document.pdf");
+        let response = read_path_call(&server, "document.pdf");
         crate::tools::read::FORCED_PDF_RUNTIME_LIMIT
             .store(0, std::sync::atomic::Ordering::SeqCst);
 
@@ -186,7 +207,7 @@ mod tests {
         };
 
         for path in ["document.pdf", "broken.pdf", "missing.pdf"] {
-            let _ = read_pdf_call(&server, path);
+            let _ = read_path_call(&server, path);
             assert_eq!(
                 server.resources.available_pdf_slots(),
                 1,
@@ -279,17 +300,27 @@ mod tests {
             Some(structured),
             true
         ));
+        let gate = crate::output_gate::OutputTokenGate::load_shared().expect("token gate");
+        assert!(matches!(
+            gate.evaluate_result(&result, &tokio_util::sync::CancellationToken::new()),
+            crate::output_gate::GateDecision::FitsByBytes
+                | crate::output_gate::GateDecision::FitsExactly(_)
+        ));
     }
 
     #[test]
     fn successful_tool_responses_omit_structured_content() {
         let output =
             crate::tools::ToolOutput::with_child_nonzero("summary".to_owned(), true);
+        let gate = crate::output_gate::OutputTokenGate::load_shared().expect("token gate");
+        let cancellation = tokio_util::sync::CancellationToken::new();
         let CallToolResponse::Complete(result) =
             blocking_response::<crate::tools::exec::ProcessError>(
                 "run_program",
                 3,
                 Ok(Ok(output)),
+                &gate,
+                &cancellation,
             )
         else {
             panic!("tool response must be complete");
@@ -301,6 +332,23 @@ mod tests {
         assert_eq!(content.text, "summary");
         assert_eq!(result.structured_content, None);
         assert_eq!(result.is_error, Some(false));
+    }
+
+    #[test]
+    fn final_verifier_replaces_an_unbounded_model_payload() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let server = CodexShim::from_path(fixture.path()).expect("server");
+        let verified = blocking_response::<crate::tools::exec::ProcessError>(
+            "run_program",
+            3,
+            Ok(Ok(crate::tools::ToolOutput::new(" x".repeat(10_000)))),
+            &server.output_token_gate,
+            &tokio_util::sync::CancellationToken::new(),
+        );
+        let error = error_details(verified);
+
+        assert_eq!(error["code"], "output_budget");
+        assert_eq!(error["retryable"], false);
     }
 
     #[test]

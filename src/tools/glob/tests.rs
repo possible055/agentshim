@@ -6,8 +6,8 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        GlobError, GlobMatch, GlobRequest, GlobTraversal, MAX_MATCHES, PATH_OMISSION, TopK,
-        execute, execute_with_traversal, memory_charge, record_match, render,
+        GlobEntryType, GlobError, GlobMatch, GlobRequest, GlobTraversal, MAX_MATCHES, PATH_OMISSION,
+        TopK, execute, execute_with_traversal, memory_charge, record_match, render,
     };
     #[cfg(feature = "bench-internals")]
     use super::execute_profiled_with_traversal;
@@ -32,9 +32,46 @@ mod tests {
             pattern: pattern.to_owned(),
             path: None,
             include_ignored: None,
+            entry_type: None,
             offset: None,
             limit: None,
         }
+    }
+
+    #[test]
+    fn files_are_default_while_directories_and_any_remain_available() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        fs::create_dir_all(fixture.path().join("src/nested")).expect("directories");
+        fs::write(fixture.path().join("src/nested/lib.rs"), "source").expect("source");
+        let root = access(fixture.path());
+        let directory = crate::path::display_path(
+            root.resolve(Path::new("src/nested"))
+                .expect("directory")
+                .absolute(),
+        );
+        let file = crate::path::display_path(
+            root.resolve(Path::new("src/nested/lib.rs"))
+                .expect("file")
+                .absolute(),
+        );
+
+        let default = execute(&root, &request("**/*"), &CancellationToken::new())
+            .expect("default glob");
+        assert!(default.lines().any(|line| line == file));
+        assert!(!default.lines().any(|line| line == directory));
+
+        let mut directories = request("**/*");
+        directories.entry_type = Some(GlobEntryType::Directory);
+        let directories = execute(&root, &directories, &CancellationToken::new())
+            .expect("directory glob");
+        assert!(directories.lines().any(|line| line == directory));
+        assert!(!directories.lines().any(|line| line == file));
+
+        let mut any = request("**/*");
+        any.entry_type = Some(GlobEntryType::Any);
+        let any = execute(&root, &any, &CancellationToken::new()).expect("any glob");
+        assert!(any.lines().any(|line| line == directory));
+        assert!(any.lines().any(|line| line == file));
     }
 
     #[test]
@@ -332,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_path_is_omitted_and_pagination_advances() {
+    fn token_dense_path_is_omitted_and_pagination_advances() {
         let fixture = tempfile::tempdir().expect("fixture");
         let root = RepositoryRoot::open(fixture.path()).expect("root");
         let first = root.resolve(Path::new("first")).expect("first path");
@@ -340,7 +377,7 @@ mod tests {
         let retained = vec![
             GlobMatch {
                 sort_key: first.sort_key().clone(),
-                absolute: "x".repeat(crate::output::MODEL_BYTE_LIMIT * 2),
+                absolute: " x".repeat(12_000),
                 charge: 0,
             },
             GlobMatch {

@@ -7,6 +7,8 @@ pub struct RuntimeResources {
     process_calls: Arc<Semaphore>,
     memory: Arc<Semaphore>,
     pdf_calls: Arc<Semaphore>,
+    #[cfg(test)]
+    pdf_gate_acquisitions: Arc<std::sync::atomic::AtomicUsize>,
     file_work: Arc<FileWorkPool>,
     shutdown: CancellationToken,
 }
@@ -56,6 +58,8 @@ impl RuntimeResources {
             process_calls: Arc::new(Semaphore::new(config.process_calls)),
             memory: Arc::new(Semaphore::new(config.memory_bytes / MEMORY_PERMIT_BYTES)),
             pdf_calls: Arc::new(Semaphore::new(MAX_PDF_CALLS)),
+            #[cfg(test)]
+            pdf_gate_acquisitions: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             file_work: Arc::new(FileWorkPool::new(config.worker_lanes)),
             shutdown: CancellationToken::new(),
         }
@@ -149,7 +153,9 @@ impl RuntimeResources {
         &self,
         request: &CancellationToken,
     ) -> Option<OwnedSemaphorePermit> {
-        PDF_GATE_ACQUISITIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(test)]
+        self.pdf_gate_acquisitions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         tokio::time::timeout(
             PDF_GATE_WAIT,
             acquire(&self.pdf_calls, request, &self.shutdown, 1),
@@ -171,20 +177,13 @@ impl RuntimeResources {
     pub fn available_pdf_slots(&self) -> usize {
         self.pdf_calls.available_permits()
     }
-}
 
-/// Counts attempts to take the gate, not successes.
-///
-/// The retry loop must take the gate at most once per call: releasing between attempts
-/// would let another call in, so a caller who hit `file_changed` would come back with
-/// `resource_busy` instead. A counter is the only way to tell "held across both attempts"
-/// apart from "released and immediately re-taken", which look identical from outside.
-static PDF_GATE_ACQUISITIONS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-#[cfg(test)]
-pub fn pdf_gate_acquisitions() -> usize {
-    PDF_GATE_ACQUISITIONS.load(std::sync::atomic::Ordering::Relaxed)
+    #[must_use]
+    #[cfg(test)]
+    pub fn pdf_gate_acquisitions(&self) -> usize {
+        self.pdf_gate_acquisitions
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 impl RuntimeResources {

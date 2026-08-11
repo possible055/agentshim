@@ -1,6 +1,5 @@
 use std::{env, ffi::OsStr, io, sync::OnceLock};
 
-use serde::Serialize;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -70,37 +69,56 @@ fn cjk_ratio<'a>(parts: impl IntoIterator<Item = &'a str>) -> f64 {
     }
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CompleteToolResult<'a> {
-    result_type: &'static str,
-    content: [TextContent<'a>; 1],
-    #[serde(skip_serializing_if = "Option::is_none")]
-    structured_content: Option<&'a Value>,
-    is_error: bool,
-}
-
-#[derive(Serialize)]
-struct TextContent<'a> {
-    r#type: &'static str,
-    text: &'a str,
-}
-
 pub(crate) fn tool_result_encoded_len(
     text: &str,
     structured: Option<&Value>,
     is_error: bool,
 ) -> usize {
-    let result = CompleteToolResult {
-        result_type: "complete",
-        content: [TextContent {
-            r#type: "text",
-            text,
-        }],
-        structured_content: structured,
-        is_error,
-    };
-    serde_json::to_vec(&result).map_or(usize::MAX, |encoded| encoded.len())
+    const PREFIX: usize = br#"{"resultType":"complete","content":[{"type":"text","text":""#.len();
+    const CONTENT_SUFFIX: usize = br#""}]"#.len();
+    const STRUCTURED_PREFIX: usize = br#","structuredContent":"#.len();
+    const ERROR_PREFIX: usize = br#","isError":"#.len();
+
+    let structured_len = structured.map_or(0, |structured| {
+        STRUCTURED_PREFIX.saturating_add(serialized_json_len(structured))
+    });
+    PREFIX
+        .saturating_add(json_string_content_encoded_len(text))
+        .saturating_add(CONTENT_SUFFIX)
+        .saturating_add(structured_len)
+        .saturating_add(ERROR_PREFIX)
+        .saturating_add(if is_error { 4 } else { 5 })
+        .saturating_add(1)
+}
+
+pub(crate) fn json_string_content_encoded_len(text: &str) -> usize {
+    text.bytes().fold(0, |length, byte| {
+        let encoded = match byte {
+            b'"' | b'\\' | b'\x08' | b'\t' | b'\n' | b'\x0C' | b'\r' => 2,
+            0x00..=0x1F => 6,
+            _ => 1,
+        };
+        length.saturating_add(encoded)
+    })
+}
+
+fn serialized_json_len(value: &Value) -> usize {
+    #[derive(Default)]
+    struct LengthWriter(usize);
+
+    impl io::Write for LengthWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0 = self.0.saturating_add(buffer.len());
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut writer = LengthWriter::default();
+    serde_json::to_writer(&mut writer, value).map_or(usize::MAX, |()| writer.0)
 }
 
 pub(crate) fn tool_result_fits_budget(

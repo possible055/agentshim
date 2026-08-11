@@ -261,6 +261,7 @@ pub(crate) fn execute_output(
                     output: expect_one(captures),
                 },
                 timeout_ms,
+                cancellation,
             )?;
             Err(ProcessError::Timeout {
                 timeout_ms,
@@ -387,7 +388,7 @@ fn render_completed(
         &[&completed.output],
         cancellation,
         |rendered| completed_output(completed, &rendered[0]),
-        ToolOutput::fits_content_budget,
+        |output| output.fits_content_and_model(cancellation),
     )
 }
 
@@ -429,11 +430,11 @@ fn completed_output(completed: &CompletedBash, output: &RenderedCapture) -> Tool
 fn render_timeout(
     timed_out: &TimedOutBash,
     timeout_ms: u64,
+    cancellation: &CancellationToken,
 ) -> Result<TimeoutRender, ProcessError> {
-    let cancellation = CancellationToken::new();
     project_captures(
         &[&timed_out.output],
-        &cancellation,
+        cancellation,
         |rendered| timeout_output(timed_out, timeout_ms, &rendered[0]),
         |render: &TimeoutRender| {
             serde_json::to_value(&render.details)
@@ -444,7 +445,18 @@ fn render_timeout(
                         true,
                         &render.text,
                         Some(&details),
-                    )
+                    ) && {
+                        let structured = crate::output::tool_error_structure(
+                            "resource_timeout",
+                            true,
+                            &render.text,
+                            Some(&details),
+                        );
+                        crate::output_gate::structured_result_fits_model_budget(
+                            &structured,
+                            cancellation,
+                        )
+                    }
                 })
         },
     )

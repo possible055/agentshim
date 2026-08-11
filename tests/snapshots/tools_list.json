@@ -141,7 +141,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Find local repository or Codex extension file paths using a glob pattern. Results use native absolute paths and expose structured numeric pagination.",
+      "description": "Find local repository or Codex extension paths using a glob pattern. Returns files by default; use type to find directories or any entry. Results use native absolute paths and expose structured numeric pagination.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -168,6 +168,16 @@
           "pattern": {
             "description": "Case-sensitive glob relative to the repository or requested Codex extension directory.",
             "minLength": 1,
+            "type": "string"
+          },
+          "type": {
+            "default": "file",
+            "description": "Filesystem entry kind to return. file includes regular files and symbolic-link entries; directory returns real directories; any preserves both.",
+            "enum": [
+              "file",
+              "directory",
+              "any"
+            ],
             "type": "string"
           }
         },

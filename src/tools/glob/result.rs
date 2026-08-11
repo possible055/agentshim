@@ -203,8 +203,26 @@ fn render(
             continue;
         }
         let output = ToolOutput::new(formatter.finish(cancellation)?);
-        if output.fits_budget() {
+        if output.fits_budget_and_model(cancellation) {
             return Ok(output);
+        }
+        if cap == 1 {
+            let next_offset = (offset.saturating_add(1) < total).then(|| offset.saturating_add(1));
+            let mut tail = Vec::new();
+            if let Some(line) = summary.model_line() {
+                tail.push(line);
+            }
+            tail.push(next_offset.map_or_else(
+                || "Complete.".to_owned(),
+                |next| format!("Partial: next_offset={next}."),
+            ));
+            let mut formatter = OutputFormatter::new(String::new(), tail, limits)?;
+            if formatter.try_push_line(PATH_OMISSION, cancellation)? {
+                let fallback = ToolOutput::new(formatter.finish(cancellation)?);
+                if fallback.fits_budget_and_model(cancellation) {
+                    return Ok(fallback);
+                }
+            }
         }
         if cap == 0 {
             return Err(crate::output::OutputError::NoProgress.into());

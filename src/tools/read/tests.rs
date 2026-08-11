@@ -1073,6 +1073,10 @@ mod tests {
                 "{name} produced an over-budget envelope of {} bytes",
                 output.text.len()
             );
+            assert!(
+                output.fits_model_budget(&cancellation),
+                "{name} produced an over-budget model payload"
+            );
         }
     }
 
@@ -1461,6 +1465,25 @@ mod tests {
         beyond.start_line = Some(100);
         let output = execute(&root, &beyond, &cancellation).expect("past eof");
         assert!(output.ends_with("\nComplete."));
+    }
+
+    #[test]
+    fn token_dense_text_preserves_the_next_line_cursor() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let dense = format!("{}\n", " x".repeat(12)).repeat(750);
+        fs::write(fixture.path().join("dense.txt"), dense).expect("dense text");
+        let root = access(fixture.path());
+        let cancellation = CancellationToken::new();
+        let mut page = request("dense.txt");
+        page.line_count = Some(750);
+
+        let output = execute_output(&root, &page, &cancellation).expect("bounded dense read");
+
+        assert!(output.fits_budget());
+        assert!(output.fits_model_budget(&cancellation));
+        assert!(output.contains("1\t x"));
+        assert!(output.contains("Partial: next_start_line="));
+        assert!(!output.contains("750\t x"));
     }
 
     #[test]

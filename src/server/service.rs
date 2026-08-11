@@ -31,6 +31,7 @@ use uuid::Uuid;
 
 use crate::{
     output::bounded_diagnostic,
+    output_gate::OutputTokenGate,
     path::{FileAccess, ReadScope, RepositoryRoot},
     runtime::{RuntimeConfig, RuntimeResources},
     tools::{
@@ -116,6 +117,7 @@ pub struct CodexShim {
     detached: DetachedTrees,
     bash_locator: BashLocator,
     protocol_compatibility: ProtocolCompatibility,
+    output_token_gate: Arc<OutputTokenGate>,
 }
 
 pub struct CodexShimBuilder {
@@ -226,6 +228,7 @@ impl CodexShimBuilder {
     /// Returns the repository root validation or capability-open error.
     pub fn build(self) -> io::Result<CodexShim> {
         let root = Arc::new(RepositoryRoot::open(self.root)?);
+        let output_token_gate = OutputTokenGate::load_shared().map_err(io::Error::other)?;
         Ok(CodexShim {
             file_access: Arc::new(FileAccess::new(Arc::clone(&root), self.read_scope)),
             root,
@@ -234,6 +237,7 @@ impl CodexShimBuilder {
             resources: RuntimeResources::new(self.runtime),
             process_resolver: ProcessResolver::capture(),
             protocol_compatibility: self.protocol_compatibility,
+            output_token_gate,
         })
     }
 }
@@ -533,12 +537,18 @@ crate::tools::read::prepare(
         }
         let result = result.expect("read attempt loop always produces a result");
         drop(permits);
-        cancellation_relay.abort();
         // The PDF reservation outlives the response construction on purpose. Base64 image
         // data is copied again into content blocks and again by the JSON serialiser, and
         // that is the single largest allocation on the whole path. Releasing the
         // reservation before it happens would leave the biggest number off the books.
-        let response = blocking_response("read", duration_ms(running.elapsed()), result);
+        let response = blocking_response(
+            "read",
+            duration_ms(running.elapsed()),
+            result,
+            &self.output_token_gate,
+            &cancellation,
+        );
+        cancellation_relay.abort();
         drop(pdf_admission);
         response
     }
@@ -605,6 +615,7 @@ crate::tools::read::prepare(
         let permits = (permits.0, permits.1);
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
+        let response_cancellation = cancellation.clone();
         let span = tracing::Span::current();
         let running = Instant::now();
         let result = tokio::task::spawn_blocking(move || {
@@ -621,8 +632,15 @@ crate::tools::read::prepare(
             })
         })
         .await;
+        let response = blocking_response(
+            "glob",
+            duration_ms(running.elapsed()),
+            result,
+            &self.output_token_gate,
+            &response_cancellation,
+        );
         cancellation_relay.abort();
-        blocking_response("glob", duration_ms(running.elapsed()), result)
+        response
     }
 
     async fn call_grep(
@@ -668,6 +686,7 @@ crate::tools::read::prepare(
         let permits = (permits.0, permits.1, permits.2);
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
+        let response_cancellation = cancellation.clone();
         let span = tracing::Span::current();
         let running = Instant::now();
         let result = tokio::task::spawn_blocking(move || {
@@ -684,8 +703,15 @@ crate::tools::read::prepare(
             })
         })
         .await;
+        let response = blocking_response(
+            "grep",
+            duration_ms(running.elapsed()),
+            result,
+            &self.output_token_gate,
+            &response_cancellation,
+        );
         cancellation_relay.abort();
-        blocking_response("grep", duration_ms(running.elapsed()), result)
+        response
     }
 
     async fn call_process(
@@ -730,6 +756,7 @@ crate::tools::read::prepare(
         let resolver = self.process_resolver.clone();
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
+        let response_cancellation = cancellation.clone();
         let span = tracing::Span::current();
         let running = Instant::now();
         let result = tokio::task::spawn_blocking(move || {
@@ -752,10 +779,19 @@ crate::tools::read::prepare(
             })
         })
         .await;
+        let response = blocking_response(
+            "run_program",
+            duration_ms(running.elapsed()),
+            result,
+            &self.output_token_gate,
+            &response_cancellation,
+        );
         cancellation_relay.abort();
-        blocking_response("run_program", duration_ms(running.elapsed()), result)
+        response
     }
 
+    // Admission, detached ownership, execution, and final verification share one lifetime.
+    #[allow(clippy::too_many_lines)]
     async fn call_bash(
         &self,
         arguments: Option<JsonObject>,
@@ -826,6 +862,7 @@ crate::tools::read::prepare(
         let locator = self.bash_locator.clone();
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
+        let response_cancellation = cancellation.clone();
         let span = tracing::Span::current();
         let running = Instant::now();
         let result = tokio::task::spawn_blocking(move || {
@@ -854,8 +891,15 @@ crate::tools::read::prepare(
             })
         })
         .await;
+        let response = blocking_response(
+            "bash",
+            duration_ms(running.elapsed()),
+            result,
+            &self.output_token_gate,
+            &response_cancellation,
+        );
         cancellation_relay.abort();
-        blocking_response("bash", duration_ms(running.elapsed()), result)
+        response
     }
 
     fn server_info(read_scope: ReadScope) -> ServerInfo {

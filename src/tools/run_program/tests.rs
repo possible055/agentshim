@@ -189,6 +189,7 @@ fn timeout_report_is_bounded_and_preserves_required_diagnostics() {
             stderr,
         },
         150,
+        &CancellationToken::new(),
     )
     .expect("timeout report");
 
@@ -249,6 +250,22 @@ fn cjk_heavy_process_output_is_bounded_below_the_english_budget() {
         chinese.encoded_len() < english.encoded_len(),
         "CJK output must be held to a smaller byte budget than English output"
     );
+}
+
+#[test]
+fn token_dense_process_output_keeps_head_tail_and_metadata() {
+    let stdout = format!("HEAD\n{}\nTAIL\n", " x".repeat(20_000));
+    let cancellation = CancellationToken::new();
+    let output = completed_output(stdout.as_bytes(), b"stderr evidence\n", "7");
+
+    assert!(output.fits_budget());
+    assert!(output.fits_model_budget(&cancellation));
+    assert!(output.contains("HEAD"));
+    assert!(output.contains("TAIL"));
+    assert!(output.contains("bytes omitted"));
+    assert!(output.contains("Exit code: 7"));
+    assert!(output.contains("Stderr bytes:"));
+    assert!(output.ends_with("Complete."));
 }
 
 #[test]
@@ -346,6 +363,7 @@ fn timeout_projection_fits_the_complete_error_envelope() {
             stderr,
         },
         150,
+        &CancellationToken::new(),
     )
     .expect("timeout report");
     let details = serde_json::to_value(&report.details).expect("timeout details");

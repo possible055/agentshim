@@ -288,7 +288,7 @@ fn read_pdf_text(
         source_id,
     } = *read;
     if let Some(offset) = request.pdf_text_offset {
-        return resume_page(document, read, pages[0], offset);
+        return resume_page(document, read, pages[0], offset, cancellation);
     }
 
     let selected_first = pages[0];
@@ -313,7 +313,15 @@ fn read_pdf_text(
         );
         let mut candidate = committed.clone();
         candidate.push(outcome);
-        if fits(absolute, mode, page_count, source_id, &candidate, None) {
+        if fits(
+            absolute,
+            mode,
+            page_count,
+            source_id,
+            &candidate,
+            None,
+            cancellation,
+        ) {
             committed = candidate;
             // The walk is forward-only, so this page's spans and content will never be
             // read again; keeping them would hold call budget for no benefit.
@@ -329,7 +337,7 @@ fn read_pdf_text(
         // Not even one page fits whole, so the caller resumes inside it by byte offset
         // rather than receiving an unrecoverable truncation.
         let page = stopped_before.unwrap_or(selected_first);
-        return resume_page(document, read, page, 0);
+        return resume_page(document, read, page, 0, cancellation);
     }
 
     // A typed error is only right when nothing in the whole selection was usable.
@@ -473,9 +481,11 @@ fn fits(
     source_id: &str,
     pages: &[PdfPageOutcome],
     first_body: Option<&str>,
+    cancellation: &CancellationToken,
 ) -> bool {
     let outcome = build_text_outcome(mode, page_count, source_id, pages, first_body);
-    ToolOutput::new(format_pdf_outcome(absolute, &outcome)).fits_content_budget()
+    let output = ToolOutput::new(format_pdf_outcome(absolute, &outcome));
+    output.fits_content_and_model(cancellation)
 }
 
 /// Deliver as much of one page as fits, starting at `offset`.
@@ -488,6 +498,7 @@ fn resume_page(
     read: &TextRead<'_>,
     page: usize,
     offset: usize,
+    cancellation: &CancellationToken,
 ) -> Result<ToolOutput, ReadError> {
     let TextRead {
         absolute,
@@ -520,7 +531,8 @@ fn resume_page(
             &chunk.text[..end],
             (offset + end < chunk.page_bytes).then_some(offset + end),
         );
-        if ToolOutput::new(format_pdf_outcome(absolute, &candidate)).fits_content_budget() {
+        let output = ToolOutput::new(format_pdf_outcome(absolute, &candidate));
+        if output.fits_content_and_model(cancellation) {
             best = end;
             if midpoint == high {
                 break;

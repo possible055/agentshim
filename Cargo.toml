@@ -1,8 +1,8 @@
 [workspace]
-members = [".", "crates/pdf-read-core"]
+members = [".", "crates/gigatoken-core", "crates/pdf-read-core"]
 # The PDF corpus and limit tests live in the member crate; without this the bare
 # `cargo test --locked` used by CI selects only the root package and skips them.
-default-members = [".", "crates/pdf-read-core"]
+default-members = [".", "crates/gigatoken-core", "crates/pdf-read-core"]
 resolver = "3"
 
 [package]
@@ -19,6 +19,7 @@ cap-std = "=4.0.2"
 chardetng = "=1.0.0"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 codexshim-pdf-read = { path = "crates/pdf-read-core" }
+codexshim-gigatoken = { path = "crates/gigatoken-core" }
 encoding_rs = "0.8.35"
 globset = "0.4.16"
 grep-matcher = "0.1.9"

@@ -148,7 +148,7 @@ fn render(
             continue;
         }
         let output = ToolOutput::new(formatter.finish(cancellation)?);
-        if output.fits_budget() {
+        if output.fits_budget_and_model(cancellation) {
             let _ = request;
             return Ok(output);
         }

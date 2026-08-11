@@ -77,6 +77,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn token_dense_matches_preserve_pagination_and_model_budget() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        fs::create_dir(fixture.path().join("src")).expect("src");
+        let dense = format!("{}\n", " x".repeat(12)).repeat(750);
+        fs::write(fixture.path().join("src/dense.rs"), dense).expect("dense source");
+        let root = Arc::new(FileAccess::new(
+            Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
+            ReadScope::Normal,
+        ));
+        let cancellation = CancellationToken::new();
+        let mut query = request("x");
+        query.fixed_strings = Some(true);
+        query.limit = Some(750);
+
+        let output = execute(&root, &query, 1, &cancellation).expect("bounded dense grep");
+
+        let gate = crate::output_gate::OutputTokenGate::load_shared().expect("token gate");
+        assert!(matches!(
+            gate.evaluate_tool_text(&output, false, &cancellation),
+            crate::output_gate::GateDecision::FitsByBytes
+                | crate::output_gate::GateDecision::FitsExactly(_)
+        ));
+        assert!(output.contains("Partial: next_offset="));
+    }
+
     #[cfg(feature = "bench-internals")]
     #[test]
     fn profiled_execution_preserves_output_and_records_wall_stages() {

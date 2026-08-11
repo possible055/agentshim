@@ -449,6 +449,7 @@ fn glob_request(directory: &str) -> GlobRequest {
         pattern: std::env::var(GLOB_PATTERN_ENV).unwrap_or_else(|_| "**/*.rs".to_owned()),
         path: Some(directory.to_owned()),
         include_ignored: None,
+        entry_type: None,
         offset: None,
         limit: Some(1_000),
     }

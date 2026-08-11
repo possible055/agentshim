@@ -42,8 +42,9 @@ fn bounded_error_payload(
     details: Option<&Value>,
 ) -> (String, Value) {
     let bounded = bounded_diagnostic(message);
+    let cancellation = CancellationToken::new();
     let structured = crate::output::tool_error_structure(code, retryable, &bounded, details);
-    if crate::output::tool_result_fits_budget(&bounded, Some(&structured), true) {
+    if error_payload_fits(code, retryable, &bounded, details, &cancellation) {
         return (bounded, structured);
     }
     let marker = "...[truncated]";
@@ -59,9 +60,7 @@ fn bounded_error_payload(
         let midpoint = low + (high - low) / 2;
         let end = boundaries[midpoint];
         let candidate = format!("{}{marker}", &bounded[..end]);
-        let structured =
-            crate::output::tool_error_structure(code, retryable, &candidate, details);
-        if crate::output::tool_result_fits_budget(&candidate, Some(&structured), true) {
+        if error_payload_fits(code, retryable, &candidate, details, &cancellation) {
             best = candidate;
             low = midpoint + 1;
         } else {
@@ -69,7 +68,7 @@ fn bounded_error_payload(
         }
     }
     let structured = crate::output::tool_error_structure(code, retryable, &best, details);
-    if crate::output::tool_result_fits_budget(&best, Some(&structured), true) {
+    if error_payload_fits(code, retryable, &best, details, &cancellation) {
         return (best, structured);
     }
     let structured = crate::output::tool_error_structure(code, retryable, marker, None);
@@ -79,6 +78,18 @@ fn bounded_error_payload(
         true
     ));
     (marker.to_owned(), structured)
+}
+
+fn error_payload_fits(
+    code: &'static str,
+    retryable: bool,
+    message: &str,
+    details: Option<&Value>,
+    cancellation: &CancellationToken,
+) -> bool {
+    let structured = crate::output::tool_error_structure(code, retryable, message, details);
+    crate::output::tool_result_fits_budget(message, Some(&structured), true)
+        && crate::output_gate::structured_result_fits_model_budget(&structured, cancellation)
 }
 
 fn bound_detail_strings(value: &mut Value) {
@@ -298,6 +309,8 @@ fn blocking_response<E: DiagnosticError>(
     tool: &str,
     run_ms: u64,
     result: Result<Result<crate::tools::ToolOutput, E>, tokio::task::JoinError>,
+    output_token_gate: &crate::output_gate::OutputTokenGate,
+    cancellation: &CancellationToken,
 ) -> CallToolResponse {
     match result {
         Ok(Ok(output)) => {
@@ -311,6 +324,7 @@ fn blocking_response<E: DiagnosticError>(
             } else {
                 tracing::info!(target: "codexshim", event = "tool_complete", phase = "response", outcome, run_ms);
             }
+            let model_budget_verified = output.model_budget_verified();
             let mut content = Vec::with_capacity(output.images.len() + 1);
             content.push(ContentBlock::text(output.text));
             content.extend(
@@ -319,7 +333,27 @@ fn blocking_response<E: DiagnosticError>(
                     .into_iter()
                     .map(|image| ContentBlock::image(image.data, image.mime_type)),
             );
-            CallToolResult::success(content).into()
+            let result = CallToolResult::success(content);
+            if model_budget_verified {
+                tracing::trace!(target: "codexshim", token_gate_path = "verified_renderer");
+                return result.into();
+            }
+            match output_token_gate.evaluate_result(&result, cancellation) {
+                crate::output_gate::GateDecision::FitsByBytes
+                | crate::output_gate::GateDecision::FitsExactly(_) => result.into(),
+                crate::output_gate::GateDecision::Exceeded => tool_error(
+                    "output_budget",
+                    false,
+                    "tool output exceeded the model token budget",
+                    None,
+                ),
+                crate::output_gate::GateDecision::Cancelled => tool_error(
+                    "client_cancellation",
+                    false,
+                    "tool output verification was cancelled",
+                    None,
+                ),
+            }
         }
         Ok(Err(error)) => diagnostic_tool_error(&error),
         Err(error) => {
@@ -595,12 +629,12 @@ fn grep_tool(read_scope: ReadScope) -> Tool {
 fn glob_tool(read_scope: ReadScope) -> Tool {
     let (description, path_description, pattern_description) = match read_scope {
         ReadScope::Normal => (
-            "Find local repository or Codex extension file paths using a glob pattern. Results use native absolute paths and expose structured numeric pagination.",
+            "Find local repository or Codex extension paths using a glob pattern. Returns files by default; use type to find directories or any entry. Results use native absolute paths and expose structured numeric pagination.",
             "Platform-native repository directory or absolute directory under a configured Codex skill or plugin root.",
             "Case-sensitive glob relative to the repository or requested Codex extension directory.",
         ),
         ReadScope::Unrestricted => (
-            "Find local filesystem paths using a glob pattern. Relative paths use the repository root; absolute paths may address supported locations outside it.",
+            "Find local filesystem paths using a glob pattern. Returns files by default; use type to find directories or any entry. Relative paths use the repository root; absolute paths may address supported locations outside it.",
             "Platform-native directory to traverse. Relative paths use the repository root; absolute paths may address supported local filesystems.",
             "Case-sensitive glob over repository-root-relative paths, or request-path-relative paths for external absolute inputs.",
         ),
@@ -636,6 +670,12 @@ fn glob_tool(read_scope: ReadScope) -> Tool {
                     "type": "string",
                     "minLength": 1,
                     "description": pattern_description
+                },
+                "type": {
+                    "type": "string",
+                    "enum": ["file", "directory", "any"],
+                    "default": "file",
+                    "description": "Filesystem entry kind to return. file includes regular files and symbolic-link entries; directory returns real directories; any preserves both."
                 }
             },
             "required": ["pattern"]

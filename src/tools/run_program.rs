@@ -262,6 +262,7 @@ pub(crate) fn execute_output(
                     stderr,
                 },
                 timeout_ms,
+                cancellation,
             )?;
             Err(ProcessError::Timeout {
                 timeout_ms,
@@ -326,7 +327,7 @@ pub(crate) fn render_completed(
         &[&completed.stdout, &completed.stderr],
         cancellation,
         |rendered| completed_output(completed, &rendered[0], &rendered[1]),
-        ToolOutput::fits_content_budget,
+        |output| output.fits_content_and_model(cancellation),
     )
 }
 
@@ -384,13 +385,13 @@ fn completed_output(
 pub(crate) fn render_timeout(
     timed_out: &TimedOutProcess,
     timeout_ms: u64,
+    cancellation: &CancellationToken,
 ) -> Result<TimeoutRender, ProcessError> {
-    let cancellation = CancellationToken::new();
     project_captures(
         &[&timed_out.stdout, &timed_out.stderr],
-        &cancellation,
+        cancellation,
         |rendered| timeout_output(timed_out, timeout_ms, &rendered[0], &rendered[1]),
-        timeout_output_fits_budget,
+        |output| timeout_output_fits_budget(output, cancellation),
     )
 }
 
@@ -471,7 +472,7 @@ fn timeout_output(
     }
 }
 
-fn timeout_output_fits_budget(output: &TimeoutRender) -> bool {
+fn timeout_output_fits_budget(output: &TimeoutRender, cancellation: &CancellationToken) -> bool {
     serde_json::to_value(&output.details)
         .ok()
         .is_some_and(|details| {
@@ -480,6 +481,14 @@ fn timeout_output_fits_budget(output: &TimeoutRender) -> bool {
                 true,
                 &output.text,
                 Some(&details),
-            )
+            ) && {
+                let structured = crate::output::tool_error_structure(
+                    "resource_timeout",
+                    true,
+                    &output.text,
+                    Some(&details),
+                );
+                crate::output_gate::structured_result_fits_model_budget(&structured, cancellation)
+            }
         })
 }

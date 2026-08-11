@@ -207,7 +207,7 @@ fn render(
             continue;
         }
         let output = ToolOutput::new(formatter.finish(cancellation)?);
-        if output.fits_budget() {
+        if output.fits_budget_and_model(cancellation) {
             return Ok(output);
         }
         if cap == 1
@@ -219,7 +219,7 @@ fn render(
                 return Err(crate::output::OutputError::NoProgress.into());
             }
             let fallback_output = ToolOutput::new(formatter.finish(cancellation)?);
-            if fallback_output.fits_budget() {
+            if fallback_output.fits_budget_and_model(cancellation) {
                 return Ok(fallback_output);
             }
         }
