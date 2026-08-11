@@ -3,6 +3,12 @@ use std::{env, ffi::OsStr, io, sync::OnceLock};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+mod token_gate;
+
+pub(crate) use token_gate::{
+    GateDecision, OutputTokenGate, TOOL_CONTENT_TOKEN_LIMIT, structured_result_fits_model_budget,
+};
+
 pub const MODEL_BYTE_LIMIT: usize = 32_000;
 pub const MIN_OUTPUT_BYTES: usize = 4_096;
 pub const MAX_OUTPUT_BYTES: usize = 262_144;

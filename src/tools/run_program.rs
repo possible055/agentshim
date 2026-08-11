@@ -488,7 +488,7 @@ fn timeout_output_fits_budget(output: &TimeoutRender, cancellation: &Cancellatio
                     &output.text,
                     Some(&details),
                 );
-                crate::output_gate::structured_result_fits_model_budget(&structured, cancellation)
+                crate::output::structured_result_fits_model_budget(&structured, cancellation)
             }
         })
 }

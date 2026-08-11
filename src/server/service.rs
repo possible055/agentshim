@@ -23,7 +23,7 @@ use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::{
-    output_gate::OutputTokenGate,
+    output::OutputTokenGate,
     path::{FileAccess, ReadScope, RepositoryRoot},
     runtime::{RuntimeConfig, RuntimeResources},
     tools::{

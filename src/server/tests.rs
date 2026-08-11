@@ -303,18 +303,17 @@ fn tool_error_budget_counts_escaped_text_and_bounds_detail_captures() {
         Some(structured),
         true
     ));
-    let gate = crate::output_gate::OutputTokenGate::load_shared().expect("token gate");
+    let gate = crate::output::OutputTokenGate::load_shared().expect("token gate");
     assert!(matches!(
         gate.evaluate_result(&result, &tokio_util::sync::CancellationToken::new()),
-        crate::output_gate::GateDecision::FitsByBytes
-            | crate::output_gate::GateDecision::FitsExactly(_)
+        crate::output::GateDecision::FitsByBytes | crate::output::GateDecision::FitsExactly(_)
     ));
 }
 
 #[test]
 fn successful_tool_responses_omit_structured_content() {
     let output = crate::tools::ToolOutput::with_child_nonzero("summary".to_owned(), true);
-    let gate = crate::output_gate::OutputTokenGate::load_shared().expect("token gate");
+    let gate = crate::output::OutputTokenGate::load_shared().expect("token gate");
     let cancellation = tokio_util::sync::CancellationToken::new();
     let CallToolResponse::Complete(result) = blocking_response::<crate::tools::exec::ProcessError>(
         "run_program",

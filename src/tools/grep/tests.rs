@@ -92,11 +92,10 @@ mod tests {
 
         let output = execute(&root, &query, 1, &cancellation).expect("bounded dense grep");
 
-        let gate = crate::output_gate::OutputTokenGate::load_shared().expect("token gate");
+        let gate = crate::output::OutputTokenGate::load_shared().expect("token gate");
         assert!(matches!(
             gate.evaluate_tool_text(&output, false, &cancellation),
-            crate::output_gate::GateDecision::FitsByBytes
-                | crate::output_gate::GateDecision::FitsExactly(_)
+            crate::output::GateDecision::FitsByBytes | crate::output::GateDecision::FitsExactly(_)
         ));
         assert!(output.contains("Partial: next_offset="));
     }

@@ -452,7 +452,7 @@ fn render_timeout(
                             &render.text,
                             Some(&details),
                         );
-                        crate::output_gate::structured_result_fits_model_budget(
+                        crate::output::structured_result_fits_model_budget(
                             &structured,
                             cancellation,
                         )

@@ -69,13 +69,12 @@ impl ToolOutput {
         &self,
         cancellation: &tokio_util::sync::CancellationToken,
     ) -> bool {
-        let Ok(gate) = crate::output_gate::OutputTokenGate::load_shared() else {
+        let Ok(gate) = crate::output::OutputTokenGate::load_shared() else {
             return false;
         };
         let fits = matches!(
             gate.evaluate_tool_text(&self.text, !self.images.is_empty(), cancellation),
-            crate::output_gate::GateDecision::FitsByBytes
-                | crate::output_gate::GateDecision::FitsExactly(_)
+            crate::output::GateDecision::FitsByBytes | crate::output::GateDecision::FitsExactly(_)
         );
         self.model_budget_verified.set(fits);
         fits
@@ -104,7 +103,7 @@ impl ToolOutput {
         encoded_len: usize,
         cancellation: &tokio_util::sync::CancellationToken,
     ) -> bool {
-        if encoded_len <= crate::output_gate::TOOL_CONTENT_TOKEN_LIMIT {
+        if encoded_len <= crate::output::TOOL_CONTENT_TOKEN_LIMIT {
             let fits = !cancellation.is_cancelled();
             self.model_budget_verified.set(fits);
             return fits;

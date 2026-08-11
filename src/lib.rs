@@ -1,7 +1,6 @@
 mod diagnostics;
 mod encoding;
 mod output;
-mod output_gate;
 mod path;
 mod runtime;
 mod server;

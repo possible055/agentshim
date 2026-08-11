@@ -95,7 +95,7 @@ fn error_payload_fits(
 ) -> bool {
     let structured = crate::output::tool_error_structure(code, retryable, message, details);
     crate::output::tool_result_fits_budget(message, Some(&structured), true)
-        && crate::output_gate::structured_result_fits_model_budget(&structured, cancellation)
+        && crate::output::structured_result_fits_model_budget(&structured, cancellation)
 }
 
 fn bound_detail_strings(value: &mut Value) {
@@ -315,7 +315,7 @@ pub(super) fn blocking_response<E: DiagnosticError>(
     tool: &str,
     run_ms: u64,
     result: Result<Result<crate::tools::ToolOutput, E>, tokio::task::JoinError>,
-    output_token_gate: &crate::output_gate::OutputTokenGate,
+    output_token_gate: &crate::output::OutputTokenGate,
     cancellation: &CancellationToken,
 ) -> CallToolResponse {
     match result {
@@ -345,15 +345,15 @@ pub(super) fn blocking_response<E: DiagnosticError>(
                 return result.into();
             }
             match output_token_gate.evaluate_result(&result, cancellation) {
-                crate::output_gate::GateDecision::FitsByBytes
-                | crate::output_gate::GateDecision::FitsExactly(_) => result.into(),
-                crate::output_gate::GateDecision::Exceeded => tool_error(
+                crate::output::GateDecision::FitsByBytes
+                | crate::output::GateDecision::FitsExactly(_) => result.into(),
+                crate::output::GateDecision::Exceeded => tool_error(
                     "output_budget",
                     false,
                     "tool output exceeded the model token budget",
                     None,
                 ),
-                crate::output_gate::GateDecision::Cancelled => tool_error(
+                crate::output::GateDecision::Cancelled => tool_error(
                     "client_cancellation",
                     false,
                     "tool output verification was cancelled",
