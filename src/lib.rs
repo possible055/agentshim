@@ -2,6 +2,7 @@ mod diagnostics;
 mod encoding;
 mod output;
 mod path;
+mod platform;
 mod runtime;
 mod server;
 mod sorting;

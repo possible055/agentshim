@@ -17,18 +17,18 @@ fn execute_unix(request: &ProcessRequest) -> Result<String, ProcessError> {
 #[cfg(unix)]
 #[test]
 fn unix_setup_failures_drop_the_owned_process_group() {
-    use platform::SetupFailurePoint::{Io, Spawn, Stderr, Stdin, Stdout};
+    use process::SetupFailurePoint::{Io, Spawn, Stderr, Stdin, Stdout};
 
     for point in [Spawn, Stdin, Stdout, Stderr, Io] {
-        platform::set_setup_failure_for_tests(point);
+        process::set_setup_failure_for_tests(point);
         let mut failing = request("/bin/sh".to_owned());
         failing.args = vec!["-c".to_owned(), "exec sleep 30".to_owned()];
         let error = execute_unix(&failing).expect_err("setup failure must be returned");
         assert!(matches!(error, ProcessError::Io(_)));
-        let process_group = platform::take_spawned_process_group_for_tests()
+        let process_group = process::take_spawned_process_group_for_tests()
             .expect("spawned process group must be recorded");
         assert!(
-            !platform::process_group_exists_for_tests(process_group),
+            !process::process_group_exists_for_tests(process_group),
             "process group {process_group} survived an injected setup failure"
         );
     }
@@ -305,7 +305,7 @@ fn unix_session_escape_does_not_detach_pipe_workers() {
 
     assert!(matches!(error, ProcessError::OutcomeUncertain));
     assert!(started.elapsed() < Duration::from_secs(7));
-    let detached_workers = platform::active_pipe_workers_for_tests();
+    let detached_workers = process::active_pipe_workers_for_tests();
     let helper_pid = std::fs::read_to_string(pid_file)
         .expect("helper PID")
         .trim()
@@ -314,12 +314,12 @@ fn unix_session_escape_does_not_detach_pipe_workers() {
     // SAFETY: The fixture owns this PID and always terminates it before asserting.
     unsafe { libc::kill(helper_pid, libc::SIGKILL) };
     let cleanup_deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while platform::active_pipe_workers_for_tests() != 0
+    while process::active_pipe_workers_for_tests() != 0
         && std::time::Instant::now() < cleanup_deadline
     {
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(platform::active_pipe_workers_for_tests(), 0);
+    assert_eq!(process::active_pipe_workers_for_tests(), 0);
     assert_eq!(
         detached_workers, 0,
         "completed call detached {detached_workers} pipe workers"

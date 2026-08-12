@@ -21,15 +21,14 @@ use windows_sys::Win32::{
     },
 };
 
-use super::{
-    super::{
-        ProcessError,
-        spawn::{EnvironmentPlan, ExecPlan},
-    },
-    platform::{
-        AttributeList, LaunchEncoding, Lifecycle, OwnedHandle, TERMINATION_EXIT_CODE,
-        create_process_cwd, environment_block, startup_info,
-    },
+use crate::tools::exec::{
+    ProcessError,
+    spawn::{EnvironmentPlan, ExecPlan},
+};
+
+use super::platform::{
+    AttributeList, LaunchEncoding, Lifecycle, OwnedHandle, TERMINATION_EXIT_CODE,
+    create_process_cwd, environment_block, startup_info,
 };
 
 /// Spawn a process tree whose lifetime outlives this call, writing both output streams

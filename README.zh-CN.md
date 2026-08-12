@@ -8,7 +8,7 @@
 
 - **受限的文件访问。** `read`、`grep`、`glob` 默认仅在仓库内操作，可选访问 Codex skill 和 plugin 目录。
 - **两种命令执行方式。** `run_program` 接收一个可执行文件和字面量参数列表，参数不经任何 shell 解析；需要管道、重定向或命令组合时使用 `bash`，它接收 POSIX 命令行。
-- **跨平台。** 原生支持 Windows、Linux 和 macOS（Intel 与 Apple Silicon）。
+- **跨平台。** 完全支持 Windows x86-64，并为 Linux x86-64、Linux ARM64 与 macOS Apple Silicon 提供兼容支持的发行资产。
 - **可读 PDF。** `read` 依内容识别 PDF（不靠扩展名），返回页面文字或渲染图片，长文档带续读游标。
 
 ## 工具
@@ -25,7 +25,7 @@
 
 ## 安装
 
-预编译二进制支持 Linux x86-64 与 ARM64、macOS Apple Silicon，以及 Windows 11（build 22621+）上的 Windows x86-64。Windows ARM64 与 macOS Intel 仍可从源码构建。
+Windows 11（build 22621+）上的 Windows x86-64 属于完全支持平台，每个拉取请求和每次推送到 `main` 都会执行完整的原生验证。Linux x86-64、Linux ARM64 与 macOS Apple Silicon 属于兼容支持的发行目标：每次发行都会在原生 runner 上完成构建、封装、哈希校验及两次安装，但不执行完整的拉取请求测试。Windows ARM64、macOS Intel 与其他 Rust 目标属于可能支持的源码构建平台，不提供正式资产、CI 保证、服务级别或支持承诺。
 
 ### 预编译发行版（推荐）
 
@@ -53,7 +53,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/possible055/codexshim/r
 安装指定版本或预发布版本时，传入 `-Version`（PowerShell）或 `--version`（sh）：
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/possible055/codexshim/releases/download/v0.1.3-alpha.3/install.sh | sh -s -- --version 0.1.3-alpha.3
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/possible055/codexshim/releases/download/v0.1.3-alpha.2/install.sh | sh -s -- --version 0.1.3-alpha.2
 ```
 
 ### 从源码构建

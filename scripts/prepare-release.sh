@@ -171,8 +171,8 @@ else
 fi
 trap - EXIT HUP INT TERM
 
-if ! cargo generate-lockfile --manifest-path "$manifest_path"; then
-    echo "cargo generate-lockfile failed; inspect the working tree" >&2
+if ! cargo update --manifest-path "$manifest_path" --workspace; then
+    echo "cargo update --workspace failed; inspect the working tree" >&2
     exit 1
 fi
 

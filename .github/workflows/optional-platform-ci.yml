@@ -20,63 +20,25 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.platform }}
   cancel-in-progress: true
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
   windows-arm64:
     if: ${{ inputs.platform == 'all' || inputs.platform == 'windows-arm64' }}
     name: Windows ARM64 CI
-    runs-on: windows-11-arm
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - uses: Swatinem/rust-cache@v2
-      - name: Runner preflight
-        shell: pwsh
-        run: |
-          rustup show active-toolchain
-          rustc -vV
-          $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
-          Write-Host "RuntimeInformation.OSArchitecture=$architecture"
-          Write-Host "RUNNER_ARCH=$env:RUNNER_ARCH"
-          if ($architecture -ne "Arm64" -or $env:RUNNER_ARCH -ne "ARM64") {
-              throw "windows-11-arm must report ARM64 architecture"
-          }
-      - name: Lint workspace
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-      - name: Test workspace targets
-        run: cargo test --locked --workspace --all-features --no-fail-fast --tests
-      - name: Test root documentation
-        run: cargo test --locked -p codexshim --all-features --doc
-      - name: Test gigatoken documentation
-        run: cargo test --locked -p codexshim-gigatoken --doc
+    uses: ./.github/workflows/rust-validation.yml
+    with:
+      runner: windows-11-arm
+      platform: windows
+      runner_arch: ARM64
+      os_architecture: Arm64
 
   macos-x86-64:
     if: ${{ inputs.platform == 'all' || inputs.platform == 'macos-x86-64' }}
     name: macOS x86-64 CI
-    runs-on: macos-15-intel
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "24"
-      - name: Runner preflight
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustup show active-toolchain
-          rustc -vV
-          test "$(uname -s)" = Darwin
-          test "$(uname -m)" = x86_64
-          test "${RUNNER_ARCH}" = X64
-      - name: Lint workspace
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-      - name: Test workspace targets
-        run: cargo test --locked --workspace --all-features --no-fail-fast --tests
-      - name: Test root documentation
-        run: cargo test --locked -p codexshim --all-features --doc
-      - name: Test gigatoken documentation
-        run: cargo test --locked -p codexshim-gigatoken --doc
+    uses: ./.github/workflows/rust-validation.yml
+    with:
+      runner: macos-15-intel
+      platform: unix
+      system: Darwin
+      machine: x86_64
+      runner_arch: X64
+      setup_node: true

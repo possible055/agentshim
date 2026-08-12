@@ -24,8 +24,8 @@ jobs:
       CODEXSHIM_BENCH_COMMIT: ${{ github.sha }}
       CODEXSHIM_BENCH_WORKTREE: github-actions
     steps:
-      - uses: actions/checkout@v7
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: ". -> target/performance"
           cache-bin: "false"
@@ -48,7 +48,7 @@ jobs:
           CODEXSHIM_AGGREGATE_SOAK_OUTPUT: ${{ github.workspace }}\target\resource-soak\windows-four-instance.jsonl
         run: cargo test --locked --test resource_soak four_instance_aggregate_process_soak -- --ignored --nocapture
       - name: Upload aggregate soak evidence
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: windows-four-instance-process-soak
           path: target/resource-soak/windows-four-instance.jsonl
@@ -58,15 +58,15 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Four-instance aggregate process soak
         env:
           CODEXSHIM_AGGREGATE_SOAK_ITERATIONS: "60"
           CODEXSHIM_AGGREGATE_SOAK_OUTPUT: ${{ github.workspace }}/target/resource-soak/linux-four-instance.jsonl
         run: cargo test --locked --test resource_soak four_instance_aggregate_process_soak -- --ignored --nocapture
       - name: Upload aggregate soak evidence
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: linux-four-instance-process-soak
           path: target/resource-soak/linux-four-instance.jsonl

@@ -6,7 +6,7 @@ resolver = "3"
 
 [package]
 name = "codexshim"
-version = "0.1.3-alpha.3"
+version = "0.1.3-alpha.4"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"

@@ -1,58 +1,55 @@
 name: Release
 
+run-name: Release ${{ inputs.commit_sha }} by @${{ github.actor }}
+
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Full commit SHA from main to release
+        required: true
+        type: string
 
 permissions:
-  contents: read
+  actions: read
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  validate-version:
-    name: Validate version
+  preflight:
+    name: Preflight
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     outputs:
-      version: ${{ steps.version.outputs.version }}
+      commit_sha: ${{ steps.release.outputs.commit_sha }}
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
     steps:
-      - uses: actions/checkout@v7
-      - name: Runner preflight
+      - name: Validate dispatch context
         shell: bash
+        env:
+          COMMIT_SHA: ${{ inputs.commit_sha }}
         run: |
           set -euo pipefail
-          rustup show active-toolchain
-          rustc -vV
-          echo "uname -s=$(uname -s)"
-          echo "uname -m=$(uname -m)"
-          test "$(uname -s)" = Linux
-          test "$(uname -m)" = x86_64
-          test "${RUNNER_ARCH}" = X64
-      - id: version
-        name: Match tag to Cargo version
-        shell: bash
-        run: |
-          version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')"
-          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
-            echo "tag $GITHUB_REF_NAME does not match Cargo version $version" >&2
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "release workflow must be dispatched from main, got $GITHUB_REF" >&2
             exit 1
           fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-  linux-validation:
-    name: Linux release gate
-    needs: validate-version
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v7
+          if [[ ! "$COMMIT_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "commit_sha must be a full 40-character hexadecimal commit SHA" >&2
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: "24"
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 0
+          persist-credentials: false
       - name: Runner preflight
         shell: bash
         run: |
@@ -64,54 +61,72 @@ jobs:
           test "$(uname -s)" = Linux
           test "$(uname -m)" = x86_64
           test "${RUNNER_ARCH}" = X64
-      - name: Format
-        run: cargo fmt --all -- --check
-      - name: Lint
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-      - name: Test workspace targets
-        run: cargo test --locked --workspace --all-features --no-fail-fast --tests
-      - name: Test root documentation
-        run: cargo test --locked -p codexshim --all-features --doc
-      - name: Test gigatoken documentation
-        run: cargo test --locked -p codexshim-gigatoken --doc
-      - name: Build workspace documentation
+      - id: release
+        name: Validate commit, version, tag, and CI
+        shell: bash
         env:
-          RUSTDOCFLAGS: -Dwarnings
-        run: cargo doc --locked --workspace --all-features --no-deps
-      - name: Metadata
-        run: cargo metadata --locked --no-deps --format-version 1
-
-  windows-validation:
-    name: Windows release gate
-    needs: validate-version
-    runs-on: windows-2025
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - uses: Swatinem/rust-cache@v2
-      - name: Runner preflight
-        shell: pwsh
+          COMMIT_SHA_INPUT: ${{ inputs.commit_sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          rustup show active-toolchain
-          rustc -vV
-          $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
-          Write-Host "RuntimeInformation.OSArchitecture=$architecture"
-          Write-Host "RUNNER_ARCH=$env:RUNNER_ARCH"
-          if ($architecture -ne "X64" -or $env:RUNNER_ARCH -ne "X64") {
-              throw "windows-2025 must report X64 architecture"
-          }
-      - name: Lint
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-      - name: Test workspace targets
-        run: cargo test --locked --workspace --all-features --no-fail-fast --tests
-      - name: Test root documentation
-        run: cargo test --locked -p codexshim --all-features --doc
-      - name: Test gigatoken documentation
-        run: cargo test --locked -p codexshim-gigatoken --doc
+          set -euo pipefail
+
+          commit_sha="$(git rev-parse HEAD^{commit})"
+          if [[ "$commit_sha" != "${COMMIT_SHA_INPUT,,}" ]]; then
+            echo "checkout resolved to $commit_sha; expected $COMMIT_SHA_INPUT" >&2
+            exit 1
+          fi
+
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$commit_sha" refs/remotes/origin/main; then
+            echo "commit $commit_sha is not reachable from origin/main" >&2
+            exit 1
+          fi
+
+          metadata="$(cargo metadata --locked --no-deps --format-version 1)"
+          version="$(jq -er '
+            [.packages[] | select(.name == "codexshim")] |
+            if length == 1 then .[0].version
+            else error("expected exactly one codexshim package")
+            end
+          ' <<<"$metadata")"
+          tag="v$version"
+
+          if [[ -n "$(git ls-remote --tags origin "refs/tags/$tag")" ]]; then
+            echo "remote tag $tag already exists" >&2
+            exit 1
+          fi
+
+          runs="$(gh api -X GET \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+            -f branch=main \
+            -f event=push \
+            -f head_sha="$commit_sha" \
+            -f status=success \
+            -f per_page=100)"
+          if ! ci_url="$(jq -er --arg sha "$commit_sha" '
+            .workflow_runs
+            | map(select(
+                .head_sha == $sha
+                and .head_branch == "main"
+                and .event == "push"
+                and .status == "completed"
+                and .conclusion == "success"
+              ))
+            | first
+            | .html_url
+          ' <<<"$runs")"; then
+            echo "commit $commit_sha has no successful completed CI push run on main" >&2
+            exit 1
+          fi
+
+          echo "validated CI run: $ci_url"
+          echo "commit_sha=$commit_sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
   package:
     name: Package ${{ matrix.target }}
-    needs: [validate-version, linux-validation, windows-validation]
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
@@ -154,8 +169,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.commit_sha }}
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: "false"
       - name: Unix runner preflight
@@ -190,7 +208,7 @@ jobs:
         if: matrix.platform != 'windows'
         shell: bash
         run: |
-          expected="codexshim ${{ needs.validate-version.outputs.version }}"
+          expected="codexshim ${{ needs.preflight.outputs.version }}"
           actual="$(./target/${{ matrix.target }}/release/${{ matrix.binary }} --version)"
           if [[ "$actual" != "$expected" ]]; then
             echo "release binary reported '$actual'; expected '$expected'" >&2
@@ -200,7 +218,7 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
-          $expected = "codexshim ${{ needs.validate-version.outputs.version }}"
+          $expected = "codexshim ${{ needs.preflight.outputs.version }}"
           $binary = (Resolve-Path "target/${{ matrix.target }}/release/${{ matrix.binary }}").Path
           $actual = (& $binary --version | Out-String).Trim()
           if ($actual -cne $expected) {
@@ -211,7 +229,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          name="codexshim-${{ needs.validate-version.outputs.version }}-${{ matrix.target }}"
+          name="codexshim-${{ needs.preflight.outputs.version }}-${{ matrix.target }}"
           stage="dist/$name"
           mkdir -p "$stage/config"
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "$stage/"
@@ -243,7 +261,7 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
-          $name = "codexshim-${{ needs.validate-version.outputs.version }}-${{ matrix.target }}"
+          $name = "codexshim-${{ needs.preflight.outputs.version }}-${{ matrix.target }}"
           $stage = Join-Path "dist" $name
           $configStage = Join-Path $stage "config"
           New-Item -ItemType Directory -Force $configStage | Out-Null
@@ -271,7 +289,7 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
-          $name = "codexshim-${{ needs.validate-version.outputs.version }}-${{ matrix.target }}"
+          $name = "codexshim-${{ needs.preflight.outputs.version }}-${{ matrix.target }}"
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
           $archive = "dist/$name.zip"
           Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -302,7 +320,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          name="codexshim-${{ needs.validate-version.outputs.version }}-${{ matrix.target }}"
+          name="codexshim-${{ needs.preflight.outputs.version }}-${{ matrix.target }}"
           tar -czf "dist/$name.tar.gz" -C dist "$name"
           expected_manifest="$(tar -tzf "dist/$name.tar.gz" | sed "s#^$name/##" | sed '/\/$/d' | LC_ALL=C sort)"
           stage_manifest="$(LC_ALL=C find "dist/$name" -type f -print | sed "s#^dist/$name/##" | LC_ALL=C sort)"
@@ -318,12 +336,12 @@ jobs:
       - name: Test Windows installer
         if: matrix.platform == 'windows'
         shell: pwsh
-        run: ./scripts/test-install-windows.ps1 -ExpectedVersion "${{ needs.validate-version.outputs.version }}" -ReleaseDirectory (Resolve-Path dist).Path
+        run: ./scripts/test-install-windows.ps1 -ExpectedVersion "${{ needs.preflight.outputs.version }}" -ReleaseDirectory (Resolve-Path dist).Path
       - name: Test Unix installer
         if: matrix.platform != 'windows'
         shell: bash
-        run: sh scripts/test-install-linux.sh "$PWD/dist" "${{ needs.validate-version.outputs.version }}"
-      - uses: actions/upload-artifact@v6
+        run: sh scripts/test-install-linux.sh "$PWD/dist" "${{ needs.preflight.outputs.version }}"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: codexshim-${{ matrix.target }}
           path: |
@@ -334,41 +352,196 @@ jobs:
 
   publish:
     name: Publish GitHub release
-    needs: [validate-version, package]
+    needs: [preflight, package]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    permissions:
-      contents: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.commit_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
           path: dist
           pattern: codexshim-*
           merge-multiple: true
-      - name: Generate checksums
-        shell: bash
-        run: |
-          cd dist
-          sha256sum codexshim-*.zip codexshim-*.tar.gz > SHA256SUMS
-      - name: Add installers
-        shell: bash
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          sh -n scripts/install.sh
-          sed "s|^default_version=\"\" # @codexshim:default-version|default_version=\"$version\" # @codexshim:default-version|" scripts/install.sh > dist/install.sh
-          sed "s|^\$DefaultVersion = \"\" # @codexshim:default-version|\$DefaultVersion = \"$version\" # @codexshim:default-version|" scripts/install.ps1 > dist/install.ps1
-          chmod 755 dist/install.sh
-          sh -n dist/install.sh
-          grep -q "^default_version=\"$version\" # @codexshim:default-version" dist/install.sh
-          grep -q "^\\\$DefaultVersion = \"$version\" # @codexshim:default-version" dist/install.ps1
-      - name: Publish assets
+      - name: Validate packaged assets
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.preflight.outputs.version }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
-          else
-            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
+          set -euo pipefail
+          expected="$(printf '%s\n' \
+            "codexshim-$VERSION-aarch64-apple-darwin.tar.gz" \
+            "codexshim-$VERSION-aarch64-apple-darwin.tar.gz.sha256" \
+            "codexshim-$VERSION-aarch64-unknown-linux-gnu.tar.gz" \
+            "codexshim-$VERSION-aarch64-unknown-linux-gnu.tar.gz.sha256" \
+            "codexshim-$VERSION-x86_64-pc-windows-msvc.zip" \
+            "codexshim-$VERSION-x86_64-pc-windows-msvc.zip.sha256" \
+            "codexshim-$VERSION-x86_64-unknown-linux-gnu.tar.gz" \
+            "codexshim-$VERSION-x86_64-unknown-linux-gnu.tar.gz.sha256" |
+            LC_ALL=C sort
+          )"
+          actual="$(find dist -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)"
+          if [[ "$actual" != "$expected" ]]; then
+            printf 'unexpected packaged assets:\n%s\n' "$actual" >&2
+            exit 1
+          fi
+      - name: Generate global assets
+        shell: bash
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          (
+            cd dist
+            sha256sum \
+              "codexshim-$VERSION-aarch64-apple-darwin.tar.gz" \
+              "codexshim-$VERSION-aarch64-unknown-linux-gnu.tar.gz" \
+              "codexshim-$VERSION-x86_64-pc-windows-msvc.zip" \
+              "codexshim-$VERSION-x86_64-unknown-linux-gnu.tar.gz" \
+              > SHA256SUMS
+          )
+          sh -n scripts/install.sh
+          sed "s|^default_version=\"\" # @codexshim:default-version|default_version=\"$VERSION\" # @codexshim:default-version|" scripts/install.sh > dist/install.sh
+          sed "s|^\$DefaultVersion = \"\" # @codexshim:default-version|\$DefaultVersion = \"$VERSION\" # @codexshim:default-version|" scripts/install.ps1 > dist/install.ps1
+          chmod 755 dist/install.sh
+          sh -n dist/install.sh
+          grep -q "^default_version=\"$VERSION\" # @codexshim:default-version" dist/install.sh
+          grep -q "^\$DefaultVersion = \"$VERSION\" # @codexshim:default-version" dist/install.ps1
+      - name: Validate final release assets
+        shell: bash
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          expected="$(printf '%s\n' \
+            SHA256SUMS \
+            "codexshim-$VERSION-aarch64-apple-darwin.tar.gz" \
+            "codexshim-$VERSION-aarch64-apple-darwin.tar.gz.sha256" \
+            "codexshim-$VERSION-aarch64-unknown-linux-gnu.tar.gz" \
+            "codexshim-$VERSION-aarch64-unknown-linux-gnu.tar.gz.sha256" \
+            "codexshim-$VERSION-x86_64-pc-windows-msvc.zip" \
+            "codexshim-$VERSION-x86_64-pc-windows-msvc.zip.sha256" \
+            "codexshim-$VERSION-x86_64-unknown-linux-gnu.tar.gz" \
+            "codexshim-$VERSION-x86_64-unknown-linux-gnu.tar.gz.sha256" \
+            install.ps1 \
+            install.sh |
+            LC_ALL=C sort
+          )"
+          actual="$(find dist -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)"
+          if [[ "$actual" != "$expected" ]]; then
+            printf 'unexpected final release assets:\n%s\n' "$actual" >&2
+            exit 1
+          fi
+      - name: Create GitHub release
+        shell: bash
+        env:
+          COMMIT_SHA: ${{ needs.preflight.outputs.commit_sha }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "$(git ls-remote --tags origin "refs/tags/$TAG")" ]]; then
+            echo "remote tag $TAG appeared after preflight" >&2
+            exit 1
+          fi
+
+          cleanup_failed_release() {
+            local ref_json ref_sha ref_type releases release_count is_draft
+            if ! ref_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$TAG" 2>/dev/null)"; then
+              echo "no tag was created; no release cleanup is needed" >&2
+              return
+            fi
+            ref_sha="$(jq -r '.object.sha' <<<"$ref_json")"
+            ref_type="$(jq -r '.object.type' <<<"$ref_json")"
+            if [[ "$ref_type" != commit || "$ref_sha" != "$COMMIT_SHA" ]]; then
+              echo "ref $TAG does not identify this release commit; refusing cleanup" >&2
+              return
+            fi
+            if ! releases="$(gh api -X GET "repos/${GITHUB_REPOSITORY}/releases" -f per_page=100)"; then
+              echo "could not inspect releases; refusing cleanup" >&2
+              return
+            fi
+            release_count="$(jq --arg tag "$TAG" '[.[] | select(.tag_name == $tag)] | length' <<<"$releases")"
+            if [[ "$release_count" == 0 ]]; then
+              gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/$TAG"
+              echo "removed tag-only residue for $TAG" >&2
+              return
+            fi
+            if [[ "$release_count" != 1 ]]; then
+              echo "unexpected release count for $TAG; refusing cleanup" >&2
+              return
+            fi
+            is_draft="$(jq -r --arg tag "$TAG" '.[] | select(.tag_name == $tag) | .draft' <<<"$releases")"
+            if [[ "$is_draft" != true ]]; then
+              echo "release $TAG is already published; refusing cleanup" >&2
+              return
+            fi
+            gh release delete "$TAG" --cleanup-tag --yes
+            echo "removed failed draft release and tag $TAG" >&2
+          }
+
+          release_args=(
+            "$TAG"
+            dist/*
+            --target "$COMMIT_SHA"
+            --generate-notes
+            --title "$TAG"
+          )
+          if [[ "$VERSION" == *-* ]]; then
+            release_args+=(--prerelease)
+          fi
+          if ! gh release create "${release_args[@]}"; then
+            cleanup_failed_release
+            exit 1
+          fi
+      - name: Verify published release
+        shell: bash
+        env:
+          COMMIT_SHA: ${{ needs.preflight.outputs.commit_sha }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/$TAG")"
+          ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$TAG")"
+          expected_assets="$(printf '%s\n' \
+            SHA256SUMS \
+            "codexshim-$VERSION-aarch64-apple-darwin.tar.gz" \
+            "codexshim-$VERSION-aarch64-apple-darwin.tar.gz.sha256" \
+            "codexshim-$VERSION-aarch64-unknown-linux-gnu.tar.gz" \
+            "codexshim-$VERSION-aarch64-unknown-linux-gnu.tar.gz.sha256" \
+            "codexshim-$VERSION-x86_64-pc-windows-msvc.zip" \
+            "codexshim-$VERSION-x86_64-pc-windows-msvc.zip.sha256" \
+            "codexshim-$VERSION-x86_64-unknown-linux-gnu.tar.gz" \
+            "codexshim-$VERSION-x86_64-unknown-linux-gnu.tar.gz.sha256" \
+            install.ps1 \
+            install.sh |
+            LC_ALL=C sort
+          )"
+          actual_assets="$(jq -r '.assets[].name' <<<"$release" | LC_ALL=C sort)"
+          expected_prerelease=false
+          if [[ "$VERSION" == *-* ]]; then
+            expected_prerelease=true
+          fi
+          jq -e \
+            --arg sha "$COMMIT_SHA" \
+            --arg tag "$TAG" \
+            --argjson prerelease "$expected_prerelease" \
+            '.tag_name == $tag
+              and .target_commitish == $sha
+              and .draft == false
+              and .prerelease == $prerelease' \
+            <<<"$release" >/dev/null
+          jq -e \
+            --arg sha "$COMMIT_SHA" \
+            '.object.type == "commit" and .object.sha == $sha' \
+            <<<"$ref" >/dev/null
+          if [[ "$actual_assets" != "$expected_assets" ]]; then
+            printf 'unexpected published assets:\n%s\n' "$actual_assets" >&2
+            exit 1
           fi

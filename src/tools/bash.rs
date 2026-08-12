@@ -14,7 +14,6 @@ use crate::{
         exec::{
             ProcessError, ProcessStreamSummary, ProcessTimeoutDetails,
             capture::{Capture, RenderedCapture, diagnostic_path, project_captures},
-            platform,
             resolve::{ResolvedProgram, launcher_for},
             spawn::{
                 self, DEFAULT_TIMEOUT_MS, EnvironmentPlan, ExecFailure, ExecPlan, MAX_TIMEOUT_MS,
@@ -339,7 +338,7 @@ fn run_detached(
     if let Some(error) = admission.injected_spawn_error() {
         return Err(error);
     }
-    let tree = platform::spawn_detached(&plan, environment, log)?;
+    let tree = crate::platform::process::spawn_detached(&plan, environment, log)?;
     let pid = tree.pid();
     admission.retain(tree, log_path.clone());
     let rendered = format!(

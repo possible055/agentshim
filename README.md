@@ -8,7 +8,7 @@ English | [简体中文](README.zh-CN.md)
 
 - **Bounded file access.** `read`, `grep`, and `glob` stay inside your repository by default, with optional access to Codex skill and plugin directories.
 - **Two ways to run commands.** `run_program` takes one executable and a literal argument list — no shell ever parses the arguments. `bash` takes a POSIX command line when you need pipelines, redirection, or composition.
-- **Cross-platform.** Native support for Windows, Linux, and macOS (Intel and Apple Silicon).
+- **Cross-platform.** Full support for Windows x86-64, with compatibility release assets for Linux x86-64, Linux ARM64, and macOS Apple Silicon.
 - **Reads PDFs.** `read` detects PDFs by content, not extension, and returns page text or rendered images with continuation cursors for long documents.
 
 ## Tools
@@ -25,7 +25,7 @@ Successful calls return bounded text. Partial `read`, `grep`, and `glob` results
 
 ## Install
 
-Prebuilt binaries are available for Linux x86-64 and ARM64, macOS Apple Silicon, and Windows x86-64 on Windows 11 (build 22621+). Windows ARM64 and macOS Intel remain source-build platforms.
+Windows x86-64 on Windows 11 (build 22621+) is fully supported and runs the complete native validation suite on every pull request and every push to `main`. Linux x86-64, Linux ARM64, and macOS Apple Silicon are compatibility-supported release targets: each release is built, packaged, hashed, and installed twice on its native runner, but these platforms do not run the full pull-request suite. Windows ARM64, macOS Intel, and other Rust targets are possible-support source builds with no release assets, CI guarantee, service level, or support commitment.
 
 ### Prebuilt release (recommended)
 
@@ -53,7 +53,7 @@ Override with `-InstallDir` (PowerShell) or `--install-dir` (sh). Re-run the sam
 Install a specific or prerelease version with `-Version` (PowerShell) or `--version` (sh):
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/possible055/codexshim/releases/download/v0.1.3-alpha.3/install.sh | sh -s -- --version 0.1.3-alpha.3
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/possible055/codexshim/releases/download/v0.1.3-alpha.2/install.sh | sh -s -- --version 0.1.3-alpha.2
 ```
 
 ### Build from source

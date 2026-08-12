@@ -20,6 +20,8 @@ mod tests {
         traversal::{TraversalSummary, prefer_parallel_root},
     };
 
+    const TEST_LANES: usize = 4;
+
     fn access(path: &Path) -> Arc<FileAccess> {
         Arc::new(FileAccess::new(
             Arc::new(RepositoryRoot::open(path).expect("root")),
@@ -55,21 +57,26 @@ mod tests {
                 .absolute(),
         );
 
-        let default =
-            execute(&root, &request("**/*"), &CancellationToken::new()).expect("default glob");
+        let default = execute(
+            &root,
+            &request("**/*"),
+            TEST_LANES,
+            &CancellationToken::new(),
+        )
+        .expect("default glob");
         assert!(default.lines().any(|line| line == file));
         assert!(!default.lines().any(|line| line == directory));
 
         let mut directories = request("**/*");
         directories.entry_type = Some(GlobEntryType::Directory);
-        let directories =
-            execute(&root, &directories, &CancellationToken::new()).expect("directory glob");
+        let directories = execute(&root, &directories, TEST_LANES, &CancellationToken::new())
+            .expect("directory glob");
         assert!(directories.lines().any(|line| line == directory));
         assert!(!directories.lines().any(|line| line == file));
 
         let mut any = request("**/*");
         any.entry_type = Some(GlobEntryType::Any);
-        let any = execute(&root, &any, &CancellationToken::new()).expect("any glob");
+        let any = execute(&root, &any, TEST_LANES, &CancellationToken::new()).expect("any glob");
         assert!(any.lines().any(|line| line == directory));
         assert!(any.lines().any(|line| line == file));
     }
@@ -87,7 +94,7 @@ mod tests {
         let root = access(fixture.path());
         let mut query = request("*.rs");
         query.limit = Some(2);
-        let first = execute(&root, &query, &CancellationToken::new()).expect("glob");
+        let first = execute(&root, &query, TEST_LANES, &CancellationToken::new()).expect("glob");
         assert!(first.contains(".hidden.rs"));
         assert!(first.contains("a.rs"));
         assert!(!first.contains("ignored.rs\n"));
@@ -95,7 +102,7 @@ mod tests {
 
         query.include_ignored = Some(true);
         query.limit = Some(100);
-        let all = execute(&root, &query, &CancellationToken::new()).expect("all glob");
+        let all = execute(&root, &query, TEST_LANES, &CancellationToken::new()).expect("all glob");
         assert!(all.contains("ignored.rs"));
         assert!(!all.contains(".git/internal.rs"));
     }
@@ -108,7 +115,7 @@ mod tests {
         let root = access(fixture.path());
         let mut query = request("*.rs");
         query.limit = Some(100);
-        let output = execute(&root, &query, &CancellationToken::new()).expect("glob");
+        let output = execute(&root, &query, TEST_LANES, &CancellationToken::new()).expect("glob");
         assert!(!output.contains("Pattern:"));
         assert!(
             output.starts_with(&crate::path::display_path(
@@ -130,7 +137,8 @@ mod tests {
         let root = access(fixture.path());
         let mut query = request("**/*");
         query.limit = Some(100);
-        let output = execute(&root, &query, &CancellationToken::new()).expect("dense glob");
+        let output =
+            execute(&root, &query, TEST_LANES, &CancellationToken::new()).expect("dense glob");
         for path in ["top.rs", "src/lib.rs", "src/nested/Unicode 界.rs"] {
             let absolute = root.resolve(Path::new(path)).expect("resolved path");
             assert!(output.contains(&crate::path::display_path(absolute.absolute())));
@@ -160,11 +168,22 @@ mod tests {
         query.offset = Some(137);
         query.limit = Some(71);
         let cancellation = CancellationToken::new();
-        let serial = execute_with_traversal(&root, &query, &cancellation, GlobTraversal::Serial)
-            .expect("serial glob");
-        let parallel =
-            execute_with_traversal(&root, &query, &cancellation, GlobTraversal::ParallelBatched)
-                .expect("parallel glob");
+        let serial = execute_with_traversal(
+            &root,
+            &query,
+            TEST_LANES,
+            &cancellation,
+            GlobTraversal::Serial,
+        )
+        .expect("serial glob");
+        let parallel = execute_with_traversal(
+            &root,
+            &query,
+            TEST_LANES,
+            &cancellation,
+            GlobTraversal::ParallelBatched,
+        )
+        .expect("parallel glob");
         assert_eq!(parallel, serial);
 
         for (pattern, entry_type) in [
@@ -175,12 +194,18 @@ mod tests {
             let mut query = request(pattern);
             query.entry_type = Some(entry_type);
             query.limit = Some(100);
-            let serial =
-                execute_with_traversal(&root, &query, &cancellation, GlobTraversal::Serial)
-                    .expect("serial glob");
+            let serial = execute_with_traversal(
+                &root,
+                &query,
+                TEST_LANES,
+                &cancellation,
+                GlobTraversal::Serial,
+            )
+            .expect("serial glob");
             let parallel = execute_with_traversal(
                 &root,
                 &query,
+                TEST_LANES,
                 &cancellation,
                 GlobTraversal::ParallelBatched,
             )
@@ -201,15 +226,21 @@ mod tests {
         let root = access(fixture.path());
         let query = request("src/deep/*.rs");
         let cancellation = CancellationToken::new();
-        let expected = execute_with_traversal(&root, &query, &cancellation, GlobTraversal::Serial)
-            .expect("serial glob");
+        let expected = execute_with_traversal(
+            &root,
+            &query,
+            TEST_LANES,
+            &cancellation,
+            GlobTraversal::Serial,
+        )
+        .expect("serial glob");
 
         for traversal in [
             GlobTraversal::SerialLiteralPrefix,
             GlobTraversal::ParallelBatchedLiteralPrefix,
         ] {
             assert_eq!(
-                execute_with_traversal(&root, &query, &cancellation, traversal)
+                execute_with_traversal(&root, &query, TEST_LANES, &cancellation, traversal)
                     .expect("literal prefix glob"),
                 expected
             );
@@ -241,11 +272,18 @@ mod tests {
         let root = access(fixture.path());
         let query = request("**/*.rs");
         let cancellation = CancellationToken::new();
-        let expected = execute_with_traversal(&root, &query, &cancellation, GlobTraversal::Serial)
-            .expect("serial glob");
+        let expected = execute_with_traversal(
+            &root,
+            &query,
+            TEST_LANES,
+            &cancellation,
+            GlobTraversal::Serial,
+        )
+        .expect("serial glob");
         let profile = execute_profiled_with_traversal(
             &root,
             &query,
+            TEST_LANES,
             &cancellation,
             GlobTraversal::ParallelBatched,
         )
@@ -360,7 +398,7 @@ mod tests {
         let fixture = tempfile::tempdir().expect("fixture");
         let root = access(fixture.path());
         assert!(matches!(
-            execute(&root, &request("["), &CancellationToken::new()),
+            execute(&root, &request("["), TEST_LANES, &CancellationToken::new()),
             Err(GlobError::Pattern(_))
         ));
         let mut total = MAX_MATCHES;

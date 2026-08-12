@@ -8,10 +8,11 @@ mod tests {
     };
 
     use crate::tools::exec::{
-        capture::drain,
-        resolve::{Launcher, ResolvedProgram},
-        spawn::{ThreadCompletion, spawn_monitored},
-        windows::{
+        resolve::launcher_for,
+        spawn::{EnvironmentPlan, ExecPlan, Streams},
+    };
+    use crate::{
+        platform::process::implementation::{
             platform::{
                 BATCH_COMMAND_LINE_LIMIT, LaunchEncoding, Pipe, append_native_argument,
                 append_native_argv0, finish_batch_command_line, finish_native_command_line,
@@ -19,10 +20,11 @@ mod tests {
             },
             runner::{FAILURE_POINT, FailurePoint, run},
         },
-    };
-    use crate::tools::exec::{
-        resolve::launcher_for,
-        spawn::{EnvironmentPlan, ExecPlan, Streams},
+        tools::exec::{
+            capture::drain,
+            resolve::{Launcher, ResolvedProgram},
+            spawn::{ThreadCompletion, spawn_monitored},
+        },
     };
 
     fn fixture_args(args: Vec<&str>) -> Vec<String> {

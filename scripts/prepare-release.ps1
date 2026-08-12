@@ -143,9 +143,9 @@ $manifestAfter = Set-PackageVersion -Content $manifestBefore -NewVersion $Versio
 
 Push-Location $repository
 try {
-    & cargo generate-lockfile
+    & cargo update --workspace
     if ($LASTEXITCODE -ne 0) {
-        throw "cargo generate-lockfile failed."
+        throw "cargo update --workspace failed."
     }
 } finally {
     Pop-Location

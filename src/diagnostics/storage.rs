@@ -121,7 +121,7 @@ pub(super) fn write_batch(directory: &Path, batch: &[Record]) -> io::Result<()> 
     let lock = open_private_append(&lock_path)?;
     acquire_lock(&lock, LOCK_WAIT)?;
     let result = append_rotated(directory, date, &bytes);
-    let unlock = unlock_file(&lock);
+    let unlock = crate::platform::diagnostics::unlock_file(&lock);
     result.and(unlock)
 }
 
@@ -155,18 +155,14 @@ fn open_private_append(path: &Path) -> io::Result<File> {
         .append(true)
         .read(true)
         .open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    }
+    crate::platform::diagnostics::set_private_permissions(&file)?;
     Ok(file)
 }
 
 fn acquire_lock(file: &File, wait: Duration) -> io::Result<()> {
     let started = Instant::now();
     loop {
-        if try_lock_file(file)? {
+        if crate::platform::diagnostics::try_lock_file(file)? {
             return Ok(());
         }
         if started.elapsed() >= wait {
@@ -176,82 +172,6 @@ fn acquire_lock(file: &File, wait: Duration) -> io::Result<()> {
             ));
         }
         thread::sleep(LOCK_RETRY);
-    }
-}
-
-#[cfg(unix)]
-fn try_lock_file(file: &File) -> io::Result<bool> {
-    use std::os::fd::AsRawFd;
-    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if result == 0 {
-        return Ok(true);
-    }
-    let error = io::Error::last_os_error();
-    if matches!(error.kind(), io::ErrorKind::WouldBlock) {
-        Ok(false)
-    } else {
-        Err(error)
-    }
-}
-
-#[cfg(unix)]
-fn unlock_file(file: &File) -> io::Result<()> {
-    use std::os::fd::AsRawFd;
-    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-#[cfg(windows)]
-fn try_lock_file(file: &File) -> io::Result<bool> {
-    use std::{mem::zeroed, os::windows::io::AsRawHandle};
-    use windows_sys::Win32::{
-        Foundation::{ERROR_LOCK_VIOLATION, GetLastError},
-        Storage::FileSystem::{LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx},
-        System::IO::OVERLAPPED,
-    };
-    let mut overlapped: OVERLAPPED = unsafe { zeroed() };
-    let result = unsafe {
-        LockFileEx(
-            file.as_raw_handle(),
-            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-            0,
-            u32::MAX,
-            u32::MAX,
-            &raw mut overlapped,
-        )
-    };
-    if result != 0 {
-        return Ok(true);
-    }
-    if unsafe { GetLastError() } == ERROR_LOCK_VIOLATION {
-        Ok(false)
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-#[cfg(windows)]
-fn unlock_file(file: &File) -> io::Result<()> {
-    use std::{mem::zeroed, os::windows::io::AsRawHandle};
-    use windows_sys::Win32::{Storage::FileSystem::UnlockFileEx, System::IO::OVERLAPPED};
-    let mut overlapped: OVERLAPPED = unsafe { zeroed() };
-    let result = unsafe {
-        UnlockFileEx(
-            file.as_raw_handle(),
-            0,
-            u32::MAX,
-            u32::MAX,
-            &raw mut overlapped,
-        )
-    };
-    if result != 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
     }
 }
 
@@ -303,7 +223,7 @@ pub(super) fn parse_log_date(name: &str) -> Option<NaiveDate> {
 
 pub(super) fn automatic_maintenance(directory: &Path) -> io::Result<()> {
     let lock = open_private_append(&directory.join(".maintenance.lock"))?;
-    if !try_lock_file(&lock)? {
+    if !crate::platform::diagnostics::try_lock_file(&lock)? {
         return Ok(());
     }
     let today = Utc::now().date_naive();
@@ -316,7 +236,7 @@ pub(super) fn automatic_maintenance(directory: &Path) -> io::Result<()> {
         purge_directory(directory, today)
             .and_then(|_| write_private(&stamp_path, today.to_string().as_bytes()))
     };
-    let unlock = unlock_file(&lock);
+    let unlock = crate::platform::diagnostics::unlock_file(&lock);
     result.and(unlock)
 }
 
@@ -326,11 +246,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .truncate(true)
         .write(true)
         .open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    }
+    crate::platform::diagnostics::set_private_permissions(&file)?;
     file.write_all(bytes)
 }
 
@@ -419,7 +335,7 @@ pub fn purge(config: &DiagnosticsConfig) -> io::Result<PurgeReport> {
     let lock = open_private_append(&config.directory.join(".maintenance.lock"))?;
     acquire_lock(&lock, LOCK_WAIT)?;
     let result = purge_directory(&config.directory, Utc::now().date_naive());
-    let unlock = unlock_file(&lock);
+    let unlock = crate::platform::diagnostics::unlock_file(&lock);
     unlock?;
     result
 }

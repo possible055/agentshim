@@ -1,0 +1,128 @@
+name: Rust validation
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        required: true
+        type: string
+      platform:
+        required: true
+        type: string
+      system:
+        required: false
+        type: string
+        default: ""
+      machine:
+        required: false
+        type: string
+        default: ""
+      runner_arch:
+        required: true
+        type: string
+      os_architecture:
+        required: false
+        type: string
+        default: ""
+      setup_node:
+        required: false
+        type: boolean
+        default: false
+      run_format:
+        required: false
+        type: boolean
+        default: false
+      build_docs:
+        required: false
+        type: boolean
+        default: false
+      run_eval:
+        required: false
+        type: boolean
+        default: false
+      run_metadata:
+        required: false
+        type: boolean
+        default: false
+      deny_test_warnings:
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  validation:
+    name: Validation
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+      RUSTFLAGS: ${{ inputs.deny_test_warnings && '-Dwarnings' || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        if: inputs.setup_node
+        with:
+          node-version: "24"
+      - name: Unix runner preflight
+        if: inputs.platform == 'unix'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          rustc -vV
+          test "$(uname -s)" = "${{ inputs.system }}"
+          test "$(uname -m)" = "${{ inputs.machine }}"
+          test "${RUNNER_ARCH}" = "${{ inputs.runner_arch }}"
+      - name: Windows runner preflight
+        if: inputs.platform == 'windows'
+        shell: pwsh
+        run: |
+          rustup show active-toolchain
+          rustc -vV
+          $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+          Write-Host "RuntimeInformation.OSArchitecture=$architecture"
+          Write-Host "RUNNER_ARCH=$env:RUNNER_ARCH"
+          if ($architecture -ne "${{ inputs.os_architecture }}" -or $env:RUNNER_ARCH -ne "${{ inputs.runner_arch }}") {
+              throw "Runner architecture does not match the validation contract"
+          }
+      - name: Format
+        if: inputs.run_format
+        run: cargo fmt --all -- --check
+      - name: Lint workspace
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - name: Test workspace default features
+        run: cargo test --locked --workspace --tests
+      - name: Test workspace all features
+        run: cargo test --locked --workspace --all-features --tests
+      - name: Check PDF rendering-only feature profile
+        run: cargo check --locked -p codexshim-pdf-read --all-targets --no-default-features --features rendering
+      - name: Test root documentation
+        run: cargo test --locked -p codexshim --all-features --doc
+      - name: Test gigatoken documentation
+        run: cargo test --locked -p codexshim-gigatoken --doc
+      - name: Build workspace documentation
+        if: inputs.build_docs
+        env:
+          RUSTDOCFLAGS: -Dwarnings
+        run: cargo doc --locked --workspace --all-features --no-deps
+      - name: Offline pwsh degradation eval on Unix
+        if: inputs.run_eval && inputs.platform == 'unix'
+        run: >-
+          python3 scripts/eval-pwsh-degradation.py
+          --responses evals/fixtures/pwsh_degradation_baseline.jsonl
+          --transcript "${RUNNER_TEMP}/pwsh-degradation-scored.jsonl"
+          --report "${RUNNER_TEMP}/pwsh-degradation-report.json"
+      - name: Offline pwsh degradation eval on Windows
+        if: inputs.run_eval && inputs.platform == 'windows'
+        run: >-
+          python scripts/eval-pwsh-degradation.py
+          --responses evals/fixtures/pwsh_degradation_baseline.jsonl
+          --transcript "${RUNNER_TEMP}/pwsh-degradation-scored.jsonl"
+          --report "${RUNNER_TEMP}/pwsh-degradation-report.json"
+      - name: Metadata
+        if: inputs.run_metadata
+        run: cargo metadata --locked --no-deps --format-version 1

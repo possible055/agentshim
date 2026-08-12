@@ -6,6 +6,7 @@
 mod corpus;
 
 use std::io::{Seek, SeekFrom, Write};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -124,29 +125,39 @@ fn the_installed_mode_decides_the_stream_ceiling() {
 /// outside the process. Setting it must change nothing.
 #[test]
 fn the_decompression_environment_override_has_no_effect() {
+    let executable = std::env::current_exe().expect("resource limit test executable");
+    for value in ["4096", "1", "not_a_number"] {
+        let output = Command::new(&executable)
+            .args([
+                "--exact",
+                "the_decompression_environment_override_child_fixture",
+            ])
+            .env("PDF_OXIDE_MAX_DECOMPRESS_MB", value)
+            .output()
+            .expect("run environment override child");
+        assert!(
+            output.status.success(),
+            "PDF_OXIDE_MAX_DECOMPRESS_MB={value} changed the effective ceiling:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn the_decompression_environment_override_child_fixture() {
+    if std::env::var_os("PDF_OXIDE_MAX_DECOMPRESS_MB").is_none() {
+        return;
+    }
     let bytes = corpus::flate_bomb_content_stream();
-    let baseline = read_under(PdfResourceLimits::text(), &bytes)
+    let observed = read_under(PdfResourceLimits::text(), &bytes)
         .expect_err("bomb refused")
         .limit()
         .expect("details");
-
-    for value in ["4096", "1", "not_a_number"] {
-        // SAFETY: single-threaded test; nothing in the crate reads this variable.
-        unsafe {
-            std::env::set_var("PDF_OXIDE_MAX_DECOMPRESS_MB", value);
-        }
-        let observed = read_under(PdfResourceLimits::text(), &bytes)
-            .expect_err("bomb refused")
-            .limit()
-            .expect("details");
-        assert_eq!(
-            observed.limit_bytes, baseline.limit_bytes,
-            "PDF_OXIDE_MAX_DECOMPRESS_MB={value} changed the effective ceiling"
-        );
-    }
-    unsafe {
-        std::env::remove_var("PDF_OXIDE_MAX_DECOMPRESS_MB");
-    }
+    assert_eq!(
+        observed.limit_bytes,
+        PdfResourceLimits::text().single_stream_bytes as u64
+    );
 }
 
 /// Both xref damage triggers reach reconstruction, which used to read the whole file

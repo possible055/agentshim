@@ -54,7 +54,7 @@ serde_json = "1"
 tempfile = "3.27"
 
 [features]
-default = ["icc-qcms", "legacy-crypto", "rendering"]
+default = ["icc-qcms", "jpeg2000", "legacy-crypto", "rendering"]
 icc-qcms = ["dep:qcms"]
 jpeg2000 = ["dep:hayro-jpeg2000"]
 legacy-crypto = ["dep:md-5"]
@@ -64,7 +64,6 @@ rendering = [
     "dep:harfrust",
     "dep:hayro-jbig2",
     "dep:tiny-skia",
-    "jpeg2000",
 ]
 test-support = []
 

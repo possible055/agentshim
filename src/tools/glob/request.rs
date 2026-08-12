@@ -137,18 +137,21 @@ pub enum GlobError {
 pub fn execute(
     access: &Arc<FileAccess>,
     request: &GlobRequest,
+    lanes: usize,
     cancellation: &CancellationToken,
 ) -> Result<String, GlobError> {
-    execute_inner(
-        access,
-        request,
-        benchmark_resources(),
-        cancellation,
-        GlobTraversal::Adaptive,
-        &GlobProfiler::disabled(),
-        None,
-    )
-    .map(|result| result.text)
+    with_benchmark_resources(lanes, |resources| {
+        execute_inner(
+            access,
+            request,
+            resources,
+            cancellation,
+            GlobTraversal::Adaptive,
+            &GlobProfiler::disabled(),
+            None,
+        )
+        .map(|result| result.text)
+    })
 }
 
 pub(crate) fn execute_output(
@@ -199,19 +202,22 @@ fn execute_inner(
 pub fn execute_with_traversal(
     access: &Arc<FileAccess>,
     request: &GlobRequest,
+    lanes: usize,
     cancellation: &CancellationToken,
     traversal: GlobTraversal,
 ) -> Result<String, GlobError> {
-    execute_inner_with_traversal(
-        access,
-        request,
-        benchmark_resources(),
-        cancellation,
-        traversal,
-        &GlobProfiler::disabled(),
-        None,
-    )
-    .map(|output| output.text)
+    with_benchmark_resources(lanes, |resources| {
+        execute_inner_with_traversal(
+            access,
+            request,
+            resources,
+            cancellation,
+            traversal,
+            &GlobProfiler::disabled(),
+            None,
+        )
+        .map(|output| output.text)
+    })
 }
 
 #[cfg(feature = "bench-internals")]
@@ -224,25 +230,28 @@ pub fn execute_with_traversal(
 pub fn execute_profiled_with_traversal(
     access: &Arc<FileAccess>,
     request: &GlobRequest,
+    lanes: usize,
     cancellation: &CancellationToken,
     traversal: GlobTraversal,
 ) -> Result<ProfiledGlob, GlobError> {
-    let profiler = GlobProfiler::enabled();
-    let total_span = profiler.span(GlobStage::Total);
-    let result = execute_inner_with_traversal(
-        access,
-        request,
-        benchmark_resources(),
-        cancellation,
-        traversal,
-        &profiler,
-        None,
-    );
-    drop(total_span);
-    let output = result?;
-    Ok(ProfiledGlob {
-        output: output.text,
-        timings: profiler.snapshot(),
+    with_benchmark_resources(lanes, |resources| {
+        let profiler = GlobProfiler::enabled();
+        let total_span = profiler.span(GlobStage::Total);
+        let result = execute_inner_with_traversal(
+            access,
+            request,
+            resources,
+            cancellation,
+            traversal,
+            &profiler,
+            None,
+        );
+        drop(total_span);
+        let output = result?;
+        Ok(ProfiledGlob {
+            output: output.text,
+            timings: profiler.snapshot(),
+        })
     })
 }
 
@@ -591,13 +600,12 @@ fn collect_parallel(
 }
 
 #[cfg(any(test, feature = "bench-internals"))]
-fn benchmark_resources() -> &'static RuntimeResources {
-    static RESOURCES: std::sync::OnceLock<RuntimeResources> = std::sync::OnceLock::new();
-    RESOURCES.get_or_init(|| {
-        RuntimeResources::new(crate::runtime::RuntimeConfig::for_tests(
-            std::thread::available_parallelism().map_or(1, usize::from),
-        ))
-    })
+fn with_benchmark_resources<T>(
+    lanes: usize,
+    execute: impl FnOnce(&RuntimeResources) -> Result<T, GlobError>,
+) -> Result<T, GlobError> {
+    let resources = RuntimeResources::new(crate::runtime::RuntimeConfig::for_tests(lanes));
+    execute(&resources)
 }
 
 pub(super) fn record_match(total: &mut usize) -> Result<(), GlobError> {

@@ -7,7 +7,8 @@ use std::{
 
 use crate::{
     path::{RepositoryRoot, ResolvedPath},
-    tools::exec::{ProcessError, platform::DetachedTree},
+    platform::process::DetachedTree,
+    tools::exec::ProcessError,
 };
 
 pub(crate) const DETACHED_CALLS_ENV: &str = "CODEXSHIM_DETACHED_CALLS";

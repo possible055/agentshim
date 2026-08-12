@@ -41,7 +41,9 @@ use windows_sys::Win32::{
     },
 };
 
-use super::super::{
+#[cfg(test)]
+use super::runner::{FailurePoint, inject_failure};
+use crate::tools::exec::{
     ProcessError,
     capture::Capture,
     resolve::{Launcher, ResolvedProgram},
@@ -49,8 +51,6 @@ use super::super::{
         CLEANUP_DEADLINE, EnvironmentPlan, IO_CANCELLATION_DEADLINE, Streams, ThreadCompletion,
     },
 };
-#[cfg(test)]
-use super::runner::{FailurePoint, inject_failure};
 
 const NATIVE_COMMAND_LINE_LIMIT: usize = 32_767;
 pub(super) const BATCH_COMMAND_LINE_LIMIT: usize = 8_191;

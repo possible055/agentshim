@@ -306,7 +306,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_prefix_equivalence_is_narrow() {
-        use crate::path::resolved::windows_component_eq;
+        use crate::platform::path::windows_component_eq;
 
         fn prefix(path: &Path) -> std::path::Component<'_> {
             path.components().next().expect("path prefix")

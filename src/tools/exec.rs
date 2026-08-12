@@ -4,16 +4,6 @@ pub(crate) mod capture;
 pub(crate) mod resolve;
 pub(crate) mod spawn;
 
-#[cfg(unix)]
-pub(crate) mod unix;
-#[cfg(unix)]
-pub(crate) use unix as platform;
-
-#[cfg(windows)]
-pub(crate) mod windows;
-#[cfg(windows)]
-pub(crate) use windows as platform;
-
 #[cfg(test)]
 mod tests;
 

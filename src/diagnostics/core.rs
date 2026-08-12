@@ -86,7 +86,7 @@ impl DiagnosticsConfig {
         Self::from_values(
             env::var_os(LOG_MODE_ENV),
             env::var_os(LOG_DIR_ENV),
-            default_log_directory,
+            crate::platform::diagnostics::default_log_directory,
         )
     }
 
@@ -118,30 +118,6 @@ impl DiagnosticsConfig {
 
 fn invalid_env(name: &str, reason: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, format!("{name} {reason}"))
-}
-
-#[cfg(windows)]
-fn default_log_directory() -> io::Result<PathBuf> {
-    env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .map(|path| path.join("codexshim").join("logs"))
-        .ok_or_else(|| invalid_env("LOCALAPPDATA", "must contain an absolute path"))
-}
-
-#[cfg(not(windows))]
-fn default_log_directory() -> io::Result<PathBuf> {
-    if let Some(path) = env::var_os("XDG_STATE_HOME").map(PathBuf::from) {
-        if !path.is_absolute() {
-            return Err(invalid_env("XDG_STATE_HOME", "must be an absolute path"));
-        }
-        return Ok(path.join("codexshim").join("logs"));
-    }
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .map(|path| path.join(".local/state/codexshim/logs"))
-        .ok_or_else(|| invalid_env("HOME", "must contain an absolute path"))
 }
 
 #[derive(Clone)]

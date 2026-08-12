@@ -21,7 +21,6 @@ use crate::path::RepositoryRoot;
 use super::{
     ProcessError,
     capture::Capture,
-    platform,
     resolve::{Launcher, ResolvedProgram},
 };
 
@@ -43,13 +42,13 @@ pub(crate) const MAX_TIMEOUT_MS: u64 = TOOL_TIMEOUT_SHELF
     .saturating_sub(PROTOCOL_SLACK)
     .as_millis() as u64;
 #[cfg(unix)]
-pub(super) const TERM_GRACE: Duration = Duration::from_millis(250);
-pub(super) const CLEANUP_DEADLINE: Duration = Duration::from_secs(5);
+pub(crate) const TERM_GRACE: Duration = Duration::from_millis(250);
+pub(crate) const CLEANUP_DEADLINE: Duration = Duration::from_secs(5);
 #[cfg(windows)]
-pub(super) const IO_CANCELLATION_DEADLINE: Duration = Duration::from_secs(1);
+pub(crate) const IO_CANCELLATION_DEADLINE: Duration = Duration::from_secs(1);
 /// How long descendants may outlive the primary process before the owned containment is
 /// terminated. A detached tree is how a command intentionally outlives its call.
-pub(super) const DESCENDANT_EXIT_GRACE: Duration = Duration::from_millis(250);
+pub(crate) const DESCENDANT_EXIT_GRACE: Duration = Duration::from_millis(250);
 
 /// Pipe topology for one call. `Merged` points the child's stdout and stderr at a single pipe
 /// so the parent observes both in pipe-write order; it cannot attribute a line to a stream.
@@ -140,7 +139,7 @@ pub(crate) fn run(
     cancellation: &CancellationToken,
 ) -> Result<ExecOutcome, ExecFailure> {
     tracing::info!(target: "codexshim", event = "process_spawn", phase = "execution");
-    let result = platform::run(plan, cancellation);
+    let result = crate::platform::process::run(plan, cancellation);
     match &result {
         Ok(_) => tracing::info!(target: "codexshim", event = "process_exit", phase = "execution"),
         Err(ExecFailure::TimedOut { .. }) => {
@@ -182,7 +181,7 @@ pub(crate) fn resolve_cwd(
 }
 
 #[cfg(unix)]
-pub(super) fn apply_environment(command: &mut std::process::Command, plan: &EnvironmentPlan) {
+pub(crate) fn apply_environment(command: &mut std::process::Command, plan: &EnvironmentPlan) {
     for (key, value) in &plan.injected {
         command.env(key, value);
     }
@@ -195,7 +194,7 @@ pub(super) fn apply_environment(command: &mut std::process::Command, plan: &Envi
 }
 
 #[cfg(windows)]
-pub(super) fn spawn_monitored<T: Send + 'static>(
+pub(crate) fn spawn_monitored<T: Send + 'static>(
     failed: Arc<AtomicBool>,
     completion: ThreadCompletion,
     task: impl FnOnce() -> io::Result<T> + Send + 'static,
@@ -212,13 +211,13 @@ pub(super) fn spawn_monitored<T: Send + 'static>(
 
 #[cfg(windows)]
 #[derive(Clone)]
-pub(super) struct ThreadCompletion {
+pub(crate) struct ThreadCompletion {
     state: Arc<(Mutex<usize>, Condvar)>,
 }
 
 #[cfg(windows)]
 impl ThreadCompletion {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             state: Arc::new((Mutex::new(0), Condvar::new())),
         }
@@ -228,7 +227,7 @@ impl ThreadCompletion {
         CompletionSignal(self.clone())
     }
 
-    pub(super) fn wait_for(&self, count: usize, timeout: Duration) -> bool {
+    pub(crate) fn wait_for(&self, count: usize, timeout: Duration) -> bool {
         let (lock, changed) = &*self.state;
         let mut completed = lock
             .lock()

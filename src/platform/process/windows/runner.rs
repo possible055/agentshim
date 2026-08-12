@@ -20,7 +20,11 @@ use windows_sys::Win32::{
     },
 };
 
-use super::super::{
+use super::platform::{
+    LaunchEncoding, Lifecycle, PreparedStdio, create_process_cwd, environment_block, prepare_stdio,
+    settle_threads,
+};
+use crate::tools::exec::{
     ProcessError,
     capture::{Capture, capture_bytes_per_stream, drain, write_stdin},
     resolve::Launcher,
@@ -28,10 +32,6 @@ use super::super::{
         DESCENDANT_EXIT_GRACE, ExecFailure, ExecOutcome, ExecPlan, ThreadCompletion,
         spawn_monitored,
     },
-};
-use super::platform::{
-    LaunchEncoding, Lifecycle, PreparedStdio, create_process_cwd, environment_block, prepare_stdio,
-    settle_threads,
 };
 
 #[cfg(test)]

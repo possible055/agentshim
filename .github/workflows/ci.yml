@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - main
-    paths-ignore:
-      - "**/*.md"
   pull_request:
   workflow_dispatch:
 
@@ -16,127 +14,17 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  linux-validation:
-    name: Linux x86-64 CI
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "24"
-      - name: Runner preflight
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustup show active-toolchain
-          rustc -vV
-          test "$(uname -s)" = Linux
-          test "$(uname -m)" = x86_64
-          test "${RUNNER_ARCH}" = X64
-      - name: Format
-        run: cargo fmt --all -- --check
-      - name: Lint workspace
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-      - name: Test workspace targets
-        run: cargo test --locked --workspace --all-features --no-fail-fast --tests
-      - name: Test root documentation
-        run: cargo test --locked -p codexshim --all-features --doc
-      - name: Test gigatoken documentation
-        run: cargo test --locked -p codexshim-gigatoken --doc
-      - name: Build workspace documentation
-        env:
-          RUSTDOCFLAGS: -Dwarnings
-        run: cargo doc --locked --workspace --all-features --no-deps
-      - name: Offline pwsh degradation eval
-        run: >-
-          python3 scripts/eval-pwsh-degradation.py
-          --responses evals/fixtures/pwsh_degradation_baseline.jsonl
-          --transcript "${RUNNER_TEMP}/pwsh-degradation-scored.jsonl"
-          --report "${RUNNER_TEMP}/pwsh-degradation-report.json"
-      - name: Metadata
-        run: cargo metadata --locked --no-deps --format-version 1
-
   windows-validation:
     name: Windows x86-64 CI
-    runs-on: windows-2025
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - name: Runner preflight
-        shell: pwsh
-        run: |
-          rustup show active-toolchain
-          rustc -vV
-          $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
-          Write-Host "RuntimeInformation.OSArchitecture=$architecture"
-          Write-Host "RUNNER_ARCH=$env:RUNNER_ARCH"
-          if ($architecture -ne "X64" -or $env:RUNNER_ARCH -ne "X64") {
-              throw "windows-2025 must report X64 architecture"
-          }
-      - name: Lint workspace
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-      - name: Test workspace targets
-        run: cargo test --locked --workspace --all-features --no-fail-fast --tests
-      - name: Test root documentation
-        run: cargo test --locked -p codexshim --all-features --doc
-      - name: Test gigatoken documentation
-        run: cargo test --locked -p codexshim-gigatoken --doc
-
-  unix-portability:
-    name: ${{ matrix.name }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux ARM64 CI
-            os: ubuntu-24.04-arm
-            system: Linux
-            machine: aarch64
-            runner_arch: ARM64
-          - name: macOS ARM64 CI
-            os: macos-26
-            system: Darwin
-            machine: arm64
-            runner_arch: ARM64
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "24"
-      - name: Runner preflight
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustup show active-toolchain
-          rustc -vV
-          test "$(uname -s)" = "${{ matrix.system }}"
-          test "$(uname -m)" = "${{ matrix.machine }}"
-          test "${RUNNER_ARCH}" = "${{ matrix.runner_arch }}"
-      - name: Test workspace targets with warnings denied
-        env:
-          RUSTFLAGS: -Dwarnings
-        run: cargo test --locked --workspace --all-features --no-fail-fast --tests
-      - name: Test root documentation with warnings denied
-        env:
-          RUSTFLAGS: -Dwarnings
-        run: cargo test --locked -p codexshim --all-features --doc
-      - name: Test gigatoken documentation with warnings denied
-        env:
-          RUSTFLAGS: -Dwarnings
-        run: cargo test --locked -p codexshim-gigatoken --doc
+    uses: ./.github/workflows/rust-validation.yml
+    with:
+      runner: windows-2025
+      platform: windows
+      runner_arch: X64
+      os_architecture: X64
+      setup_node: true
+      run_format: true
+      build_docs: true
+      run_eval: true
+      run_metadata: true

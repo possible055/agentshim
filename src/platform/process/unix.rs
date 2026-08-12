@@ -12,7 +12,7 @@ use std::{
 
 use tokio_util::sync::CancellationToken;
 
-use super::{
+use crate::tools::exec::{
     ProcessError,
     capture::{Capture, DRAIN_CHUNK_BYTES, capture_bytes_per_stream},
     spawn::{
@@ -37,7 +37,7 @@ thread_local! {
     static LAST_SPAWNED_PROCESS_GROUP: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
 }
 
-pub(super) fn run(
+pub(crate) fn run(
     plan: &ExecPlan<'_>,
     cancellation: &CancellationToken,
 ) -> Result<ExecOutcome, ExecFailure> {

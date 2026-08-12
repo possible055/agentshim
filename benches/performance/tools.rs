@@ -51,6 +51,7 @@ pub(super) fn benchmark_tools(
                 glob::execute_with_traversal(
                     access,
                     &glob_request(directory),
+                    std::thread::available_parallelism().map_or(1, usize::from),
                     &cancellation,
                     traversal,
                 )
@@ -235,9 +236,14 @@ pub(super) fn profile_glob(
     let request = glob_request(directory);
     let mut expected = None;
     for &(traversal_name, traversal) in glob_traversals() {
-        let profile =
-            glob::execute_profiled_with_traversal(access, &request, cancellation, traversal)
-                .expect("profiled glob");
+        let profile = glob::execute_profiled_with_traversal(
+            access,
+            &request,
+            std::thread::available_parallelism().map_or(1, usize::from),
+            cancellation,
+            traversal,
+        )
+        .expect("profiled glob");
         let expected = expected.get_or_insert_with(|| profile.output.clone());
         assert_eq!(
             profile.output.as_str(),

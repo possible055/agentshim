@@ -9,7 +9,7 @@ use windows_sys::Win32::Foundation::ERROR_OPERATION_ABORTED;
 
 use super::ProcessError;
 
-pub(super) const DRAIN_CHUNK_BYTES: usize = 64 * 1024;
+pub(crate) const DRAIN_CHUNK_BYTES: usize = 64 * 1024;
 const DIAGNOSTIC_PATH_BYTES: usize = 2 * 1024;
 const DIAGNOSTIC_PATH_MARKER: &str = "...[path truncated]...";
 const CAPTURE_BUDGET_FACTOR: usize = 2;
@@ -385,7 +385,7 @@ pub(crate) fn escape_invalid_utf8(bytes: &[u8]) -> (String, usize) {
 }
 
 #[cfg(windows)]
-pub(super) fn drain(
+pub(crate) fn drain(
     mut reader: impl Read,
     capture_bytes: usize,
     oem_code_page: Option<u32>,
@@ -411,7 +411,7 @@ pub(super) fn drain(
 }
 
 #[cfg(windows)]
-pub(super) fn write_stdin(mut writer: impl Write, input: Option<&str>) -> io::Result<()> {
+pub(crate) fn write_stdin(mut writer: impl Write, input: Option<&str>) -> io::Result<()> {
     if let Some(input) = input {
         if let Err(error) = writer.write_all(input.as_bytes()) {
             if !is_operation_aborted(&error) {

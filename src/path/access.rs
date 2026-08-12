@@ -13,11 +13,11 @@ use cap_std::{
 };
 
 use super::resolved::{
-    PathBackend, PathError, ResolvedPath, normalize_absolute, normalize_relative, reject_nul,
-    relative_from_absolute,
+    PathBackend, PathError, ResolvedPath, normalize_absolute, normalize_relative,
 };
+use crate::platform::path::{reject_nul, relative_from_absolute};
 #[cfg(windows)]
-use super::resolved::{validate_ambient_path, validate_platform_root};
+use crate::platform::path::{validate_ambient_path, validate_root};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ReadScope {
@@ -73,7 +73,7 @@ impl RepositoryRoot {
         }
         let path = std::fs::canonicalize(input)?;
         #[cfg(windows)]
-        validate_platform_root(&path)?;
+        validate_root(&path)?;
         let capability = Dir::open_ambient_dir(&path, ambient_authority())?;
         Ok(Self {
             path,

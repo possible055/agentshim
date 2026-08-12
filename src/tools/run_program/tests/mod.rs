@@ -21,7 +21,7 @@ use crate::{
 };
 
 #[cfg(unix)]
-use crate::tools::exec::platform;
+use crate::platform::process;
 
 use super::{
     CompletedProcess, MAX_STDIN_BYTES, PROCESS_MEMORY_BYTES, ProcessRequest, TimedOutProcess,
