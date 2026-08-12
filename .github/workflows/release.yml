@@ -322,7 +322,7 @@ jobs:
           set -euo pipefail
           name="codexshim-${{ needs.preflight.outputs.version }}-${{ matrix.target }}"
           tar -czf "dist/$name.tar.gz" -C dist "$name"
-          expected_manifest="$(tar -tzf "dist/$name.tar.gz" | sed "s#^$name/##" | sed '/\/$/d' | LC_ALL=C sort)"
+          expected_manifest="$(tar -tzf "dist/$name.tar.gz" | sed '/\/$/d' | sed "s#^$name/##" | LC_ALL=C sort)"
           stage_manifest="$(LC_ALL=C find "dist/$name" -type f -print | sed "s#^dist/$name/##" | LC_ALL=C sort)"
           if [[ "$expected_manifest" != "$stage_manifest" ]]; then
             printf 'unexpected Unix archive manifest:\n%s\n' "$expected_manifest" >&2
