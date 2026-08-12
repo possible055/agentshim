@@ -68,6 +68,8 @@ pub struct GrepStageTimings {
     pub candidate_count: usize,
     pub searched_candidates: usize,
     pub matched_candidates: usize,
+    pub reduced_candidates: usize,
+    pub scan_complete: bool,
     pub candidate_estimated_retained_bytes: usize,
     pub candidate_retained_memory_bytes: usize,
     pub candidate_vec_capacity: usize,
@@ -97,6 +99,7 @@ pub struct ProfiledGrep {
 pub struct GrepWorkerMetrics {
     pub spawned: usize,
     pub peak_active: usize,
+    pub active: usize,
 }
 
 #[cfg(feature = "bench-internals")]
@@ -132,6 +135,8 @@ pub(super) struct GrepProfileCounters {
     candidate_count: std::sync::atomic::AtomicUsize,
     searched_candidates: std::sync::atomic::AtomicUsize,
     matched_candidates: std::sync::atomic::AtomicUsize,
+    reduced_candidates: std::sync::atomic::AtomicUsize,
+    scan_complete: std::sync::atomic::AtomicBool,
     candidate_estimated_retained_bytes: std::sync::atomic::AtomicUsize,
     candidate_vec_capacity: std::sync::atomic::AtomicUsize,
     candidate_soft_target_crossings: std::sync::atomic::AtomicUsize,
@@ -183,6 +188,8 @@ impl Default for GrepProfileCounters {
             candidate_count: std::sync::atomic::AtomicUsize::new(0),
             searched_candidates: std::sync::atomic::AtomicUsize::new(0),
             matched_candidates: std::sync::atomic::AtomicUsize::new(0),
+            reduced_candidates: std::sync::atomic::AtomicUsize::new(0),
+            scan_complete: std::sync::atomic::AtomicBool::new(false),
             candidate_estimated_retained_bytes: std::sync::atomic::AtomicUsize::new(0),
             candidate_vec_capacity: std::sync::atomic::AtomicUsize::new(0),
             candidate_soft_target_crossings: std::sync::atomic::AtomicUsize::new(0),
@@ -343,6 +350,22 @@ impl GrepProfiler {
         }
     }
 
+    pub(super) fn record_reduced_candidate(&self) {
+        if let Self::Enabled(counters) = self {
+            counters
+                .reduced_candidates
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    pub(super) fn set_scan_complete(&self) {
+        if let Self::Enabled(counters) = self {
+            counters
+                .scan_complete
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     pub(super) fn record_pathname_reopen(&self) {
         if let Self::Enabled(counters) = self {
             counters
@@ -409,6 +432,10 @@ impl GrepProfiler {
             candidate_count,
             searched_candidates: load_usize(&counters.searched_candidates),
             matched_candidates: load_usize(&counters.matched_candidates),
+            reduced_candidates: load_usize(&counters.reduced_candidates),
+            scan_complete: counters
+                .scan_complete
+                .load(std::sync::atomic::Ordering::Relaxed),
             candidate_estimated_retained_bytes,
             candidate_retained_memory_bytes: candidate_estimated_retained_bytes.saturating_add(
                 candidate_vec_capacity
@@ -513,6 +540,7 @@ pub fn worker_metrics() -> GrepWorkerMetrics {
     GrepWorkerMetrics {
         spawned: GREP_WORKERS_SPAWNED.load(std::sync::atomic::Ordering::Relaxed),
         peak_active: PEAK_ACTIVE_GREP_WORKERS.load(std::sync::atomic::Ordering::Relaxed),
+        active: ACTIVE_GREP_WORKERS.load(std::sync::atomic::Ordering::Relaxed),
     }
 }
 
@@ -578,6 +606,14 @@ impl GrepProfiler {
     }
 
     pub(super) fn record_matched_candidate(&self) {
+        let _ = self;
+    }
+
+    pub(super) fn record_reduced_candidate(&self) {
+        let _ = self;
+    }
+
+    pub(super) fn set_scan_complete(&self) {
         let _ = self;
     }
 

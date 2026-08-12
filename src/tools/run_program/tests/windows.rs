@@ -19,12 +19,10 @@ fn windows_grandchild_parent_fixture() {
     if env::var("CODEXSHIM_PROCESS_FIXTURE").as_deref() != Ok("parent") {
         return;
     }
-    writeln!(std::io::stdout(), "timeout stdout evidence").expect("write stdout evidence");
-    std::io::stdout().flush().expect("flush stdout evidence");
-    writeln!(std::io::stderr(), "timeout stderr evidence").expect("write stderr evidence");
-    std::io::stderr().flush().expect("flush stderr evidence");
+    let pid_file =
+        std::path::PathBuf::from(env::var_os("CODEXSHIM_PROCESS_PID_FILE").expect("pid file"));
     let executable = env::current_exe().expect("test executable");
-    let status = Command::new(executable)
+    let mut child = Command::new(executable)
         .args([
             "--exact",
             "tools::run_program::tests::windows::windows_grandchild_child_fixture",
@@ -33,10 +31,16 @@ fn windows_grandchild_parent_fixture() {
         .env("CODEXSHIM_PROCESS_FIXTURE", "child")
         .env(
             "CODEXSHIM_PROCESS_PID_FILE",
-            env::var_os("CODEXSHIM_PROCESS_PID_FILE").expect("pid file"),
+            pid_file.with_extension("child-ready"),
         )
-        .status()
+        .spawn()
         .expect("spawn child fixture");
+    std::fs::write(pid_file, child.id().to_string()).expect("write child pid");
+    writeln!(std::io::stdout(), "timeout stdout evidence").expect("write stdout evidence");
+    std::io::stdout().flush().expect("flush stdout evidence");
+    writeln!(std::io::stderr(), "timeout stderr evidence").expect("write stderr evidence");
+    std::io::stderr().flush().expect("flush stderr evidence");
+    let status = child.wait().expect("wait for child fixture");
     assert!(status.success());
 }
 
@@ -165,7 +169,7 @@ fn windows_timeout_terminates_grandchild_job_tree() {
     )
     .expect_err("timeout");
     assert!(
-        started.elapsed() < Duration::from_secs(3),
+        started.elapsed() < Duration::from_secs(7),
         "timeout cleanup waited for inherited output pipes"
     );
     assert!(

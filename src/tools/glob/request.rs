@@ -20,8 +20,8 @@ use crate::{
     runtime::{FileWorkCredit, FileWorkPool, RuntimeResources},
     tools::ToolOutput,
     traversal::{
-        ParallelTraversal, TraversalControl, TraversalError, TraversalSummary,
-        prefer_parallel_root, walk, walk_parallel_batched,
+        ParallelTraversal, ParallelTraversalCallbacks, TraversalControl, TraversalEntry,
+        TraversalError, TraversalSummary, prefer_parallel_root, walk, walk_parallel_batched,
         walk_parallel_batched_with_literal_prefix, walk_with_literal_prefix,
     },
 };
@@ -429,6 +429,14 @@ fn matches_entry_type(entry_type: GlobEntryType, file_type: Option<std::fs::File
     }
 }
 
+fn matches_glob_entry(
+    matcher: &globset::GlobMatcher,
+    entry_type: GlobEntryType,
+    entry: TraversalEntry<'_>,
+) -> bool {
+    matches_entry_type(entry_type, entry.file_type) && matcher.is_match(entry.key)
+}
+
 fn collect_serial(
     access: &FileAccess,
     base: &ResolvedPath,
@@ -437,8 +445,8 @@ fn collect_serial(
     mut collection: GlobCollection,
     plan: GlobCollectPlan<'_>,
 ) -> Result<(GlobCollection, TraversalSummary), GlobError> {
-    let mut visit = |entry: crate::traversal::TraversalEntry<'_>| {
-        if !matches_entry_type(plan.entry_type, entry.file_type) || !matcher.is_match(entry.key) {
+    let mut visit = |entry: TraversalEntry<'_>| {
+        if !matches_glob_entry(matcher, plan.entry_type, entry) {
             return TraversalControl::Continue;
         }
         if let Err(error) = record_match(&mut collection.total) {
@@ -487,6 +495,7 @@ fn collect_parallel(
     plan: GlobCollectPlan<'_>,
 ) -> Result<(GlobCollection, TraversalSummary), GlobError> {
     let collection = Mutex::new(collection);
+    let prefilter = |entry: TraversalEntry<'_>| matches_glob_entry(matcher, plan.entry_type, entry);
     let visit = |batch: &[crate::traversal::OwnedTraversalEntry]| {
         let threshold = {
             let wait_span = profiler.span(GlobStage::MergeWaitWorker);
@@ -497,14 +506,8 @@ fn collect_parallel(
             collection.store.threshold()
         };
         let mut found = Vec::new();
-        let mut matched_entries = 0_usize;
+        let matched_entries = batch.len();
         for entry in batch {
-            if !matches_entry_type(plan.entry_type, entry.file_type)
-                || !matcher.is_match(&entry.key)
-            {
-                continue;
-            }
-            matched_entries = matched_entries.saturating_add(1);
             let sort_key = PathSortKey::new(&entry.key);
             if !threshold.might_admit(&sort_key) {
                 continue;
@@ -560,7 +563,10 @@ fn collect_parallel(
                 threads: plan.traversal_threads,
             },
             literal_prefix,
-            visit,
+            &ParallelTraversalCallbacks {
+                prefilter,
+                visitor: visit,
+            },
         )?
     } else {
         walk_parallel_batched(
@@ -572,7 +578,10 @@ fn collect_parallel(
                 batch_size: PARALLEL_BATCH_SIZE,
                 threads: plan.traversal_threads,
             },
-            visit,
+            &ParallelTraversalCallbacks {
+                prefilter,
+                visitor: visit,
+            },
         )?
     };
     let collection = collection

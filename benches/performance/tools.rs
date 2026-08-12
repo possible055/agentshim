@@ -1,6 +1,6 @@
 use super::configuration::{
-    grep_lanes, grep_mode, grep_sources, grep_traversals, grep_workload, pathname_reopen_variants,
-    percentile,
+    grep_lanes, grep_limit, grep_mode, grep_offset, grep_sources, grep_traversals, grep_workload,
+    pathname_reopen_variants, percentile,
 };
 use super::fixtures::{mmap_trace, reset_mmap_trace};
 use super::reporting::{
@@ -294,8 +294,8 @@ pub(super) fn grep_request(directory: &str, files: usize) -> GrepRequest {
         fixed_strings: Some(true),
         case: None,
         context_lines: None,
-        offset: None,
-        limit: Some(1_000),
+        offset: Some(grep_offset()),
+        limit: Some(grep_limit()),
     }
 }
 

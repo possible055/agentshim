@@ -166,6 +166,27 @@ mod tests {
             execute_with_traversal(&root, &query, &cancellation, GlobTraversal::ParallelBatched)
                 .expect("parallel glob");
         assert_eq!(parallel, serial);
+
+        for (pattern, entry_type) in [
+            ("**/*.missing", GlobEntryType::File),
+            ("**/*", GlobEntryType::Directory),
+            ("**/*", GlobEntryType::Any),
+        ] {
+            let mut query = request(pattern);
+            query.entry_type = Some(entry_type);
+            query.limit = Some(100);
+            let serial =
+                execute_with_traversal(&root, &query, &cancellation, GlobTraversal::Serial)
+                    .expect("serial glob");
+            let parallel = execute_with_traversal(
+                &root,
+                &query,
+                &cancellation,
+                GlobTraversal::ParallelBatched,
+            )
+            .expect("parallel glob");
+            assert_eq!(parallel, serial);
+        }
     }
 
     #[test]

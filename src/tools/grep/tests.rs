@@ -55,6 +55,17 @@ mod tests {
         path.to_owned()
     }
 
+    fn result_lines(output: &str) -> Vec<&str> {
+        output
+            .lines()
+            .filter(|line| {
+                !line.starts_with("Partial:")
+                    && *line != "Complete."
+                    && !line.starts_with("Skipped")
+            })
+            .collect()
+    }
+
     #[test]
     fn content_fixed_case_context_and_worker_counts_are_deterministic() {
         let (_fixture, root) = fixture();
@@ -114,6 +125,8 @@ mod tests {
         assert_eq!(profile.output, expected);
         assert_eq!(profile.timings.candidate_count, 2);
         assert_eq!(profile.timings.lanes, 2);
+        assert_eq!(profile.timings.reduced_candidates, 2);
+        assert!(profile.timings.scan_complete);
         let sequential_ns = profile
             .timings
             .setup_ns
@@ -124,6 +137,15 @@ mod tests {
         assert!(profile.timings.total_ns >= sequential_ns);
         assert!(profile.timings.candidate_traversal_ns > 0);
         assert!(profile.timings.search_wall_ns > 0);
+
+        let mut partial_query = request("needle");
+        partial_query.fixed_strings = Some(true);
+        partial_query.limit = Some(1);
+        let partial = execute_profiled(&root, &partial_query, 4, &cancellation)
+            .expect("profiled partial grep");
+        assert!(partial.output.contains("Partial: next_offset=1."));
+        assert!(!partial.timings.scan_complete);
+        assert!(partial.timings.reduced_candidates < partial.timings.candidate_count);
     }
 
     #[test]
@@ -301,6 +323,105 @@ mod tests {
     }
 
     #[test]
+    fn content_and_files_pages_match_the_complete_sequence_across_lanes() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        fs::create_dir(fixture.path().join("src")).expect("src");
+        for index in 0..12 {
+            fs::write(
+                fixture.path().join(format!("src/{index:02}.rs")),
+                format!("before\nneedle needle {index}\nafter\n"),
+            )
+            .expect("fixture file");
+        }
+        let root = Arc::new(FileAccess::new(
+            Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
+            ReadScope::Normal,
+        ));
+
+        for mode in [GrepMode::Content, GrepMode::Files] {
+            let mut complete = request("needle");
+            complete.fixed_strings = Some(true);
+            complete.mode = Some(mode);
+            complete.context_lines = (mode == GrepMode::Content).then_some(1);
+            complete.limit = Some(1_000);
+            let complete_output =
+                execute(&root, &complete, 1, &CancellationToken::new()).expect("complete sequence");
+            let expected = result_lines(&complete_output);
+            assert!(complete_output.ends_with("Complete."));
+
+            for lanes in [1, 4, 16] {
+                let mut offset = 0;
+                while offset < expected.len() {
+                    let mut page = complete.clone();
+                    page.offset = Some(offset);
+                    page.limit = Some(3);
+                    let output = execute(&root, &page, lanes, &CancellationToken::new())
+                        .expect("paged sequence");
+                    let actual = result_lines(&output);
+                    assert_eq!(
+                        actual,
+                        expected[offset..expected.len().min(offset + 3)],
+                        "mode={mode:?} lanes={lanes} offset={offset}"
+                    );
+                    offset += actual.len();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn single_file_modes_scan_through_a_trailing_binary_marker() {
+        let (fixture, root) = fixture();
+        fs::write(
+            fixture.path().join("src/single.rs"),
+            b"needle at the start\nordinary\n\0binary tail",
+        )
+        .expect("binary fixture");
+
+        for mode in [GrepMode::Content, GrepMode::Files, GrepMode::Count] {
+            let mut query = request("needle");
+            query.path = Some("src/single.rs".to_owned());
+            query.glob = None;
+            query.fixed_strings = Some(true);
+            query.mode = Some(mode);
+            query.limit = Some(1);
+
+            assert!(matches!(
+                execute(&root, &query, 4, &CancellationToken::new()),
+                Err(GrepError::Io(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn partial_skip_summary_only_counts_the_searched_prefix() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        fs::create_dir(fixture.path().join("src")).expect("src");
+        fs::write(fixture.path().join("src/00-binary.rs"), b"needle\0tail").expect("binary prefix");
+        for index in 1..=4 {
+            fs::write(
+                fixture.path().join(format!("src/{index:02}.rs")),
+                "needle\n",
+            )
+            .expect("matching fixture");
+        }
+        fs::write(fixture.path().join("src/99-binary.rs"), b"needle\0tail").expect("binary suffix");
+        let root = Arc::new(FileAccess::new(
+            Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
+            ReadScope::Normal,
+        ));
+        let mut query = request("needle");
+        query.fixed_strings = Some(true);
+        query.limit = Some(1);
+
+        let output = execute(&root, &query, 1, &CancellationToken::new()).expect("partial grep");
+
+        assert!(output.contains("Skipped while producing this page: 1 files or entries."));
+        assert!(!output.contains("2 files or entries"));
+        assert!(output.ends_with("Partial: next_offset=1."));
+    }
+
+    #[test]
     fn files_mode_output_matches_cli_shape_without_pattern_header() {
         let (_fixture, root) = fixture();
         let cancellation = CancellationToken::new();
@@ -381,7 +502,7 @@ mod tests {
     #[test]
     fn page_retention_stays_within_its_memory_budget() {
         let query = request("needle");
-        let mut page = Page::new(&query, crate::traversal::TraversalSummary::default());
+        let mut page = Page::new(&query, crate::traversal::TraversalSummary::default(), false);
         for index in 0..1_000 {
             page.push_entry(
                 format!("{index}:{}", "x".repeat(20_000)),
@@ -392,7 +513,7 @@ mod tests {
         }
 
         assert!(page.charged <= PAGE_MEMORY_BYTES);
-        assert_eq!(page.total, 1_000);
+        assert_eq!(page.seen_entries, 1_000);
         assert!(!page.retaining);
         assert!(page.lines.iter().any(|line| line.text.contains("omitted")));
         let output = render(&query, &page, &CancellationToken::new()).expect("bounded page");
@@ -404,15 +525,18 @@ mod tests {
         let query = request("needle");
         let matcher = build_matcher(&query).expect("matcher");
         let cancellation = CancellationToken::new();
+        let retirement = CancellationToken::new();
         for mode in [GrepMode::Files, GrepMode::Count] {
             let sink = PlanSink::new(
                 &matcher,
                 SearchPlan {
                     mode,
                     context: 0,
-                    capture_records: 1_000,
+                    probe: 1_000,
+                    allow_early_stop: false,
                 },
                 &cancellation,
+                &retirement,
             );
             assert_eq!(sink.capture_capacity(), 0);
         }
@@ -460,7 +584,8 @@ mod tests {
         let plan = SearchPlan {
             mode: GrepMode::Content,
             context: 0,
-            capture_records: 10,
+            probe: 10,
+            allow_early_stop: false,
         };
         let changed = candidate(root.resolve(Path::new("src/a.rs")).expect("changed path"))
             .expect("changed candidate");
@@ -479,11 +604,12 @@ mod tests {
         let stable_outcome =
             search_file(&root, &stable, &matcher, plan, &cancellation).expect("stable outcome");
 
-        let mut page = Page::new(&query, crate::traversal::TraversalSummary::default());
+        let mut page = Page::new(&query, crate::traversal::TraversalSummary::default(), false);
         page.reduce(changed_outcome, GrepMode::Content, false)
             .expect("reduce changed");
         page.reduce(stable_outcome, GrepMode::Content, false)
             .expect("reduce stable");
+        page.mark_complete();
         let output = render(&query, &page, &cancellation).expect("render");
         assert!(output.contains(&display_subpath("src/b.rs")));
         assert!(!output.contains("replacement without"));
@@ -544,7 +670,8 @@ mod tests {
             let plan = SearchPlan {
                 mode: GrepMode::Content,
                 context: 0,
-                capture_records: 10,
+                probe: 10,
+                allow_early_stop: false,
             };
             let original = fixture.path().join("src/a.rs");
             let renamed = fixture.path().join("src/a-renamed.rs");
@@ -577,7 +704,8 @@ mod tests {
             let plan = SearchPlan {
                 mode: GrepMode::Content,
                 context: 0,
-                capture_records: 10,
+                probe: 10,
+                allow_early_stop: false,
             };
             let path = fixture.path().join("src/a.rs");
             fs::OpenOptions::new()
@@ -614,7 +742,8 @@ mod tests {
             let plan = SearchPlan {
                 mode: GrepMode::Content,
                 context: 0,
-                capture_records: 10,
+                probe: 10,
+                allow_early_stop: false,
             };
             let original = fixture.path().join("src/a.rs");
             let displaced = fixture.path().join("src/a-old.rs");
@@ -650,7 +779,8 @@ mod tests {
             let plan = SearchPlan {
                 mode: GrepMode::Content,
                 context: 0,
-                capture_records: 10,
+                probe: 10,
+                allow_early_stop: false,
             };
             let original = fixture.path().join("src/a.rs");
             let candidate = candidate(root.resolve(Path::new("src/a.rs")).expect("candidate path"))

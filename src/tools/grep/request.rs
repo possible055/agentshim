@@ -568,15 +568,17 @@ fn execute_inner(
     if skipped > 0 {
         tracing::warn!(target: "codexshim", event = "grep_skipped", phase = "execution", outcome = "degraded_success", counters = %format!("io_errors={},escaped_entries={},non_unicode_entries={}", traversal_summary.io_errors, traversal_summary.escaped_entries, traversal_summary.non_unicode_entries));
     }
-    let needed = request
+    let probe = request
         .offset
         .unwrap_or(0)
         .saturating_add(request.limit.unwrap_or(DEFAULT_LIMIT))
         .saturating_add(1);
+    let mode = request.mode.unwrap_or_default();
     let plan = SearchPlan {
-        mode: request.mode.unwrap_or_default(),
+        mode,
         context: request.context_lines.unwrap_or(0),
-        capture_records: needed,
+        probe,
+        allow_early_stop: !single_file && matches!(mode, GrepMode::Content | GrepMode::Files),
     };
     let lanes = resources
         .file_work_pool()

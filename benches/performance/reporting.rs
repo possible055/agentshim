@@ -52,6 +52,8 @@ pub(super) fn emit_grep_profile(emission: &GrepProfileEmission<'_>) {
                 "lanes": stages.lanes,
                 "candidate_count": stages.candidate_count,
                 "searched_candidates": stages.searched_candidates,
+                "reduced_candidates": stages.reduced_candidates,
+                "scan_complete": stages.scan_complete,
                 "matched_candidates": stages.matched_candidates,
                 "candidate_retained_memory_bytes": stages.candidate_retained_memory_bytes,
                 "candidate_vec_capacity": stages.candidate_vec_capacity,
@@ -87,7 +89,7 @@ pub(super) fn full_grep_profile_json(emission: &GrepProfileEmission<'_>) -> serd
     let stages = &emission.profile.timings;
     let fingerprint = emission.fingerprint;
     let mmap = emission.mmap;
-    json!({
+    let mut profile = json!({
         "benchmark": "grep_profile",
         "binary_commit": benchmark_identity().0,
         "binary_worktree": benchmark_identity().1,
@@ -174,7 +176,10 @@ pub(super) fn full_grep_profile_json(emission: &GrepProfileEmission<'_>) -> serd
         },
         "output_bytes": emission.profile.output.len(),
         "output_equivalent": true,
-    })
+    });
+    profile["reduced_candidates"] = stages.reduced_candidates.into();
+    profile["scan_complete"] = stages.scan_complete.into();
+    profile
 }
 
 pub(super) fn nanos_to_ms(nanoseconds: u64) -> f64 {
@@ -255,6 +260,7 @@ pub(super) fn measure_with(
                 json!({
                     "spawned": metrics.spawned,
                     "peak_active": metrics.peak_active,
+                    "active": metrics.active,
                 })
             });
             json!({

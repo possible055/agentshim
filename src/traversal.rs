@@ -72,13 +72,17 @@ pub struct TraversalEntry<'a> {
 pub struct OwnedTraversalEntry {
     pub key: PathBuf,
     pub absolute: PathBuf,
-    pub file_type: Option<std::fs::FileType>,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct ParallelTraversal {
     pub batch_size: usize,
     pub threads: usize,
+}
+
+pub struct ParallelTraversalCallbacks<P, V> {
+    pub prefilter: P,
+    pub visitor: V,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -191,14 +195,18 @@ fn walk_filtered(
 ///
 /// Returns an error when the root is unavailable, the base is not a directory,
 /// or cancellation is requested.
-pub fn walk_parallel_batched(
+pub fn walk_parallel_batched<P, V>(
     access: &FileAccess,
     base: &ResolvedPath,
     include_ignored: bool,
     cancellation: &CancellationToken,
     parallel: ParallelTraversal,
-    visitor: impl Fn(&[OwnedTraversalEntry]) -> TraversalControl + Send + Sync,
-) -> Result<TraversalSummary, TraversalError> {
+    callbacks: &ParallelTraversalCallbacks<P, V>,
+) -> Result<TraversalSummary, TraversalError>
+where
+    P: for<'entry> Fn(TraversalEntry<'entry>) -> bool + Send + Sync,
+    V: Fn(&[OwnedTraversalEntry]) -> TraversalControl + Send + Sync,
+{
     walk_parallel_batched_filtered(
         access,
         base,
@@ -206,19 +214,23 @@ pub fn walk_parallel_batched(
         cancellation,
         parallel,
         None,
-        visitor,
+        callbacks,
     )
 }
 
-pub fn walk_parallel_batched_with_literal_prefix(
+pub fn walk_parallel_batched_with_literal_prefix<P, V>(
     access: &FileAccess,
     base: &ResolvedPath,
     include_ignored: bool,
     cancellation: &CancellationToken,
     parallel: ParallelTraversal,
     literal_prefix: &Path,
-    visitor: impl Fn(&[OwnedTraversalEntry]) -> TraversalControl + Send + Sync,
-) -> Result<TraversalSummary, TraversalError> {
+    callbacks: &ParallelTraversalCallbacks<P, V>,
+) -> Result<TraversalSummary, TraversalError>
+where
+    P: for<'entry> Fn(TraversalEntry<'entry>) -> bool + Send + Sync,
+    V: Fn(&[OwnedTraversalEntry]) -> TraversalControl + Send + Sync,
+{
     walk_parallel_batched_filtered(
         access,
         base,
@@ -226,19 +238,23 @@ pub fn walk_parallel_batched_with_literal_prefix(
         cancellation,
         parallel,
         Some(literal_prefix),
-        visitor,
+        callbacks,
     )
 }
 
-fn walk_parallel_batched_filtered(
+fn walk_parallel_batched_filtered<P, V>(
     access: &FileAccess,
     base: &ResolvedPath,
     include_ignored: bool,
     cancellation: &CancellationToken,
     parallel: ParallelTraversal,
     literal_prefix: Option<&Path>,
-    visitor: impl Fn(&[OwnedTraversalEntry]) -> TraversalControl + Send + Sync,
-) -> Result<TraversalSummary, TraversalError> {
+    callbacks: &ParallelTraversalCallbacks<P, V>,
+) -> Result<TraversalSummary, TraversalError>
+where
+    P: for<'entry> Fn(TraversalEntry<'entry>) -> bool + Send + Sync,
+    V: Fn(&[OwnedTraversalEntry]) -> TraversalControl + Send + Sync,
+{
     access.root().verify()?;
     if base.is_ambient() && access.symlink_metadata_kind(base)?.is_symlink {
         return Err(TraversalError::NotDirectory);
@@ -272,7 +288,8 @@ fn walk_parallel_batched_filtered(
         let summary = &summary;
         let stopped = &stopped;
         let cancelled = &cancelled;
-        let visitor = &visitor;
+        let prefilter = &callbacks.prefilter;
+        let visitor = &callbacks.visitor;
         let mut pending = PendingBatch::new(batch_size, &remainders);
         Box::new(move |result| {
             if stopped.load(Ordering::Relaxed) {
@@ -290,9 +307,7 @@ fn walk_parallel_batched_filtered(
             if entry.depth() == 0 {
                 return WalkState::Continue;
             }
-            let key = if let Ok(key) = walked_key(access, base, entry.path()) {
-                key.into_owned()
-            } else {
+            let Ok(key) = walked_key(access, base, entry.path()) else {
                 summary.escaped_entries.fetch_add(1, Ordering::Relaxed);
                 return WalkState::Continue;
             };
@@ -300,10 +315,16 @@ fn walk_parallel_batched_filtered(
                 summary.non_unicode_entries.fetch_add(1, Ordering::Relaxed);
                 return WalkState::Continue;
             }
-            pending.entries.push(OwnedTraversalEntry {
-                key,
-                absolute: entry.path().to_path_buf(),
+            if !prefilter(TraversalEntry {
+                key: &key,
+                absolute: entry.path(),
                 file_type: entry.file_type(),
+            }) {
+                return WalkState::Continue;
+            }
+            pending.entries.push(OwnedTraversalEntry {
+                key: key.into_owned(),
+                absolute: entry.path().to_path_buf(),
             });
             if pending.entries.len() < pending.capacity {
                 return WalkState::Continue;
@@ -325,7 +346,7 @@ fn walk_parallel_batched_filtered(
             .into_inner()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for batch in remainders {
-            if visitor(&batch) == TraversalControl::Stop {
+            if (callbacks.visitor)(&batch) == TraversalControl::Stop {
                 break;
             }
         }
@@ -478,7 +499,8 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        ParallelTraversal, TraversalControl, literal_path_prefix, walk, walk_parallel_batched,
+        OwnedTraversalEntry, ParallelTraversal, ParallelTraversalCallbacks, TraversalControl,
+        TraversalEntry, literal_path_prefix, walk, walk_parallel_batched,
         walk_parallel_batched_with_literal_prefix, walk_with_literal_prefix,
     };
     use crate::path::{FileAccess, ReadScope, RepositoryRoot};
@@ -548,12 +570,15 @@ mod tests {
                 batch_size: 2,
                 threads: 4,
             },
-            |batch| {
-                parallel
-                    .lock()
-                    .expect("parallel results")
-                    .extend(batch.iter().map(|entry| entry.key.clone()));
-                TraversalControl::Continue
+            &ParallelTraversalCallbacks {
+                prefilter: |_: TraversalEntry<'_>| true,
+                visitor: |batch: &[OwnedTraversalEntry]| {
+                    parallel
+                        .lock()
+                        .expect("parallel results")
+                        .extend(batch.iter().map(|entry| entry.key.clone()));
+                    TraversalControl::Continue
+                },
             },
         )
         .expect("parallel walk");
@@ -562,6 +587,63 @@ mod tests {
         parallel.sort();
         assert_eq!(parallel, serial);
         assert_eq!(parallel_summary, serial_summary);
+    }
+
+    #[test]
+    fn parallel_prefilter_only_batches_matching_entries() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        fs::create_dir(fixture.path().join("nested")).expect("nested");
+        fs::write(fixture.path().join("keep.rs"), "source").expect("keep");
+        fs::write(fixture.path().join("drop.txt"), "text").expect("drop");
+        fs::write(fixture.path().join("nested/also.rs"), "source").expect("nested source");
+        let root = access(fixture.path());
+        let base = root.resolve(Path::new(".")).expect("base");
+        let prefiltered = Mutex::new(Vec::new());
+        let matched = Mutex::new(Vec::new());
+
+        walk_parallel_batched(
+            &root,
+            &base,
+            false,
+            &CancellationToken::new(),
+            ParallelTraversal {
+                batch_size: 8,
+                threads: 4,
+            },
+            &ParallelTraversalCallbacks {
+                prefilter: |entry: TraversalEntry<'_>| {
+                    prefiltered
+                        .lock()
+                        .expect("prefiltered entries")
+                        .push(entry.key.to_path_buf());
+                    entry.file_type.is_some_and(|file_type| file_type.is_file())
+                        && entry
+                            .key
+                            .extension()
+                            .is_some_and(|extension| extension == "rs")
+                },
+                visitor: |batch: &[OwnedTraversalEntry]| {
+                    matched
+                        .lock()
+                        .expect("matched entries")
+                        .extend(batch.iter().map(|entry| entry.key.clone()));
+                    TraversalControl::Continue
+                },
+            },
+        )
+        .expect("parallel walk");
+
+        let prefiltered = prefiltered.into_inner().expect("prefiltered entries");
+        assert!(prefiltered.contains(&Path::new("drop.txt").to_path_buf()));
+        let mut matched = matched.into_inner().expect("matched entries");
+        matched.sort();
+        assert_eq!(
+            matched,
+            [
+                Path::new("keep.rs").to_path_buf(),
+                Path::new("nested/also.rs").to_path_buf(),
+            ]
+        );
     }
 
     #[test]
@@ -618,12 +700,15 @@ mod tests {
                 threads: 4,
             },
             prefix,
-            |batch| {
-                parallel
-                    .lock()
-                    .expect("parallel prefix results")
-                    .extend(batch.iter().map(|entry| entry.key.clone()));
-                TraversalControl::Continue
+            &ParallelTraversalCallbacks {
+                prefilter: |_: TraversalEntry<'_>| true,
+                visitor: |batch: &[OwnedTraversalEntry]| {
+                    parallel
+                        .lock()
+                        .expect("parallel prefix results")
+                        .extend(batch.iter().map(|entry| entry.key.clone()));
+                    TraversalControl::Continue
+                },
             },
         )
         .expect("parallel prefix walk");
@@ -662,7 +747,10 @@ mod tests {
                     batch_size: 2,
                     threads: 4,
                 },
-                |_| TraversalControl::Continue,
+                &ParallelTraversalCallbacks {
+                    prefilter: |_: TraversalEntry<'_>| true,
+                    visitor: |_: &[OwnedTraversalEntry]| TraversalControl::Continue,
+                },
             )
             .is_err()
         );

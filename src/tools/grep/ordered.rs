@@ -21,7 +21,7 @@ use super::{
         CONTENT_SEARCH_BATCH_SIZE, GrepBenchmarkVariant, GrepError, GrepMode, GrepRequest,
         SEARCH_HEAP_BYTES, STREAM_SEARCH_BATCH_SIZE,
     },
-    result::Page,
+    result::{Page, ReduceControl},
 };
 
 use super::{
@@ -50,6 +50,7 @@ enum PoolSlot {
 struct PoolWindow {
     slots: Box<[PoolSlot]>,
     retired: bool,
+    retirement: CancellationToken,
 }
 
 type SharedSearchWindow = Arc<(Mutex<PoolWindow>, Condvar)>;
@@ -114,6 +115,7 @@ impl Drop for SlotRetirementGuard {
         };
         if poisoned {
             state.retired = true;
+            state.retirement.cancel();
             for slot in &mut state.slots {
                 if matches!(slot, PoolSlot::Running { .. } | PoolSlot::Ready(_)) {
                     *slot = PoolSlot::Empty;
@@ -151,6 +153,7 @@ pub(super) struct OrderedSearchContext<'a> {
 #[derive(Clone)]
 struct OwnedSearchContext {
     cancellation: CancellationToken,
+    retirement: CancellationToken,
     access: Arc<FileAccess>,
     matcher: Arc<RegexMatcher>,
     plan: SearchPlan,
@@ -174,13 +177,22 @@ pub(super) fn ordered_search(
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             retired: false,
+            retirement: CancellationToken::new(),
         }),
         Condvar::new(),
     ));
     let mut retirement = WindowRetirementGuard::new(Arc::clone(&shared));
-    let mut page = Page::new(request, traversal);
+    let retirement_token = {
+        let (lock, _) = &*shared;
+        lock.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retirement
+            .clone()
+    };
+    let mut page = Page::new(request, traversal, context.plan.allow_early_stop);
     let owned = OwnedSearchContext {
         cancellation: context.cancellation.clone(),
+        retirement: retirement_token,
         access: Arc::clone(context.access),
         matcher: Arc::clone(context.matcher),
         plan: context.plan,
@@ -212,15 +224,28 @@ pub(super) fn ordered_search(
             None => run_inline_batch(&candidates[index..current_end], &owned),
         };
         for outcome in outcomes {
-            page.reduce(
-                outcome?,
+            let outcome = outcome?;
+            if outcome.retired {
+                continue;
+            }
+            context.profiler.record_reduced_candidate();
+            if page.reduce(
+                outcome,
                 request.mode.unwrap_or_default(),
                 context.single_file,
-            )?;
+            )? == ReduceControl::PageFull
+            {
+                drop(reduce_span);
+                retire_window(&shared);
+                retirement.disarm();
+                return Ok(page);
+            }
         }
         index = current_end;
     }
     drop(reduce_span);
+    page.mark_complete();
+    context.profiler.set_scan_complete();
     retire_window(&shared);
     retirement.disarm();
     Ok(page)
@@ -237,10 +262,18 @@ fn run_candidate_batch(
         matcher: &context.matcher,
         plan: context.plan,
         cancellation: &context.cancellation,
+        retirement: &context.retirement,
         variant: context.variant,
         profiler: &context.profiler,
         resources: Some(&context.resources),
     };
+    if context.cancellation.is_cancelled() {
+        outcomes.push_back(Err(GrepError::Cancelled));
+        return outcomes;
+    }
+    if context.retirement.is_cancelled() {
+        return outcomes;
+    }
     let Some(first) = candidates.first() else {
         return outcomes;
     };
@@ -262,15 +295,23 @@ fn run_candidate_batch(
     for candidate in candidates {
         if context.cancellation.is_cancelled() {
             outcomes.push_back(Err(GrepError::Cancelled));
-            continue;
+            break;
         }
-        outcomes.push_back(run_batch_candidate(
+        if context.retirement.is_cancelled() {
+            break;
+        }
+        let outcome = run_batch_candidate(
             &reader,
             candidate,
             &file_context,
             &mut searcher,
             parent_batch,
-        ));
+        );
+        let retired = outcome.as_ref().is_ok_and(|outcome| outcome.retired);
+        outcomes.push_back(outcome);
+        if retired {
+            break;
+        }
     }
     if let Some(parent_before) = parent_before {
         validate_batch_parent(&reader, &parent_before, &mut outcomes);
@@ -414,10 +455,23 @@ fn run_inline_batch(
     };
     #[cfg(not(any(test, feature = "bench-internals")))]
     let fallback = context.clone();
-    candidates
-        .iter()
-        .map(|candidate| run_candidate_with_searcher(candidate, &fallback, &mut searcher))
-        .collect()
+    let mut outcomes = VecDeque::with_capacity(candidates.len());
+    for candidate in candidates {
+        if fallback.cancellation.is_cancelled() {
+            outcomes.push_back(Err(GrepError::Cancelled));
+            break;
+        }
+        if fallback.retirement.is_cancelled() {
+            break;
+        }
+        let outcome = run_candidate_with_searcher(candidate, &fallback, &mut searcher);
+        let retired = outcome.as_ref().is_ok_and(|outcome| outcome.retired);
+        outcomes.push_back(outcome);
+        if retired {
+            break;
+        }
+    }
+    outcomes
 }
 
 fn run_candidate_with_searcher(
@@ -430,6 +484,7 @@ fn run_candidate_with_searcher(
         matcher: &context.matcher,
         plan: context.plan,
         cancellation: &context.cancellation,
+        retirement: &context.retirement,
         variant: context.variant,
         profiler: &context.profiler,
         resources: Some(&context.resources),
@@ -461,6 +516,7 @@ fn publish_ready_batch(
         Err(poisoned) => {
             let mut state = poisoned.into_inner();
             state.retired = true;
+            state.retirement.cancel();
             for slot in &mut state.slots {
                 if matches!(slot, PoolSlot::Running { .. } | PoolSlot::Ready(_)) {
                     *slot = PoolSlot::Empty;
@@ -630,6 +686,7 @@ fn retire_window(shared: &SharedSearchWindow) {
         Err(poisoned) => poisoned.into_inner(),
     };
     state.retired = true;
+    state.retirement.cancel();
     for slot in &mut state.slots {
         if matches!(slot, PoolSlot::Running { .. } | PoolSlot::Ready(_)) {
             *slot = PoolSlot::Empty;

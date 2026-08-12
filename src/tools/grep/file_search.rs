@@ -31,7 +31,8 @@ use super::candidates::Candidate;
 pub(super) struct SearchPlan {
     pub(super) mode: GrepMode,
     pub(super) context: usize,
-    pub(super) capture_records: usize,
+    pub(super) probe: usize,
+    pub(super) allow_early_stop: bool,
 }
 
 pub(super) struct FileSearchContext<'a> {
@@ -39,6 +40,7 @@ pub(super) struct FileSearchContext<'a> {
     pub(super) matcher: &'a RegexMatcher,
     pub(super) plan: SearchPlan,
     pub(super) cancellation: &'a CancellationToken,
+    pub(super) retirement: &'a CancellationToken,
     pub(super) variant: GrepBenchmarkVariant,
     pub(super) profiler: &'a GrepProfiler,
     pub(super) resources: Option<&'a RuntimeResources>,
@@ -66,6 +68,7 @@ pub(super) struct FileOutcome {
     pub(super) occurrences: usize,
     pub(super) matched: bool,
     pub(super) skipped: bool,
+    pub(super) retired: bool,
 }
 
 #[cfg(test)]
@@ -79,11 +82,13 @@ pub(super) fn search_file(
     let variant = GrepBenchmarkVariant::default();
     let mut searcher = build_searcher(plan, variant.source);
     let profiler = GrepProfiler::disabled();
+    let retirement = CancellationToken::new();
     let context = FileSearchContext {
         access,
         matcher,
         plan,
         cancellation,
+        retirement: &retirement,
         variant,
         profiler: &profiler,
         resources: None,
@@ -103,11 +108,13 @@ pub(super) fn search_file_with_hook(
     let variant = GrepBenchmarkVariant::default();
     let mut searcher = build_searcher(plan, variant.source);
     let profiler = GrepProfiler::disabled();
+    let retirement = CancellationToken::new();
     let context = FileSearchContext {
         access,
         matcher,
         plan,
         cancellation,
+        retirement: &retirement,
         variant,
         profiler: &profiler,
         resources: None,
@@ -127,11 +134,13 @@ pub(super) fn search_file_with_variant_hook(
 ) -> Result<FileOutcome, GrepError> {
     let mut searcher = build_searcher(plan, variant.source);
     let profiler = GrepProfiler::disabled();
+    let retirement = CancellationToken::new();
     let context = FileSearchContext {
         access,
         matcher,
         plan,
         cancellation,
+        retirement: &retirement,
         variant,
         profiler: &profiler,
         resources: None,
@@ -163,7 +172,7 @@ pub(super) fn build_searcher(plan: SearchPlan, source: GrepSourcePolicy) -> Sear
         .memory_map(mmap)
         .bom_sniffing(true)
         .binary_detection(BinaryDetection::quit(0));
-    if plan.mode == GrepMode::Files {
+    if plan.mode == GrepMode::Files && plan.allow_early_stop {
         builder.max_matches(Some(1));
     }
     builder.build()
@@ -205,7 +214,12 @@ pub(super) fn search_opened_candidate_with_searcher(
     file: File,
     before: &FileFingerprint,
 ) -> Result<FileOutcome, GrepError> {
-    let mut sink = PlanSink::new(context.matcher, context.plan, context.cancellation);
+    let mut sink = PlanSink::new(
+        context.matcher,
+        context.plan,
+        context.cancellation,
+        context.retirement,
+    );
     context.profiler.record_searched_candidate();
     let scan_span = context.profiler.span(GrepStage::SearchScanWorker);
     let (search_result, file) = search_source(file, before, context, searcher, &mut sink);
@@ -213,6 +227,7 @@ pub(super) fn search_opened_candidate_with_searcher(
     match search_result {
         Ok(()) => {}
         Err(SearchError::Cancelled) => return Err(GrepError::Cancelled),
+        Err(SearchError::Retired) => return Ok(FileOutcome::retired()),
         Err(SearchError::CaptureMemory) => return Err(GrepError::CaptureMemory),
         Err(SearchError::Io) => return Ok(FileOutcome::skipped()),
     }
@@ -470,12 +485,27 @@ impl FileOutcome {
             occurrences: 0,
             matched: false,
             skipped: true,
+            retired: false,
+        }
+    }
+
+    pub(super) fn retired() -> Self {
+        Self {
+            path: None,
+            records: Vec::new(),
+            entries: 0,
+            occurrences: 0,
+            matched: false,
+            skipped: false,
+            retired: true,
         }
     }
 }
 
 pub(super) struct FilesSink<'a> {
     cancellation: &'a CancellationToken,
+    retirement: &'a CancellationToken,
+    allow_early_stop: bool,
     matched: bool,
     binary: bool,
 }
@@ -483,6 +513,7 @@ pub(super) struct FilesSink<'a> {
 pub(super) struct CountSink<'a> {
     matcher: &'a RegexMatcher,
     cancellation: &'a CancellationToken,
+    retirement: &'a CancellationToken,
     occurrences: usize,
     matched: bool,
     binary: bool,
@@ -491,7 +522,9 @@ pub(super) struct CountSink<'a> {
 pub(super) struct ContentSink<'a> {
     matcher: &'a RegexMatcher,
     cancellation: &'a CancellationToken,
-    capture_records: usize,
+    retirement: &'a CancellationToken,
+    probe: usize,
+    allow_early_stop: bool,
     records: Vec<Record>,
     entries: usize,
     occurrences: usize,
@@ -509,6 +542,7 @@ pub(super) enum PlanSink<'a> {
 
 pub(super) enum SearchError {
     Cancelled,
+    Retired,
     CaptureMemory,
     Io,
 }
@@ -528,16 +562,20 @@ impl<'a> PlanSink<'a> {
         matcher: &'a RegexMatcher,
         plan: SearchPlan,
         cancellation: &'a CancellationToken,
+        retirement: &'a CancellationToken,
     ) -> Self {
         match plan.mode {
             GrepMode::Files => Self::Files(FilesSink {
                 cancellation,
+                retirement,
+                allow_early_stop: plan.allow_early_stop,
                 matched: false,
                 binary: false,
             }),
             GrepMode::Count => Self::Count(CountSink {
                 matcher,
                 cancellation,
+                retirement,
                 occurrences: 0,
                 matched: false,
                 binary: false,
@@ -545,8 +583,10 @@ impl<'a> PlanSink<'a> {
             GrepMode::Content => Self::Content(ContentSink {
                 matcher,
                 cancellation,
-                capture_records: plan.capture_records,
-                records: Vec::with_capacity(plan.capture_records.min(1_024)),
+                retirement,
+                probe: plan.probe,
+                allow_early_stop: plan.allow_early_stop,
+                records: Vec::with_capacity(plan.probe.min(1_024)),
                 entries: 0,
                 occurrences: 0,
                 matched: false,
@@ -597,10 +637,10 @@ impl ContentSink<'_> {
         kind: RecordKind,
         order: usize,
         bytes: &[u8],
-    ) -> Result<(), SearchError> {
+    ) -> Result<bool, SearchError> {
         self.entries = self.entries.saturating_add(1);
-        if self.records.len() >= self.capture_records {
-            return Ok(());
+        if self.records.len() >= self.probe {
+            return Ok(!self.allow_early_stop || self.entries < self.probe);
         }
         let text = std::str::from_utf8(trim_line(bytes))
             .map_err(|_| SearchError::Io)?
@@ -618,7 +658,7 @@ impl ContentSink<'_> {
             kind,
             text,
         });
-        Ok(())
+        Ok(!self.allow_early_stop || self.entries < self.probe)
     }
 
     fn finish(mut self, path: Option<Arc<ResolvedPath>>) -> Result<FileOutcome, GrepError> {
@@ -641,6 +681,7 @@ impl ContentSink<'_> {
             occurrences: self.occurrences,
             matched: self.matched,
             skipped: false,
+            retired: false,
         })
     }
 }
@@ -660,6 +701,7 @@ impl FilesSink<'_> {
             occurrences: usize::from(self.matched),
             matched: self.matched,
             skipped: false,
+            retired: false,
         })
     }
 }
@@ -679,6 +721,7 @@ impl CountSink<'_> {
             occurrences: self.occurrences,
             matched: self.matched,
             skipped: false,
+            retired: false,
         })
     }
 }
@@ -693,16 +736,12 @@ impl Sink for PlanSink<'_> {
     ) -> Result<bool, Self::Error> {
         match self {
             Self::Files(sink) => {
-                if sink.cancellation.is_cancelled() {
-                    return Err(SearchError::Cancelled);
-                }
+                checkpoint(sink.cancellation, sink.retirement)?;
                 sink.matched = true;
-                Ok(false)
+                Ok(!sink.allow_early_stop)
             }
             Self::Count(sink) => {
-                if sink.cancellation.is_cancelled() {
-                    return Err(SearchError::Cancelled);
-                }
+                checkpoint(sink.cancellation, sink.retirement)?;
                 sink.matched = true;
                 let mut count = 0_usize;
                 sink.matcher
@@ -715,26 +754,33 @@ impl Sink for PlanSink<'_> {
                 Ok(true)
             }
             Self::Content(sink) => {
-                if sink.cancellation.is_cancelled() {
-                    return Err(SearchError::Cancelled);
+                checkpoint(sink.cancellation, sink.retirement)?;
+                if sink.allow_early_stop && sink.entries >= sink.probe {
+                    return Ok(false);
                 }
                 sink.matched = true;
                 let line = matched.line_number().ok_or(SearchError::Io)?;
                 let mut count = 0_usize;
+                let remaining = sink.probe.saturating_sub(sink.entries);
                 sink.matcher
                     .find_iter(matched.bytes(), |_| {
                         count = count.saturating_add(1);
-                        true
+                        !sink.allow_early_stop || count < remaining
                     })
                     .map_err(|_| SearchError::Io)?;
                 sink.occurrences = sink.occurrences.saturating_add(count);
                 let start_order = *sink.same_line_order.get(&line).unwrap_or(&0);
+                let mut keep_searching = true;
                 for order in start_order..start_order.saturating_add(count.max(1)) {
-                    sink.capture(line, RecordKind::Match, order, matched.bytes())?;
+                    keep_searching =
+                        sink.capture(line, RecordKind::Match, order, matched.bytes())?;
+                    if !keep_searching {
+                        break;
+                    }
                 }
                 sink.same_line_order
                     .insert(line, start_order.saturating_add(count.max(1)));
-                Ok(true)
+                Ok(keep_searching)
             }
         }
     }
@@ -747,15 +793,42 @@ impl Sink for PlanSink<'_> {
         let Self::Content(sink) = self else {
             return Ok(true);
         };
+        checkpoint(sink.cancellation, sink.retirement)?;
         let line = context.line_number().ok_or(SearchError::Io)?;
-        sink.capture(line, RecordKind::Context, 0, context.bytes())?;
-        Ok(true)
+        sink.capture(line, RecordKind::Context, 0, context.bytes())
     }
 
     fn binary_data(&mut self, _searcher: &Searcher, _offset: u64) -> Result<bool, Self::Error> {
+        match self {
+            Self::Files(sink) => checkpoint(sink.cancellation, sink.retirement)?,
+            Self::Count(sink) => checkpoint(sink.cancellation, sink.retirement)?,
+            Self::Content(sink) => checkpoint(sink.cancellation, sink.retirement)?,
+        }
         self.mark_binary();
         Ok(false)
     }
+
+    fn begin(&mut self, _searcher: &Searcher) -> Result<bool, Self::Error> {
+        match self {
+            Self::Files(sink) => checkpoint(sink.cancellation, sink.retirement)?,
+            Self::Count(sink) => checkpoint(sink.cancellation, sink.retirement)?,
+            Self::Content(sink) => checkpoint(sink.cancellation, sink.retirement)?,
+        }
+        Ok(true)
+    }
+}
+
+fn checkpoint(
+    cancellation: &CancellationToken,
+    retirement: &CancellationToken,
+) -> Result<(), SearchError> {
+    if cancellation.is_cancelled() {
+        return Err(SearchError::Cancelled);
+    }
+    if retirement.is_cancelled() {
+        return Err(SearchError::Retired);
+    }
+    Ok(())
 }
 
 fn trim_line(mut bytes: &[u8]) -> &[u8] {

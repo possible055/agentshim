@@ -11,8 +11,8 @@ use crate::{
     runtime::{MemoryReservation, RuntimeResources},
     sorting,
     traversal::{
-        OwnedTraversalEntry, ParallelTraversal, TraversalControl, TraversalSummary,
-        prefer_parallel_root, walk, walk_parallel_batched,
+        OwnedTraversalEntry, ParallelTraversal, ParallelTraversalCallbacks, TraversalControl,
+        TraversalEntry, TraversalSummary, prefer_parallel_root, walk, walk_parallel_batched,
         walk_parallel_batched_with_literal_prefix, walk_with_literal_prefix,
     },
 };
@@ -242,9 +242,9 @@ fn collect_candidates_parallel(
     collection: CandidateCollection,
 ) -> Result<(Vec<Candidate>, TraversalSummary, CandidateMetrics), GrepError> {
     let collection = Mutex::new(collection);
-    let visit = |batch: &[OwnedTraversalEntry]| {
-        collect_candidate_batch(access, base, glob, batch, &collection)
-    };
+    let prefilter = |entry: TraversalEntry<'_>| matches_candidate_entry(glob, entry);
+    let visit =
+        |batch: &[OwnedTraversalEntry]| collect_candidate_batch(access, base, batch, &collection);
     let summary = if let Some(literal_prefix) = literal_prefix {
         walk_parallel_batched_with_literal_prefix(
             access,
@@ -256,7 +256,10 @@ fn collect_candidates_parallel(
                 threads: traversal_threads,
             },
             literal_prefix,
-            visit,
+            &ParallelTraversalCallbacks {
+                prefilter,
+                visitor: visit,
+            },
         )?
     } else {
         walk_parallel_batched(
@@ -268,7 +271,10 @@ fn collect_candidates_parallel(
                 batch_size: PARALLEL_BATCH_SIZE,
                 threads: traversal_threads,
             },
-            visit,
+            &ParallelTraversalCallbacks {
+                prefilter,
+                visitor: visit,
+            },
         )?
     };
     let collection = collection
@@ -284,22 +290,13 @@ fn collect_candidates_parallel(
 fn collect_candidate_batch(
     access: &FileAccess,
     base: &ResolvedPath,
-    glob: Option<&globset::GlobMatcher>,
     batch: &[OwnedTraversalEntry],
     collection: &Mutex<CandidateCollection>,
 ) -> TraversalControl {
     let mut found = Vec::with_capacity(batch.len());
     for entry in batch {
-        match candidate_from_entry(
-            access,
-            base,
-            glob,
-            &entry.key,
-            &entry.absolute,
-            entry.file_type,
-        ) {
-            Ok(Some(candidate)) => found.push(candidate),
-            Ok(None) => {}
+        match candidate_from_matched_entry(access, base, &entry.key, &entry.absolute) {
+            Ok(candidate) => found.push(candidate),
             Err(error) => {
                 let mut collection = collection
                     .lock()
@@ -332,13 +329,34 @@ fn candidate_from_entry(
     absolute: &Path,
     file_type: Option<std::fs::FileType>,
 ) -> Result<Option<Candidate>, GrepError> {
-    if !file_type.is_some_and(|file_type| file_type.is_file() || file_type.is_symlink())
-        || glob.is_some_and(|glob| !glob.is_match(key))
-    {
+    if !matches_candidate_entry(
+        glob,
+        TraversalEntry {
+            key,
+            absolute,
+            file_type,
+        },
+    ) {
         return Ok(None);
     }
+    candidate_from_matched_entry(access, base, key, absolute).map(Some)
+}
+
+fn matches_candidate_entry(glob: Option<&globset::GlobMatcher>, entry: TraversalEntry<'_>) -> bool {
+    entry
+        .file_type
+        .is_some_and(|file_type| file_type.is_file() || file_type.is_symlink())
+        && glob.is_none_or(|glob| glob.is_match(entry.key))
+}
+
+fn candidate_from_matched_entry(
+    access: &FileAccess,
+    base: &ResolvedPath,
+    key: &Path,
+    absolute: &Path,
+) -> Result<Candidate, GrepError> {
     let path = access.resolve_walked_entry(base, key, absolute)?;
-    candidate(path).map(Some)
+    candidate(path)
 }
 
 pub(super) struct CandidateCollection {

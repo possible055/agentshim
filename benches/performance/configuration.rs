@@ -39,6 +39,24 @@ pub(super) fn grep_mode() -> GrepMode {
     }
 }
 
+pub(super) fn grep_limit() -> usize {
+    std::env::var(GREP_LIMIT_ENV).map_or(1_000, |value| {
+        value
+            .parse::<usize>()
+            .ok()
+            .filter(|limit| (1..=1_000).contains(limit))
+            .unwrap_or_else(|| panic!("{GREP_LIMIT_ENV} must be from 1 to 1000"))
+    })
+}
+
+pub(super) fn grep_offset() -> usize {
+    std::env::var(GREP_OFFSET_ENV).map_or(0, |value| {
+        value
+            .parse::<usize>()
+            .unwrap_or_else(|_| panic!("{GREP_OFFSET_ENV} must be a non-negative integer"))
+    })
+}
+
 pub(super) fn grep_sources() -> &'static [(&'static str, grep::GrepSourcePolicy)] {
     const DEFAULT: [(&str, grep::GrepSourcePolicy); 1] =
         [("hybrid", grep::GrepSourcePolicy::Hybrid)];
