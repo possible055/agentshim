@@ -133,6 +133,7 @@ pub(super) fn read_pdf(
     source_id: &str,
     cancellation: &CancellationToken,
     call_bytes: usize,
+    output_budget: &crate::output::CallOutputBudget,
 ) -> Result<ToolOutput, ReadError> {
     if request.start_line.is_some() || request.line_count.is_some() || request.encoding.is_some() {
         return Err(ReadError::Validation(
@@ -168,6 +169,7 @@ pub(super) fn read_pdf(
             pages,
             request,
             cancellation,
+            output_budget,
         ),
         PdfMode::Image => read_pdf_images(
             &document,
@@ -176,6 +178,7 @@ pub(super) fn read_pdf(
             pages,
             source_id,
             cancellation,
+            output_budget,
         ),
     }
 }

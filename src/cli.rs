@@ -148,7 +148,7 @@ pub(super) async fn run(config: RuntimeLimits, command: CliCommand) -> Result<()
                 shutdown: service.shutdown_token(),
                 termination_reported: false,
             };
-            tracing::info!(target: "codexshim", event = "server_start", phase = "lifecycle", read_scope = %read_scope);
+            tracing::info!(target: "codexshim", event = "server_start", phase = "lifecycle", read_scope = %read_scope, burst_tokens = service.burst_token_limit());
             let shutdown = service.clone();
             let running = service.serve((reader, DiagnosticWriter(stdout))).await?;
             tracing::info!(target: "codexshim", event = "server_ready", phase = "lifecycle");
@@ -179,6 +179,7 @@ pub(super) async fn run(config: RuntimeLimits, command: CliCommand) -> Result<()
                 service.runtime_limits().detached_calls
             );
             println!("output bytes: {}", service.runtime_limits().output_bytes);
+            println!("burst tokens: {}", service.burst_token_limit());
             print_memory_limits(service.runtime_limits());
             match bash_report() {
                 Ok((executable, locale)) => {

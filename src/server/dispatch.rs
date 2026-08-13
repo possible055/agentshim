@@ -100,6 +100,7 @@ impl CodexShim {
         arguments: Option<JsonObject>,
         request_cancellation: &CancellationToken,
         admission: OwnedSemaphorePermit,
+        output_budget: &crate::output::CallOutputBudget,
     ) -> CallToolResponse {
         let queued = Instant::now();
         let read_request: crate::tools::read::ReadRequest = match parse_request(arguments, "read") {
@@ -199,6 +200,7 @@ impl CodexShim {
             let execute_access = access.clone();
             let execute_request = read_request.clone();
             let execute_cancellation = cancellation.clone();
+            let execute_output_budget = output_budget.clone();
             let execute_span = span.clone();
             let started = Instant::now();
             let timer = deadline.map(|limit| {
@@ -215,11 +217,12 @@ impl CodexShim {
             });
             let executed = tokio::task::spawn_blocking(move || {
                 execute_span.in_scope(|| {
-                    crate::tools::read::execute_prepared(
+                    crate::tools::read::execute_prepared_with_budget(
                         &execute_access,
                         &execute_request,
                         prepared,
                         &execute_cancellation,
+                        &execute_output_budget,
                     )
                 })
             })
@@ -273,6 +276,7 @@ impl CodexShim {
             result,
             &self.output_token_gate,
             &cancellation,
+            output_budget,
         );
         cancellation_relay.abort();
         drop(pdf_admission);
@@ -306,6 +310,7 @@ impl CodexShim {
         arguments: Option<JsonObject>,
         request_cancellation: &CancellationToken,
         admission: OwnedSemaphorePermit,
+        output_budget: &crate::output::CallOutputBudget,
     ) -> CallToolResponse {
         let queued = Instant::now();
         let glob_request = match parse_request(arguments, "glob") {
@@ -341,16 +346,18 @@ impl CodexShim {
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
         let response_cancellation = cancellation.clone();
+        let execute_output_budget = output_budget.clone();
         let span = tracing::Span::current();
         let running = Instant::now();
         let result = tokio::task::spawn_blocking(move || {
             span.in_scope(|| {
-                let result = crate::tools::glob::execute_output(
+                let result = crate::tools::glob::execute_output_with_budget(
                     &access,
                     &glob_request,
                     &resources,
                     &cancellation,
                     reservation,
+                    &execute_output_budget,
                 );
                 drop(permits);
                 result
@@ -363,6 +370,7 @@ impl CodexShim {
             result,
             &self.output_token_gate,
             &response_cancellation,
+            output_budget,
         );
         cancellation_relay.abort();
         response
@@ -373,6 +381,7 @@ impl CodexShim {
         arguments: Option<JsonObject>,
         request_cancellation: &CancellationToken,
         admission: OwnedSemaphorePermit,
+        output_budget: &crate::output::CallOutputBudget,
     ) -> CallToolResponse {
         let queued = Instant::now();
         let grep_request: crate::tools::grep::GrepRequest = match parse_request(arguments, "grep") {
@@ -409,16 +418,18 @@ impl CodexShim {
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
         let response_cancellation = cancellation.clone();
+        let execute_output_budget = output_budget.clone();
         let span = tracing::Span::current();
         let running = Instant::now();
         let result = tokio::task::spawn_blocking(move || {
             span.in_scope(|| {
-                let result = crate::tools::grep::execute_output(
+                let result = crate::tools::grep::execute_output_with_budget(
                     &access,
                     &grep_request,
                     &resources,
                     &cancellation,
                     reservation,
+                    &execute_output_budget,
                 );
                 drop(permits);
                 result
@@ -431,6 +442,7 @@ impl CodexShim {
             result,
             &self.output_token_gate,
             &response_cancellation,
+            output_budget,
         );
         cancellation_relay.abort();
         response
@@ -441,6 +453,7 @@ impl CodexShim {
         arguments: Option<JsonObject>,
         request_cancellation: &CancellationToken,
         admission: OwnedSemaphorePermit,
+        output_budget: &crate::output::CallOutputBudget,
     ) -> CallToolResponse {
         let process_request: ProcessRequest = match parse_request(arguments, "run_program") {
             Ok(request) => request,
@@ -479,6 +492,7 @@ impl CodexShim {
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
         let response_cancellation = cancellation.clone();
+        let execute_output_budget = output_budget.clone();
         let span = tracing::Span::current();
         let running = Instant::now();
         let result = tokio::task::spawn_blocking(move || {
@@ -489,12 +503,13 @@ impl CodexShim {
                         timeout_ms: process_request.timeout_ms(),
                     });
                 };
-                let result = crate::tools::run_program::execute_output(
+                let result = crate::tools::run_program::execute_output_with_budget(
                     &root,
                     &resolver,
                     &process_request,
                     remaining,
                     &cancellation,
+                    &execute_output_budget,
                 );
                 drop(permits);
                 result
@@ -507,6 +522,7 @@ impl CodexShim {
             result,
             &self.output_token_gate,
             &response_cancellation,
+            output_budget,
         );
         cancellation_relay.abort();
         response
@@ -519,6 +535,7 @@ impl CodexShim {
         arguments: Option<JsonObject>,
         request_cancellation: &CancellationToken,
         admission: ToolAdmission,
+        output_budget: &crate::output::CallOutputBudget,
     ) -> CallToolResponse {
         let bash_request: BashRequest = match parse_request(arguments, "bash") {
             Ok(request) => request,
@@ -585,6 +602,7 @@ impl CodexShim {
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
         let response_cancellation = cancellation.clone();
+        let execute_output_budget = output_budget.clone();
         let span = tracing::Span::current();
         let running = Instant::now();
         let result = tokio::task::spawn_blocking(move || {
@@ -600,13 +618,14 @@ impl CodexShim {
                     };
                     remaining
                 };
-                let result = crate::tools::bash::execute_output(
+                let result = crate::tools::bash::execute_output_with_budget(
                     &root,
                     &locator,
                     detached_admission,
                     &bash_request,
                     remaining,
                     &cancellation,
+                    &execute_output_budget,
                 );
                 drop(permits);
                 result
@@ -619,6 +638,7 @@ impl CodexShim {
             result,
             &self.output_token_gate,
             &response_cancellation,
+            output_budget,
         );
         cancellation_relay.abort();
         response
@@ -628,23 +648,24 @@ impl CodexShim {
         request: CallToolRequestParams,
         context: &RequestContext<RoleServer>,
         admission: ToolAdmission,
+        output_budget: &crate::output::CallOutputBudget,
     ) -> Result<CallToolResponse, McpError> {
         match (request.name.as_ref(), admission) {
             ("read", ToolAdmission::ReadOnly(admission)) => Ok(self
-                .call_read(request.arguments, &context.ct, admission)
+                .call_read(request.arguments, &context.ct, admission, output_budget)
                 .await),
             ("glob", ToolAdmission::ReadOnly(admission)) => Ok(self
-                .call_glob(request.arguments, &context.ct, admission)
+                .call_glob(request.arguments, &context.ct, admission, output_budget)
                 .await),
             ("grep", ToolAdmission::ReadOnly(admission)) => Ok(self
-                .call_grep(request.arguments, &context.ct, admission)
+                .call_grep(request.arguments, &context.ct, admission, output_budget)
                 .await),
             ("run_program", ToolAdmission::Process(admission)) => Ok(self
-                .call_process(request.arguments, &context.ct, admission)
+                .call_process(request.arguments, &context.ct, admission, output_budget)
                 .await),
             ("bash", admission @ (ToolAdmission::Process(_) | ToolAdmission::Detached(_))) => {
                 Ok(self
-                    .call_bash(request.arguments, &context.ct, admission)
+                    .call_bash(request.arguments, &context.ct, admission, output_budget)
                     .await)
             }
             (_, ToolAdmission::None) => {

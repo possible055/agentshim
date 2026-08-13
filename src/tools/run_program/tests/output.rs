@@ -32,6 +32,40 @@ fn process_memory_charge_includes_the_capture_and_render_reservation() {
     assert_eq!(request.memory_charge(), PROCESS_MEMORY_BYTES + "tool".len());
 }
 
+#[test]
+fn dynamic_burst_ceiling_keeps_process_completion_metadata() {
+    let mut stdout = Capture::new(100_000);
+    stdout.push(" x".repeat(40_000).as_bytes());
+    let stderr = Capture::new(0);
+    let gate = crate::output::BurstOutputGate::new(512);
+    let budget = crate::output::CallOutputBudget::new(
+        crate::output::OutputTokenGate::load_shared().expect("token gate"),
+        gate.begin_call(),
+    );
+    let output = render_completed_with_budget(
+        &CompletedProcess {
+            resolved: ResolvedProgram {
+                absolute: PathBuf::from("tool"),
+                executable: PathBuf::from("tool"),
+                launcher: Launcher::Native,
+            },
+            cwd: "workspace".into(),
+            exit: "7".to_owned(),
+            duration: Duration::from_millis(42),
+            stdout,
+            stderr,
+        },
+        &CancellationToken::new(),
+        &budget,
+    )
+    .expect("bounded completion summary");
+    assert!(output.contains("Exit code: 7"));
+    assert!(output.contains("Duration ms: 42"));
+    assert!(output.contains("Stdout bytes: total="));
+    assert!(output.contains("Complete."));
+    assert!(output.fits_call_budget(&budget, &CancellationToken::new()));
+}
+
 #[cfg(unix)]
 #[test]
 fn unix_multicall_proxy_preserves_resolved_argv0() {

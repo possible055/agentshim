@@ -9,6 +9,7 @@ fn doctor(process_calls: Option<&str>) -> std::process::Output {
         .env_remove("CODEXSHIM_DETACHED_CALLS")
         .env_remove("CODEXSHIM_GREP_MEMORY_BYTES")
         .env_remove("CODEXSHIM_GLOB_MEMORY_BYTES")
+        .env_remove("CODEXSHIM_BURST_TOKENS")
         .env("CODEXSHIM_LOG_MODE", "off");
     if let Some(process_calls) = process_calls {
         command.env("CODEXSHIM_PROCESS_CALLS", process_calls);
@@ -34,7 +35,39 @@ fn doctor_reports_resolved_runtime_capacity() {
         assert!(stdout.contains("grep memory bytes: 268435456"));
         assert!(stdout.contains("glob memory bytes: 33554432"));
         assert!(stdout.contains("global memory bytes: 268435456"));
+        assert!(stdout.contains("burst tokens: 8192"));
         assert!(stdout.contains(&format!("blocking threads: {blocking_threads}")));
+    }
+}
+
+#[test]
+fn burst_budget_can_only_be_lowered_inside_its_safe_range() {
+    for (value, expected) in [("2048", "2048"), ("4096", "4096"), ("8192", "8192")] {
+        let output = Command::new(env!("CARGO_BIN_EXE_codexshim"))
+            .arg("doctor")
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .env("CODEXSHIM_BURST_TOKENS", value)
+            .env("CODEXSHIM_LOG_MODE", "off")
+            .output()
+            .expect("run doctor");
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).expect("doctor stdout");
+        assert!(stdout.contains(&format!("burst tokens: {expected}")));
+    }
+    for value in ["0", "2047", "8193", "many", "-1"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_codexshim"))
+            .arg("doctor")
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .env("CODEXSHIM_BURST_TOKENS", value)
+            .env("CODEXSHIM_LOG_MODE", "off")
+            .output()
+            .expect("run doctor");
+        assert!(!output.status.success(), "{value} must be rejected");
+        assert!(
+            String::from_utf8(output.stderr)
+                .expect("doctor stderr")
+                .contains("CODEXSHIM_BURST_TOKENS")
+        );
     }
 }
 

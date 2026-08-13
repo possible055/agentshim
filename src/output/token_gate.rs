@@ -11,6 +11,9 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) const MODEL_OUTPUT_TOKEN_LIMIT: usize = 10_000;
 pub(crate) const CLIENT_WRAPPER_TOKEN_RESERVE: usize = 128;
+pub(crate) const IMAGE_MODEL_TOKENS: usize = 1_844;
+pub(crate) const IMAGE_ITEM_TOKEN_RESERVE: usize = 32;
+const BYTE_FAST_PATH_LIMIT: usize = 512;
 pub(crate) const TOOL_CONTENT_TOKEN_LIMIT: usize =
     MODEL_OUTPUT_TOKEN_LIMIT - CLIENT_WRAPPER_TOKEN_RESERVE;
 const COUNTER_WORKERS: usize = 2;
@@ -22,6 +25,19 @@ static SHARED_GATE_INIT: Mutex<()> = Mutex::new(());
 pub(crate) enum GateDecision {
     FitsByBytes,
     FitsExactly(usize),
+    Exceeded,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProjectedTokenCost {
+    pub(crate) tokens: usize,
+    pub(crate) exact: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProjectionDecision {
+    Fits(ProjectedTokenCost),
     Exceeded,
     Cancelled,
 }
@@ -130,6 +146,91 @@ impl OutputTokenGate {
         self.evaluate(text, cancellation)
     }
 
+    pub(crate) fn project_tool_output(
+        &self,
+        text: &str,
+        image_count: usize,
+        ceiling: usize,
+        cancellation: &CancellationToken,
+    ) -> ProjectionDecision {
+        let mut content = Vec::with_capacity(image_count.saturating_add(1));
+        content.push(serde_json::json!({ "type": "text", "text": text }));
+        content.extend(
+            (0..image_count).map(
+                |_| serde_json::json!({ "type": "image", "data": "", "mimeType": "image/png" }),
+            ),
+        );
+        let payload = serde_json::to_string(&content).expect("tool content projection serializes");
+        self.project_payload(
+            &payload,
+            CLIENT_WRAPPER_TOKEN_RESERVE.saturating_add(
+                image_count.saturating_mul(IMAGE_MODEL_TOKENS + IMAGE_ITEM_TOKEN_RESERVE),
+            ),
+            ceiling,
+            cancellation,
+        )
+    }
+
+    pub(crate) fn project_result(
+        &self,
+        result: &CallToolResult,
+        ceiling: usize,
+        cancellation: &CancellationToken,
+    ) -> ProjectionDecision {
+        let (payload, image_count) = if let Some(structured) = &result.structured_content
+            && !structured.is_null()
+        {
+            (
+                serde_json::to_string(structured).expect("MCP structured content is serializable"),
+                0,
+            )
+        } else {
+            let mut content = serde_json::to_value(&result.content)
+                .expect("MCP content projection is serializable");
+            let image_count = strip_image_payloads(&mut content);
+            (
+                serde_json::to_string(&content).expect("MCP content projection is serializable"),
+                image_count,
+            )
+        };
+        self.project_payload(
+            &payload,
+            CLIENT_WRAPPER_TOKEN_RESERVE.saturating_add(
+                image_count.saturating_mul(IMAGE_MODEL_TOKENS + IMAGE_ITEM_TOKEN_RESERVE),
+            ),
+            ceiling,
+            cancellation,
+        )
+    }
+
+    fn project_payload(
+        &self,
+        payload: &str,
+        fixed_tokens: usize,
+        ceiling: usize,
+        cancellation: &CancellationToken,
+    ) -> ProjectionDecision {
+        let Some(payload_ceiling) = ceiling.checked_sub(fixed_tokens) else {
+            return if cancellation.is_cancelled() {
+                ProjectionDecision::Cancelled
+            } else {
+                ProjectionDecision::Exceeded
+            };
+        };
+        match self.evaluate_up_to(payload, payload_ceiling, cancellation) {
+            GateDecision::FitsByBytes => ProjectionDecision::Fits(ProjectedTokenCost {
+                tokens: fixed_tokens.saturating_add(payload.len()),
+                exact: false,
+            }),
+            GateDecision::FitsExactly(tokens) => ProjectionDecision::Fits(ProjectedTokenCost {
+                tokens: fixed_tokens.saturating_add(tokens),
+                exact: true,
+            }),
+            GateDecision::Exceeded => ProjectionDecision::Exceeded,
+            GateDecision::Cancelled => ProjectionDecision::Cancelled,
+        }
+    }
+
     fn evaluate_up_to(
         &self,
         payload: &str,
@@ -139,7 +240,7 @@ impl OutputTokenGate {
         if cancellation.is_cancelled() {
             return GateDecision::Cancelled;
         }
-        if payload.len() <= limit {
+        if payload.len() <= limit && payload.len() <= BYTE_FAST_PATH_LIMIT {
             tracing::trace!(target: "codexshim", token_gate_path = "byte_fast", tokens_upper_bound = payload.len());
             return GateDecision::FitsByBytes;
         }
@@ -213,6 +314,26 @@ impl OutputTokenGate {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+}
+
+fn strip_image_payloads(value: &mut Value) -> usize {
+    let Value::Array(content) = value else {
+        return 0;
+    };
+    let mut images = 0_usize;
+    for block in content {
+        let Value::Object(block) = block else {
+            continue;
+        };
+        if block.get("type").and_then(Value::as_str) != Some("image") {
+            continue;
+        }
+        images = images.saturating_add(1);
+        if let Some(data) = block.get_mut("data") {
+            *data = Value::String(String::new());
+        }
+    }
+    images
 }
 
 struct CounterLease<'a> {
@@ -292,8 +413,9 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        CLIENT_WRAPPER_TOKEN_RESERVE, COUNTER_WORKERS, GateDecision, MODEL_OUTPUT_TOKEN_LIMIT,
-        OutputTokenGate, POOL_CANCELLATION_POLL, TOOL_CONTENT_TOKEN_LIMIT, project_text_payload,
+        CLIENT_WRAPPER_TOKEN_RESERVE, COUNTER_WORKERS, GateDecision, IMAGE_ITEM_TOKEN_RESERVE,
+        IMAGE_MODEL_TOKENS, MODEL_OUTPUT_TOKEN_LIMIT, OutputTokenGate, POOL_CANCELLATION_POLL,
+        ProjectionDecision, TOOL_CONTENT_TOKEN_LIMIT, project_text_payload,
         projected_text_encoded_len,
     };
 
@@ -328,9 +450,13 @@ mod tests {
         let gate = OutputTokenGate::load().expect("embedded ranks");
         let cancellation = CancellationToken::new();
         assert_eq!(
-            gate.evaluate(&"a".repeat(TOOL_CONTENT_TOKEN_LIMIT), &cancellation),
+            gate.evaluate(&"a".repeat(512), &cancellation),
             GateDecision::FitsByBytes
         );
+        assert!(matches!(
+            gate.evaluate(&"a".repeat(TOOL_CONTENT_TOKEN_LIMIT), &cancellation),
+            GateDecision::FitsExactly(_)
+        ));
         assert_eq!(
             gate.evaluate(&" x".repeat(TOOL_CONTENT_TOKEN_LIMIT), &cancellation),
             GateDecision::FitsExactly(TOOL_CONTENT_TOKEN_LIMIT)
@@ -365,6 +491,55 @@ mod tests {
         assert_eq!(
             gate.evaluate_result(&result, &cancellation),
             GateDecision::Cancelled
+        );
+    }
+
+    #[test]
+    fn result_projection_matches_codex_structured_content_precedence() {
+        let gate = OutputTokenGate::load().expect("embedded ranks");
+        let cancellation = CancellationToken::new();
+        let mut structured = CallToolResult::success(vec![ContentBlock::text(" x".repeat(8_000))]);
+        structured.structured_content = Some(serde_json::json!({ "ok": true }));
+        let ProjectionDecision::Fits(structured_cost) =
+            gate.project_result(&structured, 1_000, &cancellation)
+        else {
+            panic!("small structured content must take precedence");
+        };
+        assert!(structured_cost.tokens >= CLIENT_WRAPPER_TOKEN_RESERVE);
+
+        structured.structured_content = Some(serde_json::Value::Null);
+        assert_eq!(
+            gate.project_result(&structured, 1_000, &cancellation),
+            ProjectionDecision::Exceeded
+        );
+    }
+
+    #[test]
+    fn image_projection_ignores_base64_and_charges_fixed_model_cost() {
+        let gate = OutputTokenGate::load().expect("embedded ranks");
+        let cancellation = CancellationToken::new();
+        let small = CallToolResult::success(vec![
+            ContentBlock::text("caption"),
+            ContentBlock::image("A".repeat(16), "image/png"),
+        ]);
+        let large = CallToolResult::success(vec![
+            ContentBlock::text("caption"),
+            ContentBlock::image("A".repeat(1_000_000), "image/png"),
+        ]);
+        let ProjectionDecision::Fits(small) =
+            gate.project_result(&small, usize::MAX, &cancellation)
+        else {
+            panic!("small image projection");
+        };
+        let ProjectionDecision::Fits(large) =
+            gate.project_result(&large, usize::MAX, &cancellation)
+        else {
+            panic!("large image projection");
+        };
+        assert_eq!(small, large);
+        assert!(
+            small.tokens
+                >= CLIENT_WRAPPER_TOKEN_RESERVE + IMAGE_MODEL_TOKENS + IMAGE_ITEM_TOKEN_RESERVE
         );
     }
 
@@ -453,25 +628,51 @@ mod tests {
 
     #[test]
     #[ignore = "release small-output latency gate"]
-    fn small_output_fast_path_stays_within_byte_only_p95_target() {
+    fn complete_ticket_fast_path_stays_within_small_output_p95_target() {
         assert!(!cfg!(debug_assertions), "run this gate with --release");
         let cancellation = CancellationToken::new();
-        for bytes in [1_024, 4_096, 8_192] {
-            let output = crate::tools::ToolOutput::new("a".repeat(bytes));
+        let token_gate = std::sync::Arc::new(OutputTokenGate::load().expect("embedded ranks"));
+        let burst_gate = crate::output::BurstOutputGate::new(8_192);
+        for bytes in [128, 256, 384] {
+            let output = "a".repeat(bytes);
             let mut baseline = Vec::new();
             let mut gated = Vec::new();
             for sample in 0..9 {
                 let measure_baseline = || {
                     let started = std::time::Instant::now();
                     for _ in 0..2_000 {
-                        std::hint::black_box(output.fits_content_budget());
+                        std::hint::black_box(
+                            std::fs::metadata("Cargo.toml")
+                                .expect("benchmark fixture")
+                                .len(),
+                        );
+                        std::hint::black_box(token_gate.project_tool_output(
+                            &output,
+                            0,
+                            TOOL_CONTENT_TOKEN_LIMIT,
+                            &cancellation,
+                        ));
                     }
                     started.elapsed()
                 };
                 let measure_gated = || {
                     let started = std::time::Instant::now();
                     for _ in 0..2_000 {
-                        std::hint::black_box(output.fits_content_and_model(&cancellation));
+                        std::hint::black_box(
+                            std::fs::metadata("Cargo.toml")
+                                .expect("benchmark fixture")
+                                .len(),
+                        );
+                        let budget = crate::output::CallOutputBudget::new(
+                            std::sync::Arc::clone(&token_gate),
+                            burst_gate.begin_call(),
+                        );
+                        let decision = budget.project_tool_output(&output, 0, &cancellation);
+                        if let ProjectionDecision::Fits(cost) = decision {
+                            budget.cache_response_cost(cost);
+                            budget.finish(0, false);
+                        }
+                        std::hint::black_box(decision);
                     }
                     started.elapsed()
                 };
@@ -489,7 +690,7 @@ mod tests {
             let gated_p95 = gated[gated.len() - 1];
             let ratio = gated_p95.as_secs_f64() / baseline_p95.as_secs_f64();
             eprintln!(
-                "small_output_bytes={bytes} baseline_p95_ms={:.3} gated_p95_ms={:.3} ratio={ratio:.4}",
+                "ticket_fast_path_bytes={bytes} baseline_p95_ms={:.3} gated_p95_ms={:.3} ratio={ratio:.4}",
                 baseline_p95.as_secs_f64() * 1_000.0,
                 gated_p95.as_secs_f64() * 1_000.0,
             );

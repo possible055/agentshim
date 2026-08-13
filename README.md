@@ -21,7 +21,7 @@ English | [简体中文](README.zh-CN.md)
 | `run_program` | Run one program with a literal argument list, without a shell. |
 | `bash` | Run a POSIX bash command line and return merged stdout and stderr. |
 
-Successful calls return bounded text. Partial `read`, `grep`, and `glob` results include a continuation cursor so you can pick up where you left off. The output budget adapts to content: CJK-dense text gets a smaller byte budget because the client tokenizes it about twice as densely as English. Failures return a stable `{ error: { code, message, retryable, details } }` envelope.
+Successful calls return bounded text. Partial `read`, `grep`, and `glob` results include a continuation cursor so you can pick up where you left off. The output budget adapts to content: CJK-dense text gets a smaller byte budget because the client tokenizes it about twice as densely as English. A per-instance 8,192-token burst gate also bounds the aggregate projected model cost of parallel and rapidly consecutive responses. It is a server-side best effort: it cannot account for Codex native tools, other MCP servers, model reasoning, or tool arguments, and its two-second quiet period is a burst heuristic rather than a Codex turn identifier. Failures return a stable `{ error: { code, message, retryable, details } }` envelope.
 
 ## Install
 
@@ -192,7 +192,8 @@ Each mode also has a wall-clock ceiling: 5 s for `auto` and `text`, 10 s for `im
 | `CODEXSHIM_MCP_COMPATIBILITY` | `lenient` | Set to `strict` to reject legacy `2025-06-18` initialize clients. |
 | `CODEXSHIM_PROCESS_CALLS` | `16` | Per-instance concurrent process-call limit shared by `run_program` and `bash`; 1–32. |
 | `CODEXSHIM_DETACHED_CALLS` | `16` | Per-instance live detached `bash` trees; 1–16. |
-| `CODEXSHIM_OUTPUT_BYTES` | `32000` | Per-call output ceiling in bytes; 4096–262144. |
+| `CODEXSHIM_OUTPUT_BYTES` | `32000` | Per-call output ceiling in bytes; 4096–262144. This cannot bypass the per-call token or shared burst limits. |
+| `CODEXSHIM_BURST_TOKENS` | `8192` | Shared projected model-token budget for parallel and rapidly consecutive tool responses; 2048–8192 and may only be lowered. |
 | `CODEXSHIM_GREP_MEMORY_BYTES` | `268435456` | Per-call hard limit for retained `grep` candidates; 8388608–1073741824. |
 | `CODEXSHIM_GLOB_MEMORY_BYTES` | `33554432` | Per-call hard limit for retained `glob` matches; 8388608–1073741824. |
 | `CODEXSHIM_PDF_TEXT_MEMORY_BYTES` | `67108864` | Per-call memory budget for `auto` and `text` PDF reads; 33554432–134217728. |

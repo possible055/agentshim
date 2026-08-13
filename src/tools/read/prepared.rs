@@ -141,11 +141,28 @@ pub(crate) fn prepare(
     })
 }
 
+#[cfg(any(test, feature = "bench-internals"))]
 pub(crate) fn execute_prepared(
+    access: &FileAccess,
+    request: &ReadRequest,
+    prepared: PreparedRead,
+    cancellation: &CancellationToken,
+) -> Result<Attempt<ToolOutput>, ReadError> {
+    execute_prepared_with_budget(
+        access,
+        request,
+        prepared,
+        cancellation,
+        &crate::output::CallOutputBudget::standalone(),
+    )
+}
+
+pub(crate) fn execute_prepared_with_budget(
     access: &FileAccess,
     request: &ReadRequest,
     mut prepared: PreparedRead,
     cancellation: &CancellationToken,
+    output_budget: &crate::output::CallOutputBudget,
 ) -> Result<Attempt<ToolOutput>, ReadError> {
     if cancellation.is_cancelled() {
         return Err(ReadError::Cancelled);
@@ -158,6 +175,7 @@ pub(crate) fn execute_prepared(
             &prepared.before.source_id(),
             cancellation,
             call_bytes,
+            output_budget,
         )?;
         run_after_read_hook();
         if take_forced_change() {
@@ -195,6 +213,7 @@ pub(crate) fn execute_prepared(
         summary.source_encoding,
         &collector,
         cancellation,
+        output_budget,
     )
     .map(Attempt::Stable)
 }

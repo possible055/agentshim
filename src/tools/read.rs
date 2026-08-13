@@ -10,7 +10,9 @@ use crate::encoding::DecodeError;
 pub(crate) use fingerprint::FileFingerprint;
 #[cfg(feature = "bench-internals")]
 pub use fingerprint::{FingerprintMetrics, fingerprint_metrics, reset_fingerprint_metrics};
-pub(crate) use prepared::{Attempt, PdfMemoryBudgets, PreparedRead, execute_prepared, prepare};
+pub(crate) use prepared::{
+    Attempt, PdfMemoryBudgets, PreparedRead, execute_prepared_with_budget, prepare,
+};
 #[cfg(test)]
 use request::PdfMode;
 #[cfg(any(test, feature = "bench-internals"))]

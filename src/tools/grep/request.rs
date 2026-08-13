@@ -12,7 +12,7 @@ use super::{
     file_search::SearchPlan,
     ordered::{OrderedSearchContext, ordered_search},
     profile::{GrepProfiler, GrepStage},
-    result::render,
+    result::render_with_budget,
 };
 use crate::{
     path::{FileAccess, PathError},
@@ -306,6 +306,7 @@ pub fn execute(
                 traversal: GrepTraversal::Adaptive,
                 variant: GrepBenchmarkVariant::default(),
                 profiler: &GrepProfiler::disabled(),
+                output_budget: None,
                 memory: None,
             },
         )
@@ -341,6 +342,7 @@ pub fn execute_with_traversal(
                 traversal,
                 variant: GrepBenchmarkVariant::default(),
                 profiler: &GrepProfiler::disabled(),
+                output_budget: None,
                 memory: None,
             },
         )
@@ -372,6 +374,7 @@ pub fn execute_with_variant(
                 traversal,
                 variant,
                 profiler: &GrepProfiler::disabled(),
+                output_budget: None,
                 memory: None,
             },
         )
@@ -449,6 +452,7 @@ pub fn execute_profiled_with_variant(
                 traversal,
                 variant,
                 profiler: &profiler,
+                output_budget: None,
                 memory: None,
             },
         )?
@@ -479,12 +483,13 @@ fn with_benchmark_resources<T>(
     execute(&resources)
 }
 
-pub(crate) fn execute_output(
+pub(crate) fn execute_output_with_budget(
     access: &Arc<FileAccess>,
     request: &GrepRequest,
     resources: &RuntimeResources,
     cancellation: &CancellationToken,
     memory: MemoryReservation,
+    output_budget: &crate::output::CallOutputBudget,
 ) -> Result<ToolOutput, GrepError> {
     #[cfg(feature = "bench-internals")]
     let variant = GrepBenchmarkVariant::from_env()?;
@@ -500,6 +505,7 @@ pub(crate) fn execute_output(
             variant,
             profiler: &GrepProfiler::disabled(),
             memory: Some(memory),
+            output_budget: Some(output_budget),
         },
     )
 }
@@ -509,6 +515,7 @@ struct GrepExecution<'a> {
     variant: GrepBenchmarkVariant,
     profiler: &'a GrepProfiler,
     memory: Option<MemoryReservation>,
+    output_budget: Option<&'a crate::output::CallOutputBudget>,
 }
 
 fn execute_inner(
@@ -523,6 +530,7 @@ fn execute_inner(
         variant,
         profiler,
         memory,
+        output_budget,
     } = execution;
     let candidate_policy = CandidatePolicy::from_environment()?;
     let file_work_pool = resources.file_work_pool();
@@ -602,7 +610,7 @@ fn execute_inner(
     let page = ordered_search(&candidates, lanes, request, traversal_summary, &context)?;
     drop(search_span);
     let render_span = profiler.span(GrepStage::Render);
-    let output = render(request, &page, cancellation);
+    let output = render_with_budget(request, &page, cancellation, output_budget);
     drop(render_span);
     if let Ok(output) = &output {
         profiler.add_render_copy_bytes(output.text.len());

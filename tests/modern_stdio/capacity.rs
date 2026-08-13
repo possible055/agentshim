@@ -2,6 +2,61 @@ use super::process::process_is_running;
 use super::support::*;
 use super::*;
 
+fn projected_success_tokens(responses: &[Value]) -> usize {
+    let prototype = codexshim_gigatoken::O200kPrototype::load_embedded().expect("token ranks");
+    let mut counter = prototype
+        .fork_counter(codexshim_gigatoken::CounterLimits::default())
+        .expect("counter");
+    responses
+        .iter()
+        .filter(|response| response["result"]["isError"] == false)
+        .map(|response| {
+            let payload =
+                serde_json::to_string(&response["result"]["content"]).expect("content JSON");
+            let codexshim_gigatoken::CountUpTo::Exact(tokens) =
+                counter.count_ordinary_up_to(&payload, usize::MAX, || false)
+            else {
+                panic!("unbounded exact count")
+            };
+            128 + tokens
+        })
+        .sum()
+}
+
+#[test]
+fn parallel_large_reads_share_one_projected_burst_budget() {
+    const CALLS: u64 = 16;
+    let fixture = tempfile::tempdir().expect("fixture");
+    let body = (0..4_000)
+        .map(|line| format!("{line} {}", " x".repeat(20)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(fixture.path().join("large.txt"), body).expect("large fixture");
+    let mut session = Session::start_at(fixture.path());
+    session.send(&modern_request(1, "server/discover", empty_params()));
+    assert_eq!(session.receive()["id"], 1);
+
+    for id in 2..2 + CALLS {
+        let mut call = empty_params();
+        call.insert("name".to_owned(), json!("read"));
+        call.insert(
+            "arguments".to_owned(),
+            json!({ "path": "large.txt", "line_count": 1000 }),
+        );
+        session.send(&modern_request(id, "tools/call", call));
+    }
+    let responses = (0..CALLS).map(|_| session.receive()).collect::<Vec<_>>();
+    assert!(
+        projected_success_tokens(&responses) <= 8_192,
+        "content-bearing responses exceeded the shared burst budget"
+    );
+    assert!(responses.iter().all(|response| {
+        response["result"]["isError"] == false
+            || response["result"]["structuredContent"]["error"]["code"] == "output_budget"
+    }));
+    session.close();
+}
+
 #[test]
 fn process_overload_is_fail_fast_and_preserves_resource_busy_contract() {
     let fixture = tempfile::tempdir().expect("fixture");

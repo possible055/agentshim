@@ -207,6 +207,24 @@ pub(crate) fn execute_output(
     timeout: Duration,
     cancellation: &CancellationToken,
 ) -> Result<ToolOutput, ProcessError> {
+    execute_output_with_budget(
+        root,
+        resolver,
+        request,
+        timeout,
+        cancellation,
+        &crate::output::CallOutputBudget::standalone(),
+    )
+}
+
+pub(crate) fn execute_output_with_budget(
+    root: &Arc<RepositoryRoot>,
+    resolver: &ProcessResolver,
+    request: &ProcessRequest,
+    timeout: Duration,
+    cancellation: &CancellationToken,
+    output_budget: &crate::output::CallOutputBudget,
+) -> Result<ToolOutput, ProcessError> {
     let started = std::time::Instant::now();
     let deadline = started + timeout;
     request.validate()?;
@@ -238,7 +256,7 @@ pub(crate) fn execute_output(
     match spawn::run(&plan, cancellation) {
         Ok(outcome) => {
             let [stdout, stderr] = expect_two(outcome.captures);
-            render_completed(
+            render_completed_with_budget(
                 &CompletedProcess {
                     resolved: program,
                     cwd,
@@ -248,12 +266,13 @@ pub(crate) fn execute_output(
                     stderr,
                 },
                 cancellation,
+                output_budget,
             )
         }
         Err(ExecFailure::TimedOut { duration, captures }) => {
             let [stdout, stderr] = expect_two(captures);
             let timeout_ms = request.timeout_ms();
-            let report = render_timeout(
+            let report = render_timeout_with_budget(
                 &TimedOutProcess {
                     resolved: program,
                     cwd,
@@ -263,6 +282,7 @@ pub(crate) fn execute_output(
                 },
                 timeout_ms,
                 cancellation,
+                output_budget,
             )?;
             Err(ProcessError::Timeout {
                 timeout_ms,
@@ -319,15 +339,28 @@ impl std::ops::Deref for TimeoutRender {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn render_completed(
     completed: &CompletedProcess,
     cancellation: &CancellationToken,
+) -> Result<ToolOutput, ProcessError> {
+    render_completed_with_budget(
+        completed,
+        cancellation,
+        &crate::output::CallOutputBudget::standalone(),
+    )
+}
+
+fn render_completed_with_budget(
+    completed: &CompletedProcess,
+    cancellation: &CancellationToken,
+    output_budget: &crate::output::CallOutputBudget,
 ) -> Result<ToolOutput, ProcessError> {
     project_captures(
         &[&completed.stdout, &completed.stderr],
         cancellation,
         |rendered| completed_output(completed, &rendered[0], &rendered[1]),
-        |output| output.fits_content_and_model(cancellation),
+        |output| output.fits_content_and_call(output_budget, cancellation),
     )
 }
 
@@ -382,17 +415,49 @@ fn completed_output(
     ToolOutput::with_child_nonzero(rendered, completed.exit != "0")
 }
 
+#[cfg(test)]
 pub(crate) fn render_timeout(
     timed_out: &TimedOutProcess,
     timeout_ms: u64,
     cancellation: &CancellationToken,
 ) -> Result<TimeoutRender, ProcessError> {
+    render_timeout_with_budget(
+        timed_out,
+        timeout_ms,
+        cancellation,
+        &crate::output::CallOutputBudget::standalone(),
+    )
+}
+
+fn render_timeout_with_budget(
+    timed_out: &TimedOutProcess,
+    timeout_ms: u64,
+    cancellation: &CancellationToken,
+    output_budget: &crate::output::CallOutputBudget,
+) -> Result<TimeoutRender, ProcessError> {
     project_captures(
         &[&timed_out.stdout, &timed_out.stderr],
         cancellation,
         |rendered| timeout_output(timed_out, timeout_ms, &rendered[0], &rendered[1]),
-        |output| timeout_output_fits_budget(output, cancellation),
+        |output| timeout_output_fits_budget(output, cancellation, output_budget),
     )
+    .map_err(|error| normalize_burst_render_error(error, output_budget))
+}
+
+fn normalize_burst_render_error(
+    error: ProcessError,
+    output_budget: &crate::output::CallOutputBudget,
+) -> ProcessError {
+    if output_budget.ceiling() < crate::output::TOOL_CONTENT_TOKEN_LIMIT
+        && matches!(
+            error,
+            ProcessError::Output(crate::output::OutputError::RequiredContentTooLarge)
+        )
+    {
+        ProcessError::Output(crate::output::OutputError::BurstLimit)
+    } else {
+        error
+    }
 }
 
 fn timeout_output(
@@ -472,7 +537,11 @@ fn timeout_output(
     }
 }
 
-fn timeout_output_fits_budget(output: &TimeoutRender, cancellation: &CancellationToken) -> bool {
+fn timeout_output_fits_budget(
+    output: &TimeoutRender,
+    cancellation: &CancellationToken,
+    output_budget: &crate::output::CallOutputBudget,
+) -> bool {
     serde_json::to_value(&output.details)
         .ok()
         .is_some_and(|details| {
@@ -488,7 +557,20 @@ fn timeout_output_fits_budget(output: &TimeoutRender, cancellation: &Cancellatio
                     &output.text,
                     Some(&details),
                 );
-                crate::output::structured_result_fits_model_budget(&structured, cancellation)
+                matches!(
+                    output_budget.project_result(
+                        &{
+                            let mut result = rmcp::model::CallToolResult::error(vec![
+                                rmcp::model::ContentBlock::text(&output.text),
+                            ]);
+                            result.structured_content = Some(structured);
+                            result
+                        },
+                        output_budget.ceiling(),
+                        cancellation,
+                    ),
+                    crate::output::ProjectionDecision::Fits(_)
+                )
             }
         })
 }

@@ -16,8 +16,19 @@ pub(super) fn read_pdf_images(
     pages: Vec<usize>,
     source_id: &str,
     cancellation: &CancellationToken,
+    output_budget: &crate::output::CallOutputBudget,
 ) -> Result<ToolOutput, ReadError> {
+    const IMAGE_TOKENS: usize = 1_844 + 32;
+    const CAPTION_RESERVE: usize = 256;
+    let page_allowance = output_budget
+        .ceiling()
+        .saturating_sub(128 + CAPTION_RESERVE)
+        / IMAGE_TOKENS;
+    if page_allowance == 0 {
+        return Err(crate::output::OutputError::BurstLimit.into());
+    }
     let requested_last = pages[pages.len() - 1];
+    let pages = pages.into_iter().take(page_allowance).collect::<Vec<_>>();
     let mut delivered = Vec::with_capacity(pages.len());
     let mut images = Vec::with_capacity(pages.len());
     let mut payload_bytes = 0_usize;

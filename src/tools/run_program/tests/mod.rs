@@ -25,7 +25,7 @@ use crate::platform::process;
 
 use super::{
     CompletedProcess, MAX_STDIN_BYTES, PROCESS_MEMORY_BYTES, ProcessRequest, TimedOutProcess,
-    execute, execute_output, render_completed, render_timeout,
+    execute, execute_output, render_completed, render_completed_with_budget, render_timeout,
 };
 fn request(program: String) -> ProcessRequest {
     ProcessRequest {

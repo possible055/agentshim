@@ -164,6 +164,7 @@ fn environment(
 ///
 /// Returns validation, bash-discovery, spawn, I/O, cancellation, timeout, cleanup, or output
 /// errors.
+#[cfg(test)]
 pub(crate) fn execute_output(
     root: &Arc<RepositoryRoot>,
     locator: &BashLocator,
@@ -171,6 +172,26 @@ pub(crate) fn execute_output(
     request: &BashRequest,
     timeout: Duration,
     cancellation: &CancellationToken,
+) -> Result<ToolOutput, ProcessError> {
+    execute_output_with_budget(
+        root,
+        locator,
+        detached_admission,
+        request,
+        timeout,
+        cancellation,
+        &crate::output::CallOutputBudget::standalone(),
+    )
+}
+
+pub(crate) fn execute_output_with_budget(
+    root: &Arc<RepositoryRoot>,
+    locator: &BashLocator,
+    detached_admission: Option<DetachedAdmission>,
+    request: &BashRequest,
+    timeout: Duration,
+    cancellation: &CancellationToken,
+    output_budget: &crate::output::CallOutputBudget,
 ) -> Result<ToolOutput, ProcessError> {
     let started = std::time::Instant::now();
     request.validate()?;
@@ -240,7 +261,7 @@ pub(crate) fn execute_output(
         timeout,
     };
     match spawn::run(&plan, cancellation) {
-        Ok(outcome) => render_completed(
+        Ok(outcome) => render_completed_with_budget(
             &CompletedBash {
                 bash: resolved.absolute,
                 cwd,
@@ -249,6 +270,7 @@ pub(crate) fn execute_output(
                 output: expect_one(outcome.captures),
             },
             cancellation,
+            output_budget,
         ),
         Err(ExecFailure::TimedOut { duration, captures }) => {
             let timeout_ms = request.timeout_ms();
@@ -261,6 +283,7 @@ pub(crate) fn execute_output(
                 },
                 timeout_ms,
                 cancellation,
+                output_budget,
             )?;
             Err(ProcessError::Timeout {
                 timeout_ms,
@@ -379,16 +402,30 @@ struct TimeoutRender {
     details: ProcessTimeoutDetails,
 }
 
+#[cfg(test)]
 fn render_completed(
     completed: &CompletedBash,
     cancellation: &CancellationToken,
+) -> Result<ToolOutput, ProcessError> {
+    render_completed_with_budget(
+        completed,
+        cancellation,
+        &crate::output::CallOutputBudget::standalone(),
+    )
+}
+
+fn render_completed_with_budget(
+    completed: &CompletedBash,
+    cancellation: &CancellationToken,
+    output_budget: &crate::output::CallOutputBudget,
 ) -> Result<ToolOutput, ProcessError> {
     project_captures(
         &[&completed.output],
         cancellation,
         |rendered| completed_output(completed, &rendered[0]),
-        |output| output.fits_content_and_model(cancellation),
+        |output| output.fits_content_and_call(output_budget, cancellation),
     )
+    .map_err(|error| normalize_burst_render_error(error, output_budget))
 }
 
 fn completed_output(completed: &CompletedBash, output: &RenderedCapture) -> ToolOutput {
@@ -430,6 +467,7 @@ fn render_timeout(
     timed_out: &TimedOutBash,
     timeout_ms: u64,
     cancellation: &CancellationToken,
+    output_budget: &crate::output::CallOutputBudget,
 ) -> Result<TimeoutRender, ProcessError> {
     project_captures(
         &[&timed_out.output],
@@ -451,14 +489,41 @@ fn render_timeout(
                             &render.text,
                             Some(&details),
                         );
-                        crate::output::structured_result_fits_model_budget(
-                            &structured,
-                            cancellation,
+                        matches!(
+                            output_budget.project_result(
+                                &{
+                                    let mut result = rmcp::model::CallToolResult::error(vec![
+                                        rmcp::model::ContentBlock::text(&render.text),
+                                    ]);
+                                    result.structured_content = Some(structured);
+                                    result
+                                },
+                                output_budget.ceiling(),
+                                cancellation,
+                            ),
+                            crate::output::ProjectionDecision::Fits(_)
                         )
                     }
                 })
         },
     )
+    .map_err(|error| normalize_burst_render_error(error, output_budget))
+}
+
+fn normalize_burst_render_error(
+    error: ProcessError,
+    output_budget: &crate::output::CallOutputBudget,
+) -> ProcessError {
+    if output_budget.ceiling() < crate::output::TOOL_CONTENT_TOKEN_LIMIT
+        && matches!(
+            error,
+            ProcessError::Output(crate::output::OutputError::RequiredContentTooLarge)
+        )
+    {
+        ProcessError::Output(crate::output::OutputError::BurstLimit)
+    } else {
+        error
+    }
 }
 
 fn timeout_output(

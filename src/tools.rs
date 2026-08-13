@@ -18,7 +18,7 @@ pub(crate) struct ToolOutput {
     pub text: String,
     pub images: Vec<ToolImage>,
     pub child_nonzero: bool,
-    model_budget_verified: Cell<bool>,
+    projected_cost: Cell<Option<crate::output::ProjectedTokenCost>>,
 }
 
 impl ToolOutput {
@@ -27,7 +27,7 @@ impl ToolOutput {
             text,
             images: Vec::new(),
             child_nonzero: false,
-            model_budget_verified: Cell::new(false),
+            projected_cost: Cell::new(None),
         }
     }
 
@@ -36,7 +36,7 @@ impl ToolOutput {
             text,
             images: Vec::new(),
             child_nonzero,
-            model_budget_verified: Cell::new(false),
+            projected_cost: Cell::new(None),
         }
     }
 
@@ -45,7 +45,7 @@ impl ToolOutput {
             text,
             images,
             child_nonzero: false,
-            model_budget_verified: Cell::new(false),
+            projected_cost: Cell::new(None),
         }
     }
 
@@ -65,6 +65,7 @@ impl ToolOutput {
         self.encoded_len() <= crate::output::OutputLimits::for_content(&self.text).bytes
     }
 
+    #[cfg(test)]
     pub(crate) fn fits_model_budget(
         &self,
         cancellation: &tokio_util::sync::CancellationToken,
@@ -72,47 +73,50 @@ impl ToolOutput {
         let Ok(gate) = crate::output::OutputTokenGate::load_shared() else {
             return false;
         };
-        let fits = matches!(
+        matches!(
             gate.evaluate_tool_text(&self.text, !self.images.is_empty(), cancellation),
             crate::output::GateDecision::FitsByBytes | crate::output::GateDecision::FitsExactly(_)
-        );
-        self.model_budget_verified.set(fits);
-        fits
+        )
     }
 
-    pub(crate) fn fits_budget_and_model(
+    pub(crate) fn fits_call_budget(
         &self,
+        budget: &crate::output::CallOutputBudget,
         cancellation: &tokio_util::sync::CancellationToken,
     ) -> bool {
-        let encoded_len = self.encoded_len();
-        encoded_len <= crate::output::effective_byte_limit()
-            && self.fits_model_after_wire_bound(encoded_len, cancellation)
-    }
-
-    pub(crate) fn fits_content_and_model(
-        &self,
-        cancellation: &tokio_util::sync::CancellationToken,
-    ) -> bool {
-        let encoded_len = self.encoded_len();
-        encoded_len <= crate::output::OutputLimits::for_content(&self.text).bytes
-            && self.fits_model_after_wire_bound(encoded_len, cancellation)
-    }
-
-    fn fits_model_after_wire_bound(
-        &self,
-        encoded_len: usize,
-        cancellation: &tokio_util::sync::CancellationToken,
-    ) -> bool {
-        if encoded_len <= crate::output::TOOL_CONTENT_TOKEN_LIMIT {
-            let fits = !cancellation.is_cancelled();
-            self.model_budget_verified.set(fits);
-            return fits;
+        if let Some(cost) = self.projected_cost.get() {
+            return cost.tokens <= budget.ceiling() && !cancellation.is_cancelled();
         }
-        self.fits_model_budget(cancellation)
+        match budget.project_tool_output(&self.text, self.images.len(), cancellation) {
+            crate::output::ProjectionDecision::Fits(cost) => {
+                self.projected_cost.set(Some(cost));
+                true
+            }
+            crate::output::ProjectionDecision::Exceeded
+            | crate::output::ProjectionDecision::Cancelled => false,
+        }
     }
 
-    pub(crate) fn model_budget_verified(&self) -> bool {
-        self.model_budget_verified.get()
+    pub(crate) fn fits_budget_and_call(
+        &self,
+        budget: &crate::output::CallOutputBudget,
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> bool {
+        self.encoded_len() <= crate::output::effective_byte_limit()
+            && self.fits_call_budget(budget, cancellation)
+    }
+
+    pub(crate) fn fits_content_and_call(
+        &self,
+        budget: &crate::output::CallOutputBudget,
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> bool {
+        self.encoded_len() <= crate::output::OutputLimits::for_content(&self.text).bytes
+            && self.fits_call_budget(budget, cancellation)
+    }
+
+    pub(crate) fn projected_cost(&self) -> Option<crate::output::ProjectedTokenCost> {
+        self.projected_cost.get()
     }
 }
 

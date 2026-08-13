@@ -8,7 +8,7 @@ use std::{
 use super::profile::ProfiledGlob;
 use super::{
     profile::{GlobProfiler, GlobStage},
-    result::{GlobMatch, TopK, render},
+    result::{GlobMatch, TopK, render_with_budget},
 };
 
 use globset::GlobBuilder;
@@ -149,17 +149,19 @@ pub fn execute(
             GlobTraversal::Adaptive,
             &GlobProfiler::disabled(),
             None,
+            None,
         )
         .map(|result| result.text)
     })
 }
 
-pub(crate) fn execute_output(
+pub(crate) fn execute_output_with_budget(
     access: &Arc<FileAccess>,
     request: &GlobRequest,
     resources: &RuntimeResources,
     cancellation: &CancellationToken,
     memory: crate::runtime::MemoryReservation,
+    output_budget: &crate::output::CallOutputBudget,
 ) -> Result<ToolOutput, GlobError> {
     execute_inner(
         access,
@@ -169,9 +171,14 @@ pub(crate) fn execute_output(
         GlobTraversal::Adaptive,
         &GlobProfiler::disabled(),
         Some(memory),
+        Some(output_budget),
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the production and benchmark traversal controls must remain independently selectable"
+)]
 fn execute_inner(
     access: &Arc<FileAccess>,
     request: &GlobRequest,
@@ -180,6 +187,7 @@ fn execute_inner(
     traversal: GlobTraversal,
     profiler: &GlobProfiler,
     memory: Option<crate::runtime::MemoryReservation>,
+    output_budget: Option<&crate::output::CallOutputBudget>,
 ) -> Result<ToolOutput, GlobError> {
     execute_inner_with_traversal(
         access,
@@ -189,6 +197,7 @@ fn execute_inner(
         traversal,
         profiler,
         memory,
+        output_budget,
     )
 }
 
@@ -214,6 +223,7 @@ pub fn execute_with_traversal(
             cancellation,
             traversal,
             &GlobProfiler::disabled(),
+            None,
             None,
         )
         .map(|output| output.text)
@@ -245,6 +255,7 @@ pub fn execute_profiled_with_traversal(
             traversal,
             &profiler,
             None,
+            None,
         );
         drop(total_span);
         let output = result?;
@@ -255,6 +266,10 @@ pub fn execute_profiled_with_traversal(
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the production and benchmark traversal controls must remain independently selectable"
+)]
 fn execute_inner_with_traversal(
     access: &Arc<FileAccess>,
     request: &GlobRequest,
@@ -263,6 +278,7 @@ fn execute_inner_with_traversal(
     traversal: GlobTraversal,
     profiler: &GlobProfiler,
     memory: Option<crate::runtime::MemoryReservation>,
+    output_budget: Option<&crate::output::CallOutputBudget>,
 ) -> Result<ToolOutput, GlobError> {
     let file_work_pool = resources.file_work_pool();
     let _file_work_request = file_work_pool.begin_request();
@@ -354,7 +370,14 @@ fn execute_inner_with_traversal(
     let retained = collection.store.into_sorted(cancellation)?;
     drop(sort_span);
     let render_span = profiler.span(GlobStage::Render);
-    let result = render(request, &retained, collection.total, summary, cancellation);
+    let result = render_with_budget(
+        request,
+        &retained,
+        collection.total,
+        summary,
+        cancellation,
+        output_budget,
+    );
     drop(render_span);
     result
 }

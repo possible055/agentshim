@@ -215,11 +215,28 @@ fn pagination_tail(
     tail
 }
 
+#[cfg(test)]
 pub(super) fn render(
     request: &GrepRequest,
     page: &Page,
     cancellation: &CancellationToken,
 ) -> Result<ToolOutput, GrepError> {
+    render_with_budget(request, page, cancellation, None)
+}
+
+pub(super) fn render_with_budget(
+    request: &GrepRequest,
+    page: &Page,
+    cancellation: &CancellationToken,
+    output_budget: Option<&crate::output::CallOutputBudget>,
+) -> Result<ToolOutput, GrepError> {
+    let standalone;
+    let output_budget = if let Some(output_budget) = output_budget {
+        output_budget
+    } else {
+        standalone = crate::output::CallOutputBudget::standalone();
+        &standalone
+    };
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT);
     let available = page.lines.len().min(limit);
     let limits = OutputLimits::for_content_parts(
@@ -255,7 +272,7 @@ pub(super) fn render(
             continue;
         }
         let output = ToolOutput::new(formatter.finish(cancellation)?);
-        if output.fits_budget_and_model(cancellation) {
+        if output.fits_budget_and_call(output_budget, cancellation) {
             return Ok(output);
         }
         if cap == 1
@@ -264,15 +281,15 @@ pub(super) fn render(
             let tail = pagination_tail(total_skipped, next_offset, page.scan_complete);
             let mut formatter = OutputFormatter::new(String::new(), tail, limits)?;
             if !formatter.try_push_line(fallback, cancellation)? {
-                return Err(crate::output::OutputError::NoProgress.into());
+                return Err(crate::output::OutputError::BurstLimit.into());
             }
             let fallback_output = ToolOutput::new(formatter.finish(cancellation)?);
-            if fallback_output.fits_budget_and_model(cancellation) {
+            if fallback_output.fits_budget_and_call(output_budget, cancellation) {
                 return Ok(fallback_output);
             }
         }
         if cap == 0 {
-            return Err(crate::output::OutputError::NoProgress.into());
+            return Err(crate::output::OutputError::BurstLimit.into());
         }
         cap -= 1;
     }

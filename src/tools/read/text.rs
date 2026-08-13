@@ -121,6 +121,7 @@ pub(super) fn render(
     source_encoding: SourceEncoding,
     collector: &LineCollector,
     cancellation: &CancellationToken,
+    output_budget: &crate::output::CallOutputBudget,
 ) -> Result<ToolOutput, ReadError> {
     let available = collector.candidates.len().min(collector.requested);
     let source_has_more = collector.stopped || collector.candidates.len() > available;
@@ -158,12 +159,12 @@ pub(super) fn render(
             continue;
         }
         let output = ToolOutput::new(formatter.finish(cancellation)?);
-        if output.fits_budget_and_model(cancellation) {
+        if output.fits_budget_and_call(output_budget, cancellation) {
             let _ = request;
             return Ok(output);
         }
         if cap == 0 {
-            return Err(crate::output::OutputError::NoProgress.into());
+            return Err(crate::output::OutputError::BurstLimit.into());
         }
         cap -= 1;
     }

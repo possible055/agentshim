@@ -23,7 +23,7 @@ use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::{
-    output::OutputTokenGate,
+    output::{BurstOutputGate, CallOutputBudget, OutputTokenGate},
     path::{FileAccess, ReadScope, RepositoryRoot},
     runtime::{RuntimeConfig, RuntimeResources},
     tools::{
@@ -119,6 +119,7 @@ pub struct CodexShim {
     pub(super) bash_locator: BashLocator,
     pub(super) protocol_compatibility: ProtocolCompatibility,
     pub(super) output_token_gate: Arc<OutputTokenGate>,
+    pub(super) burst_output_gate: Arc<BurstOutputGate>,
 }
 
 pub struct CodexShimBuilder {
@@ -169,6 +170,7 @@ impl CodexShimBuilder {
     pub fn build(self) -> io::Result<CodexShim> {
         let root = Arc::new(RepositoryRoot::open(self.root)?);
         let output_token_gate = OutputTokenGate::load_shared().map_err(io::Error::other)?;
+        let burst_output_gate = BurstOutputGate::new(crate::output::configured_burst_tokens()?);
         Ok(CodexShim {
             file_access: Arc::new(FileAccess::new(Arc::clone(&root), self.read_scope)),
             root,
@@ -178,6 +180,7 @@ impl CodexShimBuilder {
             process_resolver: ProcessResolver::capture(),
             protocol_compatibility: self.protocol_compatibility,
             output_token_gate,
+            burst_output_gate,
         })
     }
 }
@@ -209,6 +212,11 @@ impl CodexShim {
     #[must_use]
     pub fn runtime_limits(&self) -> RuntimeConfig {
         self.resources.config()
+    }
+
+    #[must_use]
+    pub fn burst_token_limit(&self) -> usize {
+        self.burst_output_gate.limit()
     }
 
     #[must_use]
@@ -369,6 +377,23 @@ impl ServerHandler for CodexShim {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
+        let tool = request.name.to_string();
+        let budget = CallOutputBudget::new(
+            Arc::clone(&self.output_token_gate),
+            self.burst_output_gate.begin_call(),
+        );
+        let result = self.call_tool_inner(request, &context, &budget).await;
+        super::response::finalize_tool_response(&tool, &budget, result, &context.ct)
+    }
+}
+
+impl CodexShim {
+    async fn call_tool_inner(
+        &self,
+        request: CallToolRequestParams,
+        context: &RequestContext<RoleServer>,
+        budget: &CallOutputBudget,
+    ) -> Result<CallToolResponse, McpError> {
         let admission = match self.try_admit_tool(&request) {
             Ok(admission) => admission,
             Err(ToolAdmissionFailure::Capacity(class)) => {
@@ -384,7 +409,9 @@ impl ServerHandler for CodexShim {
             }
         };
         if !tracing::enabled!(target: "codexshim", tracing::Level::INFO) {
-            return self.dispatch_tool(request, &context, admission).await;
+            return self
+                .dispatch_tool(request, context, admission, budget)
+                .await;
         }
         let call_id = Uuid::new_v4().to_string();
         let tool = request.name.to_string();
@@ -407,7 +434,9 @@ impl ServerHandler for CodexShim {
         };
         async move {
             tracing::info!(target: "codexshim", event = "tool_start", phase = "request");
-            let response = self.dispatch_tool(request, &context, admission).await?;
+            let response = self
+                .dispatch_tool(request, context, admission, budget)
+                .await?;
             Ok(response)
         }
         .instrument(span)

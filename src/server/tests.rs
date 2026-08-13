@@ -1,6 +1,6 @@
 use std::fs;
 
-use rmcp::model::{CallToolRequestParams, CallToolResponse, ContentBlock};
+use rmcp::model::{CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock};
 use serde_json::json;
 
 use super::{
@@ -120,6 +120,7 @@ fn read_path_call(server: &CodexShim, path: &str) -> CallToolResponse {
             Some(arguments),
             &tokio_util::sync::CancellationToken::new(),
             admission,
+            &crate::output::CallOutputBudget::standalone(),
         ))
 }
 
@@ -315,12 +316,14 @@ fn successful_tool_responses_omit_structured_content() {
     let output = crate::tools::ToolOutput::with_child_nonzero("summary".to_owned(), true);
     let gate = crate::output::OutputTokenGate::load_shared().expect("token gate");
     let cancellation = tokio_util::sync::CancellationToken::new();
+    let budget = crate::output::CallOutputBudget::standalone();
     let CallToolResponse::Complete(result) = blocking_response::<crate::tools::exec::ProcessError>(
         "run_program",
         3,
         Ok(Ok(output)),
         &gate,
         &cancellation,
+        &budget,
     ) else {
         panic!("tool response must be complete");
     };
@@ -337,17 +340,43 @@ fn successful_tool_responses_omit_structured_content() {
 fn final_verifier_replaces_an_unbounded_model_payload() {
     let fixture = tempfile::tempdir().expect("fixture");
     let server = CodexShim::from_path(fixture.path()).expect("server");
+    let budget = crate::output::CallOutputBudget::standalone();
     let verified = blocking_response::<crate::tools::exec::ProcessError>(
         "run_program",
         3,
         Ok(Ok(crate::tools::ToolOutput::new(" x".repeat(10_000)))),
         &server.output_token_gate,
         &tokio_util::sync::CancellationToken::new(),
+        &budget,
     );
     let error = error_details(verified);
 
     assert_eq!(error["code"], "output_budget");
     assert_eq!(error["retryable"], false);
+}
+
+#[test]
+fn exhausted_burst_returns_only_a_bounded_control_response() {
+    let token_gate = crate::output::OutputTokenGate::load_shared().expect("token gate");
+    let burst_gate = crate::output::BurstOutputGate::new(2_048);
+    let spent = crate::output::CallOutputBudget::new(token_gate.clone(), burst_gate.begin_call());
+    assert_eq!(spent.ceiling(), 2_048);
+    spent.finish(2_048, false);
+    let budget = crate::output::CallOutputBudget::new(token_gate, burst_gate.begin_call());
+    let response = crate::server::response::finalize_tool_response(
+        "read",
+        &budget,
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            "unbounded source content".repeat(10_000),
+        )])
+        .into()),
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .expect("bounded response");
+    let details = error_details(response);
+    assert_eq!(details["code"], "output_budget");
+    assert_eq!(details["retryable"], true);
+    assert_eq!(details["details"]["reason"], "burst_limit");
 }
 
 #[test]

@@ -1,12 +1,92 @@
 use std::{fmt::Display, time::Duration};
 
+use rmcp::ErrorData as McpError;
 use rmcp::model::{CallToolResponse, CallToolResult, ContentBlock, JsonObject};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
 
-use crate::output::bounded_diagnostic;
+use crate::output::{
+    CallOutputBudget, MAX_CONTROL_RESPONSE_TOKENS, ProjectionDecision, bounded_diagnostic,
+};
+
+pub(super) fn finalize_tool_response(
+    tool: &str,
+    budget: &CallOutputBudget,
+    response: Result<CallToolResponse, McpError>,
+    cancellation: &CancellationToken,
+) -> Result<CallToolResponse, McpError> {
+    let Ok(CallToolResponse::Complete(result)) = &response else {
+        budget.finish(0, false);
+        return response;
+    };
+    let allowance = budget.ceiling();
+    if let Some(tokens) = budget.cached_response_cost() {
+        debug_assert!(tokens <= allowance);
+        budget.finish(tokens, false);
+        return response;
+    }
+    match budget.project_result(result, allowance, cancellation) {
+        ProjectionDecision::Fits(cost) => {
+            budget.finish(cost.tokens, false);
+            response
+        }
+        ProjectionDecision::Exceeded => {
+            let completed_side_effect =
+                matches!(tool, "run_program" | "bash") && result.is_error != Some(true);
+            let replacement = burst_limit_response(completed_side_effect);
+            let CallToolResponse::Complete(replacement_result) = &replacement else {
+                unreachable!("burst limit response is complete")
+            };
+            let cost = match budget.project_result(
+                replacement_result,
+                MAX_CONTROL_RESPONSE_TOKENS,
+                &CancellationToken::new(),
+            ) {
+                ProjectionDecision::Fits(cost) => cost.tokens,
+                ProjectionDecision::Exceeded | ProjectionDecision::Cancelled => {
+                    unreachable!("fixed burst response always has a measurable cost")
+                }
+            };
+            debug_assert!(cost <= MAX_CONTROL_RESPONSE_TOKENS);
+            budget.finish(cost, true);
+            Ok(replacement)
+        }
+        ProjectionDecision::Cancelled => {
+            budget.finish(0, true);
+            Ok(tool_error(
+                "client_cancellation",
+                false,
+                "tool output verification was cancelled",
+                None,
+            ))
+        }
+    }
+}
+
+fn burst_limit_response(completed_side_effect: bool) -> CallToolResponse {
+    if completed_side_effect {
+        return tool_error(
+            "output_budget",
+            false,
+            "tool execution completed but its output exceeded the current burst budget; do not retry",
+            Some(&json!({
+                "reason": "burst_limit",
+                "execution": "completed"
+            })),
+        );
+    }
+    tool_error(
+        "output_budget",
+        true,
+        "tool output exceeded the current burst budget; retry after the burst resets",
+        Some(&json!({
+            "reason": "burst_limit",
+            "retry_after_ms": 2000
+        })),
+    )
+}
 
 pub(super) fn parse_request<T: DeserializeOwned>(
     arguments: Option<JsonObject>,
@@ -146,6 +226,7 @@ impl DiagnosticError for crate::tools::read::ReadError {
             | ReadError::Directory
             | ReadError::NotRegular => "path",
             ReadError::Cancelled => "client_cancellation",
+            ReadError::Output(crate::output::OutputError::BurstLimit) => "output_budget",
             ReadError::Output(_) => "output_invariant",
             ReadError::ResourceLimit { .. } => "resource_limit",
             ReadError::PdfImageRequired { .. } => "pdf_image_required",
@@ -166,6 +247,16 @@ impl DiagnosticError for crate::tools::read::ReadError {
                 "io"
             }
         }
+    }
+
+    fn retryable(&self) -> bool {
+        matches!(
+            self,
+            crate::tools::read::ReadError::Output(crate::output::OutputError::BurstLimit)
+        ) || matches!(
+            self.error_class(),
+            "io" | "resource_timeout" | "resource_busy"
+        )
     }
 
     fn details(&self) -> Option<Value> {
@@ -205,6 +296,10 @@ impl DiagnosticError for crate::tools::read::ReadError {
                     "observed": limit.observed_bytes
                 })
             }),
+            ReadError::Output(crate::output::OutputError::BurstLimit) => Some(json!({
+                "reason": "burst_limit",
+                "retry_after_ms": 2000
+            })),
             _ => None,
         }
     }
@@ -216,12 +311,33 @@ impl DiagnosticError for crate::tools::glob::GlobError {
         match self {
             GlobError::Validation(_) | GlobError::Pattern(_) => "validation",
             GlobError::Path(_) => "path",
+            GlobError::Output(crate::output::OutputError::BurstLimit) => "output_budget",
             GlobError::Output(_) => "output_invariant",
             GlobError::TooManyMatches => "resource_timeout",
             GlobError::Memory => "resource_limit",
             GlobError::MemoryBusy => "resource_busy",
             GlobError::Traversal(_) | GlobError::Io(_) => "io",
         }
+    }
+
+    fn retryable(&self) -> bool {
+        matches!(
+            self,
+            crate::tools::glob::GlobError::MemoryBusy
+                | crate::tools::glob::GlobError::TooManyMatches
+                | crate::tools::glob::GlobError::Output(crate::output::OutputError::BurstLimit)
+        ) || matches!(
+            self.error_class(),
+            "io" | "resource_timeout" | "resource_busy"
+        )
+    }
+
+    fn details(&self) -> Option<Value> {
+        matches!(
+            self,
+            crate::tools::glob::GlobError::Output(crate::output::OutputError::BurstLimit)
+        )
+        .then(|| json!({ "reason": "burst_limit", "retry_after_ms": 2000 }))
     }
 }
 
@@ -232,12 +348,32 @@ impl DiagnosticError for crate::tools::grep::GrepError {
             GrepError::Validation(_) | GrepError::Regex(_) | GrepError::Glob(_) => "validation",
             GrepError::Path(_) => "path",
             GrepError::Cancelled => "client_cancellation",
+            GrepError::Output(crate::output::OutputError::BurstLimit) => "output_budget",
             GrepError::Output(_) => "output_invariant",
             GrepError::CandidateMemory => "resource_limit",
             GrepError::MemoryBusy => "resource_busy",
             GrepError::PoolPoison | GrepError::CaptureMemory => "resource_timeout",
             GrepError::Traversal(_) | GrepError::Io(_) => "io",
         }
+    }
+
+    fn retryable(&self) -> bool {
+        matches!(
+            self,
+            crate::tools::grep::GrepError::MemoryBusy
+                | crate::tools::grep::GrepError::Output(crate::output::OutputError::BurstLimit)
+        ) || matches!(
+            self.error_class(),
+            "io" | "resource_timeout" | "resource_busy"
+        )
+    }
+
+    fn details(&self) -> Option<Value> {
+        matches!(
+            self,
+            crate::tools::grep::GrepError::Output(crate::output::OutputError::BurstLimit)
+        )
+        .then(|| json!({ "reason": "burst_limit", "retry_after_ms": 2000 }))
     }
 }
 
@@ -254,6 +390,7 @@ impl DiagnosticError for crate::tools::exec::ProcessError {
             }
             ProcessError::Cancelled => "client_cancellation",
             ProcessError::OutcomeUncertain => "outcome_uncertain",
+            ProcessError::Output(crate::output::OutputError::BurstLimit) => "output_budget",
             ProcessError::Output(_) => "output_invariant",
         }
     }
@@ -264,7 +401,8 @@ impl DiagnosticError for crate::tools::exec::ProcessError {
     fn retryable(&self) -> bool {
         use crate::tools::exec::ProcessError;
         match self {
-            ProcessError::Unavailable(_) => false,
+            ProcessError::Unavailable(_)
+            | ProcessError::Output(crate::output::OutputError::BurstLimit) => false,
             other => matches!(
                 other.error_class(),
                 "io" | "resource_timeout" | "resource_busy"
@@ -284,6 +422,10 @@ impl DiagnosticError for crate::tools::exec::ProcessError {
             ProcessError::OutcomeUncertain => Some(json!({
                 "termination_outcome": "uncertain",
                 "containment_scope": crate::tools::exec::containment_scope()
+            })),
+            ProcessError::Output(crate::output::OutputError::BurstLimit) => Some(json!({
+                "reason": "burst_limit",
+                "execution": "completed"
             })),
             _ => None,
         }
@@ -317,6 +459,7 @@ pub(super) fn blocking_response<E: DiagnosticError>(
     result: Result<Result<crate::tools::ToolOutput, E>, tokio::task::JoinError>,
     output_token_gate: &crate::output::OutputTokenGate,
     cancellation: &CancellationToken,
+    output_budget: &CallOutputBudget,
 ) -> CallToolResponse {
     match result {
         Ok(Ok(output)) => {
@@ -330,7 +473,8 @@ pub(super) fn blocking_response<E: DiagnosticError>(
             } else {
                 tracing::info!(target: "codexshim", event = "tool_complete", phase = "response", outcome, run_ms);
             }
-            let model_budget_verified = output.model_budget_verified();
+            let call_budget_verified = output.fits_call_budget(output_budget, cancellation);
+            let projected_cost = output.projected_cost();
             let mut content = Vec::with_capacity(output.images.len() + 1);
             content.push(ContentBlock::text(output.text));
             content.extend(
@@ -340,7 +484,10 @@ pub(super) fn blocking_response<E: DiagnosticError>(
                     .map(|image| ContentBlock::image(image.data, image.mime_type)),
             );
             let result = CallToolResult::success(content);
-            if model_budget_verified {
+            if call_budget_verified {
+                if let Some(cost) = projected_cost {
+                    output_budget.cache_response_cost(cost);
+                }
                 tracing::trace!(target: "codexshim", token_gate_path = "verified_renderer");
                 return result.into();
             }

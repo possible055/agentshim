@@ -1,12 +1,23 @@
-use std::{env, ffi::OsStr, io, sync::OnceLock};
+use std::{
+    env,
+    ffi::OsStr,
+    io,
+    sync::{Arc, OnceLock},
+};
 
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+mod burst_gate;
 mod token_gate;
 
+pub(crate) use burst_gate::{
+    BurstOutputGate, BurstTicket, MAX_CONTROL_RESPONSE_TOKENS, configured_burst_tokens,
+};
+
 pub(crate) use token_gate::{
-    GateDecision, OutputTokenGate, TOOL_CONTENT_TOKEN_LIMIT, structured_result_fits_model_budget,
+    GateDecision, OutputTokenGate, ProjectedTokenCost, ProjectionDecision,
+    TOOL_CONTENT_TOKEN_LIMIT, structured_result_fits_model_budget,
 };
 
 pub const MODEL_BYTE_LIMIT: usize = 32_000;
@@ -20,6 +31,60 @@ const DIAGNOSTIC_TRUNCATION_MARKER: &str = "\n...[diagnostic truncated]";
 const TARGET_TOKENS: f64 = 10_000.0;
 const ENGLISH_BYTES_PER_TOKEN: f64 = 5.17;
 const CJK_BYTES_PER_TOKEN: f64 = 2.17;
+
+#[derive(Clone)]
+pub(crate) struct CallOutputBudget {
+    token_gate: Arc<OutputTokenGate>,
+    ticket: BurstTicket,
+}
+
+impl CallOutputBudget {
+    pub(crate) fn new(token_gate: Arc<OutputTokenGate>, ticket: BurstTicket) -> Self {
+        Self { token_gate, ticket }
+    }
+
+    pub(crate) fn standalone() -> Self {
+        let token_gate = OutputTokenGate::load_shared().expect("embedded tokenizer ranks");
+        let gate = BurstOutputGate::new(TOOL_CONTENT_TOKEN_LIMIT);
+        Self::new(token_gate, gate.begin_call())
+    }
+
+    pub(crate) fn ceiling(&self) -> usize {
+        self.ticket.allowance().min(TOOL_CONTENT_TOKEN_LIMIT)
+    }
+
+    pub(crate) fn project_tool_output(
+        &self,
+        text: &str,
+        image_count: usize,
+        cancellation: &CancellationToken,
+    ) -> ProjectionDecision {
+        self.token_gate
+            .project_tool_output(text, image_count, self.ceiling(), cancellation)
+    }
+
+    pub(crate) fn project_result(
+        &self,
+        result: &rmcp::model::CallToolResult,
+        ceiling: usize,
+        cancellation: &CancellationToken,
+    ) -> ProjectionDecision {
+        self.token_gate
+            .project_result(result, ceiling, cancellation)
+    }
+
+    pub(crate) fn cache_response_cost(&self, cost: ProjectedTokenCost) {
+        self.ticket.cache_response_cost(cost.tokens);
+    }
+
+    pub(crate) fn cached_response_cost(&self) -> Option<usize> {
+        self.ticket.cached_response_cost()
+    }
+
+    pub(crate) fn finish(&self, actual_tokens: usize, limited: bool) {
+        self.ticket.finish(actual_tokens, limited);
+    }
+}
 
 /// Resolve the configured output ceiling once per process.
 ///
@@ -306,8 +371,8 @@ pub enum OutputError {
     Cancelled,
     #[error("output formatter limit invariant failed")]
     InvariantViolation,
-    #[error("output metadata leaves no room for a result entry")]
-    NoProgress,
+    #[error("output does not fit the current burst token allowance")]
+    BurstLimit,
 }
 
 #[must_use]

@@ -68,6 +68,7 @@ impl Session {
             .env_remove("CODEXSHIM_PROCESS_CALLS")
             .env_remove("CODEXSHIM_DETACHED_CALLS")
             .env_remove("CODEXSHIM_BASH")
+            .env_remove("CODEXSHIM_BURST_TOKENS")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());

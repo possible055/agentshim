@@ -27,6 +27,7 @@ pub(super) fn read_pdf_text(
     pages: Vec<usize>,
     request: &ReadRequest,
     cancellation: &CancellationToken,
+    output_budget: &crate::output::CallOutputBudget,
 ) -> Result<ToolOutput, ReadError> {
     let TextRead {
         absolute,
@@ -35,7 +36,14 @@ pub(super) fn read_pdf_text(
         source_id,
     } = *read;
     if let Some(offset) = request.pdf_text_offset {
-        return resume_page(document, read, pages[0], offset, cancellation);
+        return resume_page(
+            document,
+            read,
+            pages[0],
+            offset,
+            cancellation,
+            output_budget,
+        );
     }
 
     let selected_first = pages[0];
@@ -68,6 +76,7 @@ pub(super) fn read_pdf_text(
             &candidate,
             None,
             cancellation,
+            output_budget,
         ) {
             committed = candidate;
             // The walk is forward-only, so this page's spans and content will never be
@@ -84,7 +93,7 @@ pub(super) fn read_pdf_text(
         // Not even one page fits whole, so the caller resumes inside it by byte offset
         // rather than receiving an unrecoverable truncation.
         let page = stopped_before.unwrap_or(selected_first);
-        return resume_page(document, read, page, 0, cancellation);
+        return resume_page(document, read, page, 0, cancellation, output_budget);
     }
 
     // A typed error is only right when nothing in the whole selection was usable.
@@ -224,6 +233,10 @@ fn is_fatal(error: &ReadError) -> bool {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the candidate envelope mirrors every continuation field that affects its cost"
+)]
 fn fits(
     absolute: &str,
     mode: PdfMode,
@@ -232,10 +245,11 @@ fn fits(
     pages: &[PdfPageOutcome],
     first_body: Option<&str>,
     cancellation: &CancellationToken,
+    output_budget: &crate::output::CallOutputBudget,
 ) -> bool {
     let outcome = build_text_outcome(mode, page_count, source_id, pages, first_body);
     let output = ToolOutput::new(format_pdf_outcome(absolute, &outcome));
-    output.fits_content_and_model(cancellation)
+    output.fits_content_and_call(output_budget, cancellation)
 }
 
 /// Deliver as much of one page as fits, starting at `offset`.
@@ -249,6 +263,7 @@ fn resume_page(
     page: usize,
     offset: usize,
     cancellation: &CancellationToken,
+    output_budget: &crate::output::CallOutputBudget,
 ) -> Result<ToolOutput, ReadError> {
     let TextRead {
         absolute,
@@ -283,7 +298,7 @@ fn resume_page(
             (offset + end < chunk.page_bytes).then_some(offset + end),
         );
         let output = ToolOutput::new(format_pdf_outcome(absolute, &candidate));
-        if output.fits_content_and_model(cancellation) {
+        if output.fits_content_and_call(output_budget, cancellation) {
             best = end;
             if midpoint == high {
                 break;
@@ -297,7 +312,7 @@ fn resume_page(
         }
     }
     if best == 0 {
-        return Err(crate::output::OutputError::RequiredContentTooLarge.into());
+        return Err(crate::output::OutputError::BurstLimit.into());
     }
 
     let outcome = page_chunk_outcome(

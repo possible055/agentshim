@@ -170,6 +170,7 @@ impl TopKThreshold {
     }
 }
 
+#[cfg(test)]
 pub(super) fn render(
     request: &GlobRequest,
     retained: &[GlobMatch],
@@ -177,6 +178,24 @@ pub(super) fn render(
     summary: TraversalSummary,
     cancellation: &CancellationToken,
 ) -> Result<ToolOutput, GlobError> {
+    render_with_budget(request, retained, total, summary, cancellation, None)
+}
+
+pub(super) fn render_with_budget(
+    request: &GlobRequest,
+    retained: &[GlobMatch],
+    total: usize,
+    summary: TraversalSummary,
+    cancellation: &CancellationToken,
+    output_budget: Option<&crate::output::CallOutputBudget>,
+) -> Result<ToolOutput, GlobError> {
+    let standalone;
+    let output_budget = if let Some(output_budget) = output_budget {
+        output_budget
+    } else {
+        standalone = crate::output::CallOutputBudget::standalone();
+        &standalone
+    };
     let offset = request.offset.unwrap_or(0);
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT);
     let available = retained.len().saturating_sub(offset).min(limit);
@@ -215,7 +234,7 @@ pub(super) fn render(
             continue;
         }
         let output = ToolOutput::new(formatter.finish(cancellation)?);
-        if output.fits_budget_and_model(cancellation) {
+        if output.fits_budget_and_call(output_budget, cancellation) {
             return Ok(output);
         }
         if cap == 1 {
@@ -231,13 +250,13 @@ pub(super) fn render(
             let mut formatter = OutputFormatter::new(String::new(), tail, limits)?;
             if formatter.try_push_line(PATH_OMISSION, cancellation)? {
                 let fallback = ToolOutput::new(formatter.finish(cancellation)?);
-                if fallback.fits_budget_and_model(cancellation) {
+                if fallback.fits_budget_and_call(output_budget, cancellation) {
                     return Ok(fallback);
                 }
             }
         }
         if cap == 0 {
-            return Err(crate::output::OutputError::NoProgress.into());
+            return Err(crate::output::OutputError::BurstLimit.into());
         }
         cap -= 1;
     }

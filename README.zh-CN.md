@@ -21,7 +21,7 @@
 | `run_program` | 以字面量参数列表运行单个程序，不经 shell。 |
 | `bash` | 运行 POSIX bash 命令行，返回合并后的 stdout 与 stderr。 |
 
-调用成功时返回受大小限制的文本。`read`、`grep`、`glob` 的部分结果会带续读游标，便于接着上次的位置继续。输出预算会随内容调整：CJK 密集文本会被压到更小的字节预算，因为客户端对它的 token 消耗约为英文的两倍。失败时返回统一的 `{ error: { code, message, retryable, details } }` 错误信封。
+调用成功时返回受大小限制的文本。`read`、`grep`、`glob` 的部分结果会带续读游标，便于接着上次的位置继续。输出预算会随内容调整：CJK 密集文本会被压到更小的字节预算，因为客户端对它的 token 消耗约为英文的两倍。每个实例还以 8192 token 的 burst gate 约束平行及快速连续响应的模型可见成本总和。此保护是服务端的最佳努力：它无法统计 Codex 原生工具、其他 MCP server、模型 reasoning 或工具参数，2 秒安静期也只是 burst heuristic，并非 Codex turn ID。失败时返回统一的 `{ error: { code, message, retryable, details } }` 错误信封。
 
 ## 安装
 
@@ -192,7 +192,8 @@ PDF 工作成本高，因此单一实例同时最多只跑一个 PDF 呼叫。�
 | `CODEXSHIM_MCP_COMPATIBILITY` | `lenient` | 设为 `strict` 以拒绝旧版 `2025-06-18` initialize 客户端。 |
 | `CODEXSHIM_PROCESS_CALLS` | `16` | 每个实例的进程调用并行上限，由 `run_program` 与 `bash` 共用；1–32。 |
 | `CODEXSHIM_DETACHED_CALLS` | `16` | 每个实例存活中的 detached `bash` 进程树数量；1–16。 |
-| `CODEXSHIM_OUTPUT_BYTES` | `32000` | 每次呼叫的输出上限（字节）；4096–262144。 |
+| `CODEXSHIM_OUTPUT_BYTES` | `32000` | 每次呼叫的输出上限（字节）；4096–262144。不能绕过单次 token 或共用 burst 限制。 |
+| `CODEXSHIM_BURST_TOKENS` | `8192` | 平行与快速连续工具响应共用的模型可见 token 预算；2048–8192，只能调低。 |
 | `CODEXSHIM_GREP_MEMORY_BYTES` | `268435456` | 每次 `grep` 呼叫保留候选项目的内存硬上限；8388608–1073741824。 |
 | `CODEXSHIM_GLOB_MEMORY_BYTES` | `33554432` | 每次 `glob` 呼叫保留匹配项目的内存硬上限；8388608–1073741824。 |
 | `CODEXSHIM_PDF_TEXT_MEMORY_BYTES` | `67108864` | `auto` 与 `text` 模式 PDF 读取的每次呼叫内存预算；33554432–134217728。 |
