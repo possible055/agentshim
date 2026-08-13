@@ -7,18 +7,23 @@ use std::{
 };
 
 pub(crate) const BURST_TOKENS_ENV: &str = "CODEXSHIM_BURST_TOKENS";
+#[cfg(test)]
 pub(crate) const DEFAULT_BURST_TOKENS: usize = 8_192;
+pub(crate) const CURSOR_BURST_TOKENS: usize = 32_768;
 pub(crate) const MIN_BURST_TOKENS: usize = 2_048;
-pub(crate) const MAX_BURST_TOKENS: usize = DEFAULT_BURST_TOKENS;
+pub(crate) const MAX_BURST_TOKENS: usize = CURSOR_BURST_TOKENS;
 pub(crate) const BURST_QUIET_PERIOD: Duration = Duration::from_secs(2);
 pub(crate) const MAX_CONTROL_RESPONSE_TOKENS: usize = 192;
 
-pub(crate) fn configured_burst_tokens() -> io::Result<usize> {
-    parse_burst_tokens(env::var_os(BURST_TOKENS_ENV).as_deref())
+pub(crate) fn configured_burst_tokens(profile: crate::ClientProfile) -> io::Result<usize> {
+    parse_burst_tokens(
+        env::var_os(BURST_TOKENS_ENV).as_deref(),
+        profile.default_burst_tokens(),
+    )
 }
 
-fn parse_burst_tokens(value: Option<&OsStr>) -> io::Result<usize> {
-    value.map_or(Ok(DEFAULT_BURST_TOKENS), |value| {
+fn parse_burst_tokens(value: Option<&OsStr>, default: usize) -> io::Result<usize> {
+    value.map_or(Ok(default), |value| {
         value
             .to_str()
             .and_then(|value| value.parse::<usize>().ok())
@@ -253,7 +258,7 @@ impl Drop for TicketInner {
 
 #[cfg(test)]
 mod tests {
-    use super::{BurstOutputGate, DEFAULT_BURST_TOKENS};
+    use super::{BurstOutputGate, CURSOR_BURST_TOKENS, DEFAULT_BURST_TOKENS};
     use std::time::Duration;
 
     #[test]
@@ -310,13 +315,38 @@ mod tests {
     }
 
     #[test]
+    fn cursor_budget_allows_four_full_tool_responses_in_one_burst() {
+        let gate = BurstOutputGate::new(CURSOR_BURST_TOKENS);
+        for _ in 0..4 {
+            let call = gate.begin_call();
+            assert!(call.allowance() >= DEFAULT_BURST_TOKENS);
+            call.finish(DEFAULT_BURST_TOKENS, false);
+        }
+        assert_eq!(gate.begin_call().allowance(), 0);
+    }
+
+    #[test]
     fn invalid_configuration_is_rejected() {
-        for value in ["0", "2047", "8193", "many", "-1"] {
-            assert!(super::parse_burst_tokens(Some(OsStr::new(value))).is_err());
+        for value in ["0", "2047", "32769", "many", "-1"] {
+            assert!(
+                super::parse_burst_tokens(Some(OsStr::new(value)), DEFAULT_BURST_TOKENS).is_err()
+            );
         }
         assert_eq!(
-            super::parse_burst_tokens(Some(OsStr::new("4096"))).ok(),
+            super::parse_burst_tokens(Some(OsStr::new("4096")), DEFAULT_BURST_TOKENS).ok(),
             Some(4_096)
+        );
+        assert_eq!(
+            super::parse_burst_tokens(None, DEFAULT_BURST_TOKENS).ok(),
+            Some(DEFAULT_BURST_TOKENS)
+        );
+        assert_eq!(
+            super::parse_burst_tokens(None, CURSOR_BURST_TOKENS).ok(),
+            Some(CURSOR_BURST_TOKENS)
+        );
+        assert_eq!(
+            super::parse_burst_tokens(Some(OsStr::new("32768")), DEFAULT_BURST_TOKENS).ok(),
+            Some(CURSOR_BURST_TOKENS)
         );
     }
 

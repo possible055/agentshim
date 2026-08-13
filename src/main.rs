@@ -122,7 +122,7 @@ fn run_logs_command(command: &CliCommand) -> ExitCode {
             );
             println!("retention days: {}", retention_days());
             println!("capacity bytes: {}", capacity_bytes());
-            println!("recorded dropped batches: {}", report.dropped);
+            println!("recorded dropped records: {}", report.dropped);
         }),
         CliCommand::LogsPurge => purge(&config).map(|report| {
             println!("deleted files: {}", report.files);

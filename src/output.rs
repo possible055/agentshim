@@ -17,9 +17,10 @@ pub(crate) use burst_gate::{
 
 pub(crate) use token_gate::{
     GateDecision, OutputTokenGate, ProjectedTokenCost, ProjectionDecision,
-    TOOL_CONTENT_TOKEN_LIMIT, structured_result_fits_model_budget,
+    structured_result_fits_model_budget,
 };
 
+pub(crate) const CALL_OUTPUT_TOKEN_LIMIT: usize = 8_192;
 pub const MODEL_BYTE_LIMIT: usize = 32_000;
 pub const MIN_OUTPUT_BYTES: usize = 4_096;
 pub const MAX_OUTPUT_BYTES: usize = 262_144;
@@ -45,12 +46,12 @@ impl CallOutputBudget {
 
     pub(crate) fn standalone() -> Self {
         let token_gate = OutputTokenGate::load_shared().expect("embedded tokenizer ranks");
-        let gate = BurstOutputGate::new(TOOL_CONTENT_TOKEN_LIMIT);
+        let gate = BurstOutputGate::new(CALL_OUTPUT_TOKEN_LIMIT);
         Self::new(token_gate, gate.begin_call())
     }
 
     pub(crate) fn ceiling(&self) -> usize {
-        self.ticket.allowance().min(TOOL_CONTENT_TOKEN_LIMIT)
+        self.ticket.allowance().min(CALL_OUTPUT_TOKEN_LIMIT)
     }
 
     pub(crate) fn project_tool_output(

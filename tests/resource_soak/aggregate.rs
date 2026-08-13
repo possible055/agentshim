@@ -61,6 +61,10 @@ fn four_instance_aggregate_process_soak() {
         "process_calls_per_instance": CALLS_PER_INSTANCE,
         "aggregate_process_calls": INSTANCE_COUNT * CALLS_PER_INSTANCE,
         "iterations": iterations,
+        "workload_iterations": iterations,
+        "measured_iterations": iterations,
+        "burst_epoch_policy": "one aggregate batch per production burst epoch",
+        "burst_quiet_ms": BURST_QUIET_MS,
         "started_unix_ms": SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time")
@@ -75,7 +79,12 @@ fn four_instance_aggregate_process_soak() {
             session
         })
         .collect::<Vec<_>>();
-    let mut samples = Vec::new();
+    artifact.write(&json!({
+        "record_type": "sessions",
+        "server_pids": sessions.iter().map(Session::pid).collect::<Vec<_>>(),
+    }));
+    let mut memory_samples = Vec::new();
+    let mut resource_samples = Vec::new();
 
     for iteration in 1..=iterations {
         for session in &mut sessions {
@@ -108,10 +117,31 @@ fn four_instance_aggregate_process_soak() {
             {
                 break current;
             }
-            assert!(
-                Instant::now() < peak_deadline,
-                "aggregate children did not reach expected peak"
-            );
+            if Instant::now() >= peak_deadline {
+                let active_descendant_pids = current
+                    .into_iter()
+                    .flat_map(|sample| sample.descendants)
+                    .collect::<Vec<_>>();
+                let server_exit_statuses =
+                    sessions.drain(..).map(Session::close).collect::<Vec<_>>();
+                artifact.write(&json!({
+                    "record_type": "result",
+                    "outcome": "fail",
+                    "failure_kind": "peak_timeout",
+                    "iteration": iteration,
+                    "tool": "run_program",
+                    "request_id": Value::Null,
+                    "error_code": "aggregate_peak_timeout",
+                    "error_details": Value::Null,
+                    "active_descendant_pids": active_descendant_pids,
+                    "server_exit_statuses": server_exit_statuses,
+                    "finished_unix_ms": SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("system time")
+                        .as_millis(),
+                }));
+                panic!("aggregate children did not reach expected peak");
+            }
             thread::sleep(Duration::from_millis(10));
         };
         let peak_descendant_count = peak
@@ -123,23 +153,79 @@ fn four_instance_aggregate_process_soak() {
             "aggregate process tree did not contain every direct child"
         );
 
-        for session in &mut sessions {
+        let mut tool_failure = None;
+        'responses: for session in &mut sessions {
             for _ in 0..CALLS_PER_INSTANCE {
                 let response = session.receive_any();
-                assert_eq!(
-                    response["result"]["isError"], false,
-                    "aggregate process failed: {response}"
-                );
+                if response["result"]["isError"] != false
+                    || response["result"]["resultType"] != "complete"
+                {
+                    tool_failure = Some(ToolCallFailure::from_response(
+                        "run_program",
+                        response["id"].as_u64().expect("numeric request ID"),
+                        response,
+                    ));
+                    break 'responses;
+                }
             }
+        }
+        if let Some(failure) = tool_failure {
+            let active_descendant_pids = sessions
+                .iter()
+                .filter_map(|session| platform::sample(session.pid()).ok())
+                .flat_map(|sample| sample.descendants)
+                .collect::<Vec<_>>();
+            let server_exit_statuses = sessions.drain(..).map(Session::close).collect::<Vec<_>>();
+            artifact.write(&json!({
+                "record_type": "result",
+                "outcome": "fail",
+                "failure_kind": "tool",
+                "iteration": iteration,
+                "tool": failure.tool,
+                "request_id": failure.request_id,
+                "error_code": failure.code,
+                "error_details": failure.details,
+                "response": failure.response,
+                "active_descendant_pids": active_descendant_pids,
+                "server_exit_statuses": server_exit_statuses,
+                "finished_unix_ms": SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time")
+                    .as_millis(),
+            }));
+            panic!(
+                "{} request {} failed during aggregate iteration {}",
+                failure.tool, failure.request_id, iteration
+            );
         }
         let settled = sessions
             .iter()
             .map(|session| platform::sample(session.pid()).expect("sample settled server"))
             .collect::<Vec<_>>();
-        assert!(
-            settled.iter().all(|sample| sample.descendants.is_empty()),
-            "aggregate descendants survived completion"
-        );
+        if settled.iter().any(|sample| !sample.descendants.is_empty()) {
+            let active_descendant_pids = settled
+                .iter()
+                .flat_map(|sample| sample.descendants.iter().copied())
+                .collect::<Vec<_>>();
+            let server_exit_statuses = sessions.drain(..).map(Session::close).collect::<Vec<_>>();
+            artifact.write(&json!({
+                "record_type": "result",
+                "outcome": "fail",
+                "failure_kind": "surviving_descendants",
+                "iteration": iteration,
+                "tool": "run_program",
+                "request_id": Value::Null,
+                "error_code": "controlled_descendants_survived",
+                "error_details": Value::Null,
+                "active_descendant_pids": active_descendant_pids,
+                "server_exit_statuses": server_exit_statuses,
+                "finished_unix_ms": SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time")
+                    .as_millis(),
+            }));
+            panic!("aggregate descendants survived completion");
+        }
         let memory_bytes = settled
             .iter()
             .map(|sample| sample.resources.memory_bytes)
@@ -158,7 +244,13 @@ fn four_instance_aggregate_process_soak() {
             .iter()
             .map(|sample| sample.resources.threads)
             .sum::<u64>();
-        samples.push((iteration, memory_bytes));
+        memory_samples.push((iteration, memory_bytes));
+        resource_samples.push(ResourceSample {
+            memory_bytes,
+            virtual_memory_bytes,
+            resource_count,
+            threads,
+        });
         artifact.write(&json!({
             "record_type": "sample",
             "iteration": iteration,
@@ -169,33 +261,55 @@ fn four_instance_aggregate_process_soak() {
             "peak_descendant_count": peak_descendant_count,
             "settled_descendant_count": 0,
         }));
+        wait_for_next_burst_epoch(iteration, iterations);
     }
 
     let server_exit_statuses = sessions.into_iter().map(Session::close).collect::<Vec<_>>();
-    let initial_memory = samples.first().expect("initial aggregate sample").1;
-    let final_memory = samples.last().expect("final aggregate sample").1;
-    let tail_sample_count = samples.len().min(10);
-    let tail_samples = &samples[samples.len() - tail_sample_count..];
+    let initial_memory = memory_samples.first().expect("initial aggregate sample").1;
+    let final_memory = memory_samples.last().expect("final aggregate sample").1;
+    let tail_sample_count = memory_samples.len().min(10);
+    let tail_samples = &memory_samples[memory_samples.len() - tail_sample_count..];
     let tail_initial_memory = tail_samples.first().expect("initial tail sample").1;
     let tail_final_memory = tail_samples.last().expect("final tail sample").1;
+    let resource_growth = sustained_tail_growth(&resource_samples, |sample| sample.resource_count);
+    let thread_growth = sustained_tail_growth(&resource_samples, |sample| sample.threads);
+    let passed = server_exit_statuses.iter().all(|status| status.success)
+        && !resource_growth
+        && !thread_growth;
     artifact.write(&json!({
         "record_type": "result",
-        "outcome": "measured",
+        "outcome": if passed { "pass" } else { "fail" },
         "server_exit_statuses": server_exit_statuses,
         "initial_memory_bytes": initial_memory,
         "final_memory_bytes": final_memory,
         "retained_growth_bytes": final_memory.saturating_sub(initial_memory),
-        "least_squares_bytes_per_iteration": request_slope(&samples),
+        "least_squares_bytes_per_iteration": request_slope(&memory_samples),
         "tail_sample_count": tail_sample_count,
         "tail_net_growth_bytes": i64::try_from(tail_final_memory).expect("memory fits i64")
             - i64::try_from(tail_initial_memory).expect("memory fits i64"),
         "tail_least_squares_bytes_per_iteration": request_slope(tail_samples),
         "surviving_descendants": [],
-        "threshold_policy": "zero surviving descendants is blocking; full and tail growth slopes are release evidence",
+        "resources": metric_summary(&resource_samples, |sample| sample.resource_count),
+        "threads": metric_summary(&resource_samples, |sample| sample.threads),
+        "resource_tail_growth_blocking": resource_growth,
+        "thread_tail_growth_blocking": thread_growth,
+        "threshold_policy": "zero surviving descendants is blocking; resource and thread tail growth require net growth >= 3, slope >= 0.25 per iteration, and increases in at least half of tail transitions; memory growth is observational",
         "finished_unix_ms": SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time")
             .as_millis(),
     }));
+    assert!(
+        !resource_growth,
+        "aggregate resource count grew throughout the tail"
+    );
+    assert!(
+        !thread_growth,
+        "aggregate thread count grew throughout the tail"
+    );
+    assert!(
+        server_exit_statuses.iter().all(|status| status.success),
+        "an aggregate server exited unsuccessfully"
+    );
     println!("aggregate soak artifact: {}", artifact.path.display());
 }

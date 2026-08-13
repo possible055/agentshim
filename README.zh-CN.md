@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-`codexshim` 为 `codex` CLI 提供一组小而聚焦的源代码工具。它以本地 stdio MCP 服务形式运行，并将启动目录作为仓库根目录。
+`codexshim` 为 Codex 与 Cursor 提供一组小而聚焦的源代码工具。它以本地 stdio MCP 服务形式运行，并将启动目录作为仓库根目录。
 
 ## 为什么使用
 
@@ -21,7 +21,7 @@
 | `run_program` | 以字面量参数列表运行单个程序，不经 shell。 |
 | `bash` | 运行 POSIX bash 命令行，返回合并后的 stdout 与 stderr。 |
 
-调用成功时返回受大小限制的文本。`read`、`grep`、`glob` 的部分结果会带续读游标，便于接着上次的位置继续。输出预算会随内容调整：CJK 密集文本会被压到更小的字节预算，因为客户端对它的 token 消耗约为英文的两倍。每个实例还以 8192 token 的 burst gate 约束平行及快速连续响应的模型可见成本总和。此保护是服务端的最佳努力：它无法统计 Codex 原生工具、其他 MCP server、模型 reasoning 或工具参数，2 秒安静期也只是 burst heuristic，并非 Codex turn ID。失败时返回统一的 `{ error: { code, message, retryable, details } }` 错误信封。
+调用成功时返回受大小限制的文本。`read`、`grep`、`glob` 的部分结果会带续读游标，便于接着上次的位置继续。输出预算会随内容调整：CJK 密集文本会被压到更小的字节预算，因为客户端对它的 token 消耗约为英文的两倍。每次响应仍受 8192 token 单次上限约束；每个实例另以 burst gate 约束平行及快速连续响应的模型可见成本总和，`codex` profile 默认为 8192 token，`cursor` profile 默认为 32768 token。此保护是服务端的最佳努力：它无法统计原生工具、其他 MCP server、模型 reasoning 或工具参数，2 秒安静期也只是 burst heuristic，并非客户端 turn ID。失败时返回统一的 `{ error: { code, message, retryable, details } }` 错误信封。
 
 ## 安装
 
@@ -78,7 +78,7 @@ cargo run --locked -- doctor
 ```toml
 [mcp_servers.codexshim]
 command = "/absolute/path/to/codexshim"
-args = ["serve"]
+args = ["serve", "--client-profile", "codex"]
 required = true
 supports_parallel_tool_calls = true
 startup_timeout_sec = 15
@@ -107,7 +107,34 @@ mcp_2026_07_28 = true
 
 `supports_parallel_tool_calls = true` 允许 Codex 并行调用 codexshim 的工具。每个实例独立允许最多 16 个活动进程调用（`run_program` 与前景 `bash`）、16 个活动只读调用（`read`、`grep`、`glob` 合计），以及 16 棵存活中的 detached 进程树。某一类满载时，调用立即失败并返回可重试的 `resource_busy` 错误。codexshim 无法判断两个并行调用在语义上是否冲突——不要对同一工作树并行发出变更性命令。
 
+## 配置 Cursor
+
+将 [Cursor 示例](config/cursor.mcp.json.example)复制到 `~/.cursor/mcp.json`，把 `command` 替换为二进制文件的绝对路径，然后重启 Cursor：
+
+```json
+{
+  "mcpServers": {
+    "codexshim": {
+      "type": "stdio",
+      "command": "/absolute/path/to/codexshim",
+      "args": ["serve", "--client-profile", "cursor"]
+    }
+  }
+}
+```
+
+Cursor profile 保留 8192 token 的单次上限，但将共享 burst 预算提高到 32768 token，以适配 Cursor 快速依序发送的工具批次。Windows JSON 路径必须转义每个反斜杠，例如 `"C:\\Users\\me\\AppData\\Local\\codexshim\\bin\\codexshim.exe"`。
+
 ## 选项
+
+### `--client-profile`
+
+选择 aggregate 输出策略。为保持向后兼容，默认值为 `codex`；`cursor` 允许更大的快速响应总量，但保留相同的单次上限。
+
+| 值 | 单次 token 上限 | 默认 burst token |
+| --- | ---: | ---: |
+| `codex`（默认） | 8192 | 8192 |
+| `cursor` | 8192 | 32768 |
 
 ### `--read-scope`
 
@@ -204,7 +231,7 @@ PDF 工作成本高，因此单一实例同时最多只跑一个 PDF 呼叫。�
 | `CODEXSHIM_PROCESS_CALLS` | `16` | 每个实例的进程调用并行上限，由 `run_program` 与 `bash` 共用；1–32。 |
 | `CODEXSHIM_DETACHED_CALLS` | `16` | 每个实例存活中的 detached `bash` 进程树数量；1–16。 |
 | `CODEXSHIM_OUTPUT_BYTES` | `32000` | 每次呼叫的输出上限（字节）；4096–262144。不能绕过单次 token 或共用 burst 限制。 |
-| `CODEXSHIM_BURST_TOKENS` | `8192` | 平行与快速连续工具响应共用的模型可见 token 预算；2048–8192，只能调低。 |
+| `CODEXSHIM_BURST_TOKENS` | profile 默认值 | 覆写平行与快速连续工具响应共用的模型可见 token 预算；2048–32768。可将 `codex` profile 提高到其安全默认值以上。 |
 | `CODEXSHIM_GREP_MEMORY_BYTES` | `268435456` | 每次 `grep` 呼叫保留候选项目的内存硬上限；8388608–1073741824。 |
 | `CODEXSHIM_GLOB_MEMORY_BYTES` | `33554432` | 每次 `glob` 呼叫保留匹配项目的内存硬上限；8388608–1073741824。 |
 | `CODEXSHIM_PDF_TEXT_MEMORY_BYTES` | `67108864` | `auto` 与 `text` 模式 PDF 读取的每次呼叫内存预算；33554432–134217728。 |

@@ -2,7 +2,7 @@
 
 English | [简体中文](README.zh-CN.md)
 
-`codexshim` gives the `codex` CLI a small, focused set of tools for working with source code. It runs as a local stdio MCP server and treats the directory you start it in as the repository root.
+`codexshim` gives Codex and Cursor a small, focused set of tools for working with source code. It runs as a local stdio MCP server and treats the directory you start it in as the repository root.
 
 ## Why use it
 
@@ -21,7 +21,7 @@ English | [简体中文](README.zh-CN.md)
 | `run_program` | Run one program with a literal argument list, without a shell. |
 | `bash` | Run a POSIX bash command line and return merged stdout and stderr. |
 
-Successful calls return bounded text. Partial `read`, `grep`, and `glob` results include a continuation cursor so you can pick up where you left off. The output budget adapts to content: CJK-dense text gets a smaller byte budget because the client tokenizes it about twice as densely as English. A per-instance 8,192-token burst gate also bounds the aggregate projected model cost of parallel and rapidly consecutive responses. It is a server-side best effort: it cannot account for Codex native tools, other MCP servers, model reasoning, or tool arguments, and its two-second quiet period is a burst heuristic rather than a Codex turn identifier. Failures return a stable `{ error: { code, message, retryable, details } }` envelope.
+Successful calls return bounded text. Partial `read`, `grep`, and `glob` results include a continuation cursor so you can pick up where you left off. The output budget adapts to content: CJK-dense text gets a smaller byte budget because clients tokenize it about twice as densely as English. Every response remains subject to an 8,192-token per-call ceiling. A per-instance burst gate also bounds the aggregate projected model cost of parallel and rapidly consecutive responses: the `codex` profile defaults to 8,192 tokens and the `cursor` profile to 32,768. It is a server-side best effort: it cannot account for native tools, other MCP servers, model reasoning, or tool arguments, and its two-second quiet period is a burst heuristic rather than a client turn identifier. Failures return a stable `{ error: { code, message, retryable, details } }` envelope.
 
 ## Install
 
@@ -78,7 +78,7 @@ Copy the matching example into `~/.codex/config.toml` (user-level) or a project'
 ```toml
 [mcp_servers.codexshim]
 command = "/absolute/path/to/codexshim"
-args = ["serve"]
+args = ["serve", "--client-profile", "codex"]
 required = true
 supports_parallel_tool_calls = true
 startup_timeout_sec = 15
@@ -107,7 +107,34 @@ Start Codex in the repository you want to work on. `codexshim` treats that worki
 
 `supports_parallel_tool_calls = true` lets Codex issue codexshim tools concurrently. Each instance independently admits up to 16 active process calls (`run_program` and foreground `bash`), 16 active read-only calls (`read`, `grep`, `glob` combined), and 16 live detached trees. When a class is full, the call fails fast with a retryable `resource_busy` error. codexshim cannot tell whether two concurrent calls conflict semantically — do not issue state-changing commands against the same working tree in parallel.
 
+## Configure Cursor
+
+Copy the [Cursor example](config/cursor.mcp.json.example) to `~/.cursor/mcp.json`, replace `command` with the absolute path to the binary, and restart Cursor:
+
+```json
+{
+  "mcpServers": {
+    "codexshim": {
+      "type": "stdio",
+      "command": "/absolute/path/to/codexshim",
+      "args": ["serve", "--client-profile", "cursor"]
+    }
+  }
+}
+```
+
+The Cursor profile keeps the 8,192-token per-call ceiling but raises the shared burst budget to 32,768 tokens for Cursor's rapidly sequenced tool batches. On Windows, JSON paths must escape each backslash, for example `"C:\\Users\\me\\AppData\\Local\\codexshim\\bin\\codexshim.exe"`.
+
 ## Options
+
+### `--client-profile`
+
+Selects the aggregate output policy. `codex` is the default for backward compatibility; `cursor` permits a larger rapid-response aggregate while retaining the same per-call ceiling.
+
+| Value | Per-call token ceiling | Default burst tokens |
+| --- | ---: | ---: |
+| `codex` (default) | 8,192 | 8,192 |
+| `cursor` | 8,192 | 32,768 |
 
 ### `--read-scope`
 
@@ -204,7 +231,7 @@ Each mode also has a wall-clock ceiling: 5 s for `auto` and `text`, 10 s for `im
 | `CODEXSHIM_PROCESS_CALLS` | `16` | Per-instance concurrent process-call limit shared by `run_program` and `bash`; 1–32. |
 | `CODEXSHIM_DETACHED_CALLS` | `16` | Per-instance live detached `bash` trees; 1–16. |
 | `CODEXSHIM_OUTPUT_BYTES` | `32000` | Per-call output ceiling in bytes; 4096–262144. This cannot bypass the per-call token or shared burst limits. |
-| `CODEXSHIM_BURST_TOKENS` | `8192` | Shared projected model-token budget for parallel and rapidly consecutive tool responses; 2048–8192 and may only be lowered. |
+| `CODEXSHIM_BURST_TOKENS` | profile default | Overrides the shared projected model-token budget for parallel and rapidly consecutive tool responses; 2048–32768. This can raise the `codex` profile above its safety default. |
 | `CODEXSHIM_GREP_MEMORY_BYTES` | `268435456` | Per-call hard limit for retained `grep` candidates; 8388608–1073741824. |
 | `CODEXSHIM_GLOB_MEMORY_BYTES` | `33554432` | Per-call hard limit for retained `glob` matches; 8388608–1073741824. |
 | `CODEXSHIM_PDF_TEXT_MEMORY_BYTES` | `67108864` | Per-call memory budget for `auto` and `text` PDF reads; 33554432–134217728. |
@@ -220,7 +247,7 @@ Logs are written as UTC-dated JSONL files:
 - Windows: `%LOCALAPPDATA%\codexshim\logs`
 - Linux: `${XDG_STATE_HOME:-$HOME/.local/state}/codexshim/logs`
 
-Retention: 64 MiB per file part, 128 MiB per UTC day, 512 MiB total, 30 days. The active day is always preserved. Inspect or purge explicitly:
+Retention: 64 MiB per file part, 128 MiB per UTC day, 512 MiB total, 30 days. Automatic maintenance runs when the writer starts and whenever a long-running process crosses into a new UTC day. It keeps historical JSONL at or below 384 MiB, reserving a full 128 MiB for the active day, so JSONL stays within the 512 MiB limit. The final 1 MiB of the daily allowance is reserved for a shutdown drop summary; ordinary events may use up to 127 MiB. Small lock and maintenance stamp files are outside this JSONL limit. Inspect or purge explicitly:
 
 ```console
 codexshim logs status
@@ -228,6 +255,26 @@ codexshim logs purge
 ```
 
 Records contain identifiers, phases, outcomes, timings, and error classes — never MCP arguments, grep patterns, process arguments or environment, stdin, file contents, or stdout/stderr.
+
+`server_ready` means the initial rmcp lifecycle completed and the stdio service loop is ready; it
+does not prove that the client requested the tool catalog. The `tools_list` event confirms that
+codexshim created a successful response containing its five tools (`read`, `grep`, `glob`,
+`run_program`, and `bash`). `tools_list_sent` confirms that response was written successfully to
+the local stdout pipe, while `stdout_write_error` records a server-side delivery failure.
+`tools_list` and its delivery event share a codexshim-generated opaque `request_id`; the client's
+original JSON-RPC ID is never persisted.
+The control-plane events are `initialize`, `initialized`, `discover`, and `tools_list`; they
+cover both legacy MCP lifecycle sessions and the modern discovery lifecycle.
+
+`CODEXSHIM_LOG_MODE=errors` writes an error and its recent context, so a successful handshake
+that ends before a tool call is not persisted. While reproducing tool-loading failures, set
+`CODEXSHIM_LOG_MODE=all` to persist every control-plane event. These records show whether the
+server handled a tool-list request, but cannot prove that Codex consumed the response, injected
+the list into a model turn, or that the model chose to use a tool.
+
+`dropped_since_last` counts diagnostic records, not queue batches. When a normal shutdown still
+has an unreported count, `diagnostics_drop_summary` persists it from the reserved daily space.
+`codexshim logs status` reports the sum visible in retained JSONL as `recorded dropped records`.
 
 ## License
 

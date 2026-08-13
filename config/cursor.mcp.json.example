@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "codexshim": {
+      "type": "stdio",
+      "command": "/absolute/path/to/codexshim",
+      "args": ["serve", "--client-profile", "cursor"]
+    }
+  }
+}

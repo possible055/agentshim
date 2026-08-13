@@ -505,7 +505,7 @@ fn normalize_burst_render_error(
     error: ProcessError,
     output_budget: &crate::output::CallOutputBudget,
 ) -> ProcessError {
-    if output_budget.ceiling() < crate::output::TOOL_CONTENT_TOKEN_LIMIT
+    if output_budget.ceiling() < crate::output::CALL_OUTPUT_TOKEN_LIMIT
         && matches!(
             error,
             ProcessError::Output(crate::output::OutputError::RequiredContentTooLarge)

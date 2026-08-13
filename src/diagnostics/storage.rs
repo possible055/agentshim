@@ -14,12 +14,14 @@ use chrono::{Days, NaiveDate, Utc};
 use serde_json::{Value, json};
 
 use super::core::{
-    DAY_BYTES, DiagnosticsConfig, LINE_BYTES, LOCK_RETRY, LOCK_WAIT, LogMode, MAX_BATCH_RECORDS,
-    PART_BYTES, QueuedBatch, RETENTION_DAYS, Record, TOTAL_BYTES, WRITER_BATCH_WAIT,
+    DAY_BYTES, DiagnosticsConfig, EVENT_DAY_BYTES, HISTORICAL_BYTES, LINE_BYTES, LOCK_RETRY,
+    LOCK_WAIT, LogMode, MAINTENANCE_RETRY, MAX_BATCH_RECORDS, PART_BYTES, QueuedBatch,
+    RETENTION_DAYS, Record, TOTAL_BYTES, WRITER_BATCH_WAIT, base_record, batch_loss_count,
 };
 
 pub(super) fn writer_loop(
     directory: &Path,
+    instance_id: &str,
     receiver: &Receiver<QueuedBatch>,
     dropped: &AtomicU64,
     queued_bytes: &AtomicUsize,
@@ -27,15 +29,18 @@ pub(super) fn writer_loop(
     warned: &mut bool,
 ) {
     let mut pending = None;
-    loop {
+    let mut maintenance = WriterMaintenance::default();
+    'writer: loop {
         let first = match pending.take() {
             Some(batch) => batch,
             None => loop {
                 match receiver.recv_timeout(WRITER_BATCH_WAIT) {
                     Ok(batch) => break batch,
-                    Err(RecvTimeoutError::Timeout) if shutdown.load(Ordering::Acquire) => return,
+                    Err(RecvTimeoutError::Timeout) if shutdown.load(Ordering::Acquire) => {
+                        break 'writer;
+                    }
                     Err(RecvTimeoutError::Timeout) => {}
-                    Err(RecvTimeoutError::Disconnected) => return,
+                    Err(RecvTimeoutError::Disconnected) => break 'writer,
                 }
             },
         };
@@ -58,11 +63,20 @@ pub(super) fn writer_loop(
                 Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
             }
         }
-        if let Err(error) = write_batch(directory, &records) {
-            dropped.fetch_add(
-                u64::try_from(records.len()).unwrap_or(u64::MAX),
-                Ordering::Relaxed,
-            );
+        let date = Utc::now().date_naive();
+        match maintenance.prepare(directory, date, Instant::now()) {
+            Ok(true) => records.insert(0, maintenance_recovered_record(instance_id)),
+            Ok(false) => {}
+            Err(_) => {
+                restore_batch_loss(dropped, &records);
+                if maintenance.take_warning() {
+                    eprintln!("codexshim diagnostics maintenance unavailable; retrying");
+                }
+                continue;
+            }
+        }
+        if let Err(error) = write_batch_at(directory, &records, date) {
+            restore_batch_loss(dropped, &records);
             if !*warned {
                 eprintln!(
                     "{}",
@@ -73,6 +87,97 @@ pub(super) fn writer_loop(
                 *warned = true;
             }
         }
+    }
+    write_shutdown_summary(directory, instance_id, dropped, maintenance.failed);
+}
+
+#[derive(Default)]
+pub(super) struct WriterMaintenance {
+    maintained_date: Option<NaiveDate>,
+    retry_at: Option<Instant>,
+    failed: bool,
+    warning_pending: bool,
+}
+
+impl WriterMaintenance {
+    pub(super) fn prepare(
+        &mut self,
+        directory: &Path,
+        date: NaiveDate,
+        now: Instant,
+    ) -> io::Result<bool> {
+        if self.maintained_date == Some(date) {
+            return Ok(false);
+        }
+        if self.retry_at.is_some_and(|retry_at| retry_at > now) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "diagnostics maintenance retry pending",
+            ));
+        }
+        match automatic_maintenance(directory, date) {
+            Ok(()) => {
+                self.maintained_date = Some(date);
+                self.retry_at = None;
+                let recovered = std::mem::take(&mut self.failed);
+                Ok(recovered)
+            }
+            Err(error) => {
+                self.retry_at = Some(now + MAINTENANCE_RETRY);
+                if !self.failed {
+                    self.warning_pending = true;
+                }
+                self.failed = true;
+                Err(error)
+            }
+        }
+    }
+
+    fn take_warning(&mut self) -> bool {
+        std::mem::take(&mut self.warning_pending)
+    }
+}
+
+pub(super) fn restore_batch_loss(dropped: &AtomicU64, records: &[Record]) {
+    dropped.fetch_add(batch_loss_count(records), Ordering::Relaxed);
+}
+
+fn maintenance_recovered_record(instance_id: &str) -> Record {
+    let mut record = base_record(instance_id, "INFO", "diagnostics_maintenance");
+    record.insert("phase".to_owned(), json!("storage"));
+    record.insert("outcome".to_owned(), json!("success"));
+    record.insert("reason".to_owned(), json!("retry_recovered"));
+    record
+}
+
+pub(super) fn write_shutdown_summary(
+    directory: &Path,
+    instance_id: &str,
+    dropped: &AtomicU64,
+    maintenance_failed: bool,
+) {
+    let count = dropped.swap(0, Ordering::AcqRel);
+    if count == 0 {
+        return;
+    }
+    let date = Utc::now().date_naive();
+    if automatic_maintenance(directory, date).is_err() {
+        dropped.fetch_add(count, Ordering::Relaxed);
+        eprintln!("codexshim diagnostics shutdown summary unavailable");
+        return;
+    }
+    let mut records = Vec::with_capacity(2);
+    if maintenance_failed {
+        records.push(maintenance_recovered_record(instance_id));
+    }
+    let mut summary = base_record(instance_id, "WARN", "diagnostics_drop_summary");
+    summary.insert("phase".to_owned(), json!("shutdown"));
+    summary.insert("reason".to_owned(), json!("shutdown"));
+    summary.insert("dropped_since_last".to_owned(), json!(count));
+    records.push(summary);
+    if write_summary_at(directory, &records, date).is_err() {
+        dropped.fetch_add(count, Ordering::Relaxed);
+        eprintln!("codexshim diagnostics shutdown summary unavailable");
     }
 }
 
@@ -111,21 +216,52 @@ pub(super) fn serialize_batch(batch: &[Record]) -> io::Result<Vec<u8>> {
     Ok(output)
 }
 
+#[cfg(test)]
 pub(super) fn write_batch(directory: &Path, batch: &[Record]) -> io::Result<()> {
+    write_batch_at(directory, batch, Utc::now().date_naive())
+}
+
+pub(super) fn write_batch_at(
+    directory: &Path,
+    batch: &[Record],
+    date: NaiveDate,
+) -> io::Result<()> {
+    write_batch_with_limit(directory, batch, date, EVENT_DAY_BYTES)
+}
+
+fn write_summary_at(directory: &Path, batch: &[Record], date: NaiveDate) -> io::Result<()> {
+    write_batch_with_limit(directory, batch, date, DAY_BYTES)
+}
+
+fn write_batch_with_limit(
+    directory: &Path,
+    batch: &[Record],
+    date: NaiveDate,
+    daily_limit: u64,
+) -> io::Result<()> {
     if batch.is_empty() {
         return Ok(());
     }
     let bytes = serialize_batch(batch)?;
-    let date = Utc::now().date_naive();
     let lock_path = directory.join(format!("codexshim-{date}.lock"));
     let lock = open_private_append(&lock_path)?;
     acquire_lock(&lock, LOCK_WAIT)?;
-    let result = append_rotated(directory, date, &bytes);
+    let result = append_rotated_with_limit(directory, date, &bytes, daily_limit);
     let unlock = crate::platform::diagnostics::unlock_file(&lock);
     result.and(unlock)
 }
 
+#[cfg(test)]
 pub(super) fn append_rotated(directory: &Path, date: NaiveDate, bytes: &[u8]) -> io::Result<()> {
+    append_rotated_with_limit(directory, date, bytes, EVENT_DAY_BYTES)
+}
+
+fn append_rotated_with_limit(
+    directory: &Path,
+    date: NaiveDate,
+    bytes: &[u8],
+    daily_limit: u64,
+) -> io::Result<()> {
     let incoming = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     let mut daily = 0_u64;
     for part in 1..=2 {
@@ -133,7 +269,7 @@ pub(super) fn append_rotated(directory: &Path, date: NaiveDate, bytes: &[u8]) ->
         let length = fs::metadata(&path).map_or(0, |metadata| metadata.len());
         daily = daily.saturating_add(length);
         if length.saturating_add(incoming) <= PART_BYTES {
-            if daily.saturating_add(incoming) > DAY_BYTES {
+            if daily.saturating_add(incoming) > daily_limit {
                 break;
             }
             let mut file = open_private_append(&path)?;
@@ -221,20 +357,16 @@ pub(super) fn parse_log_date(name: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()
 }
 
-pub(super) fn automatic_maintenance(directory: &Path) -> io::Result<()> {
+pub(super) fn automatic_maintenance(directory: &Path, today: NaiveDate) -> io::Result<()> {
     let lock = open_private_append(&directory.join(".maintenance.lock"))?;
-    if !crate::platform::diagnostics::try_lock_file(&lock)? {
-        return Ok(());
-    }
-    let today = Utc::now().date_naive();
+    acquire_lock(&lock, LOCK_WAIT)?;
     let stamp_path = directory.join(".last-maintenance");
-    let already_ran =
-        fs::read_to_string(&stamp_path).is_ok_and(|value| value.trim() == today.to_string());
+    let stamp = format!("strict-{today}");
+    let already_ran = fs::read_to_string(&stamp_path).is_ok_and(|value| value.trim() == stamp);
     let result = if already_ran {
         Ok(())
     } else {
-        purge_directory(directory, today)
-            .and_then(|_| write_private(&stamp_path, today.to_string().as_bytes()))
+        purge_directory(directory, today).and_then(|_| write_private(&stamp_path, stamp.as_bytes()))
     };
     let unlock = crate::platform::diagnostics::unlock_file(&lock);
     result.and(unlock)
@@ -270,16 +402,20 @@ pub(super) fn purge_directory(directory: &Path, today: NaiveDate) -> io::Result<
         }
     }
     logs.retain(|log| log.path.exists());
-    let mut total = logs.iter().map(|log| log.bytes).sum::<u64>();
+    let mut historical = logs
+        .iter()
+        .filter(|log| log.date != today)
+        .map(|log| log.bytes)
+        .sum::<u64>();
     for log in logs {
-        if total <= TOTAL_BYTES {
+        if historical <= HISTORICAL_BYTES {
             break;
         }
         if log.date == today {
             continue;
         }
         fs::remove_file(&log.path)?;
-        total = total.saturating_sub(log.bytes);
+        historical = historical.saturating_sub(log.bytes);
         report.files += 1;
         report.bytes = report.bytes.saturating_add(log.bytes);
     }

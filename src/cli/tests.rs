@@ -4,7 +4,7 @@ use super::{
     CliCommand, ReceiveFrameReader, ServeOptions, ShutdownReader, parse_command,
     transport::MAX_RECEIVE_FRAME_BYTES,
 };
-use codexshim::ReadScope;
+use codexshim::{ClientProfile, ReadScope};
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 
@@ -40,6 +40,22 @@ fn read_scope_defaults_and_accepts_both_argument_forms() {
 }
 
 #[test]
+fn client_profile_defaults_to_codex_and_accepts_both_argument_forms() {
+    assert_eq!(
+        serve_options(parse(&["serve"])).client_profile,
+        ClientProfile::Codex
+    );
+    assert_eq!(
+        serve_options(parse(&["serve", "--client-profile", "cursor"])).client_profile,
+        ClientProfile::Cursor
+    );
+    assert_eq!(
+        serve_options(parse(&["doctor", "--client-profile=codex"])).client_profile,
+        ClientProfile::Codex
+    );
+}
+
+#[test]
 fn read_scope_rejects_incomplete_duplicate_and_unknown_arguments() {
     for args in [
         &["serve", "--read-scope"][..],
@@ -50,6 +66,15 @@ fn read_scope_rejects_incomplete_duplicate_and_unknown_arguments() {
             "--read-scope",
             "normal",
             "--read-scope=unrestricted",
+        ][..],
+        &["serve", "--client-profile"][..],
+        &["serve", "--client-profile="][..],
+        &["serve", "--client-profile", "unknown"][..],
+        &[
+            "serve",
+            "--client-profile",
+            "codex",
+            "--client-profile=cursor",
         ][..],
         &["serve", "--unknown"][..],
         &["--version", "extra"][..],

@@ -14,7 +14,7 @@ use rmcp::{
         InitializeRequestParams, InitializeResult, ListToolsResult, PaginatedRequestParams,
         ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
     },
-    service::RequestContext,
+    service::{NotificationContext, RequestContext},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -34,6 +34,7 @@ use crate::{
 #[cfg(test)]
 use super::response::{queue_timeout_message, tool_error};
 use super::{
+    ToolsListCorrelation,
     catalog::tool_catalog,
     dispatch::{ToolAdmissionFailure, shell_delegate},
     response::{diagnostic_tool_error, resource_busy, resource_busy_with_message},
@@ -54,6 +55,10 @@ const SUPPORTED_PROTOCOLS: &[ProtocolVersion] = &[
     ProtocolVersion::V_2025_03_26,
     ProtocolVersion::V_2024_11_05,
 ];
+const TOOLSET: &str = "read,grep,glob,run_program,bash";
+const TOOL_COUNT: u64 = 5;
+const TOOLS_CACHE_TTL_MS: u64 = 300_000;
+const TOOLS_CACHE_SCOPE: &str = "private";
 
 #[derive(Clone)]
 pub struct CodexShim {
@@ -65,12 +70,14 @@ pub struct CodexShim {
     pub(super) bash_locator: BashLocator,
     pub(super) output_token_gate: Arc<OutputTokenGate>,
     pub(super) burst_output_gate: Arc<BurstOutputGate>,
+    client_profile: crate::ClientProfile,
 }
 
 pub struct CodexShimBuilder {
     root: PathBuf,
     read_scope: ReadScope,
     runtime: RuntimeConfig,
+    client_profile: crate::ClientProfile,
 }
 
 impl CodexShimBuilder {
@@ -84,6 +91,7 @@ impl CodexShimBuilder {
             root: root.into(),
             read_scope: ReadScope::default(),
             runtime: RuntimeConfig::from_env()?,
+            client_profile: crate::ClientProfile::default(),
         })
     }
 
@@ -99,6 +107,13 @@ impl CodexShimBuilder {
         self
     }
 
+    /// Select the client-specific aggregate output defaults.
+    #[must_use]
+    pub fn client_profile(mut self, client_profile: crate::ClientProfile) -> Self {
+        self.client_profile = client_profile;
+        self
+    }
+
     /// Open the repository capability and build the MCP service.
     ///
     /// # Errors
@@ -107,7 +122,8 @@ impl CodexShimBuilder {
     pub fn build(self) -> io::Result<CodexShim> {
         let root = Arc::new(RepositoryRoot::open(self.root)?);
         let output_token_gate = OutputTokenGate::load_shared().map_err(io::Error::other)?;
-        let burst_output_gate = BurstOutputGate::new(crate::output::configured_burst_tokens()?);
+        let burst_output_gate =
+            BurstOutputGate::new(crate::output::configured_burst_tokens(self.client_profile)?);
         Ok(CodexShim {
             file_access: Arc::new(FileAccess::new(Arc::clone(&root), self.read_scope)),
             root,
@@ -117,6 +133,7 @@ impl CodexShimBuilder {
             process_resolver: ProcessResolver::capture(),
             output_token_gate,
             burst_output_gate,
+            client_profile: self.client_profile,
         })
     }
 }
@@ -153,6 +170,18 @@ impl CodexShim {
     #[must_use]
     pub fn burst_token_limit(&self) -> usize {
         self.burst_output_gate.limit()
+    }
+
+    /// Return the fixed token ceiling applied to one tool response.
+    #[must_use]
+    pub fn tool_output_token_limit(&self) -> usize {
+        crate::output::CALL_OUTPUT_TOKEN_LIMIT
+    }
+
+    /// Return the selected client output profile.
+    #[must_use]
+    pub fn client_profile(&self) -> crate::ClientProfile {
+        self.client_profile
     }
 
     #[must_use]
@@ -232,8 +261,18 @@ impl CodexShim {
     #[must_use]
     pub fn tools_result_for(read_scope: ReadScope) -> ListToolsResult {
         ListToolsResult::with_all_items(tool_catalog(read_scope).to_vec())
-            .with_ttl_ms(300_000)
+            .with_ttl_ms(TOOLS_CACHE_TTL_MS)
             .with_cache_scope(CacheScope::Private)
+    }
+
+    fn request_identity(context: &RequestContext<RoleServer>) -> (String, String, String) {
+        let protocol = context
+            .protocol_version()
+            .map_or_else(|| "unknown".to_owned(), |version| version.to_string());
+        let Some(client) = context.client_info() else {
+            return (protocol, "unknown".to_owned(), "unknown".to_owned());
+        };
+        (protocol, client.name, client.version)
     }
 
     fn server_info(read_scope: ReadScope) -> ServerInfo {
@@ -269,18 +308,58 @@ impl ServerHandler for CodexShim {
 
     async fn discover(
         &self,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<DiscoverResult, McpError> {
-        tracing::info!(target: "codexshim", event = "discover", phase = "protocol");
+        let (protocol, client_name, client_version) = Self::request_identity(&context);
+        tracing::info!(target: "codexshim", event = "discover", phase = "protocol", protocol, client_name, client_version);
         Ok(Self::discovery_result_for(self.read_scope()))
     }
 
     async fn list_tools(
         &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        Ok(Self::tools_result_for(self.read_scope()))
+        let (protocol, client_name, client_version) = Self::request_identity(&context);
+        let has_cursor = request.is_some_and(|request| request.cursor.is_some());
+        let result = Self::tools_result_for(self.read_scope());
+        if let Some(correlation) = context.extensions.get::<ToolsListCorrelation>() {
+            tracing::info!(
+                target: "codexshim",
+                event = "tools_list",
+                phase = "protocol",
+                outcome = "success",
+                protocol,
+                client_name,
+                client_version,
+                request_id = correlation.0,
+                tool_count = TOOL_COUNT,
+                toolset = TOOLSET,
+                has_cursor,
+                cache_ttl_ms = TOOLS_CACHE_TTL_MS,
+                cache_scope = TOOLS_CACHE_SCOPE
+            );
+        } else {
+            tracing::info!(
+                target: "codexshim",
+                event = "tools_list",
+                phase = "protocol",
+                outcome = "success",
+                protocol,
+                client_name,
+                client_version,
+                tool_count = TOOL_COUNT,
+                toolset = TOOLSET,
+                has_cursor,
+                cache_ttl_ms = TOOLS_CACHE_TTL_MS,
+                cache_scope = TOOLS_CACHE_SCOPE
+            );
+        }
+        Ok(result)
+    }
+
+    async fn on_initialized(&self, _context: NotificationContext<RoleServer>) {
+        tracing::info!(target: "codexshim", event = "initialized", phase = "protocol");
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {

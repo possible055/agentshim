@@ -17,7 +17,7 @@ use tracing::{Event, Subscriber};
 use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
 use uuid::Uuid;
 
-use super::storage::{automatic_maintenance, prepare_directory, writer_loop};
+use super::storage::{prepare_directory, writer_loop};
 
 pub const LOG_MODE_ENV: &str = "CODEXSHIM_LOG_MODE";
 pub const LOG_DIR_ENV: &str = "CODEXSHIM_LOG_DIR";
@@ -31,9 +31,13 @@ pub(super) const LOCK_WAIT: Duration = Duration::from_secs(1);
 pub(super) const LOCK_RETRY: Duration = Duration::from_millis(5);
 pub(super) const PART_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) const DAY_BYTES: u64 = 128 * 1024 * 1024;
+pub(super) const SUMMARY_RESERVE_BYTES: u64 = 1024 * 1024;
+pub(super) const EVENT_DAY_BYTES: u64 = DAY_BYTES - SUMMARY_RESERVE_BYTES;
 pub(super) const TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+pub(super) const HISTORICAL_BYTES: u64 = TOTAL_BYTES - DAY_BYTES;
 pub(super) const RETENTION_DAYS: u64 = 30;
 pub(super) const LINE_BYTES: usize = 8 * 1024;
+pub(super) const MAINTENANCE_RETRY: Duration = Duration::from_secs(60);
 const DIAGNOSTIC_BYTES: usize = 2 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -184,9 +188,22 @@ fn allowed_field(name: &str) -> bool {
             | "protocol"
             | "client_name"
             | "client_version"
+            | "client_profile"
             | "read_scope"
             | "reason"
             | "diagnostic"
+            | "tool_count"
+            | "toolset"
+            | "has_cursor"
+            | "cache_ttl_ms"
+            | "cache_scope"
+            | "frame_limit_bytes"
+            | "framework"
+            | "framework_target"
+            | "framework_event"
+            | "request_id"
+            | "tool_output_tokens"
+            | "burst_tokens"
     )
 }
 
@@ -203,6 +220,30 @@ fn truncate_utf8(value: &str, limit: usize) -> String {
 
 pub(super) type Record = Map<String, Value>;
 type Batch = Vec<Record>;
+
+pub(super) fn base_record(instance_id: &str, level: &str, event: &str) -> Record {
+    let mut record = Map::new();
+    record.insert("schema_version".to_owned(), json!(SCHEMA_VERSION));
+    record.insert("ts".to_owned(), json!(Utc::now().to_rfc3339()));
+    record.insert("level".to_owned(), json!(level));
+    record.insert("event".to_owned(), json!(event));
+    record.insert("instance_id".to_owned(), json!(instance_id));
+    record.insert("pid".to_owned(), json!(std::process::id()));
+    record.insert("version".to_owned(), json!(env!("CARGO_PKG_VERSION")));
+    record
+}
+
+pub(super) fn batch_loss_count(batch: &[Record]) -> u64 {
+    let records = u64::try_from(batch.len()).unwrap_or(u64::MAX);
+    batch.iter().fold(records, |total, record| {
+        total.saturating_add(
+            record
+                .get("dropped_since_last")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        )
+    })
+}
 
 pub(super) struct QueuedBatch {
     pub(super) records: Batch,
@@ -225,14 +266,7 @@ impl Recorder {
             .remove("event")
             .and_then(|value| value.as_str().map(str::to_owned))
             .unwrap_or_else(|| "tracing_event".to_owned());
-        let mut record = Map::new();
-        record.insert("schema_version".to_owned(), json!(SCHEMA_VERSION));
-        record.insert("ts".to_owned(), json!(Utc::now().to_rfc3339()));
-        record.insert("level".to_owned(), json!(level));
-        record.insert("event".to_owned(), json!(event));
-        record.insert("instance_id".to_owned(), json!(self.instance_id));
-        record.insert("pid".to_owned(), json!(std::process::id()));
-        record.insert("version".to_owned(), json!(env!("CARGO_PKG_VERSION")));
+        let mut record = base_record(&self.instance_id, level, &event);
         for (key, value) in fields {
             record.insert(key, value);
         }
@@ -269,6 +303,10 @@ impl Recorder {
         if let Some(writer) = &self.writer
             && let Err(error) = writer.start()
         {
+            self.dropped.fetch_add(
+                u64::try_from(batch.len()).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
             writer.warn_once(&error);
             return;
         }
@@ -287,7 +325,7 @@ impl Recorder {
     }
 
     fn send_one(&self, batch: Batch) {
-        let batch_len = u64::try_from(batch.len()).unwrap_or(u64::MAX);
+        let lost = batch_loss_count(&batch);
         let charge = batch.len().saturating_mul(LINE_BYTES);
         if self
             .queued_bytes
@@ -298,7 +336,7 @@ impl Recorder {
             })
             .is_err()
         {
-            self.dropped.fetch_add(batch_len, Ordering::Relaxed);
+            self.dropped.fetch_add(lost, Ordering::Relaxed);
             return;
         }
         match self.sender.try_send(QueuedBatch {
@@ -308,7 +346,7 @@ impl Recorder {
             Ok(()) => {}
             Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
                 self.queued_bytes.fetch_sub(charge, Ordering::AcqRel);
-                self.dropped.fetch_add(batch_len, Ordering::Relaxed);
+                self.dropped.fetch_add(lost, Ordering::Relaxed);
             }
         }
     }
@@ -322,6 +360,7 @@ enum WriterState {
 
 struct LazyWriter {
     directory: PathBuf,
+    instance_id: String,
     state: Mutex<WriterState>,
     started: AtomicBool,
     shutdown: Arc<AtomicBool>,
@@ -333,12 +372,14 @@ struct LazyWriter {
 impl LazyWriter {
     fn new(
         directory: PathBuf,
+        instance_id: String,
         receiver: Receiver<QueuedBatch>,
         dropped: Arc<AtomicU64>,
         queued_bytes: Arc<AtomicUsize>,
     ) -> Self {
         Self {
             directory,
+            instance_id,
             state: Mutex::new(WriterState::Pending(receiver)),
             started: AtomicBool::new(false),
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -384,16 +425,17 @@ impl LazyWriter {
             unreachable!("pending diagnostics writer state changed while locked");
         };
         let directory = self.directory.clone();
+        let instance_id = self.instance_id.clone();
         let dropped = Arc::clone(&self.dropped);
         let queued_bytes = Arc::clone(&self.queued_bytes);
         let shutdown = Arc::clone(&self.shutdown);
         let writer = thread::Builder::new()
             .name("codexshim-log-writer".to_owned())
             .spawn(move || {
-                let _ = automatic_maintenance(&directory);
                 let mut warned = false;
                 writer_loop(
                     &directory,
+                    &instance_id,
                     &receiver,
                     &dropped,
                     &queued_bytes,
@@ -490,7 +532,12 @@ where
             {
                 self.recorder.record(
                     metadata.level().as_str(),
-                    BTreeMap::from([("event".to_owned(), json!("rmcp_internal"))]),
+                    BTreeMap::from([
+                        ("event".to_owned(), json!("rmcp_internal")),
+                        ("framework".to_owned(), json!("rmcp")),
+                        ("framework_target".to_owned(), json!(metadata.target())),
+                        ("framework_event".to_owned(), json!(metadata.name())),
+                    ]),
                 );
             }
             return;
@@ -545,8 +592,10 @@ impl DiagnosticsGuard {
         let (sender, receiver) = mpsc::sync_channel::<QueuedBatch>(CHANNEL_BATCHES);
         let dropped = Arc::new(AtomicU64::new(0));
         let queued_bytes = Arc::new(AtomicUsize::new(0));
+        let instance_id = Uuid::new_v4().to_string();
         let writer = Arc::new(LazyWriter::new(
             config.directory.clone(),
+            instance_id.clone(),
             receiver,
             Arc::clone(&dropped),
             Arc::clone(&queued_bytes),
@@ -554,7 +603,6 @@ impl DiagnosticsGuard {
         if config.mode == LogMode::All {
             writer.start()?;
         }
-        let instance_id = Uuid::new_v4().to_string();
         let recorder = Arc::new(Recorder {
             mode: config.mode,
             instance_id: instance_id.clone(),

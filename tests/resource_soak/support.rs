@@ -37,17 +37,22 @@ impl Session {
         assert_eq!(response["result"]["capabilities"], json!({ "tools": {} }));
     }
 
-    pub(super) fn call_tool(&mut self, name: &str, arguments: Value) -> Value {
+    pub(super) fn call_tool(
+        &mut self,
+        name: &'static str,
+        arguments: Value,
+    ) -> Result<Value, ToolCallFailure> {
         let mut params = Map::new();
         params.insert("name".to_owned(), json!(name));
         params.insert("arguments".to_owned(), arguments);
-        let response = self.request("tools/call", params);
-        assert_eq!(
-            response["result"]["isError"], false,
-            "{name} failed: {response}"
-        );
-        assert_eq!(response["result"]["resultType"], "complete");
-        response
+        let id = self.send_request("tools/call", params);
+        let response = self.receive(id);
+        if response["result"]["isError"] == false && response["result"]["resultType"] == "complete"
+        {
+            Ok(response)
+        } else {
+            Err(ToolCallFailure::from_response(name, id, response))
+        }
     }
 
     pub(super) fn send_tool(&mut self, name: &str, arguments: Value) -> u64 {
@@ -95,7 +100,7 @@ impl Session {
         serde_json::from_str(&line).expect("response JSON")
     }
 
-    pub(super) fn close(mut self) -> String {
+    pub(super) fn close(mut self) -> SessionExit {
         self.stdin.take();
         let deadline = Instant::now() + Duration::from_secs(10);
         let status = loop {
@@ -108,8 +113,42 @@ impl Session {
             }
             thread::sleep(Duration::from_millis(10));
         };
-        assert!(status.success(), "server exited with {status}");
-        status.to_string()
+        SessionExit {
+            success: status.success(),
+            status: status.to_string(),
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct SessionExit {
+    pub(super) success: bool,
+    pub(super) status: String,
+}
+
+#[derive(Debug)]
+pub(super) struct ToolCallFailure {
+    pub(super) tool: &'static str,
+    pub(super) request_id: u64,
+    pub(super) code: String,
+    pub(super) details: Value,
+    pub(super) response: Value,
+}
+
+impl ToolCallFailure {
+    pub(super) fn from_response(tool: &'static str, request_id: u64, response: Value) -> Self {
+        let code = response["result"]["structuredContent"]["error"]["code"]
+            .as_str()
+            .unwrap_or("unexpected_tool_response")
+            .to_owned();
+        let details = response["result"]["structuredContent"]["error"]["details"].clone();
+        Self {
+            tool,
+            request_id,
+            code,
+            details,
+            response,
+        }
     }
 }
 
@@ -235,21 +274,27 @@ pub(super) fn warm_up_count(iterations: usize) -> usize {
     }
 }
 
-pub(super) fn run_mixed_cycle(session: &mut Session) -> Value {
-    let read = session.call_tool("read", json!({ "path": "Cargo.toml", "line_count": 40 }));
+pub(super) fn wait_for_next_burst_epoch(iteration: usize, iterations: usize) {
+    if iteration < iterations {
+        thread::sleep(Duration::from_millis(BURST_QUIET_MS));
+    }
+}
+
+pub(super) fn run_mixed_cycle(session: &mut Session) -> Result<Value, ToolCallFailure> {
+    let read = session.call_tool("read", json!({ "path": "Cargo.toml", "line_count": 12 }))?;
     let glob = session.call_tool(
         "glob",
-        json!({ "path": "src", "pattern": "**/*.rs", "limit": 100 }),
-    );
+        json!({ "path": "src", "pattern": "**/*.rs", "limit": 20 }),
+    )?;
     let grep = session.call_tool(
         "grep",
         json!({
             "path": "src",
             "pattern": "codexshim",
             "glob": "*.rs",
-            "limit": 100,
+            "limit": 20,
         }),
-    );
+    )?;
     let process = session.call_tool(
         "run_program",
         json!({
@@ -258,18 +303,26 @@ pub(super) fn run_mixed_cycle(session: &mut Session) -> Value {
             "cwd": env!("CARGO_MANIFEST_DIR"),
             "timeout_ms": 30_000,
         }),
-    );
+    )?;
     let process_text = process["result"]["content"][0]["text"]
         .as_str()
         .expect("process text");
-    assert!(process_text.contains("Exit code: 0"));
+    if !process_text.contains("Exit code: 0") {
+        return Err(ToolCallFailure {
+            tool: "run_program",
+            request_id: process["id"].as_u64().expect("numeric request ID"),
+            code: "unexpected_process_output".to_owned(),
+            details: Value::Null,
+            response: process,
+        });
+    }
 
-    json!({
+    Ok(json!({
         "read": outcome(&read),
         "glob": outcome(&glob),
         "grep": outcome(&grep),
         "run_program": outcome(&process),
-    })
+    }))
 }
 
 pub(super) fn outcome(response: &Value) -> &'static str {
@@ -334,6 +387,54 @@ pub(super) fn metric_summary(
         "least_squares_slope_per_iteration": slope(&values),
         "window_size": window,
     })
+}
+
+pub(super) fn sustained_tail_growth(
+    samples: &[ResourceSample],
+    select: fn(&ResourceSample) -> u64,
+) -> bool {
+    const MIN_NET_GROWTH: u64 = 3;
+    const MIN_SLOPE_PER_ITERATION: f64 = 0.25;
+
+    let tail_count = samples.len().min(10);
+    if tail_count < 4 {
+        return false;
+    }
+    let values = samples[samples.len() - tail_count..]
+        .iter()
+        .map(select)
+        .collect::<Vec<_>>();
+    let positive_steps = values.windows(2).filter(|pair| pair[1] > pair[0]).count();
+    let required_positive_steps = (values.len() - 1).div_ceil(2);
+    values.last().expect("tail value").saturating_sub(values[0]) >= MIN_NET_GROWTH
+        && slope(&values) >= MIN_SLOPE_PER_ITERATION
+        && positive_steps >= required_positive_steps
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ResourceSample, sustained_tail_growth};
+
+    fn sample(resource_count: u64) -> ResourceSample {
+        ResourceSample {
+            memory_bytes: 0,
+            virtual_memory_bytes: None,
+            resource_count,
+            threads: resource_count,
+        }
+    }
+
+    #[test]
+    fn sustained_growth_requires_net_slope_and_repeated_increases() {
+        let growing = (10..20).map(sample).collect::<Vec<_>>();
+        let stable = [10, 10, 11, 10, 10, 11, 10, 10, 10, 10]
+            .into_iter()
+            .map(sample)
+            .collect::<Vec<_>>();
+
+        assert!(sustained_tail_growth(&growing, |value| value.resource_count));
+        assert!(!sustained_tail_growth(&stable, |value| value.resource_count));
+    }
 }
 
 #[cfg(unix)]

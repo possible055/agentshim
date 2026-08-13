@@ -1,9 +1,15 @@
 use std::{error::Error, ffi::OsString};
 
-use codexshim::{CodexShim, MAX_READ_ONLY_CALLS, ReadScope, RuntimeLimits, bash_report};
-use rmcp::{ServiceExt, transport::stdio};
+use codexshim::{
+    ClientProfile, CodexShim, MAX_READ_ONLY_CALLS, ReadScope, RuntimeLimits, bash_report,
+};
+use rmcp::{
+    ServiceExt,
+    service::{QuitReason, ServerInitializeError},
+    transport::{IntoTransport, stdio},
+};
 
-use self::transport::{DiagnosticWriter, ReceiveFrameReader, ShutdownReader};
+use self::transport::{DiagnosticTransport, ReceiveFrameReader, ShutdownReader};
 
 mod transport;
 
@@ -12,13 +18,15 @@ mod tests;
 
 pub(super) fn usage() {
     eprintln!(
-        "Usage: codexshim <serve|doctor> [--read-scope <normal|unrestricted>] | logs <status|purge> | --version"
+        "Usage: codexshim <serve|doctor> [--read-scope <normal|unrestricted>] \
+         [--client-profile <codex|cursor>] | logs <status|purge> | --version"
     );
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ServeOptions {
     read_scope: ReadScope,
+    client_profile: ClientProfile,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -63,6 +71,7 @@ pub(super) fn parse_command(
     }
 
     let mut read_scope = None;
+    let mut client_profile = None;
     while let Some(argument) = args.next() {
         let argument = argument
             .to_str()
@@ -79,12 +88,23 @@ pub(super) fn parse_command(
                         .map_err(|error| error.to_string())?,
                 );
             }
+            "--client-profile" => {
+                if client_profile.is_some() {
+                    return Err("--client-profile may be specified only once".to_owned());
+                }
+                client_profile = Some(
+                    value
+                        .parse::<ClientProfile>()
+                        .map_err(|error| error.to_string())?,
+                );
+            }
             _ => return Err(format!("unknown argument: {argument}")),
         }
     }
 
     let options = ServeOptions {
         read_scope: read_scope.unwrap_or_default(),
+        client_profile: client_profile.unwrap_or_default(),
     };
     match kind {
         "serve" => Ok(CliCommand::Serve(options)),
@@ -138,9 +158,11 @@ pub(super) async fn run(config: RuntimeLimits, command: CliCommand) -> Result<()
     match command {
         CliCommand::Serve(options) => {
             let read_scope = options.read_scope;
+            let client_profile = options.client_profile;
             let service = CodexShim::builder(std::env::current_dir()?)?
                 .runtime_limits(config)
                 .read_scope(read_scope)
+                .client_profile(client_profile)
                 .build()?;
             let (stdin, stdout) = stdio();
             let reader = ShutdownReader {
@@ -148,49 +170,49 @@ pub(super) async fn run(config: RuntimeLimits, command: CliCommand) -> Result<()
                 shutdown: service.shutdown_token(),
                 termination_reported: false,
             };
-            tracing::info!(target: "codexshim", event = "server_start", phase = "lifecycle", read_scope = %read_scope, burst_tokens = service.burst_token_limit());
+            tracing::info!(target: "codexshim", event = "server_start", phase = "lifecycle", read_scope = %read_scope, client_profile = %service.client_profile(), tool_output_tokens = service.tool_output_token_limit(), burst_tokens = service.burst_token_limit());
             let shutdown = service.clone();
-            let running = service.serve((reader, DiagnosticWriter(stdout))).await?;
+            let shutdown_token = service.shutdown_token();
+            let transport = (reader, stdout).into_transport();
+            let (transport, transport_failure) =
+                DiagnosticTransport::new(transport, shutdown_token);
+            let running = match service.serve(transport).await {
+                Ok(running) => running,
+                Err(error) => {
+                    shutdown.terminate_detached();
+                    tracing::error!(target: "codexshim", event = "server_stop", phase = "lifecycle", outcome = "error", error_class = initialize_error_class(&error));
+                    return Err(error.into());
+                }
+            };
             tracing::info!(target: "codexshim", event = "server_ready", phase = "lifecycle");
             let outcome = running.waiting().await;
             shutdown.terminate_detached();
-            outcome?;
-            tracing::info!(target: "codexshim", event = "server_stop", phase = "lifecycle");
-        }
-        CliCommand::Doctor(options) => {
-            let service = CodexShim::builder(std::env::current_dir()?)?
-                .runtime_limits(config)
-                .read_scope(options.read_scope)
-                .build()?;
-            service.verify_root()?;
-            service.verify_process_runtime()?;
-            println!("codexshim doctor: ok");
-            println!("root: {}", service.root_path().display());
-            println!("protocol: 2026-07-28");
-            println!("read scope: {}", service.read_scope());
-            println!("read-only calls: {MAX_READ_ONLY_CALLS}");
-            println!("process calls: {}", service.runtime_limits().process_calls);
-            println!(
-                "detached calls: {}",
-                service.runtime_limits().detached_calls
-            );
-            println!("output bytes: {}", service.runtime_limits().output_bytes);
-            println!("burst tokens: {}", service.burst_token_limit());
-            print_memory_limits(service.runtime_limits());
-            match bash_report() {
-                Ok((executable, locale)) => {
-                    println!("bash: {}", executable.display());
-                    println!("bash locale: {locale}");
+            match outcome {
+                Ok(QuitReason::Closed) if transport_failure.failed() => {
+                    tracing::error!(target: "codexshim", event = "server_stop", phase = "lifecycle", outcome = "error", error_class = "transport");
+                    return Err("MCP transport failed".into());
                 }
-                Err(error) => println!("bash: unavailable ({error})"),
+                Ok(QuitReason::Closed) => {
+                    tracing::info!(target: "codexshim", event = "server_stop", phase = "lifecycle", outcome = "success", reason = "transport_closed");
+                }
+                Ok(QuitReason::Cancelled) if transport_failure.failed() => {
+                    tracing::error!(target: "codexshim", event = "server_stop", phase = "lifecycle", outcome = "error", error_class = "transport");
+                    return Err("MCP transport failed".into());
+                }
+                Ok(QuitReason::Cancelled) => {
+                    tracing::info!(target: "codexshim", event = "server_stop", phase = "lifecycle", outcome = "success", reason = "shutdown");
+                }
+                Ok(QuitReason::JoinError(error)) | Err(error) => {
+                    tracing::error!(target: "codexshim", event = "server_stop", phase = "lifecycle", outcome = "error", error_class = "framework");
+                    return Err(error.into());
+                }
+                Ok(_) => {
+                    tracing::error!(target: "codexshim", event = "server_stop", phase = "lifecycle", outcome = "error", error_class = "framework");
+                    return Err("MCP server stopped for an unknown reason".into());
+                }
             }
-            println!("process lifecycle: ok");
-            println!("worker lanes: {}", service.runtime_limits().worker_lanes);
-            println!(
-                "blocking threads: {}",
-                service.runtime_limits().blocking_threads
-            );
         }
+        CliCommand::Doctor(options) => run_doctor(config, &options)?,
         CliCommand::Version => {
             println!("codexshim {}", env!("CARGO_PKG_VERSION"));
         }
@@ -199,4 +221,55 @@ pub(super) async fn run(config: RuntimeLimits, command: CliCommand) -> Result<()
         }
     }
     Ok(())
+}
+
+fn run_doctor(config: RuntimeLimits, options: &ServeOptions) -> Result<(), Box<dyn Error>> {
+    let service = CodexShim::builder(std::env::current_dir()?)?
+        .runtime_limits(config)
+        .read_scope(options.read_scope)
+        .client_profile(options.client_profile)
+        .build()?;
+    service.verify_root()?;
+    service.verify_process_runtime()?;
+    println!("codexshim doctor: ok");
+    println!("root: {}", service.root_path().display());
+    println!("protocol: 2026-07-28");
+    println!("read scope: {}", service.read_scope());
+    println!("read-only calls: {MAX_READ_ONLY_CALLS}");
+    println!("process calls: {}", service.runtime_limits().process_calls);
+    println!(
+        "detached calls: {}",
+        service.runtime_limits().detached_calls
+    );
+    println!("output bytes: {}", service.runtime_limits().output_bytes);
+    println!("client profile: {}", service.client_profile());
+    println!("tool output tokens: {}", service.tool_output_token_limit());
+    println!("burst tokens: {}", service.burst_token_limit());
+    print_memory_limits(service.runtime_limits());
+    match bash_report() {
+        Ok((executable, locale)) => {
+            println!("bash: {}", executable.display());
+            println!("bash locale: {locale}");
+        }
+        Err(error) => println!("bash: unavailable ({error})"),
+    }
+    println!("process lifecycle: ok");
+    println!("worker lanes: {}", service.runtime_limits().worker_lanes);
+    println!(
+        "blocking threads: {}",
+        service.runtime_limits().blocking_threads
+    );
+    Ok(())
+}
+
+fn initialize_error_class(error: &ServerInitializeError) -> &'static str {
+    match error {
+        ServerInitializeError::ExpectedInitializeRequest(_)
+        | ServerInitializeError::UnexpectedInitializeResponse(_)
+        | ServerInitializeError::InitializeFailed(_) => "protocol",
+        ServerInitializeError::ConnectionClosed(_)
+        | ServerInitializeError::TransportError { .. } => "transport",
+        ServerInitializeError::Cancelled => "cancelled",
+        _ => "server_initialize",
+    }
 }

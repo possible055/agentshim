@@ -35,14 +35,21 @@ fn doctor_reports_resolved_runtime_capacity() {
         assert!(stdout.contains("grep memory bytes: 268435456"));
         assert!(stdout.contains("glob memory bytes: 33554432"));
         assert!(stdout.contains("global memory bytes: 268435456"));
+        assert!(stdout.contains("client profile: codex"));
+        assert!(stdout.contains("tool output tokens: 8192"));
         assert!(stdout.contains("burst tokens: 8192"));
         assert!(stdout.contains(&format!("blocking threads: {blocking_threads}")));
     }
 }
 
 #[test]
-fn burst_budget_can_only_be_lowered_inside_its_safe_range() {
-    for (value, expected) in [("2048", "2048"), ("4096", "4096"), ("8192", "8192")] {
+fn burst_budget_override_accepts_the_global_safe_range() {
+    for (value, expected) in [
+        ("2048", "2048"),
+        ("4096", "4096"),
+        ("8192", "8192"),
+        ("32768", "32768"),
+    ] {
         let output = Command::new(env!("CARGO_BIN_EXE_codexshim"))
             .arg("doctor")
             .current_dir(env!("CARGO_MANIFEST_DIR"))
@@ -54,7 +61,7 @@ fn burst_budget_can_only_be_lowered_inside_its_safe_range() {
         let stdout = String::from_utf8(output.stdout).expect("doctor stdout");
         assert!(stdout.contains(&format!("burst tokens: {expected}")));
     }
-    for value in ["0", "2047", "8193", "many", "-1"] {
+    for value in ["0", "2047", "32769", "many", "-1"] {
         let output = Command::new(env!("CARGO_BIN_EXE_codexshim"))
             .arg("doctor")
             .current_dir(env!("CARGO_MANIFEST_DIR"))
@@ -69,6 +76,26 @@ fn burst_budget_can_only_be_lowered_inside_its_safe_range() {
                 .contains("CODEXSHIM_BURST_TOKENS")
         );
     }
+}
+
+#[test]
+fn cursor_profile_uses_larger_default_burst_budget() {
+    let output = Command::new(env!("CARGO_BIN_EXE_codexshim"))
+        .args(["doctor", "--client-profile", "cursor"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env_remove("CODEXSHIM_BURST_TOKENS")
+        .env("CODEXSHIM_LOG_MODE", "off")
+        .output()
+        .expect("run doctor");
+    assert!(
+        output.status.success(),
+        "doctor failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("doctor stdout");
+    assert!(stdout.contains("client profile: cursor"));
+    assert!(stdout.contains("tool output tokens: 8192"));
+    assert!(stdout.contains("burst tokens: 32768"));
 }
 
 #[test]

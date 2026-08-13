@@ -12,13 +12,17 @@ const READMES: [(&str, &str); 2] = [
     ("README.zh-CN.md", include_str!("../README.zh-CN.md")),
 ];
 
+const CURSOR_EXAMPLE: &str = include_str!("../config/cursor.mcp.json.example");
+const CODEX_ARGS: &str = r#"args = ["serve", "--client-profile", "codex"]"#;
+
 /// The settings that must not drift between the examples and the documentation. A stale
 /// `tool_timeout_sec` in particular makes the client give up before the server's own ceiling.
-const REQUIRED_SETTINGS: [&str; 4] = [
+const REQUIRED_SETTINGS: [&str; 5] = [
+    "required = true",
     "supports_parallel_tool_calls = true",
+    "startup_timeout_sec = 15",
     "tool_timeout_sec = 600",
     r#"enabled_tools = ["read", "grep", "glob", "run_program", "bash"]"#,
-    r#"args = ["serve"]"#,
 ];
 
 #[test]
@@ -27,6 +31,10 @@ fn codex_examples_and_readmes_agree_on_required_settings() {
         for setting in REQUIRED_SETTINGS {
             assert!(text.contains(setting), "{source} must document `{setting}`");
         }
+        assert!(
+            text.contains(CODEX_ARGS),
+            "{source} must document `{CODEX_ARGS}`"
+        );
         for stale in [
             "run_process",
             "tool_timeout_sec = 310",
@@ -34,6 +42,25 @@ fn codex_examples_and_readmes_agree_on_required_settings() {
         ] {
             assert!(!text.contains(stale), "{source} still mentions `{stale}`");
         }
+    }
+}
+
+#[test]
+fn cursor_example_is_valid_json_and_selects_cursor_profile() {
+    let example: serde_json::Value =
+        serde_json::from_str(CURSOR_EXAMPLE).expect("Cursor example must be valid JSON");
+    let server = &example["mcpServers"]["codexshim"];
+    assert_eq!(server["type"], "stdio");
+    assert_eq!(server["command"], "/absolute/path/to/codexshim");
+    assert_eq!(
+        server["args"],
+        serde_json::json!(["serve", "--client-profile", "cursor"])
+    );
+    for (readme, text) in READMES {
+        assert!(
+            text.contains("config/cursor.mcp.json.example"),
+            "{readme} must link the Cursor example"
+        );
     }
 }
 

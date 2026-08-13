@@ -4,11 +4,12 @@ use std::{
 };
 
 use chrono::{Days, NaiveDate};
+use tracing_subscriber::prelude::*;
 
 use super::*;
 use crate::diagnostics::storage::{
-    append_rotated, list_logs, log_path, parse_log_date, purge_directory, serialize_batch,
-    write_batch,
+    WriterMaintenance, append_rotated, list_logs, log_path, parse_log_date, purge_directory,
+    serialize_batch, status, write_batch, write_shutdown_summary,
 };
 
 fn record(event: &str) -> Record {
@@ -70,6 +71,73 @@ fn field_allowlist_redacts_sensitive_inputs_and_outputs() {
     assert!(allowed_field("call_id"));
     assert!(allowed_field("error_class"));
     assert!(allowed_field("shell_delegate"));
+    for field in [
+        "tool_count",
+        "toolset",
+        "has_cursor",
+        "cache_ttl_ms",
+        "cache_scope",
+        "client_profile",
+        "tool_output_tokens",
+        "burst_tokens",
+        "frame_limit_bytes",
+        "framework",
+        "framework_target",
+        "framework_event",
+        "request_id",
+    ] {
+        assert!(
+            allowed_field(field),
+            "control-plane field rejected: {field}"
+        );
+    }
+}
+
+#[test]
+fn control_plane_fields_are_persisted_without_sensitive_inputs() {
+    let (recorder, receiver) = test_recorder(LogMode::All, 1);
+    let subscriber = tracing_subscriber::registry().with(DiagnosticsLayer::new(Arc::new(recorder)));
+
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::info!(
+            target: "codexshim",
+            event = "tools_list",
+            tool_count = 5_u64,
+            toolset = "read,grep,glob,run_program,bash",
+            has_cursor = false,
+            cache_ttl_ms = 300_000_u64,
+            cache_scope = "private",
+            client_profile = "cursor",
+            tool_output_tokens = 8_192_u64,
+            burst_tokens = 32_768_u64,
+            frame_limit_bytes = 8_388_608_u64,
+            framework = "rmcp",
+            framework_target = "rmcp::service",
+            framework_event = "request_rejected",
+            request_id = "31d54ba8-c1c4-4efd-b596-47208981144a",
+            arguments = "sensitive input"
+        );
+    });
+
+    let record = receiver
+        .recv()
+        .expect("control-plane record")
+        .records
+        .remove(0);
+    assert_eq!(record["tool_count"], 5);
+    assert_eq!(record["toolset"], "read,grep,glob,run_program,bash");
+    assert_eq!(record["has_cursor"], false);
+    assert_eq!(record["cache_ttl_ms"], 300_000);
+    assert_eq!(record["cache_scope"], "private");
+    assert_eq!(record["client_profile"], "cursor");
+    assert_eq!(record["tool_output_tokens"], 8_192);
+    assert_eq!(record["burst_tokens"], 32_768);
+    assert_eq!(record["frame_limit_bytes"], 8_388_608);
+    assert_eq!(record["framework"], "rmcp");
+    assert_eq!(record["framework_target"], "rmcp::service");
+    assert_eq!(record["framework_event"], "request_rejected");
+    assert_eq!(record["request_id"], "31d54ba8-c1c4-4efd-b596-47208981144a");
+    assert!(record.get("arguments").is_none());
 }
 
 #[test]
@@ -161,6 +229,28 @@ fn all_off_and_overflow_modes_are_non_blocking_and_report_drops() {
     let summary = receiver.recv().expect("summary").records;
     assert_eq!(summary[0]["event"], "summary");
     assert_eq!(summary[0]["dropped_since_last"], 1);
+}
+
+#[test]
+fn repeated_queue_overflow_preserves_prior_drop_debt() {
+    let (recorder, receiver) = test_recorder(LogMode::All, 1);
+    recorder.record("INFO", fields("queued"));
+    recorder.record("INFO", fields("first-drop"));
+    assert_eq!(recorder.dropped.load(Ordering::Acquire), 1);
+    recorder.record("INFO", fields("second-drop"));
+    assert_eq!(recorder.dropped.load(Ordering::Acquire), 2);
+
+    receiver.recv().expect("queued batch");
+    recorder.record("INFO", fields("recovery"));
+    let recovery = receiver.recv().expect("recovery batch").records;
+    assert_eq!(recovery[0]["dropped_since_last"], 2);
+}
+
+#[test]
+fn failed_batch_loss_includes_the_record_and_prior_drop_debt() {
+    let mut failed = record("failed");
+    failed.insert("dropped_since_last".to_owned(), json!(7));
+    assert_eq!(batch_loss_count(&[failed]), 8);
 }
 
 #[test]
@@ -269,4 +359,123 @@ fn rotation_and_capacity_purge_preserve_today() {
     assert!(report.files >= 1);
     assert!(log_path(directory.path(), today, 1).exists());
     assert!(log_path(directory.path(), today, 2).exists());
+}
+
+#[test]
+fn capacity_purge_reserves_a_full_active_day() {
+    let directory = tempfile::tempdir().expect("directory");
+    let today = NaiveDate::from_ymd_opt(2026, 8, 6).expect("date");
+    for (days, part) in [(2, 1), (1, 1)] {
+        let date = today
+            .checked_sub_days(Days::new(days))
+            .expect("historical date");
+        File::create(log_path(directory.path(), date, part))
+            .expect("historical log")
+            .set_len(200 * 1024 * 1024)
+            .expect("historical size");
+    }
+
+    purge_directory(directory.path(), today).expect("purge");
+    let historical = list_logs(directory.path())
+        .expect("logs")
+        .iter()
+        .filter(|log| log.date != today)
+        .map(|log| log.bytes)
+        .sum::<u64>();
+    assert!(historical <= HISTORICAL_BYTES);
+}
+
+#[test]
+fn ordinary_events_leave_space_for_the_shutdown_summary() {
+    let directory = tempfile::tempdir().expect("directory");
+    let today = chrono::Utc::now().date_naive();
+    File::create(log_path(directory.path(), today, 1))
+        .expect("part one")
+        .set_len(PART_BYTES)
+        .expect("part one size");
+    let second_size = EVENT_DAY_BYTES - PART_BYTES;
+    File::create(log_path(directory.path(), today, 2))
+        .expect("part two")
+        .set_len(second_size)
+        .expect("part two size");
+    assert!(append_rotated(directory.path(), today, b"x\n").is_err());
+
+    let dropped = AtomicU64::new(3);
+    write_shutdown_summary(directory.path(), "test-instance", &dropped, false);
+    assert_eq!(dropped.load(Ordering::Acquire), 0);
+    assert!(
+        fs::metadata(log_path(directory.path(), today, 2))
+            .expect("part two metadata")
+            .len()
+            > second_size
+    );
+}
+
+#[test]
+fn shutdown_summary_is_counted_and_zero_drops_write_nothing() {
+    let directory = tempfile::tempdir().expect("directory");
+    let zero = AtomicU64::new(0);
+    write_shutdown_summary(directory.path(), "test-instance", &zero, false);
+    assert!(list_logs(directory.path()).expect("zero logs").is_empty());
+
+    let dropped = AtomicU64::new(4);
+    write_shutdown_summary(directory.path(), "test-instance", &dropped, false);
+    let status = status(&DiagnosticsConfig {
+        mode: LogMode::All,
+        directory: directory.path().to_owned(),
+    })
+    .expect("status");
+    assert_eq!(status.dropped, 4);
+    let contents = fs::read_to_string(&list_logs(directory.path()).expect("logs")[0].path)
+        .expect("summary log");
+    let summary: Value = serde_json::from_str(contents.trim()).expect("summary JSON");
+    assert_eq!(summary["event"], "diagnostics_drop_summary");
+    assert_eq!(summary["reason"], "shutdown");
+}
+
+#[test]
+fn writer_maintenance_tracks_utc_dates_and_retries_failures() {
+    let parent = tempfile::tempdir().expect("parent");
+    let directory = parent.path().join("logs");
+    fs::create_dir(&directory).expect("log directory");
+    let first = NaiveDate::from_ymd_opt(2026, 8, 6).expect("first date");
+    let second = first.checked_add_days(Days::new(1)).expect("second date");
+    let started = std::time::Instant::now();
+    let mut maintenance = WriterMaintenance::default();
+
+    assert!(
+        !maintenance
+            .prepare(&directory, first, started)
+            .expect("first maintenance")
+    );
+    assert_eq!(
+        fs::read_to_string(directory.join(".last-maintenance")).expect("first stamp"),
+        "strict-2026-08-06"
+    );
+    assert!(
+        !maintenance
+            .prepare(&directory, second, started)
+            .expect("second maintenance")
+    );
+    assert_eq!(
+        fs::read_to_string(directory.join(".last-maintenance")).expect("second stamp"),
+        "strict-2026-08-07"
+    );
+
+    let blocked = parent.path().join("blocked");
+    fs::write(&blocked, b"file").expect("blocking file");
+    let mut retrying = WriterMaintenance::default();
+    assert!(retrying.prepare(&blocked, first, started).is_err());
+    fs::remove_file(&blocked).expect("remove blocking file");
+    fs::create_dir(&blocked).expect("replacement directory");
+    assert!(
+        retrying
+            .prepare(&blocked, first, started + Duration::from_secs(59))
+            .is_err()
+    );
+    assert!(
+        retrying
+            .prepare(&blocked, first, started + Duration::from_secs(61))
+            .expect("retried maintenance")
+    );
 }
