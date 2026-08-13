@@ -175,8 +175,8 @@ pub(super) async fn run(config: RuntimeLimits, command: CliCommand) -> Result<()
             let shutdown_token = service.shutdown_token();
             let transport = (reader, stdout).into_transport();
             let (transport, transport_failure) =
-                DiagnosticTransport::new(transport, shutdown_token);
-            let running = match service.serve(transport).await {
+                DiagnosticTransport::new(transport, shutdown_token.clone());
+            let running = match service.serve_with_ct(transport, shutdown_token).await {
                 Ok(running) => running,
                 Err(error) => {
                     shutdown.terminate_detached();

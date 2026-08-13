@@ -445,7 +445,6 @@ fn tools_list_stdout_failure_is_correlated_and_stops_the_server() {
     let mut request = modern_request(1, "tools/list");
     request["id"] = json!(SECRET_ID);
     session.send(&request);
-    session.stdin.take();
     let status = session.wait_for_exit();
     assert!(!status.success());
 
