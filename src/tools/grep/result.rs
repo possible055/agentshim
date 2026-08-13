@@ -208,10 +208,9 @@ fn pagination_tail(
             ));
         }
     }
-    tail.push(next_offset.map_or_else(
-        || "Complete.".to_owned(),
-        |next| format!("Partial: next_offset={next}."),
-    ));
+    if let Some(next) = next_offset {
+        tail.push(format!("Partial: next_offset={next}."));
+    }
     tail
 }
 
@@ -252,7 +251,16 @@ pub(super) fn render_with_budget(
         let next_offset =
             (!page.scan_complete || shown_end < page.seen_entries).then_some(shown_end);
         let tail = pagination_tail(total_skipped, next_offset, page.scan_complete);
-        let mut formatter = OutputFormatter::new(String::new(), tail, limits)?;
+        let header = if available == 0 {
+            if page.offset == 0 {
+                "No matches.".to_owned()
+            } else {
+                format!("No results at offset={}.", page.offset)
+            }
+        } else {
+            String::new()
+        };
+        let mut formatter = OutputFormatter::new(header, tail, limits)?;
         let mut shown = 0_usize;
         for line in page.lines.iter().take(cap) {
             if formatter.try_push_line(&line.text, cancellation)? {

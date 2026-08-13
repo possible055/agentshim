@@ -169,6 +169,15 @@ fn the_shell_can_run_the_utilities_that_ship_beside_it() {
 }
 
 #[test]
+fn empty_success_is_only_the_exit_code() {
+    if !bash_is_available() {
+        return;
+    }
+
+    assert_eq!(run("true").expect("bash result"), "Exit code: 0");
+}
+
+#[test]
 fn a_missing_bash_reports_an_actionable_non_retryable_unavailable_error() {
     let fixture = tempfile::tempdir().expect("fixture");
     let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
@@ -219,7 +228,8 @@ fn a_command_reports_merged_output_the_resolved_bash_and_the_exit_code() {
     assert!(output.contains("out"));
     assert!(output.contains("err"));
     assert!(output.contains("Exit code: 3"));
-    assert!(output.ends_with("Complete."));
+    assert!(output.contains("Duration ms:"));
+    assert!(!output.contains("Complete."));
     assert!(!output.contains("--- stdout ---"));
 }
 

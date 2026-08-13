@@ -365,7 +365,7 @@ fn completed_page_outcome(
         pages: vec![PdfPageOutcome {
             index: page,
             state: PdfPageState::TextReady,
-            body: "(page complete at this offset)".to_owned(),
+            body: "No remaining text at this offset.".to_owned(),
             fatal: None,
         }],
         continuation: None,

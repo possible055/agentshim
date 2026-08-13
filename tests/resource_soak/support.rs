@@ -12,7 +12,6 @@ impl Session {
         let mut child = Command::new(env!("CARGO_BIN_EXE_codexshim"))
             .arg("serve")
             .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .env_remove("CODEXSHIM_MCP_COMPATIBILITY")
             .env_remove("CODEXSHIM_PROCESS_CALLS")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

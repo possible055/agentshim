@@ -9,19 +9,15 @@ pub(super) struct Session {
 
 impl Session {
     pub(super) fn start() -> Self {
-        Self::start_with_options(None, None, None)
-    }
-
-    pub(super) fn start_strict() -> Self {
-        Self::start_with_options(Some("strict"), None, None)
+        Self::start_with_options(None, None)
     }
 
     pub(super) fn start_unrestricted() -> Self {
-        Self::start_with_options(None, Some("unrestricted"), None)
+        Self::start_with_options(Some("unrestricted"), None)
     }
 
     pub(super) fn start_with_process_calls(process_calls: usize) -> Self {
-        Self::start_with_options(None, None, Some(process_calls))
+        Self::start_with_options(None, Some(process_calls))
     }
 
     pub(super) fn start_at(root: &std::path::Path) -> Self {
@@ -29,16 +25,12 @@ impl Session {
     }
 
     pub(super) fn start_with_options(
-        compatibility: Option<&str>,
         read_scope: Option<&str>,
         process_calls: Option<usize>,
     ) -> Self {
         let mut command = Self::base_command(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
         if let Some(read_scope) = read_scope {
             command.args(["--read-scope", read_scope]);
-        }
-        if let Some(compatibility) = compatibility {
-            command.env("CODEXSHIM_MCP_COMPATIBILITY", compatibility);
         }
         if let Some(process_calls) = process_calls {
             command.env("CODEXSHIM_PROCESS_CALLS", process_calls.to_string());
@@ -64,7 +56,6 @@ impl Session {
         command
             .arg("serve")
             .current_dir(root)
-            .env_remove("CODEXSHIM_MCP_COMPATIBILITY")
             .env_remove("CODEXSHIM_PROCESS_CALLS")
             .env_remove("CODEXSHIM_DETACHED_CALLS")
             .env_remove("CODEXSHIM_BASH")

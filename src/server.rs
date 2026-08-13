@@ -3,4 +3,4 @@ mod dispatch;
 mod response;
 mod service;
 
-pub use service::{CodexShim, CodexShimBuilder, ProtocolCompatibility};
+pub use service::{CodexShim, CodexShimBuilder};

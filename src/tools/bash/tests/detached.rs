@@ -47,9 +47,9 @@ fn a_detached_tree_outlives_the_call_and_dies_with_the_instance() {
     )
     .expect("detached bash");
 
-    assert!(response.contains("Pid: "), "{response}");
+    assert!(response.contains("Detached: pid="), "{response}");
     assert!(response.contains("detached.log"), "{response}");
-    assert!(response.contains("Detached;"), "{response}");
+    assert!(response.contains("scope="), "{response}");
     assert!(!response.contains("Exit code:"), "{response}");
     assert!(!response.contains("--- output ---"), "{response}");
     assert_eq!(trees.live_count(), 1);

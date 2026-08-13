@@ -33,6 +33,38 @@ fn process_memory_charge_includes_the_capture_and_render_reservation() {
 }
 
 #[test]
+fn empty_native_success_is_only_the_exit_code() {
+    let compact = completed_output(b"", b"", "0").text;
+    let previous = "Resolved program: tool\nLauncher: native\nCwd: workspace\n--- stdout ---\n\n--- stderr ---\n\nExit code: 0\nDuration ms: 1\nStdout bytes: total=0, shown=0, omitted=0, invalid=0, encoding=utf-8\nStderr bytes: total=0, shown=0, omitted=0, invalid=0, encoding=utf-8\nComplete.";
+
+    assert_eq!(compact, "Exit code: 0");
+    assert!(compact.len() * 5 <= previous.len());
+}
+
+#[test]
+fn non_native_success_keeps_resolution_diagnostics() {
+    let completed = CompletedProcess {
+        resolved: ResolvedProgram {
+            absolute: PathBuf::from("script.cmd"),
+            executable: PathBuf::from("cmd.exe"),
+            launcher: Launcher::CmdCompat,
+        },
+        cwd: PathBuf::from("workspace"),
+        exit: "0".to_owned(),
+        duration: Duration::from_millis(1),
+        stdout: Capture::new(0),
+        stderr: Capture::new(0),
+    };
+
+    let output = render_completed(&completed, &CancellationToken::new()).expect("completion");
+    assert!(output.contains("Resolved program: script.cmd"));
+    assert!(output.contains("Launcher: cmd-compat"));
+    assert!(output.ends_with("Exit code: 0"));
+    assert!(!output.contains("Cwd:"));
+    assert!(!output.contains("Duration ms:"));
+}
+
+#[test]
 fn dynamic_burst_ceiling_keeps_process_completion_metadata() {
     let mut stdout = Capture::new(100_000);
     stdout.push(" x".repeat(40_000).as_bytes());
@@ -61,8 +93,8 @@ fn dynamic_burst_ceiling_keeps_process_completion_metadata() {
     .expect("bounded completion summary");
     assert!(output.contains("Exit code: 7"));
     assert!(output.contains("Duration ms: 42"));
-    assert!(output.contains("Stdout bytes: total="));
-    assert!(output.contains("Complete."));
+    assert!(output.contains("Stdout: total="));
+    assert!(!output.contains("Complete."));
     assert!(output.fits_call_budget(&budget, &CancellationToken::new()));
 }
 
@@ -96,12 +128,9 @@ fn unix_multicall_proxy_preserves_resolved_argv0() {
     )
     .expect("multicall proxy");
 
-    let expected_proxy = fs::canonicalize(proxy.parent().expect("proxy parent"))
-        .expect("canonical proxy parent")
-        .join(proxy.file_name().expect("proxy name"));
-    assert!(output.contains(&format!("Resolved program: {}", expected_proxy.display())));
     assert!(output.contains("multicall argv0: cargo"));
     assert!(output.contains("Exit code: 0"));
+    assert!(!output.contains("Resolved program:"));
 }
 
 #[cfg(unix)]
@@ -172,7 +201,7 @@ fn a_header_near_the_diagnostic_path_limit_still_fits_the_result_budget() {
         let output = completed_output_with_paths(
             &vec![b'x'; 200_000],
             &vec![b'y'; 200_000],
-            "0",
+            "7",
             &program,
             &cwd,
         );
@@ -183,8 +212,8 @@ fn a_header_near_the_diagnostic_path_limit_still_fits_the_result_budget() {
         );
         assert!(output.text.contains("...[path truncated]..."));
         assert!(output.text.contains("Resolved program: "));
-        assert!(output.text.contains("Exit code: 0"));
-        assert!(output.text.ends_with("Complete."));
+        assert!(output.text.contains("Exit code: 7"));
+        assert!(!output.text.contains("Complete."));
     }
 }
 
@@ -213,8 +242,8 @@ fn token_dense_process_output_keeps_head_tail_and_metadata() {
     assert!(output.contains("TAIL"));
     assert!(output.contains("bytes omitted"));
     assert!(output.contains("Exit code: 7"));
-    assert!(output.contains("Stderr bytes:"));
-    assert!(output.ends_with("Complete."));
+    assert!(!output.contains("Stderr: total="));
+    assert!(!output.contains("Complete."));
 }
 
 #[test]
@@ -227,15 +256,11 @@ fn single_stream_output_that_fits_is_returned_in_full() {
     let stdout_text = output
         .text
         .split_once("--- stdout ---\n")
-        .and_then(|(_, output)| output.split_once("\n--- stderr ---"))
+        .and_then(|(_, output)| output.split_once("\nExit code:"))
         .map(|(stdout, _)| stdout)
         .expect("stdout section");
     assert_eq!(stdout_text.as_bytes(), stdout);
-    assert!(
-        output
-            .text
-            .contains("Stdout bytes: total=8908, shown=8908, omitted=0, invalid=0")
-    );
+    assert!(!output.text.contains("Stdout: total="));
     assert!(!output.text.contains("bytes omitted"));
 }
 
@@ -250,7 +275,7 @@ fn dual_high_output_is_fair_and_fits_the_complete_result_budget() {
     assert!(output.text.matches("bytes omitted").count() >= 2);
     let stdout_shown = shown_bytes(&output.text, "Stdout");
     let stderr_shown = shown_bytes(&output.text, "Stderr");
-    assert_eq!(stdout_shown, stderr_shown);
+    assert!(stdout_shown.abs_diff(stderr_shown) <= 1);
     assert!(stdout_shown > 6 * 1024);
 }
 
@@ -269,7 +294,7 @@ fn escaped_and_invalid_bytes_cannot_break_the_output_budget() {
     for bytes in cases {
         let output = completed_output(&bytes, &bytes, "0");
         assert!(output.fits_budget());
-        assert!(output.text.ends_with("Complete."));
+        assert!(!output.text.contains("Complete."));
         assert!(shown_bytes(&output.text, "Stdout") > 0);
         assert!(shown_bytes(&output.text, "Stderr") > 0);
     }
@@ -285,11 +310,7 @@ fn small_stderr_is_preserved_before_stdout_uses_remaining_budget() {
     assert!(output.fits_budget());
     assert!(output.child_nonzero);
     assert!(output.text.contains("critical diagnostic"));
-    assert!(
-        output
-            .text
-            .contains("Stderr bytes: total=20, shown=20, omitted=0, invalid=0")
-    );
+    assert!(!output.text.contains("Stderr: total="));
     assert!(output.text.contains("Exit code: 7"));
 }
 
@@ -453,5 +474,5 @@ fn high_escaping_child_output_completes_within_the_result_budget() {
 
     assert!(output.fits_budget());
     assert!(output.text.contains("bytes omitted"));
-    assert!(output.text.ends_with("Complete."));
+    assert!(!output.text.contains("Complete."));
 }

@@ -61,17 +61,21 @@ fn every_successful_pdf_response_carries_the_source_id() {
     let text = execute(&access, &request("document.pdf"), &cancellation).expect("markdown");
     let source = source_id_of(&text);
     assert_eq!(source.len(), 16);
-    assert!(text.contains("Mode: auto"));
+    assert!(text.contains("mode=auto"));
 
     let mut image = request("document.pdf");
     image.pdf_mode = Some(PdfMode::Image);
     let rendered = execute(&access, &image, &cancellation).expect("image");
-    assert!(rendered.contains(&format!("Source: {source}")));
+    assert!(rendered.contains(&format!("source={source}")));
 }
 
 fn source_id_of(text: &str) -> String {
     text.lines()
-        .find_map(|line| line.strip_prefix("Source: "))
+        .find(|line| line.starts_with("PDF: "))
+        .and_then(|line| {
+            line.split_whitespace()
+                .find_map(|field| field.strip_prefix("source="))
+        })
         .expect("every successful PDF response reports its source id")
         .to_owned()
 }
@@ -110,8 +114,8 @@ fn text_modes_deliver_a_first_batch_instead_of_refusing_long_documents() {
     let cancellation = CancellationToken::new();
 
     let text = execute(&access, &request("long.pdf"), &cancellation).expect("first batch");
-    assert!(text.contains("PDF: pages 1-10 of 14"));
-    assert!(text.contains("Continue with pages=\"11-14\""));
+    assert!(text.contains("PDF: pages=1-10/14"));
+    assert!(text.contains("pages=\"11-14\""));
 
     let mut over_cap = request("long.pdf");
     over_cap.pages = Some("1-14".to_owned());
@@ -122,7 +126,7 @@ fn text_modes_deliver_a_first_batch_instead_of_refusing_long_documents() {
     let mut past_the_end = request("long.pdf");
     past_the_end.pages = Some("1-21".to_owned());
     let text = execute(&access, &past_the_end, &cancellation).expect("clamped to the last page");
-    assert!(text.contains(" of 14 as Markdown"));
+    assert!(text.contains("/14 mode=auto"));
 
     // The cap still bounds a selection the document can actually satisfy.
     fs::write(fixture.path().join("longer.pdf"), pdf_with_pages(25)).expect("pdf");
@@ -155,8 +159,13 @@ fn page_ranges_are_clamped_to_the_document_but_must_start_inside_it() {
         )
         .unwrap_or_else(|error| panic!("pages={selector:?} must be clamped, got {error}"));
         let first = selector.split('-').next().expect("start");
+        let expected_pages = if first == "3" {
+            "3/3".to_owned()
+        } else {
+            format!("{first}-3/3")
+        };
         assert!(
-            text.contains(&format!("PDF: pages {first}-3 of 3")),
+            text.contains(&format!("PDF: pages={expected_pages}")),
             "pages={selector:?} should end at the last page, got {text}"
         );
     }
@@ -179,7 +188,7 @@ fn page_ranges_are_clamped_to_the_document_but_must_start_inside_it() {
     image.pages = Some("2-9".to_owned());
     let output = execute_output(&access, &image, &cancellation).expect("clamped image range");
     assert_eq!(output.images.len(), 2);
-    assert!(output.text.contains("PDF: pages 2-3 of 3"));
+    assert!(output.text.contains("PDF: pages=2-3/3"));
 }
 
 #[test]
@@ -193,8 +202,8 @@ fn image_mode_without_pages_renders_only_the_first_page() {
     image.pdf_mode = Some(PdfMode::Image);
     let output = execute_output(&access, &image, &cancellation).expect("first page only");
     assert_eq!(output.images.len(), 1);
-    assert!(output.text.contains("PDF: pages 1-1 of 14"));
-    assert!(output.text.contains("Continue with pages=\"2\""));
+    assert!(output.text.contains("PDF: pages=1/14"));
+    assert!(output.text.contains("pages=\"2\""));
 
     let mut five = request("long.pdf");
     five.pdf_mode = Some(PdfMode::Image);
@@ -232,7 +241,8 @@ fn a_mixed_selection_succeeds_with_a_placeholder_and_retry_request() {
 
     let text = execute(&access, &request("mixed.pdf"), &cancellation).expect("partial success");
     assert!(text.contains("PDF read heading"));
-    assert!(text.contains("Pages: 1=text_ready 2=image_required"));
+    assert!(text.contains("Page states: 2=image_required"));
+    assert!(!text.contains("text_ready"));
     assert!(text.contains("(no extractable text; retry with pdf_mode=\"image\" and pages=\"2\")"));
     assert!(text.contains("Retry: pdf_mode=\"image\" pages=\"2\""));
 }
@@ -379,7 +389,7 @@ fn pages_past_the_output_budget_are_never_extracted() {
         shown.len()
     );
     assert!(
-        text.contains(&format!("Continue with pages=\"{}", shown.len() + 1)),
+        text.contains(&format!("pages=\"{}", shown.len() + 1)),
         "missing continuation in {text}"
     );
 
@@ -475,7 +485,6 @@ fn page_body_of(text: &str) -> &str {
     let body_start = start + text[start..].find('\n').expect("heading newline") + 1;
     let tail = text[body_start..]
         .find("\n\nPartial:")
-        .or_else(|| text[body_start..].find("\n\nComplete."))
         .unwrap_or(text.len() - body_start);
     &text[body_start..body_start + tail]
 }
@@ -514,7 +523,7 @@ fn offset_continuation_rejects_out_of_range_and_reports_completion() {
     at_end.pdf_text_offset = Some(length);
     at_end.pdf_source_id = Some(source);
     let complete = execute(&access, &at_end, &cancellation).expect("offset at end");
-    assert!(complete.contains("Complete."));
+    assert!(complete.contains("No remaining text at this offset."));
 }
 
 /// Whatever the budget does to the response, the envelope itself must never exceed

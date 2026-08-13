@@ -126,6 +126,18 @@ args = ["serve", "--read-scope", "unrestricted"]
 
 `--read-scope` 只约束 `read`、`grep`、`glob` 能打开什么，**不是**进程能碰到什么的边界：`run_program` 或 `bash` 启动的任何程序都继承服务用户的一般文件系统权限。需要真正隔离时请使用 OS sandbox。
 
+### 精简的成功输出
+
+成功的 `read`、`grep` 与 `glob` 调用只返回结果行，不重复调用参数。末尾的 `Partial:` 行包含完整续读参数；没有 `Partial:` 即表示结果完整。空结果会明确显示为 `No lines.`、`No matches.` 或 `No paths matched.`；非零 offset 的空页会报告该 offset。
+
+成功的进程调用会省略正常的零值诊断。无输出且退出码为零的命令只返回：
+
+```text
+Exit code: 0
+```
+
+非空 stream 仍保留对应的 `stdout`、`stderr` 或合并 `output` 区段。解析路径、工作目录、耗时、截断和编码诊断会在解释非零退出、非原生 launcher、省略字节或无效／非 UTF-8 输出时保留。
+
 ### 长时间任务
 
 `bash` 接受 `detach` 与仓库内的 `log_path`。命令的合并输出直接写入该文件，调用立即返回 pid 与 log 路径，而不是阻塞：
@@ -168,11 +180,11 @@ Git Bash 在启动 Windows 原生程序前，会自动转换看起来像 POSIX �
 
 无论先撞到哪个上限，响应都会说明交付到哪里以及如何继续。下一段范围以本次「实际交付」的页数为准：20 页的请求若只放得下 6 页，续读建议是 `7-12`，不是 `7-26`。
 
-每个交付的页面都会在 `Pages:` 行报告一个状态：
+PDF 头格式为 `PDF: pages=FIRST-LAST/TOTAL mode=MODE source=SOURCE_ID`（单页使用 `pages=N/TOTAL`）。只有交付页面存在异常时才显示 `Page states:`；正常的 `text_ready` 页面不会列入。状态包括：
 
 | 状态 | 含义 |
 | --- | --- |
-| `text_ready` | 有足够且品质可接受的文字。 |
+| `text_ready` | 有足够且品质可接受的文字；不会显示在 `Page states:` 中。 |
 | `text_uncertain` | 有文字，但品质或覆盖可疑。文字**仍会**返回，不会被丢弃。 |
 | `image_required` | 没有可用文字，但页面有可见绘制内容——包括完全没有内嵌图片的纯向量页。响应会附一行 `Retry:` 指明能渲染该页的 `pdf_mode="image"` 调用。 |
 | `blank` | 既没有绘制内容也没有文字。 |
@@ -189,7 +201,6 @@ PDF 工作成本高，因此单一实例同时最多只跑一个 PDF 呼叫。�
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `CODEX_MCP_PROTOCOL_VERSION` | — | 向 Codex 声明的 MCP 协议版本。 |
-| `CODEXSHIM_MCP_COMPATIBILITY` | `lenient` | 设为 `strict` 以拒绝旧版 `2025-06-18` initialize 客户端。 |
 | `CODEXSHIM_PROCESS_CALLS` | `16` | 每个实例的进程调用并行上限，由 `run_program` 与 `bash` 共用；1–32。 |
 | `CODEXSHIM_DETACHED_CALLS` | `16` | 每个实例存活中的 detached `bash` 进程树数量；1–16。 |
 | `CODEXSHIM_OUTPUT_BYTES` | `32000` | 每次呼叫的输出上限（字节）；4096–262144。不能绕过单次 token 或共用 burst 限制。 |

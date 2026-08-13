@@ -73,14 +73,15 @@ fn completed_output_with_paths(
 }
 
 fn shown_bytes(output: &str, stream: &str) -> usize {
-    let prefix = format!("{stream} bytes: ");
+    let prefix = format!("{stream}: ");
     let line = output
         .lines()
         .find(|line| line.starts_with(&prefix))
         .unwrap_or_else(|| panic!("missing {stream} statistics"));
     line.split("shown=")
         .nth(1)
-        .and_then(|value| value.split(',').next())
+        .and_then(|value| value.split_whitespace().next())
+        .map(|value| value.trim_end_matches('.'))
         .and_then(|value| value.parse().ok())
         .expect("shown byte count")
 }

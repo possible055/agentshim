@@ -167,10 +167,6 @@ pub(super) async fn run(config: RuntimeLimits, command: CliCommand) -> Result<()
             println!("codexshim doctor: ok");
             println!("root: {}", service.root_path().display());
             println!("protocol: 2026-07-28");
-            println!(
-                "protocol compatibility: {}",
-                service.protocol_compatibility()
-            );
             println!("read scope: {}", service.read_scope());
             println!("read-only calls: {MAX_READ_ONLY_CALLS}");
             println!("process calls: {}", service.runtime_limits().process_calls);

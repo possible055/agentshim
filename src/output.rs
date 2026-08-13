@@ -353,7 +353,9 @@ impl OutputFormatter {
             return Err(OutputError::Cancelled);
         }
         for line in self.required_tail {
-            self.output.push('\n');
+            if !self.output.is_empty() {
+                self.output.push('\n');
+            }
             self.output.push_str(&line);
         }
         if self.output.len() > self.limits.bytes {

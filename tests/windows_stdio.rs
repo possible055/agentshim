@@ -18,7 +18,6 @@ impl Session {
         let mut child = Command::new(env!("CARGO_BIN_EXE_codexshim"))
             .arg("serve")
             .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .env_remove("CODEXSHIM_MCP_COMPATIBILITY")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -74,7 +73,7 @@ fn request(id: u64, method: &str, mut params: Value) -> Value {
 }
 
 #[test]
-fn cargo_multicall_proxy_keeps_cargo_identity() {
+fn cargo_multicall_proxy_reports_identity_on_nonzero_exit() {
     let mut session = Session::start();
     session.send(&request(1, "server/discover", json!({})));
     assert_eq!(session.receive()["id"], 1);
@@ -85,7 +84,7 @@ fn cargo_multicall_proxy_keeps_cargo_identity() {
             "name": "run_program",
             "arguments": {
                 "program": "cargo",
-                "args": ["--version"],
+                "args": ["codexshim-definitely-not-a-command"],
                 "cwd": env!("CARGO_MANIFEST_DIR"),
                 "timeout_ms": 30_000
             }
@@ -109,6 +108,6 @@ fn cargo_multicall_proxy_keeps_cargo_identity() {
         Some("cargo")
     );
     assert!(output.contains("Launcher: native"));
-    assert!(output.contains("Exit code: 0"));
+    assert!(output.contains("Exit code: 101"));
     session.close();
 }

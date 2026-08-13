@@ -13,7 +13,10 @@ use crate::{
         },
         exec::{
             ProcessError, ProcessStreamSummary, ProcessTimeoutDetails,
-            capture::{Capture, RenderedCapture, diagnostic_path, project_captures},
+            capture::{
+                Capture, RenderedCapture, diagnostic_path, project_captures,
+                push_capture_diagnostics, push_capture_section, push_output_line,
+            },
             resolve::{ResolvedProgram, launcher_for},
             spawn::{
                 self, DEFAULT_TIMEOUT_MS, EnvironmentPlan, ExecFailure, ExecPlan, MAX_TIMEOUT_MS,
@@ -365,9 +368,7 @@ fn run_detached(
     let pid = tree.pid();
     admission.retain(tree, log_path.clone());
     let rendered = format!(
-        "Bash: {}\nCwd: {}\nPid: {pid}\nLog path: {}\nDetached; lifecycle scope is {}.",
-        diagnostic_path(&resolved.absolute),
-        diagnostic_path(cwd),
+        "Detached: pid={pid} log=\"{}\" scope={}.",
         diagnostic_path(&log_path),
         crate::tools::exec::containment_scope()
     );
@@ -429,38 +430,28 @@ fn render_completed_with_budget(
 }
 
 fn completed_output(completed: &CompletedBash, output: &RenderedCapture) -> ToolOutput {
-    let header = format!(
-        "Bash: {}\nCwd: {}",
-        diagnostic_path(&completed.bash),
-        diagnostic_path(&completed.cwd)
-    );
-    let tail = [
-        format!("Exit code: {}", completed.exit),
-        format!("Duration ms: {}", completed.duration.as_millis()),
-        format!(
-            "Output bytes: total={}, shown={}, omitted={}, invalid={}, encoding={}",
-            completed.output.bytes_read,
-            output.shown_bytes,
-            output.omitted_bytes,
-            output.invalid_bytes,
-            output.encoding
-        ),
-        "Complete.".to_owned(),
-    ];
-    let mut rendered = String::with_capacity(
-        header
-            .len()
-            .saturating_add(output.text.len())
-            .saturating_add(192),
-    );
-    rendered.push_str(&header);
-    rendered.push_str("\n--- output ---\n");
-    rendered.push_str(&output.text);
-    for line in tail {
-        rendered.push('\n');
-        rendered.push_str(&line);
+    let child_nonzero = completed.exit != "0";
+    let mut rendered = String::with_capacity(output.text.len().saturating_add(192));
+    if child_nonzero {
+        push_output_line(
+            &mut rendered,
+            &format!("Bash: {}", diagnostic_path(&completed.bash)),
+        );
+        push_output_line(
+            &mut rendered,
+            &format!("Cwd: {}", diagnostic_path(&completed.cwd)),
+        );
     }
-    ToolOutput::with_child_nonzero(rendered, completed.exit != "0")
+    push_capture_section(&mut rendered, "output", output);
+    push_output_line(&mut rendered, &format!("Exit code: {}", completed.exit));
+    if child_nonzero {
+        push_output_line(
+            &mut rendered,
+            &format!("Duration ms: {}", completed.duration.as_millis()),
+        );
+    }
+    push_capture_diagnostics(&mut rendered, "Output", completed.output.bytes_read, output);
+    ToolOutput::with_child_nonzero(rendered, child_nonzero)
 }
 
 fn render_timeout(

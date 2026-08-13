@@ -41,6 +41,24 @@ mod tests {
     }
 
     #[test]
+    fn empty_results_distinguish_no_matches_from_an_empty_page() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root = access(fixture.path());
+        let cancellation = CancellationToken::new();
+        let mut query = request("*.missing");
+
+        assert_eq!(
+            execute(&root, &query, TEST_LANES, &cancellation).expect("empty glob"),
+            "No paths matched."
+        );
+        query.offset = Some(3);
+        assert_eq!(
+            execute(&root, &query, TEST_LANES, &cancellation).expect("empty page"),
+            "No results at offset=3."
+        );
+    }
+
+    #[test]
     fn files_are_default_while_directories_and_any_remain_available() {
         let fixture = tempfile::tempdir().expect("fixture");
         fs::create_dir_all(fixture.path().join("src/nested")).expect("directories");
@@ -124,7 +142,7 @@ mod tests {
                     .absolute()
             ))
         );
-        assert!(output.ends_with("Complete."));
+        assert!(!output.contains("Partial:"));
     }
 
     #[test]
@@ -450,7 +468,7 @@ mod tests {
         )
         .expect("second page");
         assert!(second_page.contains("second"));
-        assert!(second_page.ends_with("Complete."));
+        assert!(!second_page.contains("Partial:"));
     }
 
     #[test]

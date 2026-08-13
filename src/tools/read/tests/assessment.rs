@@ -34,7 +34,7 @@ fn pdf_vector_blank_and_text() -> Vec<u8> {
 fn page_states(text: &str) -> Vec<(usize, String)> {
     let line = text
         .lines()
-        .find_map(|line| line.strip_prefix("Pages: "))
+        .find_map(|line| line.strip_prefix("Page states: "))
         .expect("page state line");
     line.split_whitespace()
         .filter_map(|entry| {
@@ -64,11 +64,7 @@ fn vector_and_blank_pages_get_different_states() {
 
     assert_eq!(
         page_states(&text),
-        vec![
-            (1, "image_required".to_owned()),
-            (2, "blank".to_owned()),
-            (3, "text_ready".to_owned()),
-        ]
+        vec![(1, "image_required".to_owned()), (2, "blank".to_owned()),]
     );
     assert!(text.contains("(blank page)"));
     // Only the vector page is worth rendering, so only it gets a retry line.
@@ -148,7 +144,8 @@ fn one_unprocessable_page_does_not_fail_the_call() {
 
     assert!(text.contains("Page 1 body"));
     assert!(text.contains("Page 3 body"));
-    assert_eq!(page_states(&text).len(), 3);
+    assert_eq!(page_states(&text).len(), 1);
+    assert_eq!(page_states(&text)[0].0, 2);
 }
 
 /// An all-image selection is the only case that becomes a typed error.

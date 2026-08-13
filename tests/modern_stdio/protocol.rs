@@ -10,7 +10,13 @@ fn modern_lifecycle_serves_a_tool_call_and_shuts_down_at_eof() {
     assert_eq!(discover["id"], 1);
     assert_eq!(
         discover["result"]["supportedVersions"],
-        json!(["2026-07-28", "2025-06-18"])
+        json!([
+            "2026-07-28",
+            "2025-11-25",
+            "2025-06-18",
+            "2025-03-26",
+            "2024-11-05"
+        ])
     );
     assert_eq!(discover["result"]["capabilities"], json!({ "tools": {} }));
 
@@ -38,9 +44,9 @@ fn modern_lifecycle_serves_a_tool_call_and_shuts_down_at_eof() {
     let read_text = response["result"]["content"][0]["text"]
         .as_str()
         .expect("read text");
-    assert!(read_text.contains("Path: "));
+    assert!(!read_text.contains("Path: "));
     assert!(read_text.contains("1\tmod cli;"));
-    assert!(read_text.ends_with("Complete."));
+    assert!(!read_text.contains("Complete."));
     assert!(
         response["result"].get("structuredContent").is_none(),
         "read success must not emit structured content"
@@ -114,29 +120,7 @@ fn missing_modern_metadata_is_rejected_without_corrupting_stdio() {
 }
 
 #[test]
-fn strict_compatibility_rejects_legacy_initialize() {
-    let mut session = Session::start_strict();
-    session.send(&json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-06-18",
-            "capabilities": {},
-            "clientInfo": { "name": "legacy-test", "version": "1.0.0" }
-        }
-    }));
-    let response = session.receive();
-    assert_eq!(response["id"], 1);
-    assert_eq!(response["error"]["code"], -32601);
-
-    session.stdin.take();
-    let status = session.child.wait().expect("wait for rejected server");
-    assert!(!status.success());
-}
-
-#[test]
-fn default_compatibility_uses_native_legacy_initialize_lifecycle() {
+fn initialize_uses_the_native_legacy_lifecycle() {
     let mut session = Session::start();
     session.send(&json!({
         "jsonrpc": "2.0",
@@ -198,5 +182,79 @@ fn default_compatibility_uses_native_legacy_initialize_lifecycle() {
         read["result"].get("structuredContent").is_none(),
         "legacy read success must not emit structured content"
     );
+    session.close();
+}
+
+#[test]
+fn initialize_accepts_all_supported_versions() {
+    for protocol_version in [
+        "2026-07-28",
+        "2025-11-25",
+        "2025-06-18",
+        "2025-03-26",
+        "2024-11-05",
+    ] {
+        let mut session = Session::start();
+        session.send(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": protocol_version,
+                "capabilities": {},
+                "clientInfo": { "name": "legacy-test", "version": "1.0.0" }
+            }
+        }));
+        let initialize = session.receive();
+        assert_eq!(initialize["id"], 1);
+        assert_eq!(initialize["result"]["protocolVersion"], protocol_version);
+
+        session.send(&json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }));
+        session.send(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        }));
+        let list = session.receive();
+        assert_eq!(list["id"], 2);
+        assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(5));
+        session.close();
+    }
+}
+
+#[test]
+fn initialize_unknown_version_falls_back_without_method_error() {
+    let mut session = Session::start();
+    session.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2030-01-01",
+            "capabilities": {},
+            "clientInfo": { "name": "future-test", "version": "1.0.0" }
+        }
+    }));
+    let initialize = session.receive();
+    assert_eq!(initialize["id"], 1);
+    assert_eq!(initialize["result"]["protocolVersion"], "2026-07-28");
+
+    session.send(&json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    }));
+    session.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list",
+        "params": {}
+    }));
+    let list = session.receive();
+    assert_eq!(list["id"], 2);
+    assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(5));
     session.close();
 }

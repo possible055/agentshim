@@ -60,7 +60,8 @@ fn reads_numbered_utf8_crlf_and_utf16_pages() {
     let cancellation = CancellationToken::new();
 
     let utf8 = execute(&root, &request("utf8.txt"), &cancellation).expect("read utf8");
-    assert!(utf8.contains("1\talpha\n2\tbeta\nComplete."));
+    assert_eq!(utf8, "1\talpha\n2\tbeta");
+    assert!(!utf8.contains("Path:"));
     let bom = execute(&root, &request("utf8-bom.txt"), &cancellation).expect("utf8 bom");
     assert!(bom.contains("1\tbom"));
 

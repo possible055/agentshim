@@ -125,9 +125,13 @@ fn pdf_text_read_reports_its_source_id_over_real_stdio() {
         .expect("text block");
     let source = text
         .lines()
-        .find_map(|line| line.strip_prefix("Source: "))
+        .find(|line| line.starts_with("PDF: "))
+        .and_then(|line| {
+            line.split_whitespace()
+                .find_map(|field| field.strip_prefix("source="))
+        })
         .expect("source id line");
-    assert!(text.contains("Mode: auto"));
+    assert!(text.contains("mode=auto"));
 
     let stale = call_tool(
         &mut session,

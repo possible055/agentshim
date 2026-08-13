@@ -4,9 +4,8 @@ use rmcp::model::{CallToolRequestParams, CallToolResponse, CallToolResult, Conte
 use serde_json::json;
 
 use super::{
-    CodexShim, ProtocolCompatibility, ToolAdmission, ToolAdmissionFailure, blocking_response,
-    diagnostic_tool_error, pdf_busy, pdf_timeout, queue_timeout_message, shell_delegate,
-    tool_error,
+    CodexShim, ToolAdmission, ToolAdmissionFailure, blocking_response, diagnostic_tool_error,
+    pdf_busy, pdf_timeout, queue_timeout_message, shell_delegate, tool_error,
 };
 use crate::output::MODEL_BYTE_LIMIT;
 
@@ -212,24 +211,6 @@ fn every_pdf_read_path_returns_the_gate_and_its_reservation() {
         );
         assert!(free_memory(), "{path} leaked its memory reservation");
     }
-}
-
-#[test]
-fn protocol_compatibility_accepts_only_explicit_levels() {
-    assert_eq!(
-        ProtocolCompatibility::default(),
-        ProtocolCompatibility::Legacy
-    );
-    assert_eq!(
-        "strict".parse::<ProtocolCompatibility>().expect("strict"),
-        ProtocolCompatibility::Strict
-    );
-    assert_eq!(
-        "legacy".parse::<ProtocolCompatibility>().expect("legacy"),
-        ProtocolCompatibility::Legacy
-    );
-    assert!("auto".parse::<ProtocolCompatibility>().is_err());
-    assert!("LEGACY".parse::<ProtocolCompatibility>().is_err());
 }
 
 #[test]

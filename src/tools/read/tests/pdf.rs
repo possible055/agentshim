@@ -9,7 +9,7 @@ fn reads_pdf_as_markdown_or_png_without_extension_routing() {
     let cancellation = CancellationToken::new();
 
     let text = execute(&access, &request("document.bin"), &cancellation).expect("markdown");
-    assert!(text.contains("PDF: pages 1-1 of 1 as Markdown"));
+    assert!(text.contains("PDF: pages=1/1 mode=auto source="));
     assert!(text.contains("PDF read heading"));
 
     let mut image_request = request("document.bin");
@@ -100,7 +100,7 @@ fn page_selectors_reject_zero_reversed_and_malformed_ranges() {
     let mut single = request("long.pdf");
     single.pages = Some("2".to_owned());
     let text = execute(&access, &single, &cancellation).expect("single page");
-    assert!(text.contains("PDF: pages 2-2 of 3"));
+    assert!(text.contains("PDF: pages=2/3"));
 }
 
 /// The mode reservation and runtime ceiling must both be known from `prepare`, before

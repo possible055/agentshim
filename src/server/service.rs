@@ -1,10 +1,8 @@
 use std::{
     borrow::Cow,
     collections::BTreeMap,
-    fmt::Display,
     io,
     path::{Path, PathBuf},
-    str::FromStr,
     sync::Arc,
     time::Duration,
 };
@@ -13,8 +11,8 @@ use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     model::{
         CacheScope, CallToolRequestParams, CallToolResponse, DiscoverResult, Implementation,
-        InitializeRequestParams, InitializeResult, InitializeResultMethod, ListToolsResult,
-        PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
+        InitializeRequestParams, InitializeResult, ListToolsResult, PaginatedRequestParams,
+        ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
     },
     service::RequestContext,
 };
@@ -48,66 +46,14 @@ use super::{
 
 pub const SERVER_INSTRUCTIONS: &str = "Local repository and Codex extension tools for reading source files, searching contents, finding paths, running one program with literal arguments, and running POSIX bash command lines.";
 pub const UNRESTRICTED_SERVER_INSTRUCTIONS: &str = "Local filesystem tools for reading files, searching contents, and finding paths, plus one program with literal arguments and POSIX bash command lines. Read scope is the structured access range of read, grep, and glob; it does not bound what a spawned process can reach.";
-pub const MCP_COMPATIBILITY_ENV: &str = "CODEXSHIM_MCP_COMPATIBILITY";
 
-const STRICT_PROTOCOLS: &[ProtocolVersion] = &[ProtocolVersion::V_2026_07_28];
-const LEGACY_PROTOCOLS: &[ProtocolVersion] =
-    &[ProtocolVersion::V_2026_07_28, ProtocolVersion::V_2025_06_18];
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ProtocolCompatibility {
-    Strict,
-    #[default]
-    Legacy,
-}
-
-impl ProtocolCompatibility {
-    fn from_env() -> io::Result<Self> {
-        let Some(value) = std::env::var_os(MCP_COMPATIBILITY_ENV) else {
-            return Ok(Self::default());
-        };
-        let value = value.into_string().map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("{MCP_COMPATIBILITY_ENV} must be valid Unicode"),
-            )
-        })?;
-        value.parse()
-    }
-
-    fn supported_protocol_versions(self) -> &'static [ProtocolVersion] {
-        match self {
-            Self::Strict => STRICT_PROTOCOLS,
-            Self::Legacy => LEGACY_PROTOCOLS,
-        }
-    }
-}
-
-impl Display for ProtocolCompatibility {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Strict => formatter.write_str("strict"),
-            Self::Legacy => formatter.write_str("legacy"),
-        }
-    }
-}
-
-impl FromStr for ProtocolCompatibility {
-    type Err = io::Error;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "strict" => Ok(Self::Strict),
-            "legacy" => Ok(Self::Legacy),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "{MCP_COMPATIBILITY_ENV} must be either `strict` or `legacy`, got `{value}`"
-                ),
-            )),
-        }
-    }
-}
+const SUPPORTED_PROTOCOLS: &[ProtocolVersion] = &[
+    ProtocolVersion::V_2026_07_28,
+    ProtocolVersion::V_2025_11_25,
+    ProtocolVersion::V_2025_06_18,
+    ProtocolVersion::V_2025_03_26,
+    ProtocolVersion::V_2024_11_05,
+];
 
 #[derive(Clone)]
 pub struct CodexShim {
@@ -117,7 +63,6 @@ pub struct CodexShim {
     pub(super) process_resolver: ProcessResolver,
     pub(super) detached: DetachedTrees,
     pub(super) bash_locator: BashLocator,
-    pub(super) protocol_compatibility: ProtocolCompatibility,
     pub(super) output_token_gate: Arc<OutputTokenGate>,
     pub(super) burst_output_gate: Arc<BurstOutputGate>,
 }
@@ -126,7 +71,6 @@ pub struct CodexShimBuilder {
     root: PathBuf,
     read_scope: ReadScope,
     runtime: RuntimeConfig,
-    pub(super) protocol_compatibility: ProtocolCompatibility,
 }
 
 impl CodexShimBuilder {
@@ -134,13 +78,12 @@ impl CodexShimBuilder {
     ///
     /// # Errors
     ///
-    /// Returns an invalid-input error when runtime or protocol environment settings are invalid.
+    /// Returns an invalid-input error when runtime environment settings are invalid.
     pub fn from_env(root: impl Into<PathBuf>) -> io::Result<Self> {
         Ok(Self {
             root: root.into(),
             read_scope: ReadScope::default(),
             runtime: RuntimeConfig::from_env()?,
-            protocol_compatibility: ProtocolCompatibility::from_env()?,
         })
     }
 
@@ -153,12 +96,6 @@ impl CodexShimBuilder {
     #[must_use]
     pub fn runtime_limits(mut self, runtime: RuntimeConfig) -> Self {
         self.runtime = runtime;
-        self
-    }
-
-    #[must_use]
-    pub fn protocol_compatibility(mut self, compatibility: ProtocolCompatibility) -> Self {
-        self.protocol_compatibility = compatibility;
         self
     }
 
@@ -178,7 +115,6 @@ impl CodexShimBuilder {
             bash_locator: BashLocator::capture(),
             resources: RuntimeResources::new(self.runtime),
             process_resolver: ProcessResolver::capture(),
-            protocol_compatibility: self.protocol_compatibility,
             output_token_gate,
             burst_output_gate,
         })
@@ -186,11 +122,11 @@ impl CodexShimBuilder {
 }
 
 impl CodexShim {
-    /// Create a builder using environment-derived protocol and runtime defaults.
+    /// Create a builder using environment-derived runtime defaults.
     ///
     /// # Errors
     ///
-    /// Returns an invalid-input error when runtime or protocol environment settings are invalid.
+    /// Returns an invalid-input error when runtime environment settings are invalid.
     pub fn builder(root: impl Into<PathBuf>) -> io::Result<CodexShimBuilder> {
         CodexShimBuilder::from_env(root)
     }
@@ -227,11 +163,6 @@ impl CodexShim {
     /// Terminate every detached tree this instance still owns.
     pub fn terminate_detached(&self) {
         self.detached.terminate_all();
-    }
-
-    #[must_use]
-    pub fn protocol_compatibility(&self) -> ProtocolCompatibility {
-        self.protocol_compatibility
     }
 
     #[must_use]
@@ -283,15 +214,12 @@ impl CodexShim {
 
     #[must_use]
     pub fn discovery_result() -> DiscoverResult {
-        Self::discovery_result_for(ProtocolCompatibility::default(), ReadScope::default())
+        Self::discovery_result_for(ReadScope::default())
     }
 
-    fn discovery_result_for(
-        compatibility: ProtocolCompatibility,
-        read_scope: ReadScope,
-    ) -> DiscoverResult {
+    fn discovery_result_for(read_scope: ReadScope) -> DiscoverResult {
         DiscoverResult::from_server_info(
-            compatibility.supported_protocol_versions().to_vec(),
+            SUPPORTED_PROTOCOLS.to_vec(),
             Self::server_info(read_scope),
         )
     }
@@ -326,7 +254,7 @@ impl ServerHandler for CodexShim {
     }
 
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
-        Cow::Borrowed(self.protocol_compatibility.supported_protocol_versions())
+        Cow::Borrowed(SUPPORTED_PROTOCOLS)
     }
 
     async fn initialize(
@@ -335,15 +263,8 @@ impl ServerHandler for CodexShim {
         context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
         tracing::info!(target: "codexshim", event = "initialize", phase = "protocol", protocol = %request.protocol_version, client_name = %request.client_info.name, client_version = %request.client_info.version);
-        if self.protocol_compatibility != ProtocolCompatibility::Legacy
-            || request.protocol_version != ProtocolVersion::V_2025_06_18
-        {
-            return Err(McpError::method_not_found::<InitializeResultMethod>());
-        }
-
         context.peer.set_peer_info(request);
-        Ok(Self::server_info(self.read_scope())
-            .with_protocol_version(ProtocolVersion::V_2025_06_18))
+        Ok(Self::server_info(self.read_scope()))
     }
 
     async fn discover(
@@ -351,10 +272,7 @@ impl ServerHandler for CodexShim {
         _context: RequestContext<RoleServer>,
     ) -> Result<DiscoverResult, McpError> {
         tracing::info!(target: "codexshim", event = "discover", phase = "protocol");
-        Ok(Self::discovery_result_for(
-            self.protocol_compatibility,
-            self.read_scope(),
-        ))
+        Ok(Self::discovery_result_for(self.read_scope()))
     }
 
     async fn list_tools(

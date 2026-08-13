@@ -213,11 +213,19 @@ pub(super) fn render_with_budget(
         if let Some(line) = summary.model_line() {
             tail.push(line);
         }
-        tail.push(next_offset.map_or_else(
-            || "Complete.".to_owned(),
-            |next| format!("Partial: next_offset={next}."),
-        ));
-        let mut formatter = OutputFormatter::new(String::new(), tail, limits)?;
+        if let Some(next) = next_offset {
+            tail.push(format!("Partial: next_offset={next}."));
+        }
+        let header = if available == 0 {
+            if offset == 0 {
+                "No paths matched.".to_owned()
+            } else {
+                format!("No results at offset={offset}.")
+            }
+        } else {
+            String::new()
+        };
+        let mut formatter = OutputFormatter::new(header, tail, limits)?;
         let mut shown = 0_usize;
         for matched in retained.iter().skip(offset).take(cap) {
             if formatter.try_push_line(&matched.absolute, cancellation)? {
@@ -243,10 +251,9 @@ pub(super) fn render_with_budget(
             if let Some(line) = summary.model_line() {
                 tail.push(line);
             }
-            tail.push(next_offset.map_or_else(
-                || "Complete.".to_owned(),
-                |next| format!("Partial: next_offset={next}."),
-            ));
+            if let Some(next) = next_offset {
+                tail.push(format!("Partial: next_offset={next}."));
+            }
             let mut formatter = OutputFormatter::new(String::new(), tail, limits)?;
             if formatter.try_push_line(PATH_OMISSION, cancellation)? {
                 let fallback = ToolOutput::new(formatter.finish(cancellation)?);

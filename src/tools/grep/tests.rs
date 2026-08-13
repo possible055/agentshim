@@ -51,6 +51,24 @@ mod tests {
         (fixture, root)
     }
 
+    #[test]
+    fn empty_results_distinguish_an_empty_search_from_an_empty_page() {
+        let (_fixture, root) = fixture();
+        let cancellation = CancellationToken::new();
+        let mut query = request("absent-value");
+        query.fixed_strings = Some(true);
+
+        assert_eq!(
+            execute(&root, &query, 1, &cancellation).expect("empty search"),
+            "No matches."
+        );
+        query.offset = Some(3);
+        assert_eq!(
+            execute(&root, &query, 1, &cancellation).expect("empty page"),
+            "No results at offset=3."
+        );
+    }
+
     fn display_subpath(path: &str) -> String {
         path.to_owned()
     }
@@ -347,7 +365,7 @@ mod tests {
             let complete_output =
                 execute(&root, &complete, 1, &CancellationToken::new()).expect("complete sequence");
             let expected = result_lines(&complete_output);
-            assert!(complete_output.ends_with("Complete."));
+            assert!(!complete_output.contains("Partial:"));
 
             for lanes in [1, 4, 16] {
                 let mut offset = 0;
@@ -436,7 +454,7 @@ mod tests {
         );
         assert!(!output.contains("Pattern:"));
         assert!(output.starts_with(&first));
-        assert!(output.ends_with("Complete."));
+        assert!(!output.contains("Partial:"));
     }
 
     #[test]

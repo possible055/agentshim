@@ -126,10 +126,23 @@ pub(super) fn render(
     let available = collector.candidates.len().min(collector.requested);
     let source_has_more = collector.stopped || collector.candidates.len() > available;
     let header = if source_encoding == SourceEncoding::Utf8 {
-        format!("Path: {absolute}")
+        String::new()
     } else {
-        format!("Path: {absolute}\nEncoding: {}", source_encoding.name())
+        format!("Encoding: {}", source_encoding.name())
     };
+    if available == 0 && !source_has_more {
+        let message = if collector.start == 1 {
+            "No lines.".to_owned()
+        } else {
+            format!("No lines at or after start_line={}.", collector.start)
+        };
+        let text = if header.is_empty() {
+            message
+        } else {
+            format!("{header}\n{message}")
+        };
+        return Ok(ToolOutput::new(text));
+    }
     let limits = OutputLimits::for_content_parts(
         collector
             .candidates
@@ -141,11 +154,11 @@ pub(super) fn render(
     loop {
         let partial = source_has_more || cap < available;
         let next_start_line = partial.then(|| collector.start.saturating_add(cap));
-        let tail = next_start_line.map_or_else(
-            || "Complete.".to_owned(),
-            |next| format!("Partial: next_start_line={next}."),
-        );
-        let mut formatter = OutputFormatter::new(header.clone(), vec![tail], limits)?;
+        let tail = next_start_line
+            .map(|next| format!("Partial: next_start_line={next}."))
+            .into_iter()
+            .collect();
+        let mut formatter = OutputFormatter::new(header.clone(), tail, limits)?;
         let mut shown = 0_usize;
         for line in collector.candidates.iter().take(cap) {
             if formatter.try_push_line(render_candidate(line), cancellation)? {
@@ -160,7 +173,7 @@ pub(super) fn render(
         }
         let output = ToolOutput::new(formatter.finish(cancellation)?);
         if output.fits_budget_and_call(output_budget, cancellation) {
-            let _ = request;
+            let _ = (absolute, request);
             return Ok(output);
         }
         if cap == 0 {

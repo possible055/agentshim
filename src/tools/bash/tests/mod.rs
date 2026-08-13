@@ -42,7 +42,8 @@ fn token_dense_bash_output_keeps_head_tail_and_metadata() {
     assert!(output.contains("TAIL"));
     assert!(output.contains("bytes omitted"));
     assert!(output.contains("Exit code: 7"));
-    assert!(output.ends_with("Complete."));
+    assert!(output.contains("Output: total="));
+    assert!(!output.contains("Complete."));
 }
 
 fn request(command: &str) -> BashRequest {

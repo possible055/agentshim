@@ -38,7 +38,7 @@ pub use runtime::{
     DEFAULT_PROCESS_CALLS, MAX_CONFIGURED_PROCESS_CALLS, MAX_READ_ONLY_CALLS,
     RuntimeConfig as RuntimeLimits,
 };
-pub use server::{CodexShim, CodexShimBuilder, ProtocolCompatibility};
+pub use server::{CodexShim, CodexShimBuilder};
 
 #[cfg(feature = "bench-internals")]
 #[doc(hidden)]

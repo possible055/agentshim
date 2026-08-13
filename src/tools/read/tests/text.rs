@@ -116,7 +116,7 @@ fn empty_long_binary_invalid_and_out_of_range_are_bounded() {
     let cancellation = CancellationToken::new();
 
     let empty = execute(&root, &request("empty.txt"), &cancellation).expect("empty read");
-    assert!(empty.ends_with("\nComplete."));
+    assert_eq!(empty, "No lines.");
     let long = execute(&root, &request("long.txt"), &cancellation).expect("long read");
     assert!(long.contains("[line truncated]"));
     assert!(long.len() <= crate::output::MODEL_BYTE_LIMIT);
@@ -132,7 +132,7 @@ fn empty_long_binary_invalid_and_out_of_range_are_bounded() {
     let mut beyond = request("empty.txt");
     beyond.start_line = Some(100);
     let output = execute(&root, &beyond, &cancellation).expect("past eof");
-    assert!(output.ends_with("\nComplete."));
+    assert_eq!(output, "No lines at or after start_line=100.");
 }
 
 #[test]

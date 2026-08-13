@@ -216,6 +216,47 @@ pub(crate) struct RenderedCapture {
     pub(crate) encoding: String,
 }
 
+pub(crate) fn push_output_line(output: &mut String, line: &str) {
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    output.push_str(line);
+}
+
+pub(crate) fn push_capture_section(output: &mut String, label: &str, capture: &RenderedCapture) {
+    if capture.text.is_empty() {
+        return;
+    }
+    push_output_line(output, &format!("--- {label} ---"));
+    push_output_line(output, &capture.text);
+}
+
+pub(crate) fn push_capture_diagnostics(
+    output: &mut String,
+    label: &str,
+    total_bytes: usize,
+    capture: &RenderedCapture,
+) {
+    if capture.omitted_bytes > 0 {
+        push_output_line(
+            output,
+            &format!(
+                "{label}: total={total_bytes} shown={} omitted={}.",
+                capture.shown_bytes, capture.omitted_bytes
+            ),
+        );
+    }
+    if capture.invalid_bytes > 0 || capture.encoding != "utf-8" {
+        push_output_line(
+            output,
+            &format!(
+                "{label} encoding: invalid={} encoding={}.",
+                capture.invalid_bytes, capture.encoding
+            ),
+        );
+    }
+}
+
 #[cfg(windows)]
 fn decode_mixed_utf8_oem(mut bytes: &[u8], code_page: u32) -> Option<String> {
     use windows_sys::Win32::Globalization::IsDBCSLeadByteEx;

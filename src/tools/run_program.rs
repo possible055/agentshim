@@ -9,8 +9,11 @@ use crate::{
         ToolOutput,
         exec::{
             ProcessError, ProcessResolver, ProcessStreamSummary, ProcessTimeoutDetails,
-            capture::{Capture, RenderedCapture, diagnostic_path, project_captures},
-            resolve::ResolvedProgram,
+            capture::{
+                Capture, RenderedCapture, diagnostic_path, project_captures,
+                push_capture_diagnostics, push_capture_section, push_output_line,
+            },
+            resolve::{Launcher, ResolvedProgram},
             spawn::{
                 self, DEFAULT_TIMEOUT_MS, EnvironmentPlan, ExecFailure, ExecPlan, MAX_TIMEOUT_MS,
                 Streams,
@@ -369,50 +372,45 @@ fn completed_output(
     stdout: &RenderedCapture,
     stderr: &RenderedCapture,
 ) -> ToolOutput {
-    let header = format!(
-        "Resolved program: {}\nLauncher: {}\nCwd: {}",
-        diagnostic_path(&completed.resolved.absolute),
-        spawn::launcher_label(&completed.resolved),
-        diagnostic_path(&completed.cwd)
-    );
-    let tail = [
-        format!("Exit code: {}", completed.exit),
-        format!("Duration ms: {}", completed.duration.as_millis()),
-        format!(
-            "Stdout bytes: total={}, shown={}, omitted={}, invalid={}, encoding={}",
-            completed.stdout.bytes_read,
-            stdout.shown_bytes,
-            stdout.omitted_bytes,
-            stdout.invalid_bytes,
-            stdout.encoding
-        ),
-        format!(
-            "Stderr bytes: total={}, shown={}, omitted={}, invalid={}, encoding={}",
-            completed.stderr.bytes_read,
-            stderr.shown_bytes,
-            stderr.omitted_bytes,
-            stderr.invalid_bytes,
-            stderr.encoding
-        ),
-        "Complete.".to_owned(),
-    ];
+    let child_nonzero = completed.exit != "0";
     let mut rendered = String::with_capacity(
-        header
+        stdout
+            .text
             .len()
-            .saturating_add(stdout.text.len())
             .saturating_add(stderr.text.len())
             .saturating_add(256),
     );
-    rendered.push_str(&header);
-    rendered.push_str("\n--- stdout ---\n");
-    rendered.push_str(&stdout.text);
-    rendered.push_str("\n--- stderr ---\n");
-    rendered.push_str(&stderr.text);
-    for line in tail {
-        rendered.push('\n');
-        rendered.push_str(&line);
+    if child_nonzero || completed.resolved.launcher != Launcher::Native {
+        push_output_line(
+            &mut rendered,
+            &format!(
+                "Resolved program: {}",
+                diagnostic_path(&completed.resolved.absolute)
+            ),
+        );
+        push_output_line(
+            &mut rendered,
+            &format!("Launcher: {}", spawn::launcher_label(&completed.resolved)),
+        );
     }
-    ToolOutput::with_child_nonzero(rendered, completed.exit != "0")
+    if child_nonzero {
+        push_output_line(
+            &mut rendered,
+            &format!("Cwd: {}", diagnostic_path(&completed.cwd)),
+        );
+    }
+    push_capture_section(&mut rendered, "stdout", stdout);
+    push_capture_section(&mut rendered, "stderr", stderr);
+    push_output_line(&mut rendered, &format!("Exit code: {}", completed.exit));
+    if child_nonzero {
+        push_output_line(
+            &mut rendered,
+            &format!("Duration ms: {}", completed.duration.as_millis()),
+        );
+    }
+    push_capture_diagnostics(&mut rendered, "Stdout", completed.stdout.bytes_read, stdout);
+    push_capture_diagnostics(&mut rendered, "Stderr", completed.stderr.bytes_read, stderr);
+    ToolOutput::with_child_nonzero(rendered, child_nonzero)
 }
 
 #[cfg(test)]

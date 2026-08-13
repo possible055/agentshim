@@ -126,6 +126,18 @@ Relative paths and absolute paths inside the repository always use the repositor
 
 `--read-scope` only bounds what `read`, `grep`, and `glob` can open. It is **not** a boundary on what a spawned process can reach: any program `run_program` or `bash` launches inherits the server user's ordinary filesystem access. Use an OS sandbox when you need real isolation.
 
+### Compact successful output
+
+Successful `read`, `grep`, and `glob` calls return the result rows without repeating request parameters. A trailing `Partial:` line supplies the complete continuation arguments; when `Partial:` is absent, the result is complete. Empty results are explicit (`No lines.`, `No matches.`, or `No paths matched.`), and an empty non-zero-offset page reports that offset.
+
+Successful process calls omit normal zero-value diagnostics. An exit-zero command with no output returns only:
+
+```text
+Exit code: 0
+```
+
+Non-empty streams retain their `stdout`, `stderr`, or merged `output` section. Resolution, working-directory, duration, truncation, and encoding diagnostics remain present when they explain a non-zero exit, a non-native launcher, omitted bytes, or invalid/non-UTF-8 output.
+
 ### Long-running work
 
 `bash` accepts `detach` with a `log_path` inside the repository. The command's merged output goes straight to that file, and the call returns the pid and log path immediately instead of blocking:
@@ -168,11 +180,11 @@ Page counts bound the work of one call, not the size of the answer:
 
 Whichever limit binds first, the response tells you how far it got and how to continue. The next range is as wide as what was actually delivered: if 6 of 20 requested pages fit the output budget, the continuation is `7-12`, not `7-26`.
 
-Each delivered page reports a state on the `Pages:` line:
+The PDF header is `PDF: pages=FIRST-LAST/TOTAL mode=MODE source=SOURCE_ID` (a single page uses `pages=N/TOTAL`). A `Page states:` line appears only when a delivered page is abnormal; normal `text_ready` pages are omitted from it. The possible states are:
 
 | State | Meaning |
 | --- | --- |
-| `text_ready` | Usable text of acceptable quality. |
+| `text_ready` | Usable text of acceptable quality; not printed in `Page states:`. |
 | `text_uncertain` | Text is present but its quality or coverage is doubtful. Returned *with* the text, never instead of it. |
 | `image_required` | No usable text, but something is drawn — including pure vector art with no embedded image. The response includes a `Retry:` line naming the `pdf_mode="image"` call that would render it. |
 | `blank` | Nothing drawn and no text. |
@@ -189,7 +201,6 @@ Each mode also has a wall-clock ceiling: 5 s for `auto` and `text`, 10 s for `im
 | Variable | Default | Description |
 | --- | --- | --- |
 | `CODEX_MCP_PROTOCOL_VERSION` | — | MCP protocol version advertised to Codex. |
-| `CODEXSHIM_MCP_COMPATIBILITY` | `lenient` | Set to `strict` to reject legacy `2025-06-18` initialize clients. |
 | `CODEXSHIM_PROCESS_CALLS` | `16` | Per-instance concurrent process-call limit shared by `run_program` and `bash`; 1–32. |
 | `CODEXSHIM_DETACHED_CALLS` | `16` | Per-instance live detached `bash` trees; 1–16. |
 | `CODEXSHIM_OUTPUT_BYTES` | `32000` | Per-call output ceiling in bytes; 4096–262144. This cannot bypass the per-call token or shared burst limits. |
