@@ -97,7 +97,7 @@ impl Session {
     }
 
     fn wait_for_exit(&mut self) -> std::process::ExitStatus {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if let Some(status) = self.child.try_wait().expect("poll server") {
                 return status;
