@@ -620,14 +620,6 @@ impl<'a> PlanSink<'a> {
             Self::Content(sink) => sink.binary = true,
         }
     }
-
-    #[cfg(test)]
-    pub(super) fn capture_capacity(&self) -> usize {
-        match self {
-            Self::Content(sink) => sink.records.capacity(),
-            Self::Files(_) | Self::Count(_) => 0,
-        }
-    }
 }
 
 impl ContentSink<'_> {

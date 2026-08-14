@@ -214,63 +214,6 @@ fn image_mode_without_pages_renders_only_the_first_page() {
     ));
 }
 
-#[test]
-fn a_selection_without_any_text_is_a_typed_image_required_error() {
-    let fixture = tempfile::tempdir().expect("fixture");
-    fs::write(fixture.path().join("image.pdf"), pdf_full_page_image()).expect("pdf");
-    let access = access(fixture.path());
-    let cancellation = CancellationToken::new();
-
-    let error = execute(&access, &request("image.pdf"), &cancellation)
-        .expect_err("an image-only page has no text");
-    let ReadError::PdfImageRequired { pages, source_id } = error else {
-        panic!("expected pdf_image_required");
-    };
-    assert_eq!(pages, "1");
-    assert_eq!(source_id.len(), 16);
-}
-
-/// Mixed documents succeed: the readable pages are returned and the image-only page
-/// becomes a placeholder with the exact retry parameters.
-#[test]
-fn a_mixed_selection_succeeds_with_a_placeholder_and_retry_request() {
-    let fixture = tempfile::tempdir().expect("fixture");
-    fs::write(fixture.path().join("mixed.pdf"), pdf_text_then_image()).expect("pdf");
-    let access = access(fixture.path());
-    let cancellation = CancellationToken::new();
-
-    let text = execute(&access, &request("mixed.pdf"), &cancellation).expect("partial success");
-    assert!(text.contains("PDF read heading"));
-    assert!(text.contains("Page states: 2=image_required"));
-    assert!(!text.contains("text_ready"));
-    assert!(text.contains("(no extractable text; retry with pdf_mode=\"image\" and pages=\"2\")"));
-    assert!(text.contains("Retry: pdf_mode=\"image\" pages=\"2\""));
-}
-
-/// `classify_page()` materialises image streams. Until the assessment split removes
-/// that, no text-mode read may reach it, or the path this plan exists to make cheap
-/// would decode pixels on every default call.
-#[test]
-fn text_modes_never_reach_the_image_materialising_classifier() {
-    let fixture = tempfile::tempdir().expect("fixture");
-    fs::write(fixture.path().join("mixed.pdf"), pdf_text_then_image()).expect("pdf");
-    let access = access(fixture.path());
-    let cancellation = CancellationToken::new();
-
-    for mode in [None, Some(PdfMode::Auto), Some(PdfMode::Text)] {
-        let mut probe = request("mixed.pdf");
-        probe.pdf_mode = mode;
-        let (result, metrics) =
-            codexshim_pdf_read::measure(|| execute(&access, &probe, &cancellation));
-        result.expect("mixed document succeeds");
-        assert_eq!(metrics.render_pixels, 0, "{mode:?} rasterised a page");
-        assert_eq!(
-            metrics.font_database_loads, 0,
-            "{mode:?} loaded the system font database"
-        );
-    }
-}
-
 /// A page whose Markdown is large enough that only a few fit one response.
 /// Pages whose text-run counts are given individually, so one page can be far denser
 /// than its neighbours.

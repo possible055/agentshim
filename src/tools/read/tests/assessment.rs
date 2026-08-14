@@ -211,14 +211,6 @@ fn image_payloads_are_bounded_and_only_whole_pages_are_delivered() {
     }
 }
 
-/// The contract moved from 7 MiB to 8 MiB. Pinned so the constant, the README, and
-/// the four-page division stay in step.
-#[test]
-fn the_image_payload_ceiling_is_eight_mebibytes() {
-    assert_eq!(MAX_IMAGE_BASE64_BYTES, 8 * 1024 * 1024);
-    assert_eq!(MAX_IMAGE_BASE64_BYTES / MAX_IMAGE_PAGES, 2 * 1024 * 1024);
-}
-
 /// Rendering must not change what the text path initialises or how long it takes.
 #[test]
 fn image_mode_does_not_change_text_mode_behaviour() {

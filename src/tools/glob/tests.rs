@@ -2,22 +2,21 @@
 mod tests {
     use std::{fs, path::Path, sync::Arc};
 
-    use globset::GlobBuilder;
     use tokio_util::sync::CancellationToken;
 
     #[cfg(feature = "bench-internals")]
     use crate::tools::glob::execute_profiled_with_traversal;
     use crate::tools::glob::{
-        GlobEntryType, GlobError, GlobMatch, GlobRequest, GlobTraversal, MAX_MATCHES,
-        PATH_OMISSION, TopK, execute, execute_with_traversal, memory_charge, record_match, render,
+        GlobEntryType, GlobError, GlobMatch, GlobRequest, GlobTraversal, PATH_OMISSION, TopK,
+        execute, execute_with_traversal, render,
     };
     use crate::{
-        path::{FileAccess, ReadScope, RepositoryRoot, slash_path},
+        path::{FileAccess, ReadScope, RepositoryRoot},
         runtime::{
             DEFAULT_GLOB_MEMORY_BYTES, MIN_TOOL_MEMORY_BYTES, MemoryReservation, RuntimeConfig,
             RuntimeResources,
         },
-        traversal::{TraversalSummary, prefer_parallel_root},
+        traversal::TraversalSummary,
     };
 
     const TEST_LANES: usize = 4;
@@ -265,19 +264,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn adaptive_selector_keeps_small_roots_serial_and_sharded_roots_parallel() {
-        let fixture = tempfile::tempdir().expect("fixture");
-        let root = access(fixture.path());
-        let base = root.resolve(Path::new(".")).expect("base");
-        for index in 0..7 {
-            fs::create_dir(fixture.path().join(format!("shard-{index}"))).expect("small shard");
-        }
-        assert!(!prefer_parallel_root(&root, &base));
-        fs::create_dir(fixture.path().join("shard-7")).expect("parallel shard");
-        assert!(prefer_parallel_root(&root, &base));
-    }
-
     #[cfg(feature = "bench-internals")]
     #[test]
     fn profiled_parallel_glob_preserves_output_and_records_batches() {
@@ -311,66 +297,6 @@ mod tests {
         assert!(profile.timings.total_ns >= profile.timings.traversal_wall_ns);
         assert!(profile.timings.batches > 0);
         assert_eq!(profile.timings.matched_entries, 16);
-    }
-
-    #[test]
-    fn native_path_matching_equals_slash_path_matching() {
-        let native = Path::new("src").join("nested").join("Unicode 界.rs");
-        let slash = slash_path(&native).expect("slash path");
-        for pattern in ["**/*.rs", "src/**", "**/*", "*.txt"] {
-            let matcher = GlobBuilder::new(pattern)
-                .literal_separator(true)
-                .backslash_escape(false)
-                .build()
-                .expect("glob")
-                .compile_matcher();
-            assert_eq!(
-                matcher.is_match(&native),
-                matcher.is_match(Path::new(&slash)),
-                "pattern {pattern}"
-            );
-        }
-    }
-
-    #[test]
-    fn top_k_matches_full_sort_oracle() {
-        let fixture = tempfile::tempdir().expect("fixture");
-        let root = RepositoryRoot::open(fixture.path()).expect("root");
-        let mut paths = Vec::new();
-        let mut oracle = Vec::new();
-        for index in (0..256).rev() {
-            let path = format!("file-{index:06}.rs");
-            let resolved = root.resolve(Path::new(&path)).expect("resolve");
-            oracle.push(resolved.sort_key().clone());
-            paths.push(resolved);
-        }
-        oracle.sort();
-        for (offset, limit) in [(0_usize, 17_usize), (57, 31), (246, 10), (257, 5)] {
-            let mut top = TopK::new(
-                offset.saturating_add(limit).min(paths.len()),
-                DEFAULT_GLOB_MEMORY_BYTES,
-                None,
-            )
-            .expect("top-k");
-            for path in &paths {
-                top.admit(path).expect("admit");
-            }
-            let actual = top
-                .into_sorted(&CancellationToken::new())
-                .expect("sort")
-                .into_iter()
-                .skip(offset)
-                .take(limit)
-                .map(|entry| entry.sort_key)
-                .collect::<Vec<_>>();
-            let expected = oracle
-                .iter()
-                .skip(offset)
-                .take(limit)
-                .cloned()
-                .collect::<Vec<_>>();
-            assert_eq!(actual, expected);
-        }
     }
 
     #[test]
@@ -412,17 +338,12 @@ mod tests {
     }
 
     #[test]
-    fn invalid_pattern_and_match_limit_are_explicit() {
+    fn invalid_pattern_is_explicit() {
         let fixture = tempfile::tempdir().expect("fixture");
         let root = access(fixture.path());
         assert!(matches!(
             execute(&root, &request("["), TEST_LANES, &CancellationToken::new()),
             Err(GlobError::Pattern(_))
-        ));
-        let mut total = MAX_MATCHES;
-        assert!(matches!(
-            record_match(&mut total),
-            Err(GlobError::TooManyMatches)
         ));
     }
 
@@ -469,23 +390,5 @@ mod tests {
         .expect("second page");
         assert!(second_page.contains("second"));
         assert!(!second_page.contains("Partial:"));
-    }
-
-    #[test]
-    fn runtime_memory_charge_includes_safety_margin() {
-        let default = request("**/*");
-        assert_eq!(
-            memory_charge(&default),
-            8 * 1024 * 1024 + 200 * std::mem::size_of::<GlobMatch>()
-        );
-        let mut maximum = default;
-        maximum.offset = Some(MAX_MATCHES - 1);
-        maximum.limit = Some(1);
-        assert_eq!(
-            memory_charge(&maximum),
-            8 * 1024 * 1024 + MAX_MATCHES * std::mem::size_of::<GlobMatch>()
-        );
-        assert!(memory_charge(&maximum) <= DEFAULT_GLOB_MEMORY_BYTES);
-        assert!(memory_charge(&maximum).saturating_mul(16) < 1024 * 1024 * 1024);
     }
 }

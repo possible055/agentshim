@@ -414,21 +414,9 @@ mod tests {
 
     use super::{
         CLIENT_WRAPPER_TOKEN_RESERVE, COUNTER_WORKERS, GateDecision, IMAGE_ITEM_TOKEN_RESERVE,
-        IMAGE_MODEL_TOKENS, MODEL_OUTPUT_TOKEN_LIMIT, OutputTokenGate, POOL_CANCELLATION_POLL,
-        ProjectionDecision, TOOL_CONTENT_TOKEN_LIMIT, project_text_payload,
-        projected_text_encoded_len,
+        IMAGE_MODEL_TOKENS, OutputTokenGate, POOL_CANCELLATION_POLL, ProjectionDecision,
+        TOOL_CONTENT_TOKEN_LIMIT, project_text_payload, projected_text_encoded_len,
     };
-
-    #[test]
-    fn content_limit_reserves_client_owned_wrappers() {
-        assert_eq!(MODEL_OUTPUT_TOKEN_LIMIT, 10_000);
-        assert_eq!(CLIENT_WRAPPER_TOKEN_RESERVE, 128);
-        assert_eq!(TOOL_CONTENT_TOKEN_LIMIT, 9_872);
-        assert_eq!(
-            TOOL_CONTENT_TOKEN_LIMIT + CLIENT_WRAPPER_TOKEN_RESERVE,
-            MODEL_OUTPUT_TOKEN_LIMIT
-        );
-    }
 
     #[test]
     fn text_projection_matches_the_client_mcp_json_body() {

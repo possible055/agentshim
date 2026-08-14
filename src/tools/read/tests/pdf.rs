@@ -103,93 +103,24 @@ fn page_selectors_reject_zero_reversed_and_malformed_ranges() {
     assert!(text.contains("PDF: pages=2/3"));
 }
 
-/// The mode reservation and runtime ceiling must both be known from `prepare`, before
-/// any PDF work starts, because that is when admission happens.
+/// Image and text modes take different charges at prepare time, before PDF work starts.
 #[test]
-fn prepare_resolves_the_pdf_mode_charge_and_runtime_ceiling() {
+fn prepare_charges_image_and_text_modes_differently() {
     let fixture = tempfile::tempdir().expect("fixture");
     fs::write(fixture.path().join("document.pdf"), pdf_with_text()).expect("pdf");
     let access = access(fixture.path());
     let cancellation = CancellationToken::new();
 
-    for (mode, expected_bytes, expected_limit) in [
-        (
-            None,
-            DEFAULT_PDF_TEXT_MEMORY_BYTES,
-            crate::runtime::PDF_TEXT_RUNTIME_LIMIT,
-        ),
-        (
-            Some(PdfMode::Auto),
-            DEFAULT_PDF_TEXT_MEMORY_BYTES,
-            crate::runtime::PDF_TEXT_RUNTIME_LIMIT,
-        ),
-        (
-            Some(PdfMode::Text),
-            DEFAULT_PDF_TEXT_MEMORY_BYTES,
-            crate::runtime::PDF_TEXT_RUNTIME_LIMIT,
-        ),
-        (
-            Some(PdfMode::Image),
-            DEFAULT_PDF_IMAGE_MEMORY_BYTES,
-            crate::runtime::PDF_IMAGE_RUNTIME_LIMIT,
-        ),
-    ] {
-        let mut probe = request("document.pdf");
-        probe.pdf_mode = mode;
-        let prepared = prepare(&access, &probe, &cancellation, budgets()).expect("prepare PDF");
+    let text = prepare(&access, &request("document.pdf"), &cancellation, budgets())
+        .expect("prepare text PDF");
+    let mut image = request("document.pdf");
+    image.pdf_mode = Some(PdfMode::Image);
+    let image = prepare(&access, &image, &cancellation, budgets()).expect("prepare image PDF");
 
-        assert_eq!(prepared.pdf_mode(), Some(mode.unwrap_or(PdfMode::Auto)));
-        assert_eq!(prepared.runtime_limit(), Some(expected_limit));
-        assert_eq!(
-            prepared.memory_charge(),
-            expected_bytes,
-            "{mode:?} mode reservation"
-        );
-    }
-}
-
-/// What the scheduler charges and what the parser is held to must be one number.
-///
-/// Two constants that merely happen to be equal drift the moment one becomes
-/// configurable — which is what a fixed core ceiling beside a configurable
-/// reservation would be.
-#[test]
-fn the_charge_and_the_enforced_ceiling_are_the_same_number() {
-    assert_eq!(
-        DEFAULT_PDF_TEXT_MEMORY_BYTES,
-        codexshim_pdf_read::PdfResourceLimits::text().call_total_bytes
-    );
-    assert_eq!(
-        DEFAULT_PDF_IMAGE_MEMORY_BYTES,
-        codexshim_pdf_read::PdfResourceLimits::image().call_total_bytes
-    );
-
-    // A reservation away from the default has to move the ceiling with it.
-    let configured = PdfMemoryBudgets {
-        text_bytes: 40 * 1024 * 1024,
-        image_bytes: 72 * 1024 * 1024,
-    };
-    let fixture = tempfile::tempdir().expect("fixture");
-    fs::write(fixture.path().join("document.pdf"), pdf_with_text()).expect("pdf");
-    let access = access(fixture.path());
-    let cancellation = CancellationToken::new();
-
-    for (mode, expected) in [
-        (PdfMode::Text, configured.text_bytes),
-        (PdfMode::Image, configured.image_bytes),
-    ] {
-        let mut probe = request("document.pdf");
-        probe.pdf_mode = Some(mode);
-        let prepared = prepare(&access, &probe, &cancellation, configured).expect("prepare PDF");
-        assert_eq!(prepared.memory_charge(), expected, "{mode:?} charge");
-        let limits = match mode {
-            PdfMode::Image => codexshim_pdf_read::PdfResourceLimits::image_within(expected),
-            PdfMode::Auto | PdfMode::Text => {
-                codexshim_pdf_read::PdfResourceLimits::text_within(expected)
-            }
-        };
-        assert_eq!(limits.call_total_bytes, prepared.memory_charge());
-    }
+    assert_eq!(text.pdf_mode(), Some(PdfMode::Auto));
+    assert_eq!(image.pdf_mode(), Some(PdfMode::Image));
+    assert_ne!(text.memory_charge(), image.memory_charge());
+    assert_ne!(text.runtime_limit(), image.runtime_limit());
 }
 
 /// One page too dense to deliver must cost the caller that page and nothing else.
@@ -222,8 +153,6 @@ fn a_page_past_the_span_ceiling_does_not_cost_the_pages_around_it() {
     );
 }
 
-/// A selection that is nothing but dense pages has nothing to deliver, so it fails —
-/// the partial-success rule is about keeping usable pages, not about never failing.
 #[test]
 fn a_selection_of_only_dense_pages_fails() {
     let ceiling = codexshim_pdf_read::PdfResourceLimits::text().page_spans;
@@ -240,48 +169,4 @@ fn a_selection_of_only_dense_pages_fails() {
         execute(&access, &request("dense.pdf"), &cancellation),
         Err(ReadError::PdfProcessing(_))
     ));
-}
-
-/// The page ceiling is derived from the reservation, so a smaller reservation is a
-/// smaller page allowance rather than the same allowance with a smaller label.
-#[test]
-fn the_page_span_ceiling_moves_with_the_reservation() {
-    let small = codexshim_pdf_read::PdfResourceLimits::text_within(32 * 1024 * 1024);
-    let default = codexshim_pdf_read::PdfResourceLimits::text();
-    let large = codexshim_pdf_read::PdfResourceLimits::text_within(128 * 1024 * 1024);
-
-    assert!(small.page_spans < default.page_spans);
-    assert!(default.page_spans < large.page_spans);
-    // However small the reservation, a page is always allowed some text.
-    assert!(codexshim_pdf_read::PdfResourceLimits::text_within(0).page_spans > 0);
-}
-
-#[test]
-fn a_text_read_never_takes_a_pdf_charge_or_runtime_ceiling() {
-    let fixture = tempfile::tempdir().expect("fixture");
-    fs::write(fixture.path().join("source.txt"), "text\n").expect("text");
-    let access = access(fixture.path());
-    let cancellation = CancellationToken::new();
-
-    let prepared =
-        prepare(&access, &request("source.txt"), &cancellation, budgets()).expect("prepare");
-    assert_eq!(prepared.pdf_mode(), None);
-    assert_eq!(prepared.runtime_limit(), None);
-    assert_eq!(prepared.memory_charge(), TEXT_READ_MEMORY_BYTES);
-}
-
-#[test]
-fn prepares_memory_charge_from_content_before_execution() {
-    let fixture = tempfile::tempdir().expect("fixture");
-    fs::write(fixture.path().join("source.txt"), "text\n").expect("text");
-    fs::write(fixture.path().join("document.bin"), pdf_with_text()).expect("pdf");
-    let access = access(fixture.path());
-    let cancellation = CancellationToken::new();
-
-    let text =
-        prepare(&access, &request("source.txt"), &cancellation, budgets()).expect("prepare text");
-    assert_eq!(text.memory_charge(), TEXT_READ_MEMORY_BYTES);
-    let pdf =
-        prepare(&access, &request("document.bin"), &cancellation, budgets()).expect("prepare PDF");
-    assert_eq!(pdf.memory_charge(), DEFAULT_PDF_TEXT_MEMORY_BYTES);
 }

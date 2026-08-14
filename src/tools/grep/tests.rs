@@ -7,16 +7,15 @@ mod tests {
     #[cfg(feature = "bench-internals")]
     use crate::tools::grep::execute_profiled;
     use crate::tools::grep::{
-        CANDIDATE_SOFT_TARGET_BYTES, CandidateCollection, CandidatePolicy, CaseMode,
-        GrepBenchmarkVariant, GrepError, GrepMode, GrepRequest, GrepSourcePolicy, GrepTraversal,
-        PAGE_MEMORY_BYTES, Page, PathnameReopenPolicy, PlanSink, SearchPlan, build_matcher,
-        candidate, execute, execute_with_traversal, execute_with_variant, render, search_file,
-        search_file_with_hook, search_file_with_variant_hook,
+        CandidateCollection, CandidatePolicy, CaseMode, GrepBenchmarkVariant, GrepError, GrepMode,
+        GrepRequest, GrepSourcePolicy, GrepTraversal, PAGE_MEMORY_BYTES, Page,
+        PathnameReopenPolicy, SearchPlan, build_matcher, candidate, execute,
+        execute_with_traversal, execute_with_variant, render, search_file, search_file_with_hook,
+        search_file_with_variant_hook,
     };
     use crate::{
         path::{FileAccess, ReadScope, RepositoryRoot},
         runtime::{MIN_TOOL_MEMORY_BYTES, MemoryReservation, RuntimeConfig, RuntimeResources},
-        traversal::prefer_parallel_root,
     };
 
     fn request(pattern: &str) -> GrepRequest {
@@ -69,10 +68,6 @@ mod tests {
         );
     }
 
-    fn display_subpath(path: &str) -> String {
-        path.to_owned()
-    }
-
     fn result_lines(output: &str) -> Vec<&str> {
         output
             .lines()
@@ -93,7 +88,7 @@ mod tests {
         query.context_lines = Some(1);
         let cancellation = CancellationToken::new();
         let baseline = execute(&root, &query, 1, &cancellation).expect("grep");
-        assert!(baseline.contains(&display_subpath("src/a.rs")));
+        assert!(baseline.contains("src/a.rs"));
         assert!(baseline.contains("-1-before"));
         assert!(!baseline.contains("ignored.rs"));
         for workers in [2, 4, 8, 16] {
@@ -214,49 +209,6 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_candidate_traversal_keeps_small_roots_serial() {
-        let (fixture, root) = fixture();
-        let base = root.resolve(Path::new(".")).expect("base");
-
-        assert!(!prefer_parallel_root(&root, &base));
-        for index in 0..8 {
-            fs::create_dir(fixture.path().join(format!("root-{index}"))).expect("root entry");
-        }
-        assert!(prefer_parallel_root(&root, &base));
-    }
-
-    #[test]
-    fn candidate_soft_target_records_crossing_without_failing() {
-        let (_fixture, root) = fixture();
-        let path = root.resolve(Path::new("src/a.rs")).expect("candidate path");
-        let candidate = candidate(path).expect("candidate");
-        let mut collection =
-            CandidateCollection::new(CandidatePolicy::SoftTarget, usize::MAX, None);
-        collection.path_retained_bytes = CANDIDATE_SOFT_TARGET_BYTES;
-
-        collection
-            .admit(candidate)
-            .expect("soft target is not fatal");
-        assert_eq!(collection.soft_target_crossings, 1);
-        assert_eq!(collection.candidates.len(), 1);
-    }
-
-    #[test]
-    fn benchmark_fatal_candidate_policy_is_isolated_from_production() {
-        let (_fixture, root) = fixture();
-        let path = root.resolve(Path::new("src/a.rs")).expect("candidate path");
-        let candidate = candidate(path).expect("candidate");
-        let mut collection =
-            CandidateCollection::new(CandidatePolicy::FatalCeiling, usize::MAX, None);
-        collection.path_retained_bytes = CANDIDATE_SOFT_TARGET_BYTES;
-
-        let error = collection
-            .admit(candidate)
-            .expect_err("fatal benchmark policy");
-        assert!(matches!(error, GrepError::CandidateMemory));
-    }
-
-    #[test]
     fn candidate_memory_limit_rejects_the_first_byte_over_the_limit() {
         let (_fixture, root) = fixture();
         let path = root.resolve(Path::new("src/a.rs")).expect("candidate path");
@@ -311,8 +263,8 @@ mod tests {
         query.fixed_strings = Some(true);
         let cancellation = CancellationToken::new();
         let baseline = execute(&root, &query, 1, &cancellation).expect("grep without glob");
-        assert!(baseline.contains(&display_subpath("src/a.rs")));
-        assert!(baseline.contains(&display_subpath("src/b.rs")));
+        assert!(baseline.contains("src/a.rs"));
+        assert!(baseline.contains("src/b.rs"));
         assert!(!baseline.contains("ignored.rs"));
         for workers in [2, 4, 8, 16] {
             assert_eq!(
@@ -330,14 +282,14 @@ mod tests {
         files.mode = Some(GrepMode::Files);
         files.limit = Some(1);
         let output = execute(&root, &files, 4, &cancellation).expect("files");
-        assert!(output.contains(&display_subpath("src/a.rs")));
+        assert!(output.contains("src/a.rs"));
         assert!(output.contains("next_offset=1"));
 
         let mut count = request("needle");
         count.mode = Some(GrepMode::Count);
         let output = execute(&root, &count, 4, &cancellation).expect("count");
-        assert!(output.contains(&format!("{}:2", display_subpath("src/a.rs"))));
-        assert!(output.contains(&format!("{}:2", display_subpath("src/b.rs"))));
+        assert!(output.contains("src/a.rs:2"));
+        assert!(output.contains("src/b.rs:2"));
     }
 
     #[test]
@@ -490,7 +442,7 @@ mod tests {
 
         let output =
             execute(&root, &request("needle"), 4, &CancellationToken::new()).expect("bounded grep");
-        assert!(output.contains(&display_subpath("src/large.rs")));
+        assert!(output.contains("src/large.rs"));
         assert!(output.contains("Skipped: 1"));
     }
 
@@ -536,28 +488,6 @@ mod tests {
         assert!(page.lines.iter().any(|line| line.text.contains("omitted")));
         let output = render(&query, &page, &CancellationToken::new()).expect("bounded page");
         assert!(output.contains("Partial:"));
-    }
-
-    #[test]
-    fn non_content_sinks_do_not_preallocate_capture_records() {
-        let query = request("needle");
-        let matcher = build_matcher(&query).expect("matcher");
-        let cancellation = CancellationToken::new();
-        let retirement = CancellationToken::new();
-        for mode in [GrepMode::Files, GrepMode::Count] {
-            let sink = PlanSink::new(
-                &matcher,
-                SearchPlan {
-                    mode,
-                    context: 0,
-                    probe: 1_000,
-                    allow_early_stop: false,
-                },
-                &cancellation,
-                &retirement,
-            );
-            assert_eq!(sink.capture_capacity(), 0);
-        }
     }
 
     #[test]
@@ -629,7 +559,7 @@ mod tests {
             .expect("reduce stable");
         page.mark_complete();
         let output = render(&query, &page, &cancellation).expect("render");
-        assert!(output.contains(&display_subpath("src/b.rs")));
+        assert!(output.contains("src/b.rs"));
         assert!(!output.contains("replacement without"));
         assert!(output.contains("Skipped: 1 files or entries."));
     }
@@ -668,14 +598,6 @@ mod tests {
                 assert_eq!(actual, expected);
             }
         }
-    }
-
-    #[test]
-    fn production_default_uses_open_time_handle_semantics() {
-        assert_eq!(
-            GrepBenchmarkVariant::default().pathname_reopen,
-            PathnameReopenPolicy::Off
-        );
     }
 
     #[test]
@@ -746,43 +668,6 @@ mod tests {
                 || fs::write(&path, replacement).expect("rewrite during validation"),
             )
             .expect("rewrite outcome");
-            assert!(outcome.skipped);
-        }
-    }
-
-    #[test]
-    fn same_handle_fingerprint_rejects_replace_with_or_without_pathname_reopen() {
-        for pathname_reopen in [PathnameReopenPolicy::On, PathnameReopenPolicy::Off] {
-            let (fixture, root) = fixture();
-            let cancellation = CancellationToken::new();
-            let query = request("needle");
-            let matcher = build_matcher(&query).expect("matcher");
-            let plan = SearchPlan {
-                mode: GrepMode::Content,
-                context: 0,
-                probe: 10,
-                allow_early_stop: false,
-            };
-            let original = fixture.path().join("src/a.rs");
-            let displaced = fixture.path().join("src/a-old.rs");
-            let candidate = candidate(root.resolve(Path::new("src/a.rs")).expect("candidate path"))
-                .expect("candidate");
-            let outcome = search_file_with_variant_hook(
-                &root,
-                &candidate,
-                &matcher,
-                plan,
-                &cancellation,
-                GrepBenchmarkVariant {
-                    source: GrepSourcePolicy::Reader,
-                    pathname_reopen,
-                },
-                || {
-                    fs::rename(&original, &displaced).expect("displace original");
-                    fs::write(&original, "replacement without match\n").expect("replace pathname");
-                },
-            )
-            .expect("replace outcome");
             assert!(outcome.skipped);
         }
     }

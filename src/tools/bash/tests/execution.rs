@@ -1,4 +1,3 @@
-use super::detached::detach_request;
 use super::*;
 
 #[test]
@@ -53,14 +52,14 @@ fn validation_rejects_empty_commands_and_unsupported_detach_combinations() {
     ));
 
     let mut over_limit = request("true");
-    over_limit.timeout_ms = Some(MAX_TIMEOUT_MS + 1);
+    over_limit.timeout_ms = Some(max_timeout_ms() + 1);
     assert!(matches!(
         over_limit.validate(),
         Err(ProcessError::Validation(_))
     ));
 
     let mut at_limit = request("true");
-    at_limit.timeout_ms = Some(MAX_TIMEOUT_MS);
+    at_limit.timeout_ms = Some(max_timeout_ms());
     assert!(at_limit.validate().is_ok());
 }
 
@@ -200,16 +199,6 @@ fn a_missing_bash_reports_an_actionable_non_retryable_unavailable_error() {
     assert!(matches!(error, ProcessError::Unavailable(_)));
     let message = error.to_string();
     assert!(message.contains("CODEXSHIM_BASH"), "{message}");
-}
-
-#[test]
-fn detached_memory_charge_includes_the_log_path() {
-    let request = detach_request("true", "local/build.log");
-
-    assert_eq!(
-        request.memory_charge(),
-        super::BASH_MEMORY_BYTES + "true".len() + "local/build.log".len()
-    );
 }
 
 #[test]

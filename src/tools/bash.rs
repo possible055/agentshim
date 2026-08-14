@@ -19,8 +19,8 @@ use crate::{
             },
             resolve::{ResolvedProgram, launcher_for},
             spawn::{
-                self, DEFAULT_TIMEOUT_MS, EnvironmentPlan, ExecFailure, ExecPlan, MAX_TIMEOUT_MS,
-                Streams,
+                self, DEFAULT_TIMEOUT_MS, EnvironmentPlan, ExecFailure, ExecPlan, Streams,
+                max_timeout_ms,
             },
         },
     },
@@ -111,9 +111,10 @@ impl BashRequest {
         if self.log_path.is_some() {
             return Err(invalid("log_path is only accepted when detach is true"));
         }
-        if !(1..=MAX_TIMEOUT_MS).contains(&self.timeout_ms()) {
+        if !(1..=max_timeout_ms()).contains(&self.timeout_ms()) {
             return Err(invalid(format!(
-                "timeout_ms must be from 1 to {MAX_TIMEOUT_MS}"
+                "timeout_ms must be from 1 to {}",
+                max_timeout_ms()
             )));
         }
         Ok(())
@@ -468,19 +469,15 @@ fn render_timeout(
             serde_json::to_value(&render.details)
                 .ok()
                 .is_some_and(|details| {
-                    crate::output::tool_error_result_fits_content_budget(
+                    let structured = crate::output::tool_error_structure(
                         "resource_timeout",
                         true,
                         &render.text,
                         Some(&details),
-                    ) && {
-                        let structured = crate::output::tool_error_structure(
-                            "resource_timeout",
-                            true,
-                            &render.text,
-                            Some(&details),
-                        );
-                        matches!(
+                    );
+                    crate::output::tool_result_encoded_len(&render.text, Some(&structured), true)
+                        <= crate::output::OutputLimits::for_content(&render.text).bytes
+                        && matches!(
                             output_budget.project_result(
                                 &{
                                     let mut result = rmcp::model::CallToolResult::error(vec![
@@ -494,7 +491,6 @@ fn render_timeout(
                             ),
                             crate::output::ProjectionDecision::Fits(_)
                         )
-                    }
                 })
         },
     )

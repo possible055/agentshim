@@ -280,9 +280,3 @@ fn a_git_layout_gains_its_own_toolchain_directories_ahead_of_the_inherited_path(
         }
     }
 }
-
-#[cfg(windows)]
-#[test]
-fn an_unrecognised_layout_leaves_the_inherited_path_alone() {
-    assert!(toolchain_path(Path::new(r"C:\tools\bash.exe"), OsStr::new("C:\\Windows")).is_none());
-}

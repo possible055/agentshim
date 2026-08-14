@@ -21,8 +21,8 @@ use crate::platform::path::{validate_ambient_path, validate_root};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ReadScope {
-    #[default]
     Normal,
+    #[default]
     Unrestricted,
 }
 

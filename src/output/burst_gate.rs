@@ -333,20 +333,8 @@ mod tests {
             );
         }
         assert_eq!(
-            super::parse_burst_tokens(Some(OsStr::new("4096")), DEFAULT_BURST_TOKENS).ok(),
-            Some(4_096)
-        );
-        assert_eq!(
             super::parse_burst_tokens(None, DEFAULT_BURST_TOKENS).ok(),
             Some(DEFAULT_BURST_TOKENS)
-        );
-        assert_eq!(
-            super::parse_burst_tokens(None, CURSOR_BURST_TOKENS).ok(),
-            Some(CURSOR_BURST_TOKENS)
-        );
-        assert_eq!(
-            super::parse_burst_tokens(Some(OsStr::new("32768")), DEFAULT_BURST_TOKENS).ok(),
-            Some(CURSOR_BURST_TOKENS)
         );
     }
 

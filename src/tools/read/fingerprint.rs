@@ -2,9 +2,6 @@ use std::io;
 
 use cap_std::fs::File;
 
-#[cfg(test)]
-pub(super) use super::prepared::has_binary_magic;
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FileFingerprint {
     pub(crate) regular: bool,

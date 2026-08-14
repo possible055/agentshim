@@ -1,4 +1,4 @@
-use std::{env, ffi::OsStr, io};
+use std::{env, ffi::OsStr, io, time::Duration};
 
 pub const MAX_READ_ONLY_CALLS: usize = 16;
 pub const MAX_SEARCH_LANES: usize = 16;
@@ -22,21 +22,32 @@ pub(super) const MEMORY_GROWTH_BYTES: usize = 1024 * 1024;
 /// Not configurable in this version: there is no demonstrated need to tune it, and an
 /// environment variable would be one more way to defeat the resource contract.
 pub(super) const MAX_PDF_CALLS: usize = 1;
-pub const PDF_GATE_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
+pub const PDF_GATE_WAIT: Duration = Duration::from_millis(300);
 /// Wall-clock ceilings for the PDF work inside `execute_prepared`, excluding queue time.
 ///
 /// Byte ceilings bound how much one call may allocate, not how long it may run. With a
 /// single-slot gate, "runs forever" is identical to "no other PDF read can ever start",
 /// so a time bound is required for the gate to mean anything.
-pub const PDF_TEXT_RUNTIME_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
-pub const PDF_IMAGE_RUNTIME_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+pub const PDF_TEXT_RUNTIME_LIMIT: Duration = Duration::from_secs(5);
+pub const PDF_IMAGE_RUNTIME_LIMIT: Duration = Duration::from_secs(10);
 const TRANSPORT_BLOCKING_THREADS: usize = 2;
 const WORKER_ENV: &str = "CODEXSHIM_IO_WORKERS";
 const PROCESS_CALLS_ENV: &str = "CODEXSHIM_PROCESS_CALLS";
+const TOOL_TIMEOUT_SHELF_ENV: &str = "CODEXSHIM_TOOL_TIMEOUT_SHELF";
 pub const GREP_MEMORY_BYTES_ENV: &str = "CODEXSHIM_GREP_MEMORY_BYTES";
 pub const GLOB_MEMORY_BYTES_ENV: &str = "CODEXSHIM_GLOB_MEMORY_BYTES";
 pub const PDF_TEXT_MEMORY_BYTES_ENV: &str = "CODEXSHIM_PDF_TEXT_MEMORY_BYTES";
 pub const PDF_IMAGE_MEMORY_BYTES_ENV: &str = "CODEXSHIM_PDF_IMAGE_MEMORY_BYTES";
+
+/// Default shelf matching the `tool_timeout_sec = 600` documented in every example. The
+/// server's own execution ceiling stays below this by the cleanup deadline plus protocol
+/// slack so a client configured at the shelf always receives the server's Timeout response
+/// before its `tool_timeout_sec` fires.
+pub const DEFAULT_TOOL_TIMEOUT_SHELF: Duration = Duration::from_secs(600);
+/// Minimum shelf that leaves at least one second of execution time after the cleanup
+/// deadline and protocol slack are subtracted.
+pub const MIN_TOOL_TIMEOUT_SHELF: Duration = Duration::from_secs(15);
+pub const MAX_TOOL_TIMEOUT_SHELF: Duration = Duration::from_secs(3600);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeConfig {
@@ -51,6 +62,7 @@ pub struct RuntimeConfig {
     pub pdf_text_memory_bytes: usize,
     pub pdf_image_memory_bytes: usize,
     pub memory_bytes: usize,
+    pub tool_timeout_shelf: Duration,
 }
 
 impl RuntimeConfig {
@@ -105,6 +117,8 @@ impl RuntimeConfig {
             MAX_PDF_IMAGE_MEMORY_BYTES,
         )?;
         let memory_bytes = global_memory_bytes(grep_memory_bytes, glob_memory_bytes);
+        let tool_timeout_shelf =
+            parse_tool_timeout_shelf(env::var_os(TOOL_TIMEOUT_SHELF_ENV).as_deref())?;
         // A per-call reservation larger than the pool it is drawn from could never be
         // satisfied, so the call would fail at admission on every attempt.
         for (environment, bytes) in [
@@ -133,6 +147,7 @@ impl RuntimeConfig {
             pdf_text_memory_bytes,
             pdf_image_memory_bytes,
             memory_bytes,
+            tool_timeout_shelf,
         })
     }
 
@@ -153,6 +168,7 @@ impl RuntimeConfig {
             pdf_text_memory_bytes: DEFAULT_PDF_TEXT_MEMORY_BYTES,
             pdf_image_memory_bytes: DEFAULT_PDF_IMAGE_MEMORY_BYTES,
             memory_bytes: DEFAULT_MEMORY_BYTES,
+            tool_timeout_shelf: DEFAULT_TOOL_TIMEOUT_SHELF,
         }
     }
 }
@@ -224,6 +240,27 @@ pub(super) fn parse_process_calls(value: Option<&OsStr>) -> io::Result<usize> {
                     format!(
                         "{PROCESS_CALLS_ENV} must be an integer from 1 to \
                          {MAX_CONFIGURED_PROCESS_CALLS}"
+                    ),
+                )
+            }),
+    }
+}
+
+pub(super) fn parse_tool_timeout_shelf(value: Option<&OsStr>) -> io::Result<Duration> {
+    match value {
+        None => Ok(DEFAULT_TOOL_TIMEOUT_SHELF),
+        Some(value) => value
+            .to_str()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .filter(|duration| (MIN_TOOL_TIMEOUT_SHELF..=MAX_TOOL_TIMEOUT_SHELF).contains(duration))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "{TOOL_TIMEOUT_SHELF_ENV} must be an integer from {} to {} seconds",
+                        MIN_TOOL_TIMEOUT_SHELF.as_secs(),
+                        MAX_TOOL_TIMEOUT_SHELF.as_secs(),
                     ),
                 )
             }),

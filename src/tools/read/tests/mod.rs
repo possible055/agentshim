@@ -5,11 +5,11 @@ use encoding_rs::{BIG5, GB18030, GBK};
 use tokio_util::sync::CancellationToken;
 
 use crate::path::{FileAccess, ReadScope, RepositoryRoot};
-use crate::runtime::{DEFAULT_PDF_IMAGE_MEMORY_BYTES, DEFAULT_PDF_TEXT_MEMORY_BYTES};
+use crate::runtime::DEFAULT_PDF_TEXT_MEMORY_BYTES;
 use crate::tools::read::{
-    AFTER_READ_HOOK, BEFORE_READ_HOOK, DecodeError, MAX_IMAGE_BASE64_BYTES, MAX_IMAGE_PAGES,
-    MAX_LINE_COUNT, PdfMemoryBudgets, PdfMode, ReadError, ReadRequest, TEXT_READ_MEMORY_BYTES,
-    execute, execute_output, prepare,
+    AFTER_READ_HOOK, BEFORE_READ_HOOK, DecodeError, MAX_IMAGE_BASE64_BYTES, MAX_LINE_COUNT,
+    PdfMemoryBudgets, PdfMode, ReadError, ReadRequest, TEXT_READ_MEMORY_BYTES, execute,
+    execute_output, prepare,
 };
 
 fn budgets() -> PdfMemoryBudgets {

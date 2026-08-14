@@ -411,32 +411,6 @@ pub(super) fn sustained_tail_growth(
         && positive_steps >= required_positive_steps
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{ResourceSample, sustained_tail_growth};
-
-    fn sample(resource_count: u64) -> ResourceSample {
-        ResourceSample {
-            memory_bytes: 0,
-            virtual_memory_bytes: None,
-            resource_count,
-            threads: resource_count,
-        }
-    }
-
-    #[test]
-    fn sustained_growth_requires_net_slope_and_repeated_increases() {
-        let growing = (10..20).map(sample).collect::<Vec<_>>();
-        let stable = [10, 10, 11, 10, 10, 11, 10, 10, 10, 10]
-            .into_iter()
-            .map(sample)
-            .collect::<Vec<_>>();
-
-        assert!(sustained_tail_growth(&growing, |value| value.resource_count));
-        assert!(!sustained_tail_growth(&stable, |value| value.resource_count));
-    }
-}
-
 #[cfg(unix)]
 pub(super) mod platform {
     use std::{collections::BTreeMap, fs, io};

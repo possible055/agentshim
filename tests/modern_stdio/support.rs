@@ -24,6 +24,12 @@ impl Session {
         Self::spawn(Self::base_command(root))
     }
 
+    pub(super) fn start_normal_at(root: &std::path::Path) -> Self {
+        let mut command = Self::base_command(root);
+        command.args(["--read-scope", "normal"]);
+        Self::spawn(command)
+    }
+
     pub(super) fn start_with_options(
         read_scope: Option<&str>,
         process_calls: Option<usize>,

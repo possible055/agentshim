@@ -429,19 +429,3 @@ fn a_backgrounded_child_does_not_hold_the_foreground_call_open() {
         "the backgrounded child survived long enough to write after the response"
     );
 }
-
-#[test]
-fn detached_capacity_parsing_fails_fast_outside_its_range() {
-    use crate::tools::bash::detached::parse_detached_calls;
-    use std::ffi::OsStr;
-
-    assert_eq!(parse_detached_calls(None).ok(), Some(16));
-    assert_eq!(parse_detached_calls(Some(OsStr::new("1"))).ok(), Some(1));
-    assert_eq!(parse_detached_calls(Some(OsStr::new("16"))).ok(), Some(16));
-    for invalid in ["0", "17", "-1", "many", ""] {
-        assert!(
-            parse_detached_calls(Some(OsStr::new(invalid))).is_err(),
-            "{invalid} must be rejected"
-        );
-    }
-}

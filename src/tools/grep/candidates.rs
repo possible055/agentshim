@@ -450,7 +450,7 @@ impl CandidateCollection {
                 .saturating_mul(std::mem::size_of::<Candidate>()),
         );
         let hard_limit = self.memory_limit.min(match self.policy {
-            #[cfg(any(test, feature = "bench-internals"))]
+            #[cfg(feature = "bench-internals")]
             CandidatePolicy::FatalCeiling => CANDIDATE_SOFT_TARGET_BYTES,
             CandidatePolicy::SoftTarget => self.memory_limit,
         });

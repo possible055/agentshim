@@ -7,12 +7,12 @@ use crate::{
     tools::exec::{
         ProcessError,
         capture::{Capture, capture_bytes_per_stream},
-        spawn::MAX_TIMEOUT_MS,
+        spawn::max_timeout_ms,
     },
 };
 
 use super::{
-    BASH_ENVIRONMENT, BASH_MEMORY_BYTES, BashRequest, CompletedBash, MsysArgumentConversion,
+    BASH_ENVIRONMENT, BashRequest, CompletedBash, MsysArgumentConversion,
     detached::DetachedTrees,
     environment, execute_output,
     locate::{self, BashLocator},

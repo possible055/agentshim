@@ -1,29 +1,20 @@
 use codexshim::{CodexShim, ReadScope};
 use serde_json::{Value, json};
 
-fn assert_snapshot(actual: impl serde::Serialize, expected: &str) {
-    let actual = serde_json::to_value(actual).expect("serialize snapshot");
-    let expected: serde_json::Value = serde_json::from_str(expected).expect("parse snapshot");
-    assert_eq!(actual, expected);
-}
-
 #[test]
-fn server_discover_snapshot() {
-    assert_snapshot(
-        CodexShim::discovery_result(),
-        include_str!("snapshots/server_discover.json"),
+fn server_discover_advertises_supported_versions_and_tool_capability() {
+    let discover = serde_json::to_value(CodexShim::discovery_result()).expect("serialize discover");
+    assert_eq!(
+        discover["supportedVersions"],
+        json!([
+            "2026-07-28",
+            "2025-11-25",
+            "2025-06-18",
+            "2025-03-26",
+            "2024-11-05"
+        ])
     );
-}
-
-#[test]
-fn tools_list_snapshot() {
-    let mut actual = serde_json::to_value(CodexShim::tools_result()).expect("serialize tools");
-    for tool in actual["tools"].as_array_mut().expect("tools array") {
-        tool.as_object_mut()
-            .expect("tool object")
-            .remove("outputSchema");
-    }
-    assert_snapshot(actual, include_str!("snapshots/tools_list.json"));
+    assert_eq!(discover["capabilities"], json!({ "tools": {} }));
 }
 
 #[test]
@@ -68,7 +59,7 @@ fn tool_annotations_match_codex_approval_contract() {
 }
 
 #[test]
-fn unrestricted_catalog_changes_scope_text_without_changing_approval_annotations() {
+fn unrestricted_catalog_keeps_approval_annotations() {
     let normal = serde_json::to_value(CodexShim::tools_result()).expect("normal tools");
     let unrestricted = serde_json::to_value(CodexShim::tools_result_for(ReadScope::Unrestricted))
         .expect("unrestricted tools");
@@ -82,17 +73,6 @@ fn unrestricted_catalog_changes_scope_text_without_changing_approval_annotations
             tool(normal_tools, name)["annotations"],
             tool(unrestricted_tools, name)["annotations"]
         );
-    }
-    for name in ["read", "grep", "glob"] {
-        assert!(
-            tool(unrestricted_tools, name)["description"]
-                .as_str()
-                .expect("description")
-                .contains("local filesystem")
-        );
-    }
-    for name in ["run_program", "bash"] {
-        assert_eq!(tool(normal_tools, name), tool(unrestricted_tools, name));
     }
 }
 

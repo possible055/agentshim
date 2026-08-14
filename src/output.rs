@@ -217,28 +217,6 @@ pub(crate) fn tool_error_structure(
     })
 }
 
-#[cfg(test)]
-pub(crate) fn tool_error_result_fits_budget(
-    code: &'static str,
-    retryable: bool,
-    message: &str,
-    details: Option<&Value>,
-) -> bool {
-    let structured = tool_error_structure(code, retryable, message, details);
-    tool_result_fits_budget(message, Some(&structured), true)
-}
-
-pub(crate) fn tool_error_result_fits_content_budget(
-    code: &'static str,
-    retryable: bool,
-    message: &str,
-    details: Option<&Value>,
-) -> bool {
-    let structured = tool_error_structure(code, retryable, message, details);
-    tool_result_encoded_len(message, Some(&structured), true)
-        <= OutputLimits::for_content(message).bytes
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OutputLimits {
     pub bytes: usize,
@@ -473,11 +451,6 @@ mod tests {
             assert!(bounded.len() <= super::MODEL_BYTE_LIMIT);
             assert!(std::str::from_utf8(bounded.as_bytes()).is_ok());
         }
-    }
-
-    #[test]
-    fn short_diagnostics_are_unchanged() {
-        assert_eq!(bounded_diagnostic("short diagnostic"), "short diagnostic");
     }
 
     #[test]

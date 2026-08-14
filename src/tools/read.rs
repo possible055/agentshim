@@ -26,7 +26,7 @@ use hooks::{AFTER_READ_HOOK, BEFORE_READ_HOOK};
 #[cfg(test)]
 pub(crate) use hooks::{FORCED_CHANGES, FORCED_PDF_RUNTIME_LIMIT, global_read_state_guard};
 #[cfg(test)]
-use pdf::{MAX_IMAGE_BASE64_BYTES, MAX_IMAGE_PAGES};
+use pdf::MAX_IMAGE_BASE64_BYTES;
 #[cfg(test)]
 use request::{MAX_LINE_COUNT, TEXT_READ_MEMORY_BYTES};
 

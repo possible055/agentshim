@@ -15,8 +15,8 @@ use crate::{
             },
             resolve::{Launcher, ResolvedProgram},
             spawn::{
-                self, DEFAULT_TIMEOUT_MS, EnvironmentPlan, ExecFailure, ExecPlan, MAX_TIMEOUT_MS,
-                Streams,
+                self, DEFAULT_TIMEOUT_MS, EnvironmentPlan, ExecFailure, ExecPlan, Streams,
+                max_timeout_ms,
             },
         },
     },
@@ -78,9 +78,10 @@ impl ProcessRequest {
         {
             return Err(invalid("stdin must not exceed 1048576 UTF-8 bytes"));
         }
-        if !(1..=MAX_TIMEOUT_MS).contains(&self.timeout_ms()) {
+        if !(1..=max_timeout_ms()).contains(&self.timeout_ms()) {
             return Err(invalid(format!(
-                "timeout_ms must be from 1 to {MAX_TIMEOUT_MS}"
+                "timeout_ms must be from 1 to {}",
+                max_timeout_ms()
             )));
         }
 
@@ -543,19 +544,15 @@ fn timeout_output_fits_budget(
     serde_json::to_value(&output.details)
         .ok()
         .is_some_and(|details| {
-            crate::output::tool_error_result_fits_content_budget(
+            let structured = crate::output::tool_error_structure(
                 "resource_timeout",
                 true,
                 &output.text,
                 Some(&details),
-            ) && {
-                let structured = crate::output::tool_error_structure(
-                    "resource_timeout",
-                    true,
-                    &output.text,
-                    Some(&details),
-                );
-                matches!(
+            );
+            crate::output::tool_result_encoded_len(&output.text, Some(&structured), true)
+                <= crate::output::OutputLimits::for_content(&output.text).bytes
+                && matches!(
                     output_budget.project_result(
                         &{
                             let mut result = rmcp::model::CallToolResult::error(vec![
@@ -569,6 +566,5 @@ fn timeout_output_fits_budget(
                     ),
                     crate::output::ProjectionDecision::Fits(_)
                 )
-            }
         })
 }

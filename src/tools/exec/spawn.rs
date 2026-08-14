@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::OnceLock,
     time::Duration,
 };
 
@@ -25,22 +26,15 @@ use super::{
 };
 
 pub(crate) const DEFAULT_TIMEOUT_MS: u64 = 120_000;
-/// The `tool_timeout_sec` ceiling the client examples and READMEs document. The server's own
-/// execution ceiling stays below this so a client configured at the shelf always receives the
-/// server's Timeout response before its `tool_timeout_sec` fires.
-pub(super) const TOOL_TIMEOUT_SHELF: Duration = Duration::from_secs(600);
 /// Round-trip slack beyond `CLEANUP_DEADLINE` for the MCP response carrying the Timeout.
 pub(super) const PROTOCOL_SLACK: Duration = Duration::from_secs(5);
-/// Maximum execution time the caller may request. Derived below `TOOL_TIMEOUT_SHELF` by the
-/// cleanup deadline plus protocol slack, so the client never gives up before the server does.
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "TOOL_TIMEOUT_SHELF is 600 s, far below u64::MAX ms"
-)]
-pub(crate) const MAX_TIMEOUT_MS: u64 = TOOL_TIMEOUT_SHELF
-    .saturating_sub(CLEANUP_DEADLINE)
-    .saturating_sub(PROTOCOL_SLACK)
-    .as_millis() as u64;
+/// The default shelf when no override has been installed. Matches the
+/// `tool_timeout_sec = 600` documented in every example.
+const DEFAULT_SHELF: Duration = Duration::from_secs(600);
+/// Process-wide max execution time the caller may request. Derived below the configured
+/// shelf by the cleanup deadline plus protocol slack, so the client never gives up before
+/// the server does. Set once during server build from `RuntimeConfig::tool_timeout_shelf`.
+static MAX_TIMEOUT_MS: OnceLock<u64> = OnceLock::new();
 #[cfg(unix)]
 pub(crate) const TERM_GRACE: Duration = Duration::from_millis(250);
 pub(crate) const CLEANUP_DEADLINE: Duration = Duration::from_secs(5);
@@ -49,6 +43,36 @@ pub(crate) const IO_CANCELLATION_DEADLINE: Duration = Duration::from_secs(1);
 /// How long descendants may outlive the primary process before the owned containment is
 /// terminated. A detached tree is how a command intentionally outlives its call.
 pub(crate) const DESCENDANT_EXIT_GRACE: Duration = Duration::from_millis(250);
+
+/// Install the process-wide max execution time from the configured shelf. Called once
+/// during server build; later calls are ignored because the tool catalog may already have
+/// cached schemas built from the first value.
+pub(crate) fn install_max_timeout_ms(shelf: Duration) {
+    let max = shelf
+        .saturating_sub(CLEANUP_DEADLINE)
+        .saturating_sub(PROTOCOL_SLACK)
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    let _ = MAX_TIMEOUT_MS.set(max);
+}
+
+/// The process-wide max execution time in milliseconds. Before `install_max_timeout_ms`
+/// is called, returns the default derived from `DEFAULT_SHELF`.
+pub(crate) fn max_timeout_ms() -> u64 {
+    *MAX_TIMEOUT_MS
+        .get()
+        .unwrap_or(&max_timeout_ms_from_shelf(DEFAULT_SHELF))
+}
+
+fn max_timeout_ms_from_shelf(shelf: Duration) -> u64 {
+    shelf
+        .saturating_sub(CLEANUP_DEADLINE)
+        .saturating_sub(PROTOCOL_SLACK)
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
 
 /// Pipe topology for one call. `Merged` points the child's stdout and stderr at a single pipe
 /// so the parent observes both in pipe-write order; it cannot attribute a line to a stream.

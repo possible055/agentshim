@@ -25,6 +25,12 @@ cargo check --locked -p codexshim-pdf-read --all-targets --no-default-features -
 - Timing, throughput, thread scheduling, and repeated race checks belong in the performance or stability workflows. Correctness tests must assert deterministic contracts.
 - A test that passes only with `--test-threads 1` is not isolated and must not be merged in that state.
 
+## What to test
+
+Unit tests cover one module's behaviour. Integration tests use only the public API and real stdio. The same contract belongs in one layer, not both.
+
+Assert public parse boundaries, MCP wire (lifecycle, versions, annotations, error envelopes, stdio integrity), path and process safety, resource admission, and observable tool output. Do not assert that a named constant equals a number, that `memory_charge()` equals `BASE + "fixed".len()`, or that a full tool schema JSON matches a snapshot. Do not wrap a fixed parameter in a helper just to check it. Do not freeze README examples, doctor default tables, or internal thresholds that should stay flexible.
+
 ## Platform boundaries
 
 Windows and Unix mechanisms live under `crate::platform`. Portable policy and result formatting remain in their owning modules. Add shared contract tests for platform implementations, then exercise each implementation on its native CI runner.

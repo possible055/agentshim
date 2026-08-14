@@ -27,18 +27,9 @@ fn validation_rejects_conflicts_nul_and_oversized_stdin() {
 }
 
 #[test]
-fn process_memory_charge_includes_the_capture_and_render_reservation() {
-    let request = request("tool".to_owned());
-    assert_eq!(request.memory_charge(), PROCESS_MEMORY_BYTES + "tool".len());
-}
-
-#[test]
 fn empty_native_success_is_only_the_exit_code() {
     let compact = completed_output(b"", b"", "0").text;
-    let previous = "Resolved program: tool\nLauncher: native\nCwd: workspace\n--- stdout ---\n\n--- stderr ---\n\nExit code: 0\nDuration ms: 1\nStdout bytes: total=0, shown=0, omitted=0, invalid=0, encoding=utf-8\nStderr bytes: total=0, shown=0, omitted=0, invalid=0, encoding=utf-8\nComplete.";
-
     assert_eq!(compact, "Exit code: 0");
-    assert!(compact.len() * 5 <= previous.len());
 }
 
 #[test]
@@ -337,12 +328,13 @@ fn timeout_projection_fits_the_complete_error_envelope() {
     )
     .expect("timeout report");
     let details = serde_json::to_value(&report.details).expect("timeout details");
+    let structured =
+        crate::output::tool_error_structure("resource_timeout", true, &report.text, Some(&details));
 
-    assert!(crate::output::tool_error_result_fits_budget(
-        "resource_timeout",
-        true,
+    assert!(crate::output::tool_result_fits_budget(
         &report.text,
-        Some(&details)
+        Some(&structured),
+        true
     ));
     assert_eq!(
         report.details.stdout.shown + report.details.stdout.omitted,

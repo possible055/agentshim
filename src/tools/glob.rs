@@ -16,7 +16,7 @@ pub use request::{GlobTraversal, execute, execute_with_traversal};
 pub(crate) use request::{execute_output_with_budget, memory_charge};
 
 #[cfg(test)]
-use request::{MAX_MATCHES, PATH_OMISSION, record_match};
+use request::PATH_OMISSION;
 #[cfg(test)]
 use result::{GlobMatch, TopK, render};
 

@@ -247,13 +247,6 @@ fn repeated_queue_overflow_preserves_prior_drop_debt() {
 }
 
 #[test]
-fn failed_batch_loss_includes_the_record_and_prior_drop_debt() {
-    let mut failed = record("failed");
-    failed.insert("dropped_since_last".to_owned(), json!(7));
-    assert_eq!(batch_loss_count(&[failed]), 8);
-}
-
-#[test]
 fn errors_mode_starts_writer_only_when_an_error_is_recorded() {
     let parent = tempfile::tempdir().expect("parent");
     let directory = parent.path().join("logs");

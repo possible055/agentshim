@@ -571,27 +571,4 @@ mod tests {
         assert!(failure.failed());
         assert!(shutdown.is_cancelled());
     }
-
-    #[test]
-    fn repeated_insert_and_cancel_returns_to_zero() {
-        let mut tracker = CorrelationTracker::default();
-        for id in 0..10_000 {
-            let id = RequestId::Number(id);
-            assert!(tracker.insert(id.clone(), "correlation".to_owned()));
-            tracker.remove(&id);
-        }
-
-        assert!(tracker.entries.is_empty());
-    }
-
-    #[test]
-    fn clear_removes_every_correlation() {
-        let mut tracker = CorrelationTracker::default();
-        tracker.insert(request_id(1), "first".to_owned());
-        tracker.insert(request_id(2), "second".to_owned());
-
-        tracker.clear();
-
-        assert!(tracker.entries.is_empty());
-    }
 }

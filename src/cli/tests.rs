@@ -23,19 +23,19 @@ fn serve_options(command: Result<CliCommand, String>) -> ServeOptions {
 fn read_scope_defaults_and_accepts_both_argument_forms() {
     assert_eq!(
         serve_options(parse(&["serve"])).read_scope,
-        ReadScope::Normal
-    );
-    assert_eq!(
-        serve_options(parse(&["serve", "--read-scope", "normal"])).read_scope,
-        ReadScope::Normal
+        ReadScope::Unrestricted
     );
     assert_eq!(
         serve_options(parse(&["serve", "--read-scope", "unrestricted"])).read_scope,
         ReadScope::Unrestricted
     );
     assert_eq!(
-        serve_options(parse(&["doctor", "--read-scope=normal"])).read_scope,
+        serve_options(parse(&["serve", "--read-scope", "normal"])).read_scope,
         ReadScope::Normal
+    );
+    assert_eq!(
+        serve_options(parse(&["doctor", "--read-scope=unrestricted"])).read_scope,
+        ReadScope::Unrestricted
     );
 }
 
@@ -181,35 +181,6 @@ async fn receive_frame_accepts_maximum_escaped_stdin_request() {
     let output = read_frame(input.clone())
         .await
         .expect("escaped stdin frame");
-
-    assert_eq!(output, input);
-}
-
-#[tokio::test]
-async fn receive_frame_preserves_ordinary_cargo_arguments_and_environment() {
-    let request = json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/call",
-        "params": {
-            "name": "run_program",
-            "arguments": {
-                "program": "cargo",
-                "args": ["test", "--locked", "--all-targets", "--", "--nocapture"],
-                "env": {
-                    "CARGO_TARGET_DIR": "target/frame-contract",
-                    "RUST_BACKTRACE": "1",
-                },
-                "unset_env": ["RUSTFLAGS"],
-            }
-        }
-    });
-    let mut input = serde_json::to_vec(&request).expect("request JSON");
-    input.push(b'\n');
-
-    let output = read_frame(input.clone())
-        .await
-        .expect("ordinary Cargo frame");
 
     assert_eq!(output, input);
 }

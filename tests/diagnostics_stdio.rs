@@ -282,15 +282,6 @@ fn unavailable_log_directory_does_not_corrupt_json_rpc_stdout() {
 }
 
 #[test]
-fn successful_default_mode_call_does_not_create_jsonl() {
-    let directory = tempfile::tempdir().expect("log directory");
-    let mut session = Session::start(directory.path());
-    session.call_read(1, &json!("src/main.rs"), false);
-    session.close();
-    assert!(jsonl_paths(directory.path()).is_empty());
-}
-
-#[test]
 fn all_mode_persists_modern_discovery_and_tool_list_metadata() {
     let directory = tempfile::tempdir().expect("log directory");
     let mut session = Session::start_with_mode(directory.path(), "all");

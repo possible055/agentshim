@@ -26,11 +26,9 @@ pub use request::{
 #[cfg(test)]
 use candidates::{CandidateCollection, candidate};
 #[cfg(test)]
-use file_search::{
-    PlanSink, SearchPlan, search_file, search_file_with_hook, search_file_with_variant_hook,
-};
+use file_search::{SearchPlan, search_file, search_file_with_hook, search_file_with_variant_hook};
 #[cfg(test)]
-use request::{CANDIDATE_SOFT_TARGET_BYTES, CandidatePolicy, PAGE_MEMORY_BYTES, build_matcher};
+use request::{CandidatePolicy, PAGE_MEMORY_BYTES, build_matcher};
 #[cfg(test)]
 use result::{Page, render};
 

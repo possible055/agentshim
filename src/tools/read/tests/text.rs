@@ -240,16 +240,6 @@ fn second_change_fails_explicitly() {
 }
 
 #[test]
-fn webp_magic_requires_riff_container() {
-    assert!(!crate::tools::read::fingerprint::has_binary_magic(
-        b"abcdefghWEBP source text"
-    ));
-    assert!(crate::tools::read::fingerprint::has_binary_magic(
-        b"RIFF1234WEBP"
-    ));
-}
-
-#[test]
 fn validation_and_directory_fail_before_content_read() {
     let fixture = tempfile::tempdir().expect("fixture");
     fs::create_dir(fixture.path().join("directory")).expect("directory");

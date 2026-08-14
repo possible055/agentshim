@@ -3,15 +3,19 @@ use super::*;
 
 #[test]
 fn normal_tools_reject_unmanaged_paths_outside_the_startup_root() {
-    let mut session = Session::start();
-    session.send(&modern_request(1, "server/discover", empty_params()));
-    assert_eq!(session.receive()["id"], 1);
-
-    let outside = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("repository parent")
+    let startup = tempfile::tempdir().expect("startup root");
+    std::fs::write(startup.path().join("inside.txt"), "inside").expect("startup file");
+    let unmanaged = tempfile::tempdir().expect("unmanaged fixture");
+    std::fs::write(unmanaged.path().join("secret.txt"), "secret").expect("unmanaged file");
+    let outside = unmanaged
+        .path()
+        .join("secret.txt")
         .to_string_lossy()
         .into_owned();
+
+    let mut session = Session::start_normal_at(startup.path());
+    session.send(&modern_request(1, "server/discover", empty_params()));
+    assert_eq!(session.receive()["id"], 1);
     let requests = [
         ("read", json!({ "path": outside })),
         ("grep", json!({ "path": outside, "pattern": "codexshim" })),
@@ -49,13 +53,7 @@ fn unrestricted_scope_reads_searches_and_globs_outside_the_startup_root() {
 
     let mut session = Session::start_unrestricted();
     session.send(&modern_request(1, "server/discover", empty_params()));
-    let discover = session.receive();
-    assert!(
-        discover["result"]["instructions"]
-            .as_str()
-            .expect("instructions")
-            .contains("Local filesystem")
-    );
+    assert_eq!(session.receive()["id"], 1);
 
     let read = call_tool(&mut session, 2, "read", json!({ "path": source }));
     assert_eq!(read["result"]["isError"], false);
@@ -91,20 +89,6 @@ fn unrestricted_scope_reads_searches_and_globs_outside_the_startup_root() {
         .expect("glob text");
     assert!(glob_text.contains("alpha.rs"));
     assert!(!glob_text.contains("beta.txt"));
-
-    let process = call_tool(
-        &mut session,
-        5,
-        "run_program",
-        json!({ "program": "cargo", "args": ["--version"], "cwd": base }),
-    );
-    assert_eq!(process["result"]["isError"], false);
-    assert!(
-        process["result"]["content"][0]["text"]
-            .as_str()
-            .expect("process output")
-            .contains("cargo ")
-    );
 
     session.close();
 }

@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use super::{
-    capture::{Capture, capture_bytes_per_stream, escape_invalid_utf8},
+    capture::{Capture, capture_bytes_per_stream},
     resolve::ProcessResolver,
 };
 #[cfg(unix)]
@@ -103,10 +103,6 @@ fn resolver_cache_preserves_multicall_proxy_identity() {
 
 #[test]
 fn invalid_utf8_is_escaped_across_valid_spans() {
-    let (rendered, invalid) = escape_invalid_utf8(b"a\xF0\x9F\x92\xA9b\xFFc\xE2\x82");
-    assert_eq!(rendered, "a💩b\\xFFc\\xE2\\x82");
-    assert_eq!(invalid, 3);
-
     let mut capture = Capture::new(capture_bytes_per_stream(2));
     capture.push(b"a\xF0\x9F");
     capture.push(b"\x92\xA9b\xFF");
@@ -139,21 +135,6 @@ fn cmd_compat_oem_fallback_preserves_utf8_and_decodes_cp950_runs() {
     assert_eq!(rendered.text, "binary \\xA4");
     assert_eq!(rendered.encoding, "utf-8-with-byte-escapes");
     assert_eq!(rendered.invalid_bytes, 1);
-}
-
-#[test]
-fn capture_budget_is_a_per_call_total_split_across_streams() {
-    let merged = Capture::new(capture_bytes_per_stream(1));
-    let split = Capture::new(capture_bytes_per_stream(2));
-
-    assert_eq!(
-        merged.head_limit() + merged.tail_limit(),
-        2 * (split.head_limit() + split.tail_limit())
-    );
-    assert_eq!(
-        merged.head_limit() + merged.tail_limit(),
-        crate::output::effective_byte_limit() * 2
-    );
 }
 
 #[test]

@@ -121,6 +121,7 @@ impl CodexShimBuilder {
     /// Returns the repository root validation or capability-open error.
     pub fn build(self) -> io::Result<CodexShim> {
         let root = Arc::new(RepositoryRoot::open(self.root)?);
+        crate::tools::exec::spawn::install_max_timeout_ms(self.runtime.tool_timeout_shelf);
         let output_token_gate = OutputTokenGate::load_shared().map_err(io::Error::other)?;
         let burst_output_gate =
             BurstOutputGate::new(crate::output::configured_burst_tokens(self.client_profile)?);

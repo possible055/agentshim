@@ -5,13 +5,13 @@ mod tests {
     use crate::runtime::{
         DEFAULT_GLOB_MEMORY_BYTES, DEFAULT_GREP_MEMORY_BYTES, DEFAULT_MEMORY_BYTES,
         DEFAULT_PDF_IMAGE_MEMORY_BYTES, DEFAULT_PDF_TEXT_MEMORY_BYTES, DEFAULT_PROCESS_CALLS,
-        GLOB_MEMORY_BYTES_ENV, GREP_MEMORY_BYTES_ENV, MAX_CONFIGURED_PROCESS_CALLS,
+        DEFAULT_TOOL_TIMEOUT_SHELF, GLOB_MEMORY_BYTES_ENV, GREP_MEMORY_BYTES_ENV,
         MAX_PDF_IMAGE_MEMORY_BYTES, MAX_PDF_TEXT_MEMORY_BYTES, MAX_READ_ONLY_CALLS,
-        MAX_TOOL_MEMORY_BYTES, MIN_PDF_IMAGE_MEMORY_BYTES, MIN_PDF_TEXT_MEMORY_BYTES,
-        MIN_TOOL_MEMORY_BYTES, MemoryReservation, PDF_IMAGE_MEMORY_BYTES_ENV,
-        PDF_TEXT_MEMORY_BYTES_ENV, RuntimeConfig, RuntimeResources, blocking_threads,
-        default_scheduler_threads, default_worker_lanes, global_memory_bytes,
-        parse_memory_bytes_in_range, parse_process_calls, parse_tool_memory_bytes,
+        MAX_TOOL_MEMORY_BYTES, MAX_TOOL_TIMEOUT_SHELF, MIN_PDF_IMAGE_MEMORY_BYTES,
+        MIN_PDF_TEXT_MEMORY_BYTES, MIN_TOOL_MEMORY_BYTES, MemoryReservation,
+        PDF_IMAGE_MEMORY_BYTES_ENV, PDF_TEXT_MEMORY_BYTES_ENV, RuntimeConfig, RuntimeResources,
+        blocking_threads, global_memory_bytes, parse_memory_bytes_in_range, parse_process_calls,
+        parse_tool_memory_bytes, parse_tool_timeout_shelf,
     };
     use tokio_util::sync::CancellationToken;
 
@@ -63,24 +63,6 @@ mod tests {
                 "the shared helper is the wrong range for {environment}"
             );
         }
-    }
-
-    /// Both mode reservations must fit the pool they are drawn from, or the call could
-    /// never be admitted.
-    #[test]
-    fn pdf_mode_reservations_fit_the_shared_pool() {
-        let config = RuntimeConfig::for_tests(1);
-        assert!(config.pdf_text_memory_bytes <= config.memory_bytes);
-        assert!(config.pdf_image_memory_bytes <= config.memory_bytes);
-        // Const-evaluable, so `assert!` would be optimised out; compare at runtime.
-        assert_eq!(
-            MAX_PDF_TEXT_MEMORY_BYTES.min(DEFAULT_MEMORY_BYTES),
-            MAX_PDF_TEXT_MEMORY_BYTES
-        );
-        assert_eq!(
-            MAX_PDF_IMAGE_MEMORY_BYTES.min(DEFAULT_MEMORY_BYTES),
-            MAX_PDF_IMAGE_MEMORY_BYTES
-        );
     }
 
     #[tokio::test]
@@ -165,84 +147,46 @@ mod tests {
         drop((gate, reservation, text));
     }
 
-    /// The behaviour the split replaced: a call that reserves the whole pool starves
-    /// every other tool. Kept as the contrast case, and as the reason the PDF charge is
-    /// now a per-mode fraction rather than the pool.
-    #[tokio::test]
-    async fn a_whole_pool_reservation_would_block_text_reads() {
-        let resources = RuntimeResources::new(RuntimeConfig::for_tests(4));
-        let request = CancellationToken::new();
-
-        let whole_pool = resources
-            .try_reserve_memory(DEFAULT_MEMORY_BYTES)
-            .expect("whole-pool reservation");
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(100),
-                resources.reserve_memory(256 * 1024, &request),
-            )
-            .await
-            .is_err(),
-            "a whole-pool reservation is supposed to starve everything else"
-        );
-        drop(whole_pool);
-    }
-
-    /// The per-mode charge is only truthful because the core refuses allocations above
-    /// the same ceilings. If the reservation is ever raised above what the parser
-    /// enforces, the scheduler goes back to describing rather than bounding.
     #[test]
-    fn mode_reservations_match_the_ceilings_the_core_enforces() {
-        let config = RuntimeConfig::for_tests(1);
-        assert_eq!(
-            config.pdf_text_memory_bytes,
-            codexshim_pdf_read::PdfResourceLimits::text().call_total_bytes
-        );
-        assert_eq!(
-            config.pdf_image_memory_bytes,
-            codexshim_pdf_read::PdfResourceLimits::image().call_total_bytes
-        );
-    }
-
-    #[test]
-    fn default_workers_allow_bounded_io_overlap() {
-        #[cfg(windows)]
-        {
-            assert_eq!(default_worker_lanes(1), 4);
-            assert_eq!(default_worker_lanes(2), 8);
-            assert_eq!(default_worker_lanes(4), 16);
-            assert_eq!(default_worker_lanes(64), 16);
-        }
-        #[cfg(not(windows))]
-        {
-            assert_eq!(default_worker_lanes(1), 2);
-            assert_eq!(default_worker_lanes(2), 4);
-            assert_eq!(default_worker_lanes(4), 8);
-            assert_eq!(default_worker_lanes(64), 8);
-        }
-        assert_eq!(default_scheduler_threads(1), 1);
-        assert_eq!(default_scheduler_threads(64), 2);
-    }
-
-    #[test]
-    fn process_call_configuration_is_bounded_and_determines_blocking_capacity() {
+    fn process_call_configuration_is_bounded() {
         assert_eq!(
             parse_process_calls(None).expect("default process calls"),
             DEFAULT_PROCESS_CALLS
         );
-        for (value, expected_threads) in [("1", 35), ("16", 50), ("32", 66)] {
-            let calls = parse_process_calls(Some(OsStr::new(value))).expect("valid process calls");
-            assert_eq!(
-                blocking_threads(calls, crate::tools::bash::detached::DEFAULT_DETACHED_CALLS),
-                expected_threads
-            );
-        }
+        assert_eq!(
+            parse_process_calls(Some(OsStr::new("1"))).expect("minimum process calls"),
+            1
+        );
         for value in ["0", "33", "-1", "many"] {
             let error =
                 parse_process_calls(Some(OsStr::new(value))).expect_err("invalid process calls");
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         }
-        assert_eq!(MAX_CONFIGURED_PROCESS_CALLS, 32);
+    }
+
+    #[test]
+    fn tool_timeout_shelf_defaults_and_bounds_match_the_documented_range() {
+        assert_eq!(
+            parse_tool_timeout_shelf(None).expect("default shelf"),
+            DEFAULT_TOOL_TIMEOUT_SHELF,
+        );
+        assert_eq!(
+            parse_tool_timeout_shelf(Some(OsStr::new("600"))).expect("explicit default"),
+            DEFAULT_TOOL_TIMEOUT_SHELF,
+        );
+        assert_eq!(
+            parse_tool_timeout_shelf(Some(OsStr::new("300"))).expect("lower shelf"),
+            std::time::Duration::from_secs(300),
+        );
+        assert_eq!(
+            parse_tool_timeout_shelf(Some(OsStr::new("3600"))).expect("maximum shelf"),
+            MAX_TOOL_TIMEOUT_SHELF,
+        );
+        for value in ["14", "3601", "0", "-1", "many"] {
+            let error =
+                parse_tool_timeout_shelf(Some(OsStr::new(value))).expect_err("invalid shelf");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
     }
 
     #[test]

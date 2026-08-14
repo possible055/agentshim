@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use crate::{
     path::ReadScope,
-    tools::exec::spawn::{DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS},
+    tools::exec::spawn::{DEFAULT_TIMEOUT_MS, max_timeout_ms},
 };
 
 pub(super) fn tool_catalog(read_scope: ReadScope) -> &'static [Tool; 5] {
@@ -231,6 +231,7 @@ fn glob_tool(read_scope: ReadScope) -> Tool {
 }
 
 fn run_program_tool() -> Tool {
+    let max = max_timeout_ms();
     Tool::new(
         "run_program",
         "Run one local program directly with literal arguments and no shell. Use this by default \
@@ -276,7 +277,7 @@ fn run_program_tool() -> Tool {
                 "timeout_ms": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": MAX_TIMEOUT_MS,
+                    "maximum": max,
                     "default": DEFAULT_TIMEOUT_MS,
                     "description": "Execution timeout in milliseconds. On timeout the owned process containment is terminated and a Timeout error is returned."
                 },
@@ -300,6 +301,7 @@ fn run_program_tool() -> Tool {
 }
 
 fn bash_tool() -> Tool {
+    let max = max_timeout_ms();
     let description = format!(
         "Run a POSIX bash command line and return merged stdout and stderr with the exit code. \
          Write POSIX bash, never PowerShell, on every platform. The command runs \
@@ -310,7 +312,7 @@ fn bash_tool() -> Tool {
          stderr can still interleave them differently from what a terminal would show. Output \
          above the byte budget is truncated in the middle: redirect to a file and page it with \
          read when you need all of it. The default timeout is {DEFAULT_TIMEOUT_MS} ms and the \
-         maximum is {MAX_TIMEOUT_MS} ms; for work that needs longer, set detach with a log_path \
+         maximum is {max} ms; for work that needs longer, set detach with a log_path \
          and read that file instead of waiting. On Windows, prefer run_program for one native \
          program with literal arguments. When Bash composition must pass slash-style switches \
          such as /E or /C to a native program, set msys_argument_conversion to disabled. This \
@@ -354,7 +356,7 @@ fn bash_tool() -> Tool {
                 "timeout_ms": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": MAX_TIMEOUT_MS,
+                    "maximum": max,
                     "default": DEFAULT_TIMEOUT_MS,
                     "description": "Execution timeout in milliseconds. On timeout the owned process group is terminated and a Timeout error is returned. Forbidden when detach is true."
                 }

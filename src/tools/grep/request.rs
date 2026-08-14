@@ -163,7 +163,7 @@ impl GrepBenchmarkVariant {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CandidatePolicy {
     SoftTarget,
-    #[cfg(any(test, feature = "bench-internals"))]
+    #[cfg(feature = "bench-internals")]
     FatalCeiling,
 }
 
