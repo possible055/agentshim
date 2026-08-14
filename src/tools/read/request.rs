@@ -12,7 +12,7 @@ use crate::{encoding::DecodeError, path::PathError};
 use crate::{path::FileAccess, tools::ToolOutput};
 
 pub(super) const PREFIX_BYTES: usize = 8 * 1024;
-pub(super) const CANDIDATE_BYTES: usize = 64 * 1024;
+pub(super) const CANDIDATE_BYTES: usize = 256 * 1024;
 pub(super) const LINE_PREFIX_BYTES: usize = 8 * 1024;
 pub(super) const MAX_LINE_COUNT: usize = 2_000;
 pub(super) const TEXT_READ_MEMORY_BYTES: usize = 256 * 1024;

@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "scenarios": [
+    {
+      "id": "true_noop",
+      "description": "Minimal native program dispatch",
+      "program": "true",
+      "args": []
+    },
+    {
+      "id": "git_status",
+      "description": "Literal argv git status without a shell",
+      "program": "git",
+      "args": ["status", "--short"]
+    },
+    {
+      "id": "timeout_path",
+      "description": "Timeout enforcement for a long-running program",
+      "program": "sleep",
+      "args": ["2"],
+      "timeout_ms": 100
+    },
+    {
+      "id": "python_hello",
+      "description": "Interpreter invoked with a literal -c argument",
+      "program": "python",
+      "args": ["-c", "print('ok')"]
+    }
+  ]
+}

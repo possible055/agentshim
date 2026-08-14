@@ -13,6 +13,10 @@ dist/
 .coverage
 __pycache__/
 *.pyc
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.dmypy.json
 
 # IDE / Editor / AI agent
 .vscode/
@@ -37,3 +41,10 @@ CLAUDE.md
 # Project-specific
 local/
 repos/
+
+# Evaluation datasets & benchmarks runtime
+evals/datasets/codebase/codebase_*/
+evals/datasets/pdf/corpus/
+evals/datasets/pdf/long/
+evals/datasets/pdf/short/
+evals/datasets/pdf/ocr/

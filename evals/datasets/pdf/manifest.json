@@ -1,0 +1,256 @@
+{
+  "version": 1,
+  "licenses": {
+    "nist": "NIST publications state that they are not subject to copyright in the United States; attribution is appreciated.",
+    "olmocr": "ODC-BY-1.0; retain attribution and follow the AI2 Responsible Use Guidelines."
+  },
+  "oracles": {
+    "headers_footers": "https://huggingface.co/datasets/allenai/olmOCR-bench/resolve/main/bench_data/headers_footers.jsonl?download=true",
+    "multi_column": "https://huggingface.co/datasets/allenai/olmOCR-bench/resolve/main/bench_data/multi_column.jsonl?download=true",
+    "old_scans": "https://huggingface.co/datasets/allenai/olmOCR-bench/resolve/main/bench_data/old_scans.jsonl?download=true"
+  },
+  "documents": [
+    {
+      "id": "L01",
+      "category": "long",
+      "filename": "L01-nist-sp-800-53r5.pdf",
+      "title": "NIST SP 800-53 Revision 5",
+      "expected_pages": 492,
+      "license": "nist",
+      "url": "https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-53r5.pdf"
+    },
+    {
+      "id": "L02",
+      "category": "long",
+      "filename": "L02-nist-sp-800-160v1r1.pdf",
+      "title": "NIST SP 800-160 Volume 1 Revision 1",
+      "expected_pages": 195,
+      "license": "nist",
+      "url": "https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-160v1r1.pdf"
+    },
+    {
+      "id": "L03",
+      "category": "long",
+      "filename": "L03-nist-sp-800-37r2.pdf",
+      "title": "NIST SP 800-37 Revision 2",
+      "expected_pages": 183,
+      "license": "nist",
+      "url": "https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-37r2.pdf"
+    },
+    {
+      "id": "L04",
+      "category": "long",
+      "filename": "L04-nist-sp-800-171r3.pdf",
+      "title": "NIST SP 800-171 Revision 3",
+      "expected_pages": 120,
+      "license": "nist",
+      "url": "https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-171r3.pdf"
+    },
+    {
+      "id": "L05",
+      "category": "long",
+      "filename": "L05-nist-sp-800-63-4.pdf",
+      "title": "NIST SP 800-63-4",
+      "expected_pages": 96,
+      "license": "nist",
+      "url": "https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-63-4.pdf"
+    },
+    {
+      "id": "L06",
+      "category": "long",
+      "filename": "L06-nist-sp-800-61r2.pdf",
+      "title": "NIST SP 800-61 Revision 2",
+      "expected_pages": 80,
+      "license": "nist",
+      "url": "https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-61r2.pdf"
+    },
+    {
+      "id": "L07",
+      "category": "long",
+      "filename": "L07-nist-sp-800-190.pdf",
+      "title": "NIST SP 800-190",
+      "expected_pages": 63,
+      "license": "nist",
+      "url": "https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-190.pdf"
+    },
+    {
+      "id": "L08",
+      "category": "long",
+      "filename": "L08-nist-sp-800-207.pdf",
+      "title": "NIST SP 800-207",
+      "expected_pages": 59,
+      "license": "nist",
+      "url": "https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-207.pdf"
+    },
+    {
+      "id": "S01",
+      "category": "short",
+      "filename": "S01-headers-footers.pdf",
+      "title": "olmOCR headers_footers 0058e040",
+      "expected_pages": 1,
+      "license": "olmocr",
+      "oracle": "headers_footers",
+      "url": "https://huggingface.co/datasets/allenai/olmOCR-bench/resolve/main/bench_data/pdfs/headers_footers/0058e04004009cc0df75aab998d3e107dc646b46_page_1_processed.pdf?download=true"
+    },
+    {
+      "id": "S02",
+      "category": "short",
+      "filename": "S02-headers-footers.pdf",
+      "title": "olmOCR headers_footers 006c33b9",
+      "expected_pages": 1,
+      "license": "olmocr",
+      "oracle": "headers_footers",
+      "url": "https://huggingface.co/datasets/allenai/olmOCR-bench/resolve/main/bench_data/pdfs/headers_footers/006c33b9244de3ff296633d1cb446a8fb8a5eca1_page_10_processed.pdf?download=true"
+    },
+    {
+      "id": "S03",
+      "category": "short",
+      "filename": "S03-headers-footers.pdf",
+      "title": "olmOCR headers_footers 008086ee",
+      "expected_pages": 1,
+      "license": "olmocr",
+      "oracle": "headers_footers",
+      "url": "https://huggingface.co/datasets/allenai/olmOCR-bench/resolve/main/bench_data/pdfs/headers_footers/008086eec0621732163bc07b8aca9fe02e6954af_page_2_processed.pdf?download=true"
+    },
+    {
+      "id": "S04",
+      "category": "short",
+      "filename": "S04-headers-footers.pdf",
+      "title": "olmOCR headers_footers 00c67a6c",
+      "expected_pages": 1,
+      "license": "olmocr",
+      "oracle": "headers_footers",
+      "url": "https://huggingface.co/datasets/allenai/olmOCR-bench/resolve/main/bench_data/pdfs/headers_footers/00c67a6c7c38a95cd639846dbf764936713de0d9_page_12_processed.pdf?download=true"
+    },
+    {
+      "id": "S05",
+      "category": "short",
+      "filename": "S05-multi-column.pdf",
+      "title": "olmOCR multi_column 0005784d page 1",
+      "expected_pages": 1,
+      "license": "olmocr",
+      "oracle": "multi_column",
+      "url": "https://huggingface.co/datasets/allenai/olmOCR-bench/resolve/main/bench_data/pdfs/multi_column/0005784d0d255f6652180433936fa2998188_page_1_pg1.pdf?download=true"
+    },
+    {
+      "id": "S06",
+      "category": "short",
+      "filename": "S06-multi-column.pdf",
+      "title": "olmOCR multi_column 0005784d page 4",
+      "expected_pages": 1,
+      "license": "olmocr",
+      "oracle": "multi_column",
+      "url": "https://huggingface.co/datasets/allenai/olmOCR-bench/resolve/main/bench_data/pdfs/multi_column/0005784d0d255f6652180433936fa2998188_page_4_pg1.pdf?download=true"
+    },
+    {
+      "id": "S07",
+      "category": "short",
+      "filename": "S07-multi-column.pdf",
+      "title": "olmOCR multi_column 00187fe0",
+      "expected_pages": 1,
+      "license": "olmocr",
+      "oracle": "multi_column",
+      "url": "https://huggingface.co/datasets/allenai/olmOCR-bench/resolve/main/bench_data/pdfs/multi_column/00187fe0533b1e8ddc748adab4924b6f7099_page_10_pg1.pdf?download=true"
+    },
+    {
+      "id": "S08",
+      "category": "short",
+      "filename": "S08-multi-column.pdf",
+      "title": "olmOCR multi_column 0083fb21",
+      "expected_pages": 1,
+      "license": "olmocr",
+      "oracle": "multi_column",
+      "url": "https://huggingface.co/datasets/allenai/olmOCR-bench/resolve/main/bench_data/pdfs/multi_column/0083fb2109e58be50aec2eca07fcbfe1230b_page_1_pg1.pdf?download=true"
+    },
+    {
+      "id": "O01",
+      "category": "ocr",
+      "filename": "O01-old-scan-1.pdf",
+      "title": "olmOCR old_scans 1",
+      "expected_pages": 1,
+      "license": "olmocr",
+      "oracle": "old_scans",
+      "url": "https://huggingface.co/datasets/allenai/olmOCR-bench/resolve/main/bench_data/pdfs/old_scans/1.pdf?download=true"
+    },
+    {
+      "id": "O02",
+      "category": "ocr",
+      "filename": "O02-old-scan-2.pdf",
+      "title": "olmOCR old_scans 2",
+      "expected_pages": 1,
+      "license": "olmocr",
+      "oracle": "old_scans",
+      "url": "https://huggingface.co/datasets/allenai/olmOCR-bench/resolve/main/bench_data/pdfs/old_scans/2.pdf?download=true"
+    },
+    {
+      "id": "O03",
+      "category": "ocr",
+      "filename": "O03-old-scan-4.pdf",
+      "title": "olmOCR old_scans 4",
+      "expected_pages": 1,
+      "license": "olmocr",
+      "oracle": "old_scans",
+      "url": "https://huggingface.co/datasets/allenai/olmOCR-bench/resolve/main/bench_data/pdfs/old_scans/4.pdf?download=true"
+    },
+    {
+      "id": "O04",
+      "category": "ocr",
+      "filename": "O04-old-scan-5.pdf",
+      "title": "olmOCR old_scans 5",
+      "expected_pages": 1,
+      "license": "olmocr",
+      "oracle": "old_scans",
+      "url": "https://huggingface.co/datasets/allenai/olmOCR-bench/resolve/main/bench_data/pdfs/old_scans/5.pdf?download=true"
+    },
+    {
+      "id": "O05",
+      "category": "ocr",
+      "filename": "O05-old-scan-6.pdf",
+      "title": "olmOCR old_scans 6",
+      "expected_pages": 1,
+      "license": "olmocr",
+      "oracle": "old_scans",
+      "url": "https://huggingface.co/datasets/allenai/olmOCR-bench/resolve/main/bench_data/pdfs/old_scans/6.pdf?download=true"
+    },
+    {
+      "id": "O06",
+      "category": "ocr",
+      "filename": "O06-old-scan-7.pdf",
+      "title": "olmOCR old_scans 7",
+      "expected_pages": 1,
+      "license": "olmocr",
+      "oracle": "old_scans",
+      "url": "https://huggingface.co/datasets/allenai/olmOCR-bench/resolve/main/bench_data/pdfs/old_scans/7.pdf?download=true"
+    },
+    {
+      "id": "O07",
+      "category": "ocr",
+      "filename": "O07-old-scan-8.pdf",
+      "title": "olmOCR old_scans 8",
+      "expected_pages": 1,
+      "license": "olmocr",
+      "oracle": "old_scans",
+      "url": "https://huggingface.co/datasets/allenai/olmOCR-bench/resolve/main/bench_data/pdfs/old_scans/8.pdf?download=true"
+    },
+    {
+      "id": "O08",
+      "category": "ocr",
+      "filename": "O08-old-scan-10.pdf",
+      "title": "olmOCR old_scans 10",
+      "expected_pages": 1,
+      "license": "olmocr",
+      "oracle": "old_scans",
+      "url": "https://huggingface.co/datasets/allenai/olmOCR-bench/resolve/main/bench_data/pdfs/old_scans/10.pdf?download=true"
+    },
+    {
+      "id": "O09",
+      "category": "ocr",
+      "filename": "O09-old-scan-11.pdf",
+      "title": "olmOCR old_scans 11",
+      "expected_pages": 1,
+      "license": "olmocr",
+      "oracle": "old_scans",
+      "url": "https://huggingface.co/datasets/allenai/olmOCR-bench/resolve/main/bench_data/pdfs/old_scans/11.pdf?download=true"
+    }
+  ]
+}

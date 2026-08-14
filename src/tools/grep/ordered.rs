@@ -9,7 +9,7 @@ use grep_searcher::Searcher;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    path::FileAccess, runtime::RuntimeResources, tools::read::FileFingerprint,
+    output::SkipReason, path::FileAccess, runtime::RuntimeResources, tools::read::FileFingerprint,
     traversal::TraversalSummary,
 };
 
@@ -281,7 +281,12 @@ fn run_candidate_batch(
     let reader = context.access.open_same_parent_reader(&first.path);
     drop(parent_span);
     let Ok(reader) = reader else {
-        outcomes.extend((0..candidates.len()).map(|_| Ok(FileOutcome::skipped())));
+        outcomes.extend(candidates.iter().map(|candidate| {
+            Ok(FileOutcome::skipped(
+                Some(Arc::clone(&candidate.path)),
+                SkipReason::Io,
+            ))
+        }));
         return outcomes;
     };
     #[cfg(any(test, feature = "bench-internals"))]
@@ -289,7 +294,12 @@ fn run_candidate_batch(
     #[cfg(not(any(test, feature = "bench-internals")))]
     let parent_batch = false;
     let Ok(parent_before) = batch_parent_fingerprint(&reader, parent_batch) else {
-        outcomes.extend((0..candidates.len()).map(|_| Ok(FileOutcome::skipped())));
+        outcomes.extend(candidates.iter().map(|candidate| {
+            Ok(FileOutcome::skipped(
+                Some(Arc::clone(&candidate.path)),
+                SkipReason::Io,
+            ))
+        }));
         return outcomes;
     };
     for candidate in candidates {
@@ -364,7 +374,10 @@ fn run_batch_candidate(
     });
     drop(open_span);
     let Ok(OpenedCandidate { file, fingerprint }) = opened else {
-        return Ok(FileOutcome::skipped());
+        return Ok(FileOutcome::skipped(
+            Some(Arc::clone(&candidate.path)),
+            SkipReason::Io,
+        ));
     };
     #[cfg(any(test, feature = "bench-internals"))]
     let mut outcome = search_opened_candidate_with_searcher(
@@ -390,7 +403,10 @@ fn run_batch_candidate(
             .open_identity(&candidate.path)
             .and_then(|file| FileFingerprint::from_file(&file));
         if !identity.is_ok_and(|identity| identity == fingerprint) {
-            outcome = Ok(FileOutcome::skipped());
+            outcome = Ok(FileOutcome::skipped(
+                Some(Arc::clone(&candidate.path)),
+                SkipReason::ChangedWhileSearched,
+            ));
         }
     }
     outcome
@@ -421,8 +437,9 @@ fn validate_batch_parent(
             return;
         }
         for outcome in outcomes {
-            if outcome.is_ok() {
-                *outcome = Ok(FileOutcome::skipped());
+            if let Ok(current) = outcome {
+                let path = current.path.clone();
+                *outcome = Ok(FileOutcome::skipped(path, SkipReason::ChangedWhileSearched));
             }
         }
     }

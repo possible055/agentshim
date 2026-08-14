@@ -15,7 +15,10 @@ use ignore::{DirEntry, WalkBuilder, WalkState};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::path::{FileAccess, ResolvedPath};
+use crate::{
+    output::{SkipNotes, SkipReason},
+    path::{FileAccess, ResolvedPath},
+};
 
 const PARALLEL_ROOT_ENTRY_THRESHOLD: usize = 8;
 
@@ -40,24 +43,33 @@ pub(crate) fn prefer_parallel_root(access: &FileAccess, base: &ResolvedPath) -> 
     })
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct TraversalSummary {
     pub io_errors: usize,
     pub escaped_entries: usize,
     pub non_unicode_entries: usize,
+    pub(crate) skips: SkipNotes,
 }
 
 impl TraversalSummary {
     #[must_use]
     pub fn skipped(&self) -> usize {
-        self.io_errors
-            .saturating_add(self.escaped_entries)
-            .saturating_add(self.non_unicode_entries)
+        self.skips.total()
     }
 
-    #[must_use]
-    pub fn model_line(&self) -> Option<String> {
-        (self.skipped() > 0).then(|| format!("Skipped: {} entries.", self.skipped()))
+    pub fn record_io(&mut self, path: impl Into<String>) {
+        self.io_errors = self.io_errors.saturating_add(1);
+        self.skips.record(path, SkipReason::Io);
+    }
+
+    pub fn record_escaped(&mut self, path: impl Into<String>) {
+        self.escaped_entries = self.escaped_entries.saturating_add(1);
+        self.skips.record(path, SkipReason::Escaped);
+    }
+
+    pub fn record_non_unicode(&mut self, path: impl Into<String>) {
+        self.non_unicode_entries = self.non_unicode_entries.saturating_add(1);
+        self.skips.record(path, SkipReason::NonUnicodePath);
     }
 }
 
@@ -162,19 +174,22 @@ fn walk_filtered(
         if cancellation.is_cancelled() {
             return Err(TraversalError::Cancelled);
         }
-        let Ok(entry) = result else {
-            summary.io_errors = summary.io_errors.saturating_add(1);
-            continue;
+        let entry = match result {
+            Ok(entry) => entry,
+            Err(error) => {
+                summary.record_io(ignore_error_path(&error));
+                continue;
+            }
         };
         if entry.depth() == 0 {
             continue;
         }
         let Ok(key) = walked_key(access, base, entry.path()) else {
-            summary.escaped_entries = summary.escaped_entries.saturating_add(1);
+            summary.record_escaped(lossy_path(entry.path()));
             continue;
         };
         if key.to_str().is_none() {
-            summary.non_unicode_entries = summary.non_unicode_entries.saturating_add(1);
+            summary.record_non_unicode(lossy_path(&key));
             continue;
         }
         if visitor(TraversalEntry {
@@ -300,19 +315,22 @@ where
                 stopped.store(true, Ordering::Relaxed);
                 return WalkState::Quit;
             }
-            let Ok(entry) = result else {
-                summary.io_errors.fetch_add(1, Ordering::Relaxed);
-                return WalkState::Continue;
+            let entry = match result {
+                Ok(entry) => entry,
+                Err(error) => {
+                    summary.record_io(ignore_error_path(&error));
+                    return WalkState::Continue;
+                }
             };
             if entry.depth() == 0 {
                 return WalkState::Continue;
             }
             let Ok(key) = walked_key(access, base, entry.path()) else {
-                summary.escaped_entries.fetch_add(1, Ordering::Relaxed);
+                summary.record_escaped(lossy_path(entry.path()));
                 return WalkState::Continue;
             };
             if key.to_str().is_none() {
-                summary.non_unicode_entries.fetch_add(1, Ordering::Relaxed);
+                summary.record_non_unicode(lossy_path(&key));
                 return WalkState::Continue;
             }
             if !prefilter(TraversalEntry {
@@ -400,21 +418,67 @@ fn configure_entry_filter(
     });
 }
 
-#[derive(Default)]
 struct AtomicTraversalSummary {
     io_errors: AtomicUsize,
     escaped_entries: AtomicUsize,
     non_unicode_entries: AtomicUsize,
+    skips: Mutex<SkipNotes>,
+}
+
+impl Default for AtomicTraversalSummary {
+    fn default() -> Self {
+        Self {
+            io_errors: AtomicUsize::new(0),
+            escaped_entries: AtomicUsize::new(0),
+            non_unicode_entries: AtomicUsize::new(0),
+            skips: Mutex::new(SkipNotes::default()),
+        }
+    }
 }
 
 impl AtomicTraversalSummary {
+    fn record_io(&self, path: String) {
+        self.io_errors.fetch_add(1, Ordering::Relaxed);
+        self.record_skip(path, SkipReason::Io);
+    }
+
+    fn record_escaped(&self, path: String) {
+        self.escaped_entries.fetch_add(1, Ordering::Relaxed);
+        self.record_skip(path, SkipReason::Escaped);
+    }
+
+    fn record_non_unicode(&self, path: String) {
+        self.non_unicode_entries.fetch_add(1, Ordering::Relaxed);
+        self.record_skip(path, SkipReason::NonUnicodePath);
+    }
+
+    fn record_skip(&self, path: String, reason: SkipReason) {
+        self.skips
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record(path, reason);
+    }
+
     fn snapshot(&self) -> TraversalSummary {
         TraversalSummary {
             io_errors: self.io_errors.load(Ordering::Relaxed),
             escaped_entries: self.escaped_entries.load(Ordering::Relaxed),
             non_unicode_entries: self.non_unicode_entries.load(Ordering::Relaxed),
+            skips: self
+                .skips
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
         }
     }
+}
+
+fn ignore_error_path(error: &ignore::Error) -> String {
+    error.to_string()
+}
+
+fn lossy_path(path: impl AsRef<Path>) -> String {
+    path.as_ref().to_string_lossy().into_owned()
 }
 
 struct PendingBatch<'a> {

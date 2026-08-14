@@ -13,15 +13,46 @@ repos:
       - id: trailing-whitespace
       - id: mixed-line-ending
       - id: check-added-large-files
-        args: ["--maxkb=4000"]
+        args: ["--maxkb=5000"]
       - id: check-merge-conflict
       - id: check-case-conflict
       - id: check-shebang-scripts-are-executable
         exclude: '\.rs$'
       - id: detect-private-key
 
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.3
+    hooks:
+      - id: ruff-format
+        types: [python]
+      - id: ruff-check
+        args: ["--fix"]
+        types: [python]
+
   - repo: local
     hooks:
+      - id: uv-lock-check
+        name: uv lock check
+        entry: uv lock --locked
+        language: system
+        files: '(pyproject\.toml|uv\.lock)$'
+        pass_filenames: false
+
+      - id: mypy
+        name: mypy
+        entry: uv run --frozen --group dev -- mypy
+        language: system
+        args:
+          [
+            "--config-file=pyproject.toml",
+            "--no-error-summary",
+            "evals",
+            "scripts",
+          ]
+        files: '^(evals/.*\.py|scripts/.*\.py|pyproject\.toml)$'
+        pass_filenames: false
+        require_serial: true
+
       - id: cargo-fmt
         name: cargo fmt
         entry: cargo fmt --all -- --check

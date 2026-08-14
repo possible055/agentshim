@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "scenarios": [
+    {
+      "id": "read_first_page",
+      "tool": "read",
+      "description": "Read the first 100 lines of one synthetic source file",
+      "start_line": 1,
+      "line_count": 100
+    },
+    {
+      "id": "grep_sparse",
+      "tool": "grep",
+      "description": "Search the corpus for the sparse marker token",
+      "pattern": "CODEXSHIM_BENCHMARK_SPARSE_TARGET",
+      "mode": "content"
+    },
+    {
+      "id": "grep_dense",
+      "tool": "grep",
+      "description": "Search the corpus for the dense marker token",
+      "pattern": "CODEXSHIM_BENCHMARK_DENSE_MATCH",
+      "mode": "content"
+    },
+    {
+      "id": "glob_all",
+      "tool": "glob",
+      "description": "List every file under the synthetic corpus",
+      "pattern": "**/*"
+    }
+  ]
+}

@@ -14,7 +14,7 @@ impl PageLine {
 pub(super) struct Page {
     pub(super) lines: Vec<PageLine>,
     pub(super) seen_entries: usize,
-    skipped: usize,
+    skips: SkipNotes,
     offset: usize,
     retain: usize,
     pub(super) charged: usize,
@@ -36,7 +36,7 @@ impl Page {
         Self {
             lines: Vec::new(),
             seen_entries: 0,
-            skipped: 0,
+            skips: SkipNotes::default(),
             offset,
             retain: limit.saturating_add(1),
             charged: 0,
@@ -64,18 +64,19 @@ impl Page {
             entries,
             occurrences,
             matched,
-            skipped,
+            skip,
             retired,
         } = outcome;
         debug_assert!(!retired, "retired outcomes must not reach the reducer");
-        if skipped {
-            self.skipped = self.skipped.saturating_add(1);
+        if let Some(reason) = skip {
             if single_file {
-                return Err(GrepError::Io(io::Error::other(
-                    "single grep target changed, is binary, or could not be searched",
-                )));
+                return Err(GrepError::Unsearchable(reason));
             }
-            return Ok(ReduceControl::Continue);
+            self.skips
+                .record(display_skip_path(path.as_deref()), reason);
+            if records.is_empty() {
+                return Ok(ReduceControl::Continue);
+            }
         }
         match mode {
             GrepMode::Files if matched => {
@@ -178,6 +179,12 @@ impl Page {
         self.charged = self.charged.saturating_add(line.charge());
         self.lines.push(line);
     }
+
+    fn combined_skips(&self) -> SkipNotes {
+        let mut notes = self.skips.clone();
+        notes.merge(&self.traversal.skips);
+        notes
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -193,25 +200,15 @@ fn display_outcome_path(path: Option<&ResolvedPath>) -> String {
     )
 }
 
-fn pagination_tail(
-    total_skipped: usize,
-    next_offset: Option<usize>,
-    scan_complete: bool,
-) -> Vec<String> {
-    let mut tail = Vec::new();
-    if total_skipped > 0 {
-        if scan_complete {
-            tail.push(format!("Skipped: {total_skipped} files or entries."));
-        } else {
-            tail.push(format!(
-                "Skipped while producing this page: {total_skipped} files or entries."
-            ));
-        }
-    }
-    if let Some(next) = next_offset {
-        tail.push(format!("Partial: next_offset={next}."));
-    }
-    tail
+fn display_skip_path(path: Option<&ResolvedPath>) -> String {
+    path.map_or_else(
+        || "<unknown>".to_owned(),
+        |path| crate::path::display_path(path.absolute()),
+    )
+}
+
+fn page_tail(notes: &SkipNotes, next_offset: Option<usize>, scan_complete: bool) -> Vec<String> {
+    crate::output::search_tail(notes, scan_complete, "files", [], next_offset)
 }
 
 #[cfg(test)]
@@ -246,11 +243,11 @@ pub(super) fn render_with_budget(
     );
     let mut cap = available;
     loop {
-        let total_skipped = page.skipped.saturating_add(page.traversal.skipped());
+        let notes = page.combined_skips();
         let shown_end = page.offset.saturating_add(cap);
         let next_offset =
             (!page.scan_complete || shown_end < page.seen_entries).then_some(shown_end);
-        let tail = pagination_tail(total_skipped, next_offset, page.scan_complete);
+        let tail = page_tail(&notes, next_offset, page.scan_complete);
         let header = if available == 0 {
             if page.offset == 0 {
                 "No matches.".to_owned()
@@ -286,7 +283,7 @@ pub(super) fn render_with_budget(
         if cap == 1
             && let Some(fallback) = page.lines[0].fallback.as_deref()
         {
-            let tail = pagination_tail(total_skipped, next_offset, page.scan_complete);
+            let tail = page_tail(&notes, next_offset, page.scan_complete);
             let mut formatter = OutputFormatter::new(String::new(), tail, limits)?;
             if !formatter.try_push_line(fallback, cancellation)? {
                 return Err(crate::output::OutputError::BurstLimit.into());
@@ -303,12 +300,10 @@ pub(super) fn render_with_budget(
     }
 }
 
-use std::io;
-
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    output::{OutputFormatter, OutputLimits},
+    output::{OutputFormatter, OutputLimits, SkipNotes},
     path::ResolvedPath,
     tools::ToolOutput,
     traversal::TraversalSummary,

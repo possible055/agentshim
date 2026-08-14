@@ -27,8 +27,8 @@ const MAX_CONTEXT: usize = 20;
 #[cfg(any(test, feature = "bench-internals"))]
 pub(super) const CANDIDATE_SOFT_TARGET_BYTES: usize = 64 * 1024 * 1024;
 pub(super) const MEMORY_SOURCE_BYTES: usize = 16 * 1024;
-pub(super) const SEARCH_HEAP_BYTES: usize = 1024 * 1024;
-pub(super) const CAPTURE_MEMORY_BYTES: usize = 1024 * 1024;
+pub(super) const SEARCH_HEAP_BYTES: usize = 8 * 1024 * 1024;
+pub(super) const CAPTURE_MEMORY_BYTES: usize = 8 * 1024 * 1024;
 pub(super) const PAGE_MEMORY_BYTES: usize = 48 * 1024;
 pub(super) const PARALLEL_BATCH_SIZE: usize = 256;
 pub(super) const CONTENT_SEARCH_BATCH_SIZE: usize = 8;
@@ -270,8 +270,8 @@ pub enum GrepError {
     MemoryBusy,
     #[error("grep worker pool state was poisoned")]
     PoolPoison,
-    #[error("grep matching content exceeds the bounded capture budget; narrow the query")]
-    CaptureMemory,
+    #[error("{}", .0.single_file_message())]
+    Unsearchable(crate::output::SkipReason),
     #[error("grep cancelled")]
     Cancelled,
     #[error(transparent)]

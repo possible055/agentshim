@@ -23,6 +23,8 @@ English | [简体中文](README.zh-CN.md)
 
 Successful calls return bounded text. Partial `read`, `grep`, and `glob` results include a continuation cursor so you can pick up where you left off. Failures return a stable `{ error: { code, message, retryable, details } }` envelope.
 
+Directory `grep` and `glob` list skipped paths as `path — reason` and always report the true total (`Skipped: N files.` or `showing M`). A single-file `grep` that cannot be searched returns a distinct error for that reason instead of folding binary, change, and I/O together. `limit` and `offset` are pagination cursors; the token and byte budget is the output window. Search heap and per-file capture are safety valves that skip or truncate that file — they are not a silent drop and not a call-level hard fail. One instance's shared `memory_bytes` pool defaults to 256 MiB and cannot exceed 1 GiB.
+
 ## Install
 
 **Windows (PowerShell):**

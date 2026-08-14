@@ -3,14 +3,14 @@ use std::{cmp::Ordering, collections::BinaryHeap};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    output::{OutputFormatter, OutputLimits},
+    output::{OutputFormatter, OutputLimits, search_tail},
     path::{PathSortKey, ResolvedPath},
     sorting,
     tools::ToolOutput,
     traversal::{TraversalError, TraversalSummary},
 };
 
-use super::request::{DEFAULT_LIMIT, GlobError, GlobRequest, PATH_OMISSION};
+use super::request::{DEFAULT_LIMIT, GlobError, GlobRequest, MAX_MATCHES, PATH_OMISSION};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct GlobMatch {
@@ -170,22 +170,49 @@ impl TopKThreshold {
     }
 }
 
+fn page_tail(
+    summary: &TraversalSummary,
+    scan_stopped: bool,
+    next_offset: Option<usize>,
+) -> Vec<String> {
+    let extras = scan_stopped.then(|| {
+        format!("Scan stopped: more than {MAX_MATCHES} paths matched; narrow pattern or path.")
+    });
+    search_tail(
+        &summary.skips,
+        !scan_stopped && next_offset.is_none(),
+        "entries",
+        extras,
+        next_offset,
+    )
+}
+
 #[cfg(test)]
 pub(super) fn render(
     request: &GlobRequest,
     retained: &[GlobMatch],
     total: usize,
-    summary: TraversalSummary,
+    summary: &TraversalSummary,
+    scan_stopped: bool,
     cancellation: &CancellationToken,
 ) -> Result<ToolOutput, GlobError> {
-    render_with_budget(request, retained, total, summary, cancellation, None)
+    render_with_budget(
+        request,
+        retained,
+        total,
+        summary,
+        scan_stopped,
+        cancellation,
+        None,
+    )
 }
 
 pub(super) fn render_with_budget(
     request: &GlobRequest,
     retained: &[GlobMatch],
     total: usize,
-    summary: TraversalSummary,
+    summary: &TraversalSummary,
+    scan_stopped: bool,
     cancellation: &CancellationToken,
     output_budget: Option<&crate::output::CallOutputBudget>,
 ) -> Result<ToolOutput, GlobError> {
@@ -209,13 +236,7 @@ pub(super) fn render_with_budget(
     let mut cap = available;
     loop {
         let next_offset = (offset.saturating_add(cap) < total).then(|| offset.saturating_add(cap));
-        let mut tail = Vec::new();
-        if let Some(line) = summary.model_line() {
-            tail.push(line);
-        }
-        if let Some(next) = next_offset {
-            tail.push(format!("Partial: next_offset={next}."));
-        }
+        let tail = page_tail(summary, scan_stopped, next_offset);
         let header = if available == 0 {
             if offset == 0 {
                 "No paths matched.".to_owned()
@@ -247,13 +268,7 @@ pub(super) fn render_with_budget(
         }
         if cap == 1 {
             let next_offset = (offset.saturating_add(1) < total).then(|| offset.saturating_add(1));
-            let mut tail = Vec::new();
-            if let Some(line) = summary.model_line() {
-                tail.push(line);
-            }
-            if let Some(next) = next_offset {
-                tail.push(format!("Partial: next_offset={next}."));
-            }
+            let tail = page_tail(summary, scan_stopped, next_offset);
             let mut formatter = OutputFormatter::new(String::new(), tail, limits)?;
             if formatter.try_push_line(PATH_OMISSION, cancellation)? {
                 let fallback = ToolOutput::new(formatter.finish(cancellation)?);

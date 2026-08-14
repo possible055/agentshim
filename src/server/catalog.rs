@@ -96,12 +96,12 @@ fn read_tool(read_scope: ReadScope) -> Tool {
 fn grep_tool(read_scope: ReadScope) -> Tool {
     let (description, path_description, glob_description) = match read_scope {
         ReadScope::Normal => (
-            "Search local repository or Codex extension contents using Rust regex or fixed strings. Results are deterministic and expose structured numeric pagination.",
+            "Search local repository or Codex extension contents using Rust regex or fixed strings. Results are deterministic and expose structured numeric pagination. Skipped files are listed with a path and reason.",
             "Optional platform-native repository path or absolute path under a configured Codex skill or plugin directory.",
             "Optional case-sensitive glob relative to the repository or requested Codex extension path.",
         ),
         ReadScope::Unrestricted => (
-            "Search local filesystem contents using Rust regex or fixed strings. Relative paths use the repository root; absolute paths may address supported locations outside it.",
+            "Search local filesystem contents using Rust regex or fixed strings. Relative paths use the repository root; absolute paths may address supported locations outside it. Skipped files are listed with a path and reason.",
             "Optional platform-native file or directory path. Relative paths use the repository root; absolute paths may address supported local filesystems.",
             "Optional case-sensitive glob over repository-root-relative paths, or request-path-relative paths for external absolute inputs.",
         ),
@@ -140,7 +140,7 @@ fn grep_tool(read_scope: ReadScope) -> Tool {
                     "minimum": 1,
                     "maximum": 1000,
                     "default": 200,
-                    "description": "Maximum matching entries to return."
+                    "description": "Pagination cursor: maximum matching entries to return. The token and byte budget is the real output window."
                 },
                 "mode": {
                     "type": "string",
@@ -172,12 +172,12 @@ fn grep_tool(read_scope: ReadScope) -> Tool {
 fn glob_tool(read_scope: ReadScope) -> Tool {
     let (description, path_description, pattern_description) = match read_scope {
         ReadScope::Normal => (
-            "Find local repository or Codex extension paths using a glob pattern. Returns files by default; use type to find directories or any entry. Results use native absolute paths and expose structured numeric pagination.",
+            "Find local repository or Codex extension paths using a glob pattern. Returns files by default; use type to find directories or any entry. Results use native absolute paths and expose structured numeric pagination. Skipped entries are listed with a path and reason.",
             "Platform-native repository directory or absolute directory under a configured Codex skill or plugin root.",
             "Case-sensitive glob relative to the repository or requested Codex extension directory.",
         ),
         ReadScope::Unrestricted => (
-            "Find local filesystem paths using a glob pattern. Returns files by default; use type to find directories or any entry. Relative paths use the repository root; absolute paths may address supported locations outside it.",
+            "Find local filesystem paths using a glob pattern. Returns files by default; use type to find directories or any entry. Relative paths use the repository root; absolute paths may address supported locations outside it. Skipped entries are listed with a path and reason.",
             "Platform-native directory to traverse. Relative paths use the repository root; absolute paths may address supported local filesystems.",
             "Case-sensitive glob over repository-root-relative paths, or request-path-relative paths for external absolute inputs.",
         ),
@@ -199,7 +199,7 @@ fn glob_tool(read_scope: ReadScope) -> Tool {
                     "minimum": 1,
                     "maximum": 1000,
                     "default": 200,
-                    "description": "Maximum paths to return."
+                    "description": "Pagination cursor: maximum paths to return. The token and byte budget is the real output window."
                 },
                 "offset": {
                     "type": "integer",

@@ -15,6 +15,13 @@ struct CandidateLine {
     truncated: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CollectStop {
+    None,
+    LineCount,
+    CandidateBudget,
+}
+
 #[derive(Debug)]
 pub(super) struct LineCollector {
     start: usize,
@@ -27,6 +34,7 @@ pub(super) struct LineCollector {
     saw_input: bool,
     ended_with_newline: bool,
     stopped: bool,
+    stop: CollectStop,
 }
 
 impl LineCollector {
@@ -42,6 +50,7 @@ impl LineCollector {
             saw_input: false,
             ended_with_newline: false,
             stopped: false,
+            stop: CollectStop::None,
         }
     }
 
@@ -90,21 +99,24 @@ impl LineCollector {
         }
         if self.current_number >= self.start {
             if self.candidates.len() > self.requested {
+                self.stop = CollectStop::LineCount;
                 return false;
             }
             let stored_bytes = self.current.len();
-            if self.candidate_bytes.saturating_add(stored_bytes) > CANDIDATE_BYTES
+            if self.candidate_bytes.saturating_add(self.current_bytes) > CANDIDATE_BYTES
                 && !self.candidates.is_empty()
             {
+                self.stop = CollectStop::CandidateBudget;
                 return false;
             }
-            self.candidate_bytes = self.candidate_bytes.saturating_add(stored_bytes);
+            self.candidate_bytes = self.candidate_bytes.saturating_add(self.current_bytes);
             self.candidates.push(CandidateLine {
                 number: self.current_number,
                 prefix: std::mem::take(&mut self.current),
                 truncated: self.current_bytes > stored_bytes,
             });
             if self.candidates.len() > self.requested {
+                self.stop = CollectStop::LineCount;
                 return false;
             }
         }
@@ -152,10 +164,16 @@ pub(super) fn render(
     );
     let mut cap = available;
     loop {
-        let partial = source_has_more || cap < available;
+        let output_budget_stop = cap < available;
+        let partial = source_has_more || output_budget_stop;
         let next_start_line = partial.then(|| collector.start.saturating_add(cap));
         let tail = next_start_line
-            .map(|next| format!("Partial: next_start_line={next}."))
+            .map(|next| {
+                format!(
+                    "Partial: next_start_line={next}. ({})",
+                    partial_stop_reason(collector, output_budget_stop)
+                )
+            })
             .into_iter()
             .collect();
         let mut formatter = OutputFormatter::new(header.clone(), tail, limits)?;
@@ -180,6 +198,16 @@ pub(super) fn render(
             return Err(crate::output::OutputError::BurstLimit.into());
         }
         cap -= 1;
+    }
+}
+
+fn partial_stop_reason(collector: &LineCollector, output_budget_stop: bool) -> &'static str {
+    if output_budget_stop {
+        "output budget"
+    } else if collector.stop == CollectStop::CandidateBudget {
+        "read candidate budget"
+    } else {
+        "line_count"
     }
 }
 

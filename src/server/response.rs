@@ -313,7 +313,6 @@ impl DiagnosticError for crate::tools::glob::GlobError {
             GlobError::Path(_) => "path",
             GlobError::Output(crate::output::OutputError::BurstLimit) => "output_budget",
             GlobError::Output(_) => "output_invariant",
-            GlobError::TooManyMatches => "resource_timeout",
             GlobError::Memory => "resource_limit",
             GlobError::MemoryBusy => "resource_busy",
             GlobError::Traversal(_) | GlobError::Io(_) => "io",
@@ -324,7 +323,6 @@ impl DiagnosticError for crate::tools::glob::GlobError {
         matches!(
             self,
             crate::tools::glob::GlobError::MemoryBusy
-                | crate::tools::glob::GlobError::TooManyMatches
                 | crate::tools::glob::GlobError::Output(crate::output::OutputError::BurstLimit)
         ) || matches!(
             self.error_class(),
@@ -352,20 +350,27 @@ impl DiagnosticError for crate::tools::grep::GrepError {
             GrepError::Output(_) => "output_invariant",
             GrepError::CandidateMemory => "resource_limit",
             GrepError::MemoryBusy => "resource_busy",
-            GrepError::PoolPoison | GrepError::CaptureMemory => "resource_timeout",
-            GrepError::Traversal(_) | GrepError::Io(_) => "io",
+            GrepError::PoolPoison => "resource_timeout",
+            GrepError::Unsearchable(_) | GrepError::Traversal(_) | GrepError::Io(_) => "io",
         }
     }
 
+    /// `io` is retryable by default because most of it is transient. A single-file
+    /// skip that cannot change without a different target — binary, undecodable,
+    /// heap, capture, escaped, non-unicode — is not: advertising a retry invites
+    /// the model to spend its turns re-running a call that will fail the same way.
     fn retryable(&self) -> bool {
-        matches!(
-            self,
-            crate::tools::grep::GrepError::MemoryBusy
-                | crate::tools::grep::GrepError::Output(crate::output::OutputError::BurstLimit)
-        ) || matches!(
-            self.error_class(),
-            "io" | "resource_timeout" | "resource_busy"
-        )
+        use crate::tools::grep::GrepError;
+        match self {
+            GrepError::Unsearchable(reason) => reason.retryable(),
+            GrepError::MemoryBusy | GrepError::Output(crate::output::OutputError::BurstLimit) => {
+                true
+            }
+            other => matches!(
+                other.error_class(),
+                "io" | "resource_timeout" | "resource_busy"
+            ),
+        }
     }
 
     fn details(&self) -> Option<Value> {

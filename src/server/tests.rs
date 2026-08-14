@@ -376,6 +376,50 @@ fn unavailable_bash_response_is_io_and_not_retryable() {
     assert_eq!(result.is_error, Some(true));
 }
 
+#[test]
+fn unsearchable_binary_is_io_and_not_retryable() {
+    let error = crate::tools::grep::GrepError::Unsearchable(crate::output::SkipReason::Binary);
+    let CallToolResponse::Complete(result) = diagnostic_tool_error(&error) else {
+        panic!("tool error must be complete");
+    };
+    let structured = result
+        .structured_content
+        .as_ref()
+        .expect("structured error");
+
+    assert_eq!(structured["error"]["code"], "io");
+    assert_eq!(structured["error"]["retryable"], false);
+    assert!(
+        structured["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("binary")
+    );
+}
+
+#[test]
+fn unsearchable_changed_is_io_and_retryable() {
+    let error = crate::tools::grep::GrepError::Unsearchable(
+        crate::output::SkipReason::ChangedWhileSearched,
+    );
+    let CallToolResponse::Complete(result) = diagnostic_tool_error(&error) else {
+        panic!("tool error must be complete");
+    };
+    let structured = result
+        .structured_content
+        .as_ref()
+        .expect("structured error");
+
+    assert_eq!(structured["error"]["code"], "io");
+    assert_eq!(structured["error"]["retryable"], true);
+    assert!(
+        structured["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("changed")
+    );
+}
+
 fn detached_request() -> CallToolRequestParams {
     serde_json::from_value(json!({
         "name": "bash",

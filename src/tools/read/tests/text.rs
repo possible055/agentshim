@@ -151,6 +151,7 @@ fn token_dense_text_preserves_the_next_line_cursor() {
     assert!(output.fits_model_budget(&cancellation));
     assert!(output.contains("1\t x"));
     assert!(output.contains("Partial: next_start_line="));
+    assert!(output.contains("(output budget)"));
     assert!(!output.contains("750\t x"));
 }
 
@@ -173,7 +174,25 @@ fn deep_page_skips_unretained_line_prefixes_without_changing_output() {
     assert!(output.contains("19991\tline-19991-"));
     assert!(output.contains("19995\tline-19995-"));
     assert!(!output.contains("19990\t"));
-    assert!(output.ends_with("Partial: next_start_line=19996."));
+    assert!(output.ends_with("Partial: next_start_line=19996. (line_count)"));
+}
+
+#[test]
+fn candidate_budget_names_the_partial_stop_cause() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let mut text = String::from("keep\n");
+    text.push_str(&"x".repeat(300_000));
+    text.push('\n');
+    text.push_str("unreached\n");
+    fs::write(fixture.path().join("wide.txt"), text).expect("wide text");
+    let root = access(fixture.path());
+    let cancellation = CancellationToken::new();
+
+    let output =
+        execute(&root, &request("wide.txt"), &cancellation).expect("candidate-budget read");
+    assert!(output.contains("1\tkeep"));
+    assert!(output.contains("Partial: next_start_line=2. (read candidate budget)"));
+    assert!(!output.contains("unreached"));
 }
 
 #[test]

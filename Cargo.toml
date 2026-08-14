@@ -49,6 +49,15 @@ tempfile = "3.20.0"
 [features]
 bench-internals = []
 
+# Build artifacts live on a 24 GB RAM disk; full debug info dominated the budget
+# (4.5 GB of .pdb across 17 test binaries). Keep file:line for backtraces, drop
+# the rest. Override for a single build with CARGO_PROFILE_DEV_DEBUG=2.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [[bench]]
 name = "performance"
 harness = false

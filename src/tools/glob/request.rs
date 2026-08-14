@@ -109,8 +109,6 @@ pub enum GlobError {
     Validation(String),
     #[error("invalid glob pattern: {0}")]
     Pattern(String),
-    #[error("more than 100000 paths matched; narrow pattern or path")]
-    TooManyMatches,
     #[error(
         "retained glob paths exceed the configured memory limit; narrow pattern or offset, or \
          raise CODEXSHIM_GLOB_MEMORY_BYTES"
@@ -268,6 +266,7 @@ pub fn execute_profiled_with_traversal(
 
 #[allow(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "the production and benchmark traversal controls must remain independently selectable"
 )]
 fn execute_inner_with_traversal(
@@ -302,6 +301,7 @@ fn execute_inner_with_traversal(
     let collection = GlobCollection {
         store: TopK::new(retain, resources.config().glob_memory_bytes, memory)?,
         total: 0,
+        scan_stopped: false,
         terminal_error: None,
     };
     let regular_plan = regular_collect_plan(request, selection.threads);
@@ -362,8 +362,7 @@ fn execute_inner_with_traversal(
         collection.store.len(),
         collection.store.retained_memory_bytes(),
     );
-    let skipped = summary.io_errors + summary.escaped_entries + summary.non_unicode_entries;
-    if skipped > 0 {
+    if summary.skipped() > 0 {
         tracing::warn!(target: "codexshim", event = "traversal_skipped", phase = "execution", outcome = "degraded_success", counters = %format!("io_errors={},escaped_entries={},non_unicode_entries={}", summary.io_errors, summary.escaped_entries, summary.non_unicode_entries));
     }
     let sort_span = profiler.span(GlobStage::FinalSort);
@@ -374,7 +373,8 @@ fn execute_inner_with_traversal(
         request,
         &retained,
         collection.total,
-        summary,
+        &summary,
+        collection.scan_stopped,
         cancellation,
         output_budget,
     );
@@ -428,6 +428,7 @@ fn select_glob_traversal(
 struct GlobCollection {
     store: TopK,
     total: usize,
+    scan_stopped: bool,
     terminal_error: Option<GlobError>,
 }
 
@@ -481,8 +482,8 @@ fn collect_serial(
         if !matches_glob_entry(matcher, plan.entry_type, entry) {
             return TraversalControl::Continue;
         }
-        if let Err(error) = record_match(&mut collection.total) {
-            collection.terminal_error = Some(error);
+        if !record_match(&mut collection.total) {
+            collection.scan_stopped = true;
             return TraversalControl::Stop;
         }
         let sort_key = PathSortKey::new(entry.key);
@@ -566,12 +567,12 @@ fn collect_parallel(
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         drop(wait_span);
         let hold_span = profiler.span(GlobStage::MergeWorkWorker);
-        if collection.terminal_error.is_some() {
+        if collection.terminal_error.is_some() || collection.scan_stopped {
             return TraversalControl::Stop;
         }
         for _ in 0..matched_entries {
-            if let Err(error) = record_match(&mut collection.total) {
-                collection.terminal_error = Some(error);
+            if !record_match(&mut collection.total) {
+                collection.scan_stopped = true;
                 return TraversalControl::Stop;
             }
         }
@@ -631,10 +632,10 @@ fn with_benchmark_resources<T>(
     execute(&resources)
 }
 
-pub(super) fn record_match(total: &mut usize) -> Result<(), GlobError> {
+pub(super) fn record_match(total: &mut usize) -> bool {
     if *total >= MAX_MATCHES {
-        return Err(GlobError::TooManyMatches);
+        return false;
     }
     *total += 1;
-    Ok(())
+    true
 }

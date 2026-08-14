@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "scenarios": [
+    {
+      "id": "cold_first_call",
+      "command": "true",
+      "description": "Cold first subprocess invocation latency"
+    },
+    {
+      "id": "noop_warm",
+      "command": "true",
+      "description": "Steady-state minimal execution overhead"
+    },
+    {
+      "id": "fastpath_eligible",
+      "command": "git rev-parse HEAD",
+      "description": "Direct executable dispatch without pipe or redirection"
+    },
+    {
+      "id": "fastpath_ineligible",
+      "command": "git rev-parse HEAD | head -1",
+      "description": "Pipeline execution requiring shell interpreter orchestration"
+    },
+    {
+      "id": "output_1mib",
+      "command": "head -c 1048576 /dev/zero | tr '\\0' x",
+      "description": "High-throughput 1 MiB standard output streaming"
+    },
+    {
+      "id": "descendant_lingering",
+      "command": "sleep 0.05 &",
+      "description": "Background descendant process termination and job cleanup"
+    },
+    {
+      "id": "timeout_path",
+      "command": "sleep 2",
+      "timeout_ms": 100,
+      "description": "Subprocess timeout enforcement and process tree cancellation"
+    }
+  ]
+}

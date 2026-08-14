@@ -4,6 +4,7 @@ mod tests {
 
     use tokio_util::sync::CancellationToken;
 
+    use crate::output::SkipReason;
     #[cfg(feature = "bench-internals")]
     use crate::tools::grep::execute_profiled;
     use crate::tools::grep::{
@@ -358,7 +359,7 @@ mod tests {
 
             assert!(matches!(
                 execute(&root, &query, 4, &CancellationToken::new()),
-                Err(GrepError::Io(_))
+                Err(GrepError::Unsearchable(SkipReason::Binary))
             ));
         }
     }
@@ -386,8 +387,9 @@ mod tests {
 
         let output = execute(&root, &query, 1, &CancellationToken::new()).expect("partial grep");
 
-        assert!(output.contains("Skipped while producing this page: 1 files or entries."));
-        assert!(!output.contains("2 files or entries"));
+        assert!(output.contains("Skipped while producing this page: 1 files"));
+        assert!(output.contains(" — binary"));
+        assert!(!output.contains("2 files"));
         assert!(output.ends_with("Partial: next_offset=1."));
     }
 
@@ -427,7 +429,8 @@ mod tests {
         fs::write(fixture.path().join("src/utf16.rs"), utf16).expect("utf16");
         let output = execute(&root, &request("needle"), 2, &cancellation).expect("grep");
         assert!(output.contains("utf16.rs"));
-        assert!(output.contains("Skipped: 1"));
+        assert!(output.contains(" — binary"));
+        assert!(output.contains("Skipped: 1 files."));
     }
 
     #[test]
@@ -443,7 +446,7 @@ mod tests {
         let output =
             execute(&root, &request("needle"), 4, &CancellationToken::new()).expect("bounded grep");
         assert!(output.contains("src/large.rs"));
-        assert!(output.contains("Skipped: 1"));
+        assert!(output.contains("src/long.rs"));
     }
 
     #[test]
@@ -493,16 +496,34 @@ mod tests {
     #[test]
     fn capture_memory_limit_is_reported() {
         let (fixture, root) = fixture();
-        let line = format!("needle {}\n", "x".repeat(2_000));
-        fs::write(fixture.path().join("src/a-large.rs"), line.repeat(600))
+        let line = format!("needle {}\n", "x".repeat(20_000));
+        fs::write(fixture.path().join("src/z-large.rs"), line.repeat(500))
             .expect("large matching fixture");
         let mut query = request("needle");
         query.fixed_strings = Some(true);
         query.limit = Some(1_000);
 
+        let output = execute(&root, &query, 1, &CancellationToken::new()).expect("directory grep");
+        assert!(output.contains("src/b.rs"));
+        assert!(output.contains(" — matching content exceeds capture budget"));
+        assert!(output.contains("Skipped: 1 files."));
+    }
+
+    #[test]
+    fn single_file_capture_overflow_is_an_explicit_error() {
+        let (fixture, root) = fixture();
+        let line = format!("needle {}\n", "x".repeat(20_000));
+        fs::write(fixture.path().join("src/a-large.rs"), line.repeat(500))
+            .expect("large matching fixture");
+        let mut query = request("needle");
+        query.path = Some("src/a-large.rs".to_owned());
+        query.glob = None;
+        query.fixed_strings = Some(true);
+        query.limit = Some(1_000);
+
         assert!(matches!(
             execute(&root, &query, 1, &CancellationToken::new()),
-            Err(GrepError::CaptureMemory)
+            Err(GrepError::Unsearchable(SkipReason::CaptureBudget))
         ));
     }
 
@@ -548,7 +569,7 @@ mod tests {
                 .expect("replace during search");
             })
             .expect("changed outcome");
-        assert!(changed_outcome.skipped);
+        assert_eq!(changed_outcome.skip, Some(SkipReason::ChangedWhileSearched));
         let stable_outcome =
             search_file(&root, &stable, &matcher, plan, &cancellation).expect("stable outcome");
 
@@ -561,7 +582,94 @@ mod tests {
         let output = render(&query, &page, &cancellation).expect("render");
         assert!(output.contains("src/b.rs"));
         assert!(!output.contains("replacement without"));
-        assert!(output.contains("Skipped: 1 files or entries."));
+        assert!(output.contains(" — changed while being searched"));
+        assert!(output.contains("Skipped: 1 files."));
+    }
+
+    #[test]
+    fn directory_search_lists_binary_and_changed_reasons_without_dropping_other_hits() {
+        let (fixture, root) = fixture();
+        fs::write(fixture.path().join("src/binary.rs"), b"needle\0tail").expect("binary");
+        let cancellation = CancellationToken::new();
+        let query = request("needle");
+        let matcher = build_matcher(&query).expect("matcher");
+        let plan = SearchPlan {
+            mode: GrepMode::Content,
+            context: 0,
+            probe: 10,
+            allow_early_stop: false,
+        };
+        let changed = candidate(root.resolve(Path::new("src/a.rs")).expect("changed path"))
+            .expect("changed candidate");
+        let binary = candidate(
+            root.resolve(Path::new("src/binary.rs"))
+                .expect("binary path"),
+        )
+        .expect("binary candidate");
+        let stable = candidate(root.resolve(Path::new("src/b.rs")).expect("stable path"))
+            .expect("stable candidate");
+        let changed_outcome =
+            search_file_with_hook(&root, &changed, &matcher, plan, &cancellation, || {
+                fs::write(
+                    fixture.path().join("src/a.rs"),
+                    "replacement without the old match\n",
+                )
+                .expect("replace during search");
+            })
+            .expect("changed outcome");
+        let binary_outcome =
+            search_file(&root, &binary, &matcher, plan, &cancellation).expect("binary outcome");
+        let stable_outcome =
+            search_file(&root, &stable, &matcher, plan, &cancellation).expect("stable outcome");
+        assert_eq!(changed_outcome.skip, Some(SkipReason::ChangedWhileSearched));
+        assert_eq!(binary_outcome.skip, Some(SkipReason::Binary));
+
+        let mut page = Page::new(&query, crate::traversal::TraversalSummary::default(), false);
+        page.reduce(changed_outcome, GrepMode::Content, false)
+            .expect("reduce changed");
+        page.reduce(binary_outcome, GrepMode::Content, false)
+            .expect("reduce binary");
+        page.reduce(stable_outcome, GrepMode::Content, false)
+            .expect("reduce stable");
+        page.mark_complete();
+        let output = render(&query, &page, &cancellation).expect("render");
+        assert!(output.contains("src/b.rs"));
+        assert!(output.contains(" — binary"));
+        assert!(output.contains(" — changed while being searched"));
+        assert!(output.contains("Skipped: 2 files."));
+    }
+
+    #[test]
+    fn single_file_change_is_an_explicit_changed_error() {
+        let (fixture, root) = fixture();
+        let cancellation = CancellationToken::new();
+        let mut query = request("needle");
+        query.path = Some("src/a.rs".to_owned());
+        query.glob = None;
+        query.fixed_strings = Some(true);
+        let matcher = build_matcher(&query).expect("matcher");
+        let plan = SearchPlan {
+            mode: GrepMode::Content,
+            context: 0,
+            probe: 10,
+            allow_early_stop: false,
+        };
+        let target = candidate(root.resolve(Path::new("src/a.rs")).expect("single path"))
+            .expect("single candidate");
+        let outcome = search_file_with_hook(&root, &target, &matcher, plan, &cancellation, || {
+            fs::write(
+                fixture.path().join("src/a.rs"),
+                "replacement without the old match\n",
+            )
+            .expect("replace during search");
+        })
+        .expect("changed outcome");
+
+        let mut page = Page::new(&query, crate::traversal::TraversalSummary::default(), false);
+        assert!(matches!(
+            page.reduce(outcome, GrepMode::Content, true),
+            Err(GrepError::Unsearchable(SkipReason::ChangedWhileSearched))
+        ));
     }
 
     #[test]
@@ -630,7 +738,11 @@ mod tests {
                 || fs::rename(&original, &renamed).expect("rename during validation"),
             )
             .expect("rename outcome");
-            assert!(outcome.skipped, "{pathname_reopen:?}");
+            assert_eq!(
+                outcome.skip,
+                Some(SkipReason::ChangedWhileSearched),
+                "{pathname_reopen:?}"
+            );
         }
     }
 
@@ -668,7 +780,7 @@ mod tests {
                 || fs::write(&path, replacement).expect("rewrite during validation"),
             )
             .expect("rewrite outcome");
-            assert!(outcome.skipped);
+            assert_eq!(outcome.skip, Some(SkipReason::ChangedWhileSearched));
         }
     }
 
@@ -704,7 +816,10 @@ mod tests {
                 },
             )
             .expect("delete recreate outcome");
-            assert_eq!(outcome.skipped, pathname_reopen == PathnameReopenPolicy::On);
+            assert_eq!(
+                outcome.skip.is_some(),
+                pathname_reopen == PathnameReopenPolicy::On
+            );
         }
     }
 }

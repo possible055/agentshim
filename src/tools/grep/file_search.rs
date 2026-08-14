@@ -13,6 +13,7 @@ use grep_searcher::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    output::SkipReason,
     path::{FileAccess, ResolvedPath},
     runtime::RuntimeResources,
     tools::read::FileFingerprint,
@@ -67,7 +68,7 @@ pub(super) struct FileOutcome {
     pub(super) entries: usize,
     pub(super) occurrences: usize,
     pub(super) matched: bool,
-    pub(super) skipped: bool,
+    pub(super) skip: Option<SkipReason>,
     pub(super) retired: bool,
 }
 
@@ -201,7 +202,10 @@ pub(super) fn search_file_with_searcher(
         fingerprint: before,
     }) = opened
     else {
-        return Ok(FileOutcome::skipped());
+        return Ok(FileOutcome::skipped(
+            Some(Arc::clone(&candidate.path)),
+            SkipReason::Io,
+        ));
     };
     search_opened_candidate_with_searcher(candidate, context, searcher, after_search, file, &before)
 }
@@ -228,8 +232,27 @@ pub(super) fn search_opened_candidate_with_searcher(
         Ok(()) => {}
         Err(SearchError::Cancelled) => return Err(GrepError::Cancelled),
         Err(SearchError::Retired) => return Ok(FileOutcome::retired()),
-        Err(SearchError::CaptureMemory) => return Err(GrepError::CaptureMemory),
-        Err(SearchError::Io) => return Ok(FileOutcome::skipped()),
+        Err(SearchError::CaptureMemory) => {
+            return Ok(sink.finish_capture_overflow(Arc::clone(&candidate.path)));
+        }
+        Err(SearchError::HeapLimit) => {
+            return Ok(FileOutcome::skipped(
+                Some(Arc::clone(&candidate.path)),
+                SkipReason::LineExceedsSearchHeap,
+            ));
+        }
+        Err(SearchError::Io) => {
+            return Ok(FileOutcome::skipped(
+                Some(Arc::clone(&candidate.path)),
+                SkipReason::Io,
+            ));
+        }
+        Err(SearchError::Undecodable) => {
+            return Ok(FileOutcome::skipped(
+                Some(Arc::clone(&candidate.path)),
+                SkipReason::Undecodable,
+            ));
+        }
     }
     after_search();
     let verify_span = context.profiler.span(GrepStage::SearchVerifyWorker);
@@ -239,7 +262,10 @@ pub(super) fn search_opened_candidate_with_searcher(
     let unchanged = before.matches_current_state(&file)?;
     drop(after_span);
     if !unchanged {
-        return Ok(FileOutcome::skipped());
+        return Ok(FileOutcome::skipped(
+            Some(Arc::clone(&candidate.path)),
+            SkipReason::ChangedWhileSearched,
+        ));
     }
     #[cfg(any(test, feature = "bench-internals"))]
     if context.variant.pathname_reopen == PathnameReopenPolicy::On {
@@ -252,15 +278,23 @@ pub(super) fn search_opened_candidate_with_searcher(
             GrepStage::SearchPathnameFingerprintWorker,
         ) {
             Ok(identity) => identity.fingerprint,
-            Err(_) => return Ok(FileOutcome::skipped()),
+            Err(_) => {
+                return Ok(FileOutcome::skipped(
+                    Some(Arc::clone(&candidate.path)),
+                    SkipReason::Io,
+                ));
+            }
         };
         drop(reopen_span);
         if *before != identity {
-            return Ok(FileOutcome::skipped());
+            return Ok(FileOutcome::skipped(
+                Some(Arc::clone(&candidate.path)),
+                SkipReason::ChangedWhileSearched,
+            ));
         }
     }
     drop(verify_span);
-    let path = sink.matched_file().then(|| Arc::clone(&candidate.path));
+    let path = Some(Arc::clone(&candidate.path));
     let outcome = sink.finish(path)?;
     if outcome.matched {
         context.profiler.record_matched_candidate();
@@ -477,14 +511,14 @@ pub(super) fn requires_path_identity(policy: PathnameReopenPolicy) -> bool {
 }
 
 impl FileOutcome {
-    pub(super) fn skipped() -> Self {
+    pub(super) fn skipped(path: Option<Arc<ResolvedPath>>, reason: SkipReason) -> Self {
         Self {
-            path: None,
+            path,
             records: Vec::new(),
             entries: 0,
             occurrences: 0,
             matched: false,
-            skipped: true,
+            skip: Some(reason),
             retired: false,
         }
     }
@@ -496,7 +530,7 @@ impl FileOutcome {
             entries: 0,
             occurrences: 0,
             matched: false,
-            skipped: false,
+            skip: None,
             retired: true,
         }
     }
@@ -544,16 +578,23 @@ pub(super) enum SearchError {
     Cancelled,
     Retired,
     CaptureMemory,
+    HeapLimit,
+    Undecodable,
     Io,
 }
 
 impl SinkError for SearchError {
-    fn error_message<T: std::fmt::Display>(_message: T) -> Self {
-        Self::Io
+    fn error_message<T: std::fmt::Display>(message: T) -> Self {
+        let message = message.to_string();
+        if message.contains("heap limit") || message.contains("allocation limit") {
+            Self::HeapLimit
+        } else {
+            Self::Io
+        }
     }
 
-    fn error_io(_error: io::Error) -> Self {
-        Self::Io
+    fn error_io(error: io::Error) -> Self {
+        Self::error_message(error)
     }
 }
 
@@ -605,11 +646,12 @@ impl<'a> PlanSink<'a> {
         }
     }
 
-    fn matched_file(&self) -> bool {
+    fn finish_capture_overflow(self, path: Arc<ResolvedPath>) -> FileOutcome {
         match self {
-            Self::Files(sink) => sink.matched,
-            Self::Count(sink) => sink.matched,
-            Self::Content(sink) => sink.matched,
+            Self::Content(sink) => sink.finish_capture_overflow(path),
+            Self::Files(_) | Self::Count(_) => {
+                FileOutcome::skipped(Some(path), SkipReason::CaptureBudget)
+            }
         }
     }
 
@@ -635,7 +677,7 @@ impl ContentSink<'_> {
             return Ok(!self.allow_early_stop || self.entries < self.probe);
         }
         let text = std::str::from_utf8(trim_line(bytes))
-            .map_err(|_| SearchError::Io)?
+            .map_err(|_| SearchError::Undecodable)?
             .to_owned();
         self.charged = self
             .charged
@@ -658,23 +700,40 @@ impl ContentSink<'_> {
             return Err(GrepError::Cancelled);
         }
         if self.binary {
-            return Ok(FileOutcome::skipped());
+            return Ok(FileOutcome::skipped(path, SkipReason::Binary));
         }
-        self.records.sort_by(|left, right| {
-            left.line
-                .cmp(&right.line)
-                .then_with(|| left.kind.cmp(&right.kind))
-                .then_with(|| left.order.cmp(&right.order))
-        });
+        self.sort_records();
         Ok(FileOutcome {
             path,
             records: self.records,
             entries: self.entries,
             occurrences: self.occurrences,
             matched: self.matched,
-            skipped: false,
+            skip: None,
             retired: false,
         })
+    }
+
+    fn finish_capture_overflow(mut self, path: Arc<ResolvedPath>) -> FileOutcome {
+        self.sort_records();
+        FileOutcome {
+            path: Some(path),
+            records: self.records,
+            entries: self.entries,
+            occurrences: self.occurrences,
+            matched: self.matched,
+            skip: Some(SkipReason::CaptureBudget),
+            retired: false,
+        }
+    }
+
+    fn sort_records(&mut self) {
+        self.records.sort_by(|left, right| {
+            left.line
+                .cmp(&right.line)
+                .then_with(|| left.kind.cmp(&right.kind))
+                .then_with(|| left.order.cmp(&right.order))
+        });
     }
 }
 
@@ -684,7 +743,7 @@ impl FilesSink<'_> {
             return Err(GrepError::Cancelled);
         }
         if self.binary {
-            return Ok(FileOutcome::skipped());
+            return Ok(FileOutcome::skipped(path, SkipReason::Binary));
         }
         Ok(FileOutcome {
             path,
@@ -692,7 +751,7 @@ impl FilesSink<'_> {
             entries: 0,
             occurrences: usize::from(self.matched),
             matched: self.matched,
-            skipped: false,
+            skip: None,
             retired: false,
         })
     }
@@ -704,7 +763,7 @@ impl CountSink<'_> {
             return Err(GrepError::Cancelled);
         }
         if self.binary {
-            return Ok(FileOutcome::skipped());
+            return Ok(FileOutcome::skipped(path, SkipReason::Binary));
         }
         Ok(FileOutcome {
             path,
@@ -712,7 +771,7 @@ impl CountSink<'_> {
             entries: 0,
             occurrences: self.occurrences,
             matched: self.matched,
-            skipped: false,
+            skip: None,
             retired: false,
         })
     }

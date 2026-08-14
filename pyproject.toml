@@ -2,12 +2,35 @@
 name = "codexshim"
 version = "0"
 description = "Local Python tooling for codexshim (pre-commit hooks)"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 
 [dependency-groups]
 dev = [
+    "mypy>=1.15.0",
     "pre-commit>=4.5.0",
+    "ruff>=0.9.9",
 ]
 
 [tool.uv]
 package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.mypy]
+python_version = "3.13"
+check_untyped_defs = true
+disallow_untyped_decorators = false
+ignore_missing_imports = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+explicit_package_bases = true
+exclude = [
+    "^evals/datasets/codebase/codebase_.*",
+    "^local/.*",
+]

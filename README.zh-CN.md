@@ -23,6 +23,8 @@
 
 调用成功时返回受大小限制的文本。`read`、`grep` 和 `glob` 的部分结果会带续读游标，便于接着上次的位置继续。失败时返回统一的 `{ error: { code, message, retryable, details } }` 错误信封。
 
+目录 `grep` 与 `glob` 以 `path — reason` 列出跳过路径，并始终报告真实总数（`Skipped: N files.` 或 `showing M`）。单文件 `grep` 搜不到时按原因返回不同错误，不再把 binary、变更与 I/O 折成一句。`limit` 与 `offset` 是分页游标；真正的输出窗口是 token／字节预算。搜索 heap 与单文件 capture 是安全阀：超标时跳过或截断该文件，不是静默丢档，也不是整次呼叫硬失败。单个实例的共享 `memory_bytes` 池默认 256 MiB，上限 1 GiB。
+
 ## 安装
 
 **Windows (PowerShell):**

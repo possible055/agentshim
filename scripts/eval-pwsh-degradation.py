@@ -10,7 +10,6 @@ import tempfile
 import time
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CASES = ROOT / "evals" / "pwsh_degradation.jsonl"
 RESPONSE_SCHEMA = ROOT / "evals" / "pwsh_degradation_response.schema.json"
@@ -19,9 +18,7 @@ TOOL_CATALOG_SNAPSHOT = ROOT / "tests" / "snapshots" / "tools_list.json"
 
 def read_jsonl(path: Path) -> list[dict]:
     records = []
-    for line_number, line in enumerate(
-        path.read_text(encoding="utf-8").splitlines(), start=1
-    ):
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():
             continue
         try:
@@ -120,8 +117,7 @@ def collect_round(
                 completed.stderr[-4000:],
             )
             raise RuntimeError(
-                f"Codex eval round {round_number} failed with "
-                f"{completed.returncode}: {stderr}"
+                f"Codex eval round {round_number} failed with {completed.returncode}: {stderr}"
             )
         response = json.loads(output_path.read_text(encoding="utf-8"))
         decisions = response.get("decisions")
@@ -167,13 +163,15 @@ def pwsh_policy(case: dict, decision: dict) -> tuple[bool, bool, str]:
 
 
 def score_round(round_number: int, cases: list[dict], decisions: list[dict]) -> list[dict]:
-    by_id = {}
+    by_id: dict[str, dict] = {}
     for decision in decisions:
         decision_id = decision.get("id")
+        if not isinstance(decision_id, str):
+            raise RuntimeError(f"round {round_number} invalid decision id {decision_id!r}")
         if decision_id in by_id:
             raise RuntimeError(f"round {round_number} duplicated case {decision_id!r}")
         by_id[decision_id] = decision
-    expected_ids = {case["id"] for case in cases}
+    expected_ids: set[str] = {str(case["id"]) for case in cases}
     if set(by_id) != expected_ids:
         missing = sorted(expected_ids - set(by_id))
         extra = sorted(set(by_id) - expected_ids)
@@ -278,9 +276,7 @@ def main() -> None:
         print(tool_catalog_sha256(current_tool_catalog()))
         return
     if not args.responses and not args.model:
-        raise SystemExit(
-            "--model or CODEXSHIM_EVAL_MODEL is required for a reproducible eval"
-        )
+        raise SystemExit("--model or CODEXSHIM_EVAL_MODEL is required for a reproducible eval")
     cases = read_jsonl(args.cases)
     case_ids = [case["id"] for case in cases]
     if len(set(case_ids)) != len(case_ids):
@@ -288,13 +284,9 @@ def main() -> None:
 
     if args.responses:
         prior = read_jsonl(args.responses)
-        pinned_hashes = {
-            result.get("tool_catalog_sha256") for result in prior
-        }
+        pinned_hashes = {result.get("tool_catalog_sha256") for result in prior}
         if None in pinned_hashes or len(pinned_hashes) != 1:
-            raise SystemExit(
-                "response transcript must pin exactly one tool_catalog_sha256"
-            )
+            raise SystemExit("response transcript must pin exactly one tool_catalog_sha256")
         pinned_hash = pinned_hashes.pop()
         catalog = current_tool_catalog()
         current_hash = tool_catalog_sha256(catalog)
@@ -376,13 +368,9 @@ def main() -> None:
     )
     print(json.dumps(report, ensure_ascii=False, indent=2))
     print(f"report={report_path}", file=sys.stderr)
-    if (
-        args.minimum_pass_rate is not None
-        and report["pass_rate"] < args.minimum_pass_rate
-    ):
+    if args.minimum_pass_rate is not None and report["pass_rate"] < args.minimum_pass_rate:
         raise SystemExit(
-            f"pass rate {report['pass_rate']:.6f} is below "
-            f"{args.minimum_pass_rate:.6f}"
+            f"pass rate {report['pass_rate']:.6f} is below {args.minimum_pass_rate:.6f}"
         )
 
 

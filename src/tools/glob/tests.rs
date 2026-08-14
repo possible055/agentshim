@@ -7,8 +7,8 @@ mod tests {
     #[cfg(feature = "bench-internals")]
     use crate::tools::glob::execute_profiled_with_traversal;
     use crate::tools::glob::{
-        GlobEntryType, GlobError, GlobMatch, GlobRequest, GlobTraversal, PATH_OMISSION, TopK,
-        execute, execute_with_traversal, render,
+        GlobEntryType, GlobError, GlobMatch, GlobRequest, GlobTraversal, MAX_MATCHES,
+        PATH_OMISSION, TopK, execute, execute_with_traversal, render,
     };
     use crate::{
         path::{FileAccess, ReadScope, RepositoryRoot},
@@ -372,7 +372,8 @@ mod tests {
             &query,
             &retained,
             retained.len(),
-            TraversalSummary::default(),
+            &TraversalSummary::default(),
+            false,
             &CancellationToken::new(),
         )
         .expect("first page");
@@ -384,11 +385,39 @@ mod tests {
             &query,
             &retained,
             retained.len(),
-            TraversalSummary::default(),
+            &TraversalSummary::default(),
+            false,
             &CancellationToken::new(),
         )
         .expect("second page");
         assert!(second_page.contains("second"));
         assert!(!second_page.contains("Partial:"));
+    }
+
+    #[test]
+    fn match_cap_is_a_scan_stopped_success_page() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root = RepositoryRoot::open(fixture.path()).expect("root");
+        let first = root.resolve(Path::new("first")).expect("first path");
+        let retained = vec![GlobMatch {
+            sort_key: first.sort_key().clone(),
+            absolute: crate::path::display_path(first.absolute()),
+            charge: 0,
+        }];
+        let mut query = request("**/*");
+        query.limit = Some(1);
+
+        let output = render(
+            &query,
+            &retained,
+            MAX_MATCHES,
+            &TraversalSummary::default(),
+            true,
+            &CancellationToken::new(),
+        )
+        .expect("scan-stopped page");
+        assert!(output.contains("Scan stopped: more than "));
+        assert!(output.contains(" paths matched; narrow pattern or path."));
+        assert!(output.contains("Partial: next_offset="));
     }
 }

@@ -70,7 +70,7 @@ fn reads_numbered_utf8_crlf_and_utf16_pages() {
     page.line_count = Some(1);
     let utf16 = execute(&root, &page, &cancellation).expect("read utf16");
     assert!(utf16.contains("Encoding: UTF-16LE\n2\ttwo"));
-    assert!(utf16.ends_with("Partial: next_start_line=3."));
+    assert!(utf16.ends_with("Partial: next_start_line=3. (line_count)"));
     let be = execute(&root, &request("utf16be.txt"), &cancellation).expect("utf16be");
     assert!(be.contains("Encoding: UTF-16BE\n1\tbig"));
     let mut latin = request("latin.txt");

@@ -9,12 +9,14 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 mod burst_gate;
+mod skip_notes;
 mod token_gate;
 
 pub(crate) use burst_gate::{
     BurstOutputGate, BurstTicket, MAX_CONTROL_RESPONSE_TOKENS, configured_burst_tokens,
 };
 
+pub(crate) use skip_notes::{SkipNotes, SkipReason, search_tail};
 pub(crate) use token_gate::{
     GateDecision, OutputTokenGate, ProjectedTokenCost, ProjectionDecision,
     structured_result_fits_model_budget,

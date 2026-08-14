@@ -122,6 +122,9 @@ pub(super) fn parse_command(
 fn print_memory_limits(limits: RuntimeLimits) {
     println!("grep memory bytes: {}", limits.grep_memory_bytes);
     println!("glob memory bytes: {}", limits.glob_memory_bytes);
+    println!(
+        "search heap charges against the shared memory pool; capture overflow skips or truncates that file"
+    );
     println!("pdf text memory bytes: {}", limits.pdf_text_memory_bytes);
     println!("pdf image memory bytes: {}", limits.pdf_image_memory_bytes);
     println!(
