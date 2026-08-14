@@ -54,8 +54,7 @@ fn an_absent_pdf_mode_keeps_text_reads_on_the_text_budget() {
         serde_json::from_str(r#"{"path":"source.txt"}"#).expect("minimal request");
     assert!(parsed.pdf_mode.is_none());
     assert!(parsed.pages.is_none());
-    assert!(parsed.pdf_text_offset.is_none());
-    assert!(parsed.pdf_source_id.is_none());
+    assert!(parsed.pdf_cursor.is_none());
 
     let fixture = tempfile::tempdir().expect("fixture");
     fs::write(fixture.path().join("source.txt"), "text\n").expect("text");

@@ -264,11 +264,11 @@ impl DiagnosticError for crate::tools::read::ReadError {
         match self {
             // Retrying the same parameters can never succeed, so the error is not
             // retryable; the caller still needs the exact parameters that would work.
-            ReadError::PdfImageRequired { pages, source_id } => Some(json!({
+            ReadError::PdfImageRequired { pages, cursor } => Some(json!({
                 "retry_with": [{
                     "pdf_mode": "image",
                     "pages": pages,
-                    "pdf_source_id": source_id
+                    "pdf_cursor": cursor
                 }]
             })),
             ReadError::ResourceLimit {

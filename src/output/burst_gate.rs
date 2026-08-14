@@ -6,10 +6,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::profile::CURSOR_BURST_TOKENS;
+
 pub(crate) const BURST_TOKENS_ENV: &str = "CODEXSHIM_BURST_TOKENS";
-#[cfg(test)]
-pub(crate) const DEFAULT_BURST_TOKENS: usize = 8_192;
-pub(crate) const CURSOR_BURST_TOKENS: usize = 32_768;
 pub(crate) const MIN_BURST_TOKENS: usize = 2_048;
 pub(crate) const MAX_BURST_TOKENS: usize = CURSOR_BURST_TOKENS;
 pub(crate) const BURST_QUIET_PERIOD: Duration = Duration::from_secs(2);
@@ -258,35 +257,49 @@ impl Drop for TicketInner {
 
 #[cfg(test)]
 mod tests {
-    use super::{BurstOutputGate, CURSOR_BURST_TOKENS, DEFAULT_BURST_TOKENS};
+    use super::BurstOutputGate;
+    use crate::output::CALL_OUTPUT_TOKEN_LIMIT;
+    use crate::profile::{CODEX_BURST_TOKENS, CURSOR_BURST_TOKENS};
     use std::time::Duration;
 
     #[test]
     fn active_calls_share_the_remaining_budget() {
-        let gate = BurstOutputGate::new(DEFAULT_BURST_TOKENS);
+        let gate = BurstOutputGate::new(CODEX_BURST_TOKENS);
         let first = gate.begin_call();
         let second = gate.begin_call();
-        assert_eq!(first.allowance(), DEFAULT_BURST_TOKENS / 2);
-        assert_eq!(second.allowance(), DEFAULT_BURST_TOKENS / 2);
+        assert_eq!(first.allowance(), CODEX_BURST_TOKENS / 2);
+        assert_eq!(second.allowance(), CODEX_BURST_TOKENS / 2);
         first.finish(3_000, false);
         second.finish(2_000, false);
         let third = gate.begin_call();
-        assert_eq!(third.allowance(), DEFAULT_BURST_TOKENS - 5_000);
+        assert_eq!(third.allowance(), CODEX_BURST_TOKENS - 5_000);
+    }
+
+    #[test]
+    fn codex_budget_scales_usefully_across_supported_parallelism() {
+        for (calls, expected) in [(2, 8_192), (4, 4_096), (8, 2_048), (16, 1_024)] {
+            let gate = BurstOutputGate::new(CODEX_BURST_TOKENS);
+            let tickets = (0..calls).map(|_| gate.begin_call()).collect::<Vec<_>>();
+            assert!(
+                tickets.iter().all(|ticket| ticket.allowance() == expected),
+                "{calls} calls must receive {expected} tokens each"
+            );
+        }
     }
 
     #[test]
     fn dropped_ticket_releases_its_reservation() {
-        let gate = BurstOutputGate::new(DEFAULT_BURST_TOKENS);
+        let gate = BurstOutputGate::new(CODEX_BURST_TOKENS);
         let first = gate.begin_call();
         let second = gate.begin_call();
-        assert_eq!(first.allowance(), DEFAULT_BURST_TOKENS / 2);
+        assert_eq!(first.allowance(), CODEX_BURST_TOKENS / 2);
         drop(first);
-        assert_eq!(second.allowance(), DEFAULT_BURST_TOKENS);
+        assert_eq!(second.allowance(), CODEX_BURST_TOKENS);
     }
 
     #[test]
     fn panicking_owner_releases_unclaimed_and_reserved_state() {
-        let gate = BurstOutputGate::new(DEFAULT_BURST_TOKENS);
+        let gate = BurstOutputGate::new(CODEX_BURST_TOKENS);
         let sibling = gate.begin_call();
         let panic_gate = gate.clone();
         let panic = std::panic::catch_unwind(move || {
@@ -295,23 +308,24 @@ mod tests {
             panic!("ticket owner failed");
         });
         assert!(panic.is_err());
-        assert_eq!(sibling.allowance(), DEFAULT_BURST_TOKENS);
+        assert_eq!(sibling.allowance(), CODEX_BURST_TOKENS);
     }
 
     #[test]
     fn quiet_period_resets_only_after_every_call_finishes() {
-        let gate = BurstOutputGate::with_quiet_period(8_192, Duration::from_millis(10));
+        let gate =
+            BurstOutputGate::with_quiet_period(CODEX_BURST_TOKENS, Duration::from_millis(10));
         let long = gate.begin_call();
         let first = gate.begin_call();
         first.finish(2_000, false);
         std::thread::sleep(Duration::from_millis(20));
         let same_burst = gate.begin_call();
-        assert_eq!(same_burst.allowance(), (8_192 - 2_000) / 2);
+        assert_eq!(same_burst.allowance(), (CODEX_BURST_TOKENS - 2_000) / 2);
         same_burst.finish(1_000, false);
         long.finish(1_000, false);
         std::thread::sleep(Duration::from_millis(20));
         let reset = gate.begin_call();
-        assert_eq!(reset.allowance(), 8_192);
+        assert_eq!(reset.allowance(), CODEX_BURST_TOKENS);
     }
 
     #[test]
@@ -319,8 +333,8 @@ mod tests {
         let gate = BurstOutputGate::new(CURSOR_BURST_TOKENS);
         for _ in 0..4 {
             let call = gate.begin_call();
-            assert!(call.allowance() >= DEFAULT_BURST_TOKENS);
-            call.finish(DEFAULT_BURST_TOKENS, false);
+            assert!(call.allowance() >= CALL_OUTPUT_TOKEN_LIMIT);
+            call.finish(CALL_OUTPUT_TOKEN_LIMIT, false);
         }
         assert_eq!(gate.begin_call().allowance(), 0);
     }
@@ -329,12 +343,12 @@ mod tests {
     fn invalid_configuration_is_rejected() {
         for value in ["0", "2047", "32769", "many", "-1"] {
             assert!(
-                super::parse_burst_tokens(Some(OsStr::new(value)), DEFAULT_BURST_TOKENS).is_err()
+                super::parse_burst_tokens(Some(OsStr::new(value)), CODEX_BURST_TOKENS).is_err()
             );
         }
         assert_eq!(
-            super::parse_burst_tokens(None, DEFAULT_BURST_TOKENS).ok(),
-            Some(DEFAULT_BURST_TOKENS)
+            super::parse_burst_tokens(None, CODEX_BURST_TOKENS).ok(),
+            Some(CODEX_BURST_TOKENS)
         );
     }
 

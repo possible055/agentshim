@@ -7,9 +7,9 @@ use tokio_util::sync::CancellationToken;
 use crate::path::{FileAccess, ReadScope, RepositoryRoot};
 use crate::runtime::DEFAULT_PDF_TEXT_MEMORY_BYTES;
 use crate::tools::read::{
-    AFTER_READ_HOOK, BEFORE_READ_HOOK, DecodeError, MAX_IMAGE_BASE64_BYTES, MAX_LINE_COUNT,
-    PdfMemoryBudgets, PdfMode, ReadError, ReadRequest, TEXT_READ_MEMORY_BYTES, execute,
-    execute_output, prepare,
+    AFTER_READ_HOOK, Attempt, BEFORE_READ_HOOK, DecodeError, MAX_IMAGE_BASE64_BYTES,
+    MAX_LINE_COUNT, PdfMemoryBudgets, PdfMode, ReadError, ReadRequest, TEXT_READ_MEMORY_BYTES,
+    execute, execute_output, execute_prepared_with_budget, prepare,
 };
 
 fn budgets() -> PdfMemoryBudgets {
@@ -35,8 +35,16 @@ fn request(path: &str) -> ReadRequest {
         encoding: None,
         pdf_mode: None,
         pages: None,
-        pdf_text_offset: None,
-        pdf_source_id: None,
+        pdf_cursor: None,
+    }
+}
+
+/// The 16-hex-digit shape a real `source_id` has, for tests that only need a
+/// well-formed token rather than one matching a specific fixture.
+fn sample_cursor(text_offset: Option<usize>) -> String {
+    match text_offset {
+        Some(offset) => format!("abcdef0123456789.{offset}"),
+        None => "abcdef0123456789".to_owned(),
     }
 }
 
@@ -77,6 +85,25 @@ fn reads_numbered_utf8_crlf_and_utf16_pages() {
     latin.encoding = Some("windows-1252".to_owned());
     let latin = execute(&root, &latin, &cancellation).expect("explicit encoding");
     assert!(latin.contains("Encoding: windows-1252\n1\tcafé"));
+}
+
+#[test]
+fn known_files_inside_denied_directories_remain_readable() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    fs::create_dir_all(fixture.path().join("node_modules/pkg")).expect("node_modules");
+    fs::write(
+        fixture.path().join("node_modules/pkg/index.js"),
+        "module.exports = 1;\n",
+    )
+    .expect("pkg");
+    let root = access(fixture.path());
+    let output = execute(
+        &root,
+        &request("node_modules/pkg/index.js"),
+        &CancellationToken::new(),
+    )
+    .expect("read inside denied directory");
+    assert!(output.contains("module.exports = 1;"));
 }
 
 fn pdf_with_text() -> Vec<u8> {

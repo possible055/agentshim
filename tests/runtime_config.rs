@@ -63,7 +63,14 @@ fn cursor_profile_uses_a_larger_default_burst_budget_than_codex() {
             .expect("doctor must report burst tokens")
     };
     assert!(cursor_stdout.contains("client profile: cursor"));
-    assert!(burst(&cursor_stdout) > burst(&codex_stdout));
+    assert_eq!(
+        burst(&cursor_stdout),
+        codexshim::ClientProfile::Cursor.default_burst_tokens()
+    );
+    assert_eq!(
+        burst(&codex_stdout),
+        codexshim::ClientProfile::Codex.default_burst_tokens()
+    );
 }
 
 #[test]

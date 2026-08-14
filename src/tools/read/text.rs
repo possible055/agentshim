@@ -170,7 +170,9 @@ pub(super) fn render(
         let tail = next_start_line
             .map(|next| {
                 format!(
-                    "Partial: next_start_line={next}. ({})",
+                    "{} {}={next}. ({})",
+                    crate::output::PARTIAL_MARKER,
+                    crate::output::NEXT_START_LINE_FIELD,
                     partial_stop_reason(collector, output_budget_stop)
                 )
             })

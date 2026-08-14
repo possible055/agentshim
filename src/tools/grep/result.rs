@@ -207,8 +207,21 @@ fn display_skip_path(path: Option<&ResolvedPath>) -> String {
     )
 }
 
-fn page_tail(notes: &SkipNotes, next_offset: Option<usize>, scan_complete: bool) -> Vec<String> {
-    crate::output::search_tail(notes, scan_complete, "files", [], next_offset)
+fn page_tail(
+    notes: &SkipNotes,
+    next_offset: Option<usize>,
+    scan_complete: bool,
+    nothing_matched: bool,
+    offer_fallback_encoding: bool,
+) -> Vec<String> {
+    let mut extras = Vec::new();
+    if nothing_matched {
+        extras.push(crate::output::GITIGNORE_RETRY_HINT.to_owned());
+    }
+    if offer_fallback_encoding && notes.has_undecodable() {
+        extras.push(crate::output::UNDECODABLE_RETRY_HINT.to_owned());
+    }
+    crate::output::search_tail(notes, scan_complete, "files", extras, next_offset)
 }
 
 #[cfg(test)]
@@ -247,7 +260,19 @@ pub(super) fn render_with_budget(
         let shown_end = page.offset.saturating_add(cap);
         let next_offset =
             (!page.scan_complete || shown_end < page.seen_entries).then_some(shown_end);
-        let tail = page_tail(&notes, next_offset, page.scan_complete);
+        // Only a finished scan can claim nothing matched. A truncated one already tells the
+        // caller to continue, and pointing at gitignore there would send them the wrong way.
+        let nothing_matched =
+            page.scan_complete && page.seen_entries == 0 && page.traversal.gitignore_filtered;
+        // Offering the argument the caller already supplied would just be noise.
+        let offer_fallback_encoding = request.fallback_encoding.is_none();
+        let tail = page_tail(
+            &notes,
+            next_offset,
+            page.scan_complete,
+            nothing_matched,
+            offer_fallback_encoding,
+        );
         let header = if available == 0 {
             if page.offset == 0 {
                 "No matches.".to_owned()
@@ -283,7 +308,13 @@ pub(super) fn render_with_budget(
         if cap == 1
             && let Some(fallback) = page.lines[0].fallback.as_deref()
         {
-            let tail = page_tail(&notes, next_offset, page.scan_complete);
+            let tail = page_tail(
+                &notes,
+                next_offset,
+                page.scan_complete,
+                nothing_matched,
+                offer_fallback_encoding,
+            );
             let mut formatter = OutputFormatter::new(String::new(), tail, limits)?;
             if !formatter.try_push_line(fallback, cancellation)? {
                 return Err(crate::output::OutputError::BurstLimit.into());

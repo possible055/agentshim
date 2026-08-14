@@ -85,8 +85,11 @@ fn dynamic_burst_ceiling_keeps_process_completion_metadata() {
     assert!(output.contains("Exit code: 7"));
     assert!(output.contains("Duration ms: 42"));
     assert!(output.contains("Stdout: total="));
+    assert!(output.contains("omitted="));
+    assert!(!output.contains("Partial:"));
     assert!(!output.contains("Complete."));
     assert!(output.fits_call_budget(&budget, &CancellationToken::new()));
+    assert!(output.fits_model_budget(&CancellationToken::new()));
 }
 
 #[cfg(unix)]

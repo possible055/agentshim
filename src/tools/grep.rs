@@ -30,7 +30,7 @@ use file_search::{SearchPlan, search_file, search_file_with_hook, search_file_wi
 #[cfg(test)]
 use request::{CandidatePolicy, PAGE_MEMORY_BYTES, build_matcher};
 #[cfg(test)]
-use result::{Page, render};
+use result::{Page, render, render_with_budget};
 
 #[cfg(test)]
 #[path = "grep/tests.rs"]

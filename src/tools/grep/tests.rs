@@ -11,8 +11,8 @@ mod tests {
         CandidateCollection, CandidatePolicy, CaseMode, GrepBenchmarkVariant, GrepError, GrepMode,
         GrepRequest, GrepSourcePolicy, GrepTraversal, PAGE_MEMORY_BYTES, Page,
         PathnameReopenPolicy, SearchPlan, build_matcher, candidate, execute,
-        execute_with_traversal, execute_with_variant, render, search_file, search_file_with_hook,
-        search_file_with_variant_hook,
+        execute_with_traversal, execute_with_variant, render, render_with_budget, search_file,
+        search_file_with_hook, search_file_with_variant_hook,
     };
     use crate::{
         path::{FileAccess, ReadScope, RepositoryRoot},
@@ -30,6 +30,9 @@ mod tests {
             context_lines: None,
             offset: None,
             limit: None,
+            include_ignored: None,
+            encoding: None,
+            fallback_encoding: None,
         }
     }
 
@@ -49,6 +52,179 @@ mod tests {
             ReadScope::Normal,
         ));
         (fixture, root)
+    }
+
+    /// A legacy-encoded file used to answer "No matches." for any pattern whose UTF-8
+    /// bytes could not appear in it, which is every CJK pattern. The bytes now get decoded
+    /// before the matcher sees them.
+    #[test]
+    fn legacy_encoded_files_are_searched_after_decoding() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        fs::write(
+            fixture.path().join("big5.txt"),
+            encoding_rs::BIG5
+                .encode("繁體中文測試資料\n第二行內容足夠辨識\n")
+                .0,
+        )
+        .expect("big5 source");
+        fs::write(
+            fixture.path().join("gbk.txt"),
+            encoding_rs::GBK
+                .encode("简体中文测试数据\n第二行内容足够识别\n")
+                .0,
+        )
+        .expect("gbk source");
+        let root = Arc::new(FileAccess::new(
+            Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
+            ReadScope::Normal,
+        ));
+        let cancellation = CancellationToken::new();
+
+        let mut query = request("繁體");
+        query.glob = None;
+        query.fixed_strings = Some(true);
+        let traditional = execute(&root, &query, 1, &cancellation).expect("big5 search");
+        assert!(
+            traditional.contains("big5.txt"),
+            "expected a Big5 hit, got {traditional}"
+        );
+
+        let mut query = request("简体");
+        query.glob = None;
+        query.fixed_strings = Some(true);
+        let simplified = execute(&root, &query, 1, &cancellation).expect("gbk search");
+        assert!(
+            simplified.contains("gbk.txt"),
+            "expected a GBK hit, got {simplified}"
+        );
+    }
+
+    /// An encoding detection cannot resolve must be reported, and the report must name the
+    /// argument that makes the file reachable.
+    #[test]
+    fn undecodable_files_are_reported_with_a_fallback_hint() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        fs::write(
+            fixture.path().join("sparse.txt"),
+            encoding_rs::BIG5.encode("fn 計算() {\n").0,
+        )
+        .expect("sparse big5 source");
+        fs::write(fixture.path().join("plain.txt"), "計算\n").expect("utf8 source");
+        let root = Arc::new(FileAccess::new(
+            Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
+            ReadScope::Normal,
+        ));
+        let cancellation = CancellationToken::new();
+        let mut query = request("計算");
+        query.glob = None;
+        query.fixed_strings = Some(true);
+
+        let reported = execute(&root, &query, 1, &cancellation).expect("search");
+        assert!(
+            reported.contains("undecodable"),
+            "undecodable files must be listed, got {reported}"
+        );
+        assert!(
+            reported.contains("fallback_encoding"),
+            "the report must name the argument that reaches them, got {reported}"
+        );
+
+        query.fallback_encoding = Some("big5".to_owned());
+        let recovered = execute(&root, &query, 1, &cancellation).expect("fallback search");
+        assert!(
+            recovered.contains("sparse.txt"),
+            "fallback_encoding must reach the file, got {recovered}"
+        );
+        assert!(
+            !recovered.contains("fallback_encoding="),
+            "the hint must not repeat once the argument is supplied"
+        );
+    }
+
+    /// One searcher serves every candidate a worker handles. A small text file disarms
+    /// binary detection for its own slice search, and a binary file that follows must
+    /// still be reported as binary rather than searched as text.
+    #[test]
+    fn a_binary_file_after_a_text_file_is_still_reported_as_binary() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        fs::write(fixture.path().join("a_small.rs"), "needle here\n").expect("text source");
+        fs::write(
+            fixture.path().join("b_large.rs"),
+            b"\x00\x01needle\x02".repeat(8_000),
+        )
+        .expect("binary source");
+        let root = Arc::new(FileAccess::new(
+            Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
+            ReadScope::Normal,
+        ));
+        let cancellation = CancellationToken::new();
+        let mut query = request("needle");
+        query.fixed_strings = Some(true);
+
+        let output = execute(&root, &query, 1, &cancellation).expect("mixed search");
+
+        assert!(output.contains("a_small.rs:1:needle here"));
+        assert!(
+            output.contains("b_large.rs — binary"),
+            "the binary file must be reported, got {output}"
+        );
+        assert!(
+            !output.contains("b_large.rs:"),
+            "the binary file must not produce match lines, got {output}"
+        );
+    }
+
+    #[test]
+    fn encoding_arguments_are_rejected_for_the_wrong_target_kind() {
+        let (_fixture, root) = fixture();
+        let cancellation = CancellationToken::new();
+
+        let mut directory = request("needle");
+        directory.encoding = Some("big5".to_owned());
+        assert!(matches!(
+            execute(&root, &directory, 1, &cancellation),
+            Err(GrepError::Validation(_))
+        ));
+
+        let mut single = request("needle");
+        single.path = Some("src/a.rs".to_owned());
+        single.glob = None;
+        single.fallback_encoding = Some("big5".to_owned());
+        assert!(matches!(
+            execute(&root, &single, 1, &cancellation),
+            Err(GrepError::Validation(_))
+        ));
+
+        let mut unknown = request("needle");
+        unknown.fallback_encoding = Some("not-an-encoding".to_owned());
+        assert!(matches!(
+            execute(&root, &unknown, 1, &cancellation),
+            Err(GrepError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn an_empty_gitignore_filtered_search_recommends_the_retry_flag() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        fs::write(fixture.path().join(".gitignore"), "hidden.rs\n").expect("ignore file");
+        fs::write(fixture.path().join("hidden.rs"), "needle").expect("hidden source");
+        let root = Arc::new(FileAccess::new(
+            Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
+            ReadScope::Normal,
+        ));
+        let cancellation = CancellationToken::new();
+        let mut query = request("needle");
+        query.fixed_strings = Some(true);
+
+        query.include_ignored = Some(false);
+        let filtered = execute(&root, &query, 1, &cancellation).expect("filtered search");
+        assert!(filtered.contains("No matches."));
+        assert!(filtered.contains("include_ignored=true"));
+
+        query.include_ignored = Some(true);
+        let included = execute(&root, &query, 1, &cancellation).expect("included search");
+        assert!(included.contains("needle"));
+        assert!(!included.contains("include_ignored=true"));
     }
 
     #[test]
@@ -91,7 +267,7 @@ mod tests {
         let baseline = execute(&root, &query, 1, &cancellation).expect("grep");
         assert!(baseline.contains("src/a.rs"));
         assert!(baseline.contains("-1-before"));
-        assert!(!baseline.contains("ignored.rs"));
+        assert!(baseline.contains("ignored.rs"));
         for workers in [2, 4, 8, 16] {
             assert_eq!(
                 execute(&root, &query, workers, &cancellation).expect("parallel grep"),
@@ -125,6 +301,44 @@ mod tests {
         assert!(output.contains("Partial: next_offset="));
     }
 
+    #[test]
+    fn partial_pages_keep_the_shown_offset_under_burst_and_item_ceilings() {
+        let query = request("needle");
+        let mut page = Page::new(&query, crate::traversal::TraversalSummary::default(), false);
+        page.mark_complete();
+        for index in 0..80 {
+            page.push_entry(
+                format!("src/{index:02}.rs:{index}:{}", " x".repeat(20)),
+                Some(format!(
+                    "src/{index:02}.rs:{index}:[line text omitted: exceeds output budget]"
+                )),
+            );
+        }
+        let cancellation = CancellationToken::new();
+        let burst_512 = crate::output::CallOutputBudget::new(
+            crate::output::OutputTokenGate::load_shared().expect("token gate"),
+            crate::output::BurstOutputGate::new(512).begin_call(),
+        );
+        let output = render_with_budget(&query, &page, &cancellation, Some(&burst_512))
+            .expect("512-token grep page");
+        let next = output
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("Partial: next_offset=")?
+                    .trim_end_matches('.')
+                    .parse::<usize>()
+                    .ok()
+            })
+            .expect("partial cursor");
+        assert_eq!(next, result_lines(&output).len());
+        assert!(output.fits_call_budget(&burst_512, &cancellation));
+        assert!(output.fits_call_budget(
+            &crate::output::CallOutputBudget::standalone(),
+            &cancellation
+        ));
+        assert!(output.fits_model_budget(&cancellation));
+    }
+
     #[cfg(feature = "bench-internals")]
     #[test]
     fn profiled_execution_preserves_output_and_records_wall_stages() {
@@ -137,9 +351,9 @@ mod tests {
         let profile = execute_profiled(&root, &query, 4, &cancellation).expect("profiled grep");
 
         assert_eq!(profile.output, expected);
-        assert_eq!(profile.timings.candidate_count, 2);
-        assert_eq!(profile.timings.lanes, 2);
-        assert_eq!(profile.timings.reduced_candidates, 2);
+        assert_eq!(profile.timings.candidate_count, 3);
+        assert_eq!(profile.timings.lanes, 3);
+        assert_eq!(profile.timings.reduced_candidates, 3);
         assert!(profile.timings.scan_complete);
         let sequential_ns = profile
             .timings
@@ -266,7 +480,7 @@ mod tests {
         let baseline = execute(&root, &query, 1, &cancellation).expect("grep without glob");
         assert!(baseline.contains("src/a.rs"));
         assert!(baseline.contains("src/b.rs"));
-        assert!(!baseline.contains("ignored.rs"));
+        assert!(baseline.contains("ignored.rs"));
         for workers in [2, 4, 8, 16] {
             assert_eq!(
                 execute(&root, &query, workers, &cancellation).expect("parallel grep"),
@@ -283,7 +497,7 @@ mod tests {
         files.mode = Some(GrepMode::Files);
         files.limit = Some(1);
         let output = execute(&root, &files, 4, &cancellation).expect("files");
-        assert!(output.contains("src/a.rs"));
+        assert!(output.contains("ignored.rs") || output.contains("src/a.rs"));
         assert!(output.contains("next_offset=1"));
 
         let mut count = request("needle");
@@ -291,6 +505,56 @@ mod tests {
         let output = execute(&root, &count, 4, &cancellation).expect("count");
         assert!(output.contains("src/a.rs:2"));
         assert!(output.contains("src/b.rs:2"));
+        assert!(output.contains("ignored.rs:1"));
+    }
+
+    #[test]
+    fn include_ignored_false_restores_gitignore_filtering() {
+        let (_fixture, root) = fixture();
+        let mut query = request("needle");
+        query.fixed_strings = Some(true);
+        query.include_ignored = Some(false);
+        let output = execute(&root, &query, 1, &CancellationToken::new()).expect("respected grep");
+        assert!(output.contains("src/a.rs"));
+        assert!(!output.contains("ignored.rs"));
+    }
+
+    #[test]
+    fn directory_grep_skips_denied_trees_while_single_file_grep_still_reads_them() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        fs::create_dir_all(fixture.path().join("src")).expect("src");
+        fs::create_dir_all(fixture.path().join("node_modules/pkg")).expect("node_modules");
+        fs::write(fixture.path().join("src/lib.rs"), "needle\n").expect("source");
+        fs::write(fixture.path().join("node_modules/pkg/index.rs"), "needle\n").expect("pkg");
+        let root = Arc::new(FileAccess::new(
+            Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
+            ReadScope::Normal,
+        ));
+        let mut directory = request("needle");
+        directory.fixed_strings = Some(true);
+        let output =
+            execute(&root, &directory, 1, &CancellationToken::new()).expect("directory grep");
+        assert!(output.contains("src/lib.rs"));
+        assert!(!output.contains("node_modules"));
+
+        let mut denied_root = request("needle");
+        denied_root.path = Some("node_modules".to_owned());
+        denied_root.fixed_strings = Some(true);
+        assert!(matches!(
+            execute(&root, &denied_root, 1, &CancellationToken::new()),
+            Err(GrepError::Traversal(
+                crate::traversal::TraversalError::DeniedDirectory
+            ))
+        ));
+
+        let mut single_file = request("needle");
+        single_file.path = Some("node_modules/pkg/index.rs".to_owned());
+        single_file.fixed_strings = Some(true);
+        single_file.glob = None;
+        let single = execute(&root, &single_file, 1, &CancellationToken::new())
+            .expect("single-file grep inside denied directory");
+        assert!(single.contains("node_modules"));
+        assert!(single.contains("needle"));
     }
 
     #[test]
@@ -402,7 +666,7 @@ mod tests {
         files.fixed_strings = Some(true);
         let output = execute(&root, &files, 1, &cancellation).expect("files");
         let first = crate::path::display_path(
-            root.resolve(Path::new("src/a.rs"))
+            root.resolve(Path::new("ignored.rs"))
                 .expect("first result")
                 .absolute(),
         );
@@ -555,6 +819,8 @@ mod tests {
             context: 0,
             probe: 10,
             allow_early_stop: false,
+            encoding: None,
+            fallback_encoding: None,
         };
         let changed = candidate(root.resolve(Path::new("src/a.rs")).expect("changed path"))
             .expect("changed candidate");
@@ -598,6 +864,8 @@ mod tests {
             context: 0,
             probe: 10,
             allow_early_stop: false,
+            encoding: None,
+            fallback_encoding: None,
         };
         let changed = candidate(root.resolve(Path::new("src/a.rs")).expect("changed path"))
             .expect("changed candidate");
@@ -653,6 +921,8 @@ mod tests {
             context: 0,
             probe: 10,
             allow_early_stop: false,
+            encoding: None,
+            fallback_encoding: None,
         };
         let target = candidate(root.resolve(Path::new("src/a.rs")).expect("single path"))
             .expect("single candidate");
@@ -720,6 +990,8 @@ mod tests {
                 context: 0,
                 probe: 10,
                 allow_early_stop: false,
+                encoding: None,
+                fallback_encoding: None,
             };
             let original = fixture.path().join("src/a.rs");
             let renamed = fixture.path().join("src/a-renamed.rs");
@@ -758,6 +1030,8 @@ mod tests {
                 context: 0,
                 probe: 10,
                 allow_early_stop: false,
+                encoding: None,
+                fallback_encoding: None,
             };
             let path = fixture.path().join("src/a.rs");
             fs::OpenOptions::new()
@@ -796,6 +1070,8 @@ mod tests {
                 context: 0,
                 probe: 10,
                 allow_early_stop: false,
+                encoding: None,
+                fallback_encoding: None,
             };
             let original = fixture.path().join("src/a.rs");
             let candidate = candidate(root.resolve(Path::new("src/a.rs")).expect("candidate path"))

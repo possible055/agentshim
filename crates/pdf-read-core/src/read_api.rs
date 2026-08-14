@@ -312,7 +312,7 @@ impl PdfReadDocument {
             return Err(PdfReadError {
                 kind: PdfReadErrorKind::Invalid,
                 message: format!(
-                    "pdf_text_offset {offset} is past the end of page {} ({} bytes)",
+                    "resume offset {offset} is past the end of page {} ({} bytes)",
                     page_index + 1,
                     markdown.len()
                 ),
@@ -323,7 +323,7 @@ impl PdfReadDocument {
             return Err(PdfReadError {
                 kind: PdfReadErrorKind::Invalid,
                 message: format!(
-                    "pdf_text_offset {offset} is not a character boundary on page {}",
+                    "resume offset {offset} is not a character boundary on page {}",
                     page_index + 1
                 ),
                 limit: None,

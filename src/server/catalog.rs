@@ -29,12 +29,12 @@ pub(super) fn tool_catalog(read_scope: ReadScope) -> &'static [Tool; 5] {
 fn read_tool(read_scope: ReadScope) -> Tool {
     let (description, path_description) = match read_scope {
         ReadScope::Normal => (
-            "Read a local repository or Codex extension file. Text files are returned as numbered lines; PDFs default to page-oriented Markdown and can be rendered as images. Absolute paths may address configured Codex skill and plugin directories.",
-            "Platform-native repository path or absolute path under a configured Codex skill or plugin directory.",
+            "Read one file as numbered lines. Relative paths resolve against the repository root; an absolute path outside it succeeds only where this server was configured to allow it, and otherwise fails immediately with a message naming the limit, so an attempt is cheap. Omit line_count to fill one response. A truncated response ends with a line starting Partial: that names the argument for the next call, such as `Partial: next_start_line=801.` — send that value back rather than re-reading from line 1. PDFs return per-page Markdown or images instead; the pdf_* arguments control that.",
+            "Platform-native path to one file. Relative paths resolve against the repository root; an absolute path works only where this server was configured to allow it.",
         ),
         ReadScope::Unrestricted => (
-            "Read a local filesystem file. Text files are returned as numbered lines; PDFs default to page-oriented Markdown and can be rendered as images. Relative paths use the repository root; absolute paths may address supported locations outside it.",
-            "Platform-native regular file path. Relative paths use the repository root; absolute paths may address supported local filesystems.",
+            "Read one file as numbered lines. Relative paths resolve against the repository root; absolute paths may reach supported locations outside it. Omit line_count to fill one response. A truncated response ends with a line starting Partial: that names the argument for the next call, such as `Partial: next_start_line=801.` — send that value back rather than re-reading from line 1. PDFs return per-page Markdown or images instead; the pdf_* arguments control that.",
+            "Platform-native path to one file. Relative paths resolve against the repository root; absolute paths may reach supported local filesystems.",
         ),
     };
     Tool::new(
@@ -46,13 +46,13 @@ fn read_tool(read_scope: ReadScope) -> Tool {
             "properties": {
                 "encoding": {
                     "type": "string",
-                    "description": "Optional WHATWG encoding label. A BOM takes precedence; when omitted, UTF-8, Big5, and GBK/GB18030 are detected conservatively."
+                    "description": "Optional WHATWG encoding label. Leave it unset first: a BOM wins, and UTF-8, Big5, and GBK/GB18030 are detected conservatively. Pass a label when the returned text comes back garbled, or when the response reports an Encoding: line you know is wrong for this file."
                 },
                 "line_count": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 2000,
-                    "description": "Maximum number of lines to return."
+                    "description": "Maximum lines to return starting at start_line. Omit to fill one response. A large value does not defeat the response size cap — an over-long result still comes back truncated with a Partial: line."
                 },
                 "pages": {
                     "type": "string",
@@ -68,41 +68,37 @@ fn read_tool(read_scope: ReadScope) -> Tool {
                     "type": "string",
                     "enum": ["auto", "text", "image"],
                     "default": "auto",
-                    "description": "PDF only: \"auto\" and \"text\" return page Markdown, \"image\" renders PNG content blocks. Without pages, text modes deliver the first 10 pages and image renders page 1, each with a continuation."
+                    "description": "PDF only: \"auto\" and \"text\" return page Markdown, \"image\" renders PNG content blocks. Without pages, text modes deliver the first 10 pages and image renders page 1; when more remain, the response ends with a Partial: line."
                 },
-                "pdf_source_id": {
+                "pdf_cursor": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "PDF only: opaque token from a previous response, replayed to prove the continuation targets the same source version."
-                },
-                "pdf_text_offset": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "PDF only: resume a single page's Markdown at this UTF-8 byte offset. Requires pages to name exactly one page, and a non-zero value requires pdf_source_id."
+                    "description": "PDF only: copy the pdf_cursor value printed verbatim in the previous response's Partial: or Retry: line, together with the pages it printed. It carries both the source version and any resume point inside a page, so a stale value is rejected rather than silently returning pages from a changed file."
                 },
                 "start_line": {
                     "type": "integer",
                     "minimum": 1,
                     "default": 1,
-                    "description": "One-based first line to return."
+                    "description": "One-based first line to return, and the argument to continue with: a truncated response names the next value as next_start_line."
                 }
             },
             "required": ["path"]
         })),
     )
+    .with_title("Read")
     .with_annotations(read_only_annotations())
 }
 
 fn grep_tool(read_scope: ReadScope) -> Tool {
     let (description, path_description, glob_description) = match read_scope {
         ReadScope::Normal => (
-            "Search local repository or Codex extension contents using Rust regex or fixed strings. Results are deterministic and expose structured numeric pagination. Skipped files are listed with a path and reason.",
-            "Optional platform-native repository path or absolute path under a configured Codex skill or plugin directory.",
-            "Optional case-sensitive glob relative to the repository or requested Codex extension path.",
+            "Search file contents under the repository root using Rust regex or fixed strings. Files that could not be searched are listed with a path and reason. Omit limit to fill one response. A truncated response ends with `Partial: next_offset=N.` — pass that N back as offset instead of restarting.",
+            "Optional platform-native file or directory to search. Relative paths resolve against the repository root; an absolute path works only where this server was configured to allow it.",
+            "Optional case-sensitive glob over repository-root-relative paths.",
         ),
         ReadScope::Unrestricted => (
-            "Search local filesystem contents using Rust regex or fixed strings. Relative paths use the repository root; absolute paths may address supported locations outside it. Skipped files are listed with a path and reason.",
-            "Optional platform-native file or directory path. Relative paths use the repository root; absolute paths may address supported local filesystems.",
+            "Search file contents using Rust regex or fixed strings. Relative paths resolve against the repository root; absolute paths may reach supported locations outside it. Files that could not be searched are listed with a path and reason. Omit limit to fill one response. A truncated response ends with `Partial: next_offset=N.` — pass that N back as offset instead of restarting.",
+            "Optional platform-native file or directory to search. Relative paths resolve against the repository root; absolute paths may reach supported local filesystems.",
             "Optional case-sensitive glob over repository-root-relative paths, or request-path-relative paths for external absolute inputs.",
         ),
     };
@@ -126,6 +122,14 @@ fn grep_tool(read_scope: ReadScope) -> Tool {
                     "default": 0,
                     "description": "Lines of context to show before and after each match."
                 },
+                "encoding": {
+                    "type": "string",
+                    "description": "Single-file path only, and rejected with a directory. WHATWG label such as \"big5\" or \"gbk\" naming how to decode that one file before searching it. Use this after a single-file search failed as undecodable."
+                },
+                "fallback_encoding": {
+                    "type": "string",
+                    "description": "Directory path only, and rejected with a single file. WHATWG label applied only to files whose encoding cannot be determined on its own; it never displaces a BOM, valid UTF-8, or a detected encoding, so files that already read correctly are unaffected. Use this when the skip list reports files as undecodable and you know what they are."
+                },
                 "fixed_strings": {
                     "type": "boolean",
                     "default": false,
@@ -135,12 +139,16 @@ fn grep_tool(read_scope: ReadScope) -> Tool {
                     "type": "string",
                     "description": glob_description
                 },
+                "include_ignored": {
+                    "type": "boolean",
+                    "description": "Set true and retry when a file you had good reason to expect is missing from the results — the server's configured default may be filtering gitignored paths. Leave it unset otherwise. .git internals and common heavy build directories are excluded either way and this flag does not reach them."
+                },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 1000,
                     "default": 200,
-                    "description": "Pagination cursor: maximum matching entries to return. The token and byte budget is the real output window."
+                    "description": "Maximum matching entries to return. Omit to fill one response. A large value does not defeat the response size cap — an over-long result still comes back truncated with a Partial: line."
                 },
                 "mode": {
                     "type": "string",
@@ -152,7 +160,7 @@ fn grep_tool(read_scope: ReadScope) -> Tool {
                     "type": "integer",
                     "minimum": 0,
                     "default": 0,
-                    "description": "Skip this many matching entries before returning results, for pagination."
+                    "description": "Skip this many matching entries before returning results. To continue a truncated response, pass the N from its `Partial: next_offset=N.` line."
                 },
                 "path": {
                     "type": "string",
@@ -166,19 +174,20 @@ fn grep_tool(read_scope: ReadScope) -> Tool {
             "required": ["pattern"]
         })),
     )
+    .with_title("Grep")
     .with_annotations(read_only_annotations())
 }
 
 fn glob_tool(read_scope: ReadScope) -> Tool {
     let (description, path_description, pattern_description) = match read_scope {
         ReadScope::Normal => (
-            "Find local repository or Codex extension paths using a glob pattern. Returns files by default; use type to find directories or any entry. Results use native absolute paths and expose structured numeric pagination. Skipped entries are listed with a path and reason.",
-            "Platform-native repository directory or absolute directory under a configured Codex skill or plugin root.",
-            "Case-sensitive glob relative to the repository or requested Codex extension directory.",
+            "Find paths under the repository root using a glob pattern. Returns files by default; use type to find directories or any entry. Results are native absolute paths. Entries that could not be traversed are listed with a path and reason. Omit limit to fill one response. A truncated response ends with `Partial: next_offset=N.` — pass that N back as offset instead of restarting.",
+            "Platform-native directory to traverse. Relative paths resolve against the repository root; an absolute path works only where this server was configured to allow it.",
+            "Case-sensitive glob over repository-root-relative paths.",
         ),
         ReadScope::Unrestricted => (
-            "Find local filesystem paths using a glob pattern. Returns files by default; use type to find directories or any entry. Relative paths use the repository root; absolute paths may address supported locations outside it. Skipped entries are listed with a path and reason.",
-            "Platform-native directory to traverse. Relative paths use the repository root; absolute paths may address supported local filesystems.",
+            "Find local filesystem paths using a glob pattern. Returns files by default; use type to find directories or any entry. Relative paths resolve against the repository root; absolute paths may reach supported locations outside it. Results are native absolute paths. Entries that could not be traversed are listed with a path and reason. Omit limit to fill one response. A truncated response ends with `Partial: next_offset=N.` — pass that N back as offset instead of restarting.",
+            "Platform-native directory to traverse. Relative paths resolve against the repository root; absolute paths may reach supported local filesystems.",
             "Case-sensitive glob over repository-root-relative paths, or request-path-relative paths for external absolute inputs.",
         ),
     };
@@ -191,21 +200,20 @@ fn glob_tool(read_scope: ReadScope) -> Tool {
             "properties": {
                 "include_ignored": {
                     "type": "boolean",
-                    "default": false,
-                    "description": "Include entries matched by gitignore; .git internals remain excluded."
+                    "description": "Set true and retry when a path you had good reason to expect is missing from the results — the server's configured default may be filtering gitignored paths. Leave it unset otherwise. .git internals and common heavy build directories are excluded either way and this flag does not reach them."
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 1000,
                     "default": 200,
-                    "description": "Pagination cursor: maximum paths to return. The token and byte budget is the real output window."
+                    "description": "Maximum paths to return. Omit to fill one response. A large value does not defeat the response size cap — an over-long result still comes back truncated with a Partial: line."
                 },
                 "offset": {
                     "type": "integer",
                     "minimum": 0,
                     "default": 0,
-                    "description": "Skip this many matching paths before returning results, for pagination."
+                    "description": "Skip this many matching paths before returning results. To continue a truncated response, pass the N from its `Partial: next_offset=N.` line."
                 },
                 "path": {
                     "type": "string",
@@ -221,12 +229,13 @@ fn glob_tool(read_scope: ReadScope) -> Tool {
                     "type": "string",
                     "enum": ["file", "directory", "any"],
                     "default": "file",
-                    "description": "Filesystem entry kind to return. file includes regular files and symbolic-link entries; directory returns real directories; any preserves both."
+                    "description": "Filesystem entry kind to return. file includes regular files and symbolic-link entries; directory returns real directories; any returns both."
                 }
             },
             "required": ["pattern"]
         })),
     )
+    .with_title("Glob")
     .with_annotations(read_only_annotations())
 }
 
@@ -239,11 +248,11 @@ fn run_program_tool() -> Tool {
          is passed as one literal argument. Pipes, redirection, globbing, and variable expansion do \
          not happen. Arguments are passed literally — do not add quoting. Prefer this when \
          arguments contain characters a shell would mangle, such as Windows paths, regexes, and \
-         JSON. Use bash only when shell composition is required. Do not issue state-changing \
-         commands against the same working tree in parallel calls. Cleanup owns a Windows Job \
-         Object or the Unix process group it created; a Unix program that starts a new session can \
-         escape that group. This is not a sandbox. This is an open-world, destructive operation \
-         and may require approval.",
+         JSON. Use bash only when shell composition is required. Oversized output keeps head and \
+         tail with total/shown/omitted and has no continuation cursor; redirect to a file and page \
+         it with read. Do not issue state-changing commands against the same working tree in \
+         parallel calls. A program that daemonizes itself may keep running after this call \
+         returns. This is not a sandbox, and the call may require user approval.",
         schema(json!({
             "type": "object",
             "additionalProperties": false,
@@ -279,7 +288,7 @@ fn run_program_tool() -> Tool {
                     "minimum": 1,
                     "maximum": max,
                     "default": DEFAULT_TIMEOUT_MS,
-                    "description": "Execution timeout in milliseconds. On timeout the owned process containment is terminated and a Timeout error is returned."
+                    "description": "Execution timeout in milliseconds. On timeout the program is terminated and a Timeout error is returned."
                 },
                 "unset_env": {
                     "type": "array",
@@ -291,6 +300,7 @@ fn run_program_tool() -> Tool {
             "required": ["program"]
         })),
     )
+    .with_title("Run Program")
     .with_annotations(
         ToolAnnotations::new()
             .read_only(false)
@@ -307,20 +317,16 @@ fn bash_tool() -> Tool {
          Write POSIX bash, never PowerShell, on every platform. The command runs \
          non-interactively with no TTY and stdin closed, so pass flags such as -y or --no-edit \
          instead of expecting a prompt. A non-zero exit code is a normal result, not a tool \
-         error. Both output streams are merged into one pipe, so lines appear in pipe-write \
-         order and cannot be attributed to a stream; a program that buffers stdout but not \
-         stderr can still interleave them differently from what a terminal would show. Output \
-         above the byte budget is truncated in the middle: redirect to a file and page it with \
-         read when you need all of it. The default timeout is {DEFAULT_TIMEOUT_MS} ms and the \
-         maximum is {max} ms; for work that needs longer, set detach with a log_path \
-         and read that file instead of waiting. On Windows, prefer run_program for one native \
-         program with literal arguments. When Bash composition must pass slash-style switches \
-         such as /E or /C to a native program, set msys_argument_conversion to disabled. This \
-         setting applies to the whole Bash command; codexshim does not inspect subcommands or \
-         retry failures. Do not issue state-changing commands against the same working tree in \
-         parallel calls. Cleanup owns a Windows Job Object or the Unix process group it \
-         created; a Unix program that starts a new session can escape that group. This is not \
-         a sandbox. This is an open-world, destructive operation and may require approval."
+         error. stdout and stderr come back merged, with no way to tell which line came from \
+         which, and their relative order is not reliable. Output too large for one response is \
+         truncated in the middle and cannot be continued: redirect it to a file and page that \
+         with read when you need all of it. The default timeout is {DEFAULT_TIMEOUT_MS} ms and \
+         the maximum is {max} ms; for \
+         work that needs longer, set detach with a log_path and read that file instead of \
+         waiting. On Windows, prefer run_program for one native program with literal arguments. \
+         Do not issue state-changing commands against the same working tree in parallel calls. A \
+         program that daemonizes itself may keep running after this call returns. This is not a \
+         sandbox, and the call may require user approval."
     );
     Tool::new(
         "bash",
@@ -341,7 +347,7 @@ fn bash_tool() -> Tool {
                 "detach": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Run the command past the end of this call under server-owned lifecycle tracking. Windows owns a Job Object; Unix owns the created process group, which a program can escape by starting a new session. Requires log_path and forbids timeout_ms; returns the pid and log path instead of output."
+                    "description": "Run the command past the end of this call. Requires log_path and forbids timeout_ms; returns the pid and log path instead of output. Poll progress by reading log_path."
                 },
                 "log_path": {
                     "type": "string",
@@ -351,19 +357,20 @@ fn bash_tool() -> Tool {
                     "type": "string",
                     "enum": ["default", "disabled"],
                     "default": "default",
-                    "description": "Windows Git Bash only. default leaves inherited MSYS settings and automatic argv path conversion unchanged. disabled sets MSYS2_ARG_CONV_EXCL=* for the whole Bash command so native child processes receive slash-prefixed arguments unchanged. It has no effect on macOS or Linux. Prefer run_program for a single native program."
+                    "description": "Windows Git Bash only, and ignored elsewhere. Git Bash rewrites arguments that look like POSIX paths before launching a native Windows program, which corrupts slash-style switches such as /E. Set disabled to retry with that rewriting turned off; it applies to the whole command, not just the subcommand that failed."
                 },
                 "timeout_ms": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": max,
                     "default": DEFAULT_TIMEOUT_MS,
-                    "description": "Execution timeout in milliseconds. On timeout the owned process group is terminated and a Timeout error is returned. Forbidden when detach is true."
+                    "description": "Execution timeout in milliseconds. On timeout the command is terminated and a Timeout error is returned. Forbidden when detach is true."
                 }
             },
             "required": ["command"]
         })),
     )
+    .with_title("Bash")
     .with_annotations(
         ToolAnnotations::new()
             .read_only(false)

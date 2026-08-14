@@ -4,29 +4,46 @@
     {
       "id": "read_first_page",
       "tool": "read",
-      "description": "Read the first 100 lines of one synthetic source file",
+      "description": "Read the first 100 lines of the expected synthetic source file",
       "start_line": 1,
-      "line_count": 100
+      "line_count": 100,
+      "gate": "read_marker"
     },
     {
-      "id": "grep_sparse",
+      "id": "grep_sparse_fullscan",
       "tool": "grep",
-      "description": "Search the corpus for the sparse marker token",
+      "description": "Full-scan the sparse marker via count/summary",
       "pattern": "CODEXSHIM_BENCHMARK_SPARSE_TARGET",
-      "mode": "content"
+      "mode": "count",
+      "limit": 1000,
+      "fixed_strings": true,
+      "gate": "grep_file_count"
     },
     {
-      "id": "grep_dense",
+      "id": "grep_dense_fullscan",
       "tool": "grep",
-      "description": "Search the corpus for the dense marker token",
+      "description": "Full-scan the dense marker via count/summary; 20 files keep one output page",
       "pattern": "CODEXSHIM_BENCHMARK_DENSE_MATCH",
-      "mode": "content"
+      "mode": "count",
+      "limit": 1000,
+      "fixed_strings": true,
+      "gate": "grep_hit_total"
     },
     {
-      "id": "glob_all",
+      "id": "glob_prefix_complete",
       "tool": "glob",
-      "description": "List every file under the synthetic corpus",
-      "pattern": "**/*"
+      "description": "Complete set of the ten file_00000[0-9] paths",
+      "pattern": "**/file_00000[0-9].*",
+      "limit": 200,
+      "gate": "glob_path_set"
+    },
+    {
+      "id": "glob_first_page",
+      "tool": "glob",
+      "description": "First page of **/* with an explicit limit of 50",
+      "pattern": "**/*",
+      "limit": 50,
+      "gate": "glob_first_page"
     }
   ]
 }

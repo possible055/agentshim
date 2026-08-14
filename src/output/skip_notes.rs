@@ -5,6 +5,18 @@
 
 const MAX_SAMPLED_SKIP_ENTRIES: usize = 32;
 
+/// Emitted when a search returns nothing and gitignore filtering was in force. The
+/// filtered paths are dropped inside the walker and never reach this crate, so the
+/// caller cannot be told which ones were lost — only that the flag is worth retrying.
+pub(crate) const GITIGNORE_RETRY_HINT: &str =
+    "Retry with include_ignored=true if the path you expect is gitignored.";
+
+/// Emitted when a search skipped files whose encoding could not be determined. Without
+/// this the caller sees only that the files were skipped, with no way to know that naming
+/// their encoding would let the search reach them.
+pub(crate) const UNDECODABLE_RETRY_HINT: &str =
+    "Retry with fallback_encoding set to their WHATWG label to search the undecodable files.";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
 pub enum SkipReason {
     Binary,
@@ -15,6 +27,7 @@ pub enum SkipReason {
     CaptureBudget,
     Escaped,
     NonUnicodePath,
+    TranscodeMemory,
 }
 
 impl SkipReason {
@@ -29,6 +42,7 @@ impl SkipReason {
             Self::CaptureBudget => "matching content exceeds capture budget",
             Self::Escaped => "escaped",
             Self::NonUnicodePath => "non-unicode path",
+            Self::TranscodeMemory => "legacy encoding too large to decode for search",
         }
     }
 
@@ -45,6 +59,9 @@ impl SkipReason {
             Self::CaptureBudget => "single grep target matching content exceeds the capture budget",
             Self::Escaped => "single grep target escaped the search root",
             Self::NonUnicodePath => "single grep target path is not valid Unicode",
+            Self::TranscodeMemory => {
+                "single grep target is too large to decode from its legacy encoding"
+            }
         }
     }
 
@@ -71,11 +88,15 @@ impl SkipEntry {
 pub(crate) struct SkipNotes {
     entries: Vec<SkipEntry>,
     total: usize,
+    /// Tracked separately from `entries` because sampling stops at 32: an undecodable file
+    /// beyond that cut would otherwise lose the one hint that makes it reachable.
+    undecodable: bool,
 }
 
 impl SkipNotes {
     pub(crate) fn record(&mut self, path: impl Into<String>, reason: SkipReason) {
         self.total = self.total.saturating_add(1);
+        self.undecodable |= reason == SkipReason::Undecodable;
         if self.entries.len() < MAX_SAMPLED_SKIP_ENTRIES {
             self.entries.push(SkipEntry {
                 path: path.into(),
@@ -92,6 +113,12 @@ impl SkipNotes {
             self.entries.push(entry.clone());
         }
         self.total = self.total.saturating_add(other.total);
+        self.undecodable |= other.undecodable;
+    }
+
+    #[must_use]
+    pub(crate) fn has_undecodable(&self) -> bool {
+        self.undecodable
     }
 
     #[must_use]
@@ -139,7 +166,11 @@ pub(crate) fn search_tail(
     }
     tail.extend(extras);
     if let Some(next) = next_offset {
-        tail.push(format!("Partial: next_offset={next}."));
+        tail.push(format!(
+            "{} {}={next}.",
+            super::PARTIAL_MARKER,
+            super::NEXT_OFFSET_FIELD
+        ));
     }
     tail
 }

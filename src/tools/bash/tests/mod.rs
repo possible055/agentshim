@@ -31,6 +31,7 @@ fn token_dense_bash_output_keeps_head_tail_and_metadata() {
             exit: "7".to_owned(),
             duration: Duration::from_millis(2),
             output: capture,
+            msys_retry_available: false,
         },
         &cancellation,
     )
@@ -74,6 +75,26 @@ fn run(command: &str) -> Result<String, ProcessError> {
         &CancellationToken::new(),
     )
     .map(|output| output.text)
+}
+
+#[test]
+fn slash_switch_detection_separates_windows_switches_from_posix_paths() {
+    for switch in ["/E", "/S", "/MIR", "/XO", "/T4"] {
+        assert!(super::is_slash_switch(switch), "{switch} is a switch");
+    }
+    for path in [
+        "/tmp",
+        "/usr",
+        "/etc",
+        "/home",
+        "/usr/bin",
+        "/",
+        "a/b",
+        "https://example.test",
+        "--flag",
+    ] {
+        assert!(!super::is_slash_switch(path), "{path} is not a switch");
+    }
 }
 
 fn bash_is_available() -> bool {

@@ -1,7 +1,12 @@
 [workspace]
-members = [".", "crates/gigatoken-core", "crates/pdf-read-core"]
+# Do not list "." here. Cargo matches members/exclude with Path::starts_with,
+# so a "." member is the whole tree and disables exclude for nested checkouts.
+members = ["crates/gigatoken-core", "crates/pdf-read-core"]
 # Keep bare workspace-root Cargo commands aligned with the explicit CI package scope.
 default-members = [".", "crates/gigatoken-core", "crates/pdf-read-core"]
+# Nested checkouts and local-only trees are not members. Cargo matches exclude
+# with Path::starts_with (not globs), so list directory prefixes, not `dir/*`.
+exclude = ["repos", "local"]
 resolver = "3"
 
 [package]

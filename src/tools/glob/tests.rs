@@ -8,7 +8,7 @@ mod tests {
     use crate::tools::glob::execute_profiled_with_traversal;
     use crate::tools::glob::{
         GlobEntryType, GlobError, GlobMatch, GlobRequest, GlobTraversal, MAX_MATCHES,
-        PATH_OMISSION, TopK, execute, execute_with_traversal, render,
+        PATH_OMISSION, TopK, execute, execute_with_traversal, render, render_with_budget,
     };
     use crate::{
         path::{FileAccess, ReadScope, RepositoryRoot},
@@ -37,6 +37,26 @@ mod tests {
             offset: None,
             limit: None,
         }
+    }
+
+    #[test]
+    fn an_empty_gitignore_filtered_scan_recommends_the_retry_flag() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        fs::write(fixture.path().join(".gitignore"), "hidden.rs\n").expect("ignore file");
+        fs::write(fixture.path().join("hidden.rs"), "source").expect("hidden source");
+        let root = access(fixture.path());
+        let cancellation = CancellationToken::new();
+        let mut query = request("hidden.rs");
+
+        query.include_ignored = Some(false);
+        let filtered = execute(&root, &query, TEST_LANES, &cancellation).expect("filtered glob");
+        assert!(filtered.contains("No paths matched."));
+        assert!(filtered.contains("include_ignored=true"));
+
+        query.include_ignored = Some(true);
+        let included = execute(&root, &query, TEST_LANES, &cancellation).expect("included glob");
+        assert!(included.contains("hidden.rs"));
+        assert!(!included.contains("include_ignored=true"));
     }
 
     #[test]
@@ -114,14 +134,50 @@ mod tests {
         let first = execute(&root, &query, TEST_LANES, &CancellationToken::new()).expect("glob");
         assert!(first.contains(".hidden.rs"));
         assert!(first.contains("a.rs"));
-        assert!(!first.contains("ignored.rs\n"));
         assert!(first.ends_with("Partial: next_offset=2."));
 
-        query.include_ignored = Some(true);
+        query.include_ignored = Some(false);
         query.limit = Some(100);
+        let respected =
+            execute(&root, &query, TEST_LANES, &CancellationToken::new()).expect("respected glob");
+        assert!(!respected.contains("ignored.rs\n"));
+        assert!(!respected.contains(".git/internal.rs"));
+
+        query.include_ignored = Some(true);
         let all = execute(&root, &query, TEST_LANES, &CancellationToken::new()).expect("all glob");
         assert!(all.contains("ignored.rs"));
         assert!(!all.contains(".git/internal.rs"));
+    }
+
+    #[test]
+    fn glob_skips_denied_directories_and_rejects_them_as_roots() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        fs::create_dir_all(fixture.path().join("src")).expect("src");
+        fs::create_dir_all(fixture.path().join("node_modules/pkg")).expect("node_modules");
+        fs::create_dir_all(fixture.path().join("target/debug")).expect("target");
+        fs::write(fixture.path().join("src/lib.rs"), "source").expect("source");
+        fs::write(fixture.path().join("node_modules/pkg/index.rs"), "pkg").expect("pkg");
+        fs::write(fixture.path().join("target/debug/out.rs"), "out").expect("out");
+        let root = access(fixture.path());
+        let output = execute(
+            &root,
+            &request("**/*.rs"),
+            TEST_LANES,
+            &CancellationToken::new(),
+        )
+        .expect("glob");
+        assert!(output.contains("src"));
+        assert!(!output.contains("node_modules"));
+        assert!(!output.contains("target"));
+
+        let mut denied = request("**/*.rs");
+        denied.path = Some("node_modules".to_owned());
+        assert!(matches!(
+            execute(&root, &denied, TEST_LANES, &CancellationToken::new()),
+            Err(GlobError::Traversal(
+                crate::traversal::TraversalError::DeniedDirectory
+            ))
+        ));
     }
 
     #[test]
@@ -392,6 +448,64 @@ mod tests {
         .expect("second page");
         assert!(second_page.contains("second"));
         assert!(!second_page.contains("Partial:"));
+    }
+
+    #[test]
+    fn partial_pages_keep_the_shown_offset_under_burst_and_item_ceilings() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root = RepositoryRoot::open(fixture.path()).expect("root");
+        let retained = (0..80)
+            .map(|index| {
+                let path = root
+                    .resolve(Path::new(&format!("file-{index:02}.rs")))
+                    .expect("path");
+                GlobMatch {
+                    sort_key: path.sort_key().clone(),
+                    absolute: format!(
+                        "{} {}",
+                        crate::path::display_path(path.absolute()),
+                        " x".repeat(20)
+                    ),
+                    charge: 0,
+                }
+            })
+            .collect::<Vec<_>>();
+        let query = request("**/*");
+        let cancellation = CancellationToken::new();
+        let burst_512 = crate::output::CallOutputBudget::new(
+            crate::output::OutputTokenGate::load_shared().expect("token gate"),
+            crate::output::BurstOutputGate::new(512).begin_call(),
+        );
+        let output = render_with_budget(
+            &query,
+            &retained,
+            retained.len(),
+            &TraversalSummary::default(),
+            false,
+            &cancellation,
+            Some(&burst_512),
+        )
+        .expect("512-token glob page");
+        let next = output
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("Partial: next_offset=")?
+                    .trim_end_matches('.')
+                    .parse::<usize>()
+                    .ok()
+            })
+            .expect("partial cursor");
+        let shown = output
+            .lines()
+            .filter(|line| !line.starts_with("Partial:") && !line.starts_with("Skipped"))
+            .count();
+        assert_eq!(next, shown);
+        assert!(output.fits_call_budget(&burst_512, &cancellation));
+        assert!(output.fits_call_budget(
+            &crate::output::CallOutputBudget::standalone(),
+            &cancellation
+        ));
+        assert!(output.fits_model_budget(&cancellation));
     }
 
     #[test]

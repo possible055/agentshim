@@ -36,10 +36,6 @@ on:
         required: false
         type: boolean
         default: false
-      run_eval:
-        required: false
-        type: boolean
-        default: false
       run_metadata:
         required: false
         type: boolean
@@ -109,20 +105,6 @@ jobs:
         env:
           RUSTDOCFLAGS: -Dwarnings
         run: cargo doc --locked --workspace --all-features --no-deps
-      - name: Offline pwsh degradation eval on Unix
-        if: inputs.run_eval && inputs.platform == 'unix'
-        run: >-
-          python3 scripts/eval-pwsh-degradation.py
-          --responses evals/fixtures/pwsh_degradation_baseline.jsonl
-          --transcript "${RUNNER_TEMP}/pwsh-degradation-scored.jsonl"
-          --report "${RUNNER_TEMP}/pwsh-degradation-report.json"
-      - name: Offline pwsh degradation eval on Windows
-        if: inputs.run_eval && inputs.platform == 'windows'
-        run: >-
-          python scripts/eval-pwsh-degradation.py
-          --responses evals/fixtures/pwsh_degradation_baseline.jsonl
-          --transcript "${RUNNER_TEMP}/pwsh-degradation-scored.jsonl"
-          --report "${RUNNER_TEMP}/pwsh-degradation-report.json"
       - name: Metadata
         if: inputs.run_metadata
         run: cargo metadata --locked --no-deps --format-version 1

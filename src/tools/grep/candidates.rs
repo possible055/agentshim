@@ -39,6 +39,7 @@ pub(super) fn collect_candidates(
     access: &FileAccess,
     input: &str,
     glob: Option<&globset::GlobMatcher>,
+    include_ignored: bool,
     cancellation: &CancellationToken,
     traversal: GrepTraversal,
     resources: &RuntimeResources,
@@ -94,13 +95,20 @@ pub(super) fn collect_candidates(
     let collection = CandidateCollection::new(policy, resources.config().grep_memory_bytes, memory);
     let (mut candidates, summary, metrics) = match traversal {
         GrepTraversal::Adaptive => unreachable!("adaptive traversal was resolved"),
-        GrepTraversal::Serial => {
-            collect_candidates_serial(access, &base, glob, cancellation, None, collection)?
-        }
+        GrepTraversal::Serial => collect_candidates_serial(
+            access,
+            &base,
+            glob,
+            include_ignored,
+            cancellation,
+            None,
+            collection,
+        )?,
         GrepTraversal::ParallelBatched => collect_candidates_parallel(
             access,
             &base,
             glob,
+            include_ignored,
             cancellation,
             None,
             traversal_threads,
@@ -111,6 +119,7 @@ pub(super) fn collect_candidates(
             access,
             &base,
             glob,
+            include_ignored,
             cancellation,
             literal_prefix,
             collection,
@@ -120,6 +129,7 @@ pub(super) fn collect_candidates(
             access,
             &base,
             glob,
+            include_ignored,
             cancellation,
             literal_prefix,
             traversal_threads,
@@ -185,6 +195,7 @@ fn collect_candidates_serial(
     access: &FileAccess,
     base: &ResolvedPath,
     glob: Option<&globset::GlobMatcher>,
+    include_ignored: bool,
     cancellation: &CancellationToken,
     literal_prefix: Option<&Path>,
     mut collection: CandidateCollection,
@@ -217,13 +228,13 @@ fn collect_candidates_serial(
         walk_with_literal_prefix(
             access,
             base,
-            false,
+            include_ignored,
             cancellation,
             literal_prefix,
             &mut visit,
         )?
     } else {
-        walk(access, base, false, cancellation, &mut visit)?
+        walk(access, base, include_ignored, cancellation, &mut visit)?
     };
     if let Some(error) = terminal_error {
         return Err(error);
@@ -232,10 +243,12 @@ fn collect_candidates_serial(
     Ok((collection.candidates, summary, metrics))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_candidates_parallel(
     access: &FileAccess,
     base: &ResolvedPath,
     glob: Option<&globset::GlobMatcher>,
+    include_ignored: bool,
     cancellation: &CancellationToken,
     literal_prefix: Option<&Path>,
     traversal_threads: usize,
@@ -249,7 +262,7 @@ fn collect_candidates_parallel(
         walk_parallel_batched_with_literal_prefix(
             access,
             base,
-            false,
+            include_ignored,
             cancellation,
             ParallelTraversal {
                 batch_size: PARALLEL_BATCH_SIZE,
@@ -265,7 +278,7 @@ fn collect_candidates_parallel(
         walk_parallel_batched(
             access,
             base,
-            false,
+            include_ignored,
             cancellation,
             ParallelTraversal {
                 batch_size: PARALLEL_BATCH_SIZE,

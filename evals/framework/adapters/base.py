@@ -30,6 +30,9 @@ class TargetAdapter(ABC):
     def supports_pdf_read(self) -> bool:
         return False
 
+    def supports_tool(self, tool: str) -> bool:
+        return tool != "run_program"
+
     def invoke_run_program(
         self,
         program: str,
@@ -60,6 +63,7 @@ class TargetAdapter(ABC):
         mode: str = "content",
         case: str = "smart",
         fixed_strings: bool = False,
+        limit: int | None = None,
         timeout_s: float = 60.0,
     ) -> dict[str, Any]:
         """Invokes the file search/grep tool."""
@@ -69,6 +73,7 @@ class TargetAdapter(ABC):
         self,
         path: str,
         pattern: str = "**/*",
+        limit: int | None = None,
         timeout_s: float = 60.0,
     ) -> dict[str, Any]:
         """Invokes the file pattern matching/find tool."""

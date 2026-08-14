@@ -17,13 +17,9 @@
 | --- | --- |
 | `read` | 读取源文件并附带行号。支持 UTF-8、带 BOM 的 UTF-16，以及 WHATWG 编码标签。也可读取 PDF。 |
 | `grep` | 使用 Rust 正则或字面字符串搜索文件内容。 |
-| `glob` | 查找文件，并遵循仓库忽略规则。 |
+| `glob` | 查找文件。默认包含被 gitignore 的文件；`.git` 与常见超大目录仍排除。 |
 | `run_program` | 以字面量参数列表运行单个程序，不经 shell。 |
 | `bash` | 运行 POSIX bash 命令行，返回合并后的 stdout 与 stderr。 |
-
-调用成功时返回受大小限制的文本。`read`、`grep` 和 `glob` 的部分结果会带续读游标，便于接着上次的位置继续。失败时返回统一的 `{ error: { code, message, retryable, details } }` 错误信封。
-
-目录 `grep` 与 `glob` 以 `path — reason` 列出跳过路径，并始终报告真实总数（`Skipped: N files.` 或 `showing M`）。单文件 `grep` 搜不到时按原因返回不同错误，不再把 binary、变更与 I/O 折成一句。`limit` 与 `offset` 是分页游标；真正的输出窗口是 token／字节预算。搜索 heap 与单文件 capture 是安全阀：超标时跳过或截断该文件，不是静默丢档，也不是整次呼叫硬失败。单个实例的共享 `memory_bytes` 池默认 256 MiB，上限 1 GiB。
 
 ## 安装
 
@@ -67,19 +63,13 @@ startup_timeout_sec = 15
 tool_timeout_sec = 600
 enabled_tools = ["read", "grep", "glob", "run_program", "bash"]
 default_tools_approval_mode = "writes"
-env = { CODEX_MCP_PROTOCOL_VERSION = "2026-07-28" }
 
 [mcp_servers.codexshim.tools.run_program]
 approval_mode = "on-request"
 
 [mcp_servers.codexshim.tools.bash]
 approval_mode = "prompt"
-
-[features]
-mcp_2026_07_28 = true
 ```
-
-`run_program` 可以按需审批；`bash` 一律提示。两个工具都不是安全 sandbox。在 Windows 上，使用单引号 TOML 路径，以避免转义反斜杠。`tool_timeout_sec` 必须与 `CODEXSHIM_TOOL_TIMEOUT_SHELF` 一致（两者默认均为 600）；服务端会比该 shelf 提前 10 秒超时，以便 Timeout 响应在客户端自身截止时间之前送达。
 
 ## 配置 Cursor
 
@@ -103,11 +93,18 @@ mcp_2026_07_28 = true
 
 ### `--client-profile`
 
-选择 aggregate 输出策略。默认值为 `codex`；`cursor` 允许更大的快速响应总量。
+选择 aggregate burst 策略。这些层不是同一条限制：
+
+| 层 | 数值 | 含义 |
+| --- | ---: | --- |
+| Codex 单项 truncation | 10,000 tokens 或 bytes | 包上 `Wall time:` / `Output:` 后的 history 上限 |
+| 服务端内容上限 | 9,872 | 10,000 减去 128 wrapper tokens |
+| 单次呼叫上限 | 8,192 | 两个 profile 都是；单页目前不能超过它 |
+| Burst 合计 | profile 默认值 | 剩余预算在未完成呼叫之间均分 |
 
 | 值 | 单次 token 上限 | 默认 burst token |
 | --- | ---: | ---: |
-| `codex`（默认） | 8,192 | 8,192 |
+| `codex`（默认） | 8,192 | 16,384 |
 | `cursor` | 8,192 | 32,768 |
 
 ### `--read-scope`
@@ -151,8 +148,7 @@ Git Bash 在启动 Windows 原生程序前，会转换看起来像 POSIX 路径�
 | --- | --- | --- |
 | `pdf_mode` | `auto`（默认）、`text`、`image` | `auto`/`text` 返回页面 Markdown；`image` 渲染 PNG 内容块。 |
 | `pages` | `"7"` 或 `"7-12"` | 单页或一段连续范围。 |
-| `pdf_text_offset` | 大于等于 0 的整数 | 以 UTF-8 字节偏移续读同一页的 Markdown。 |
-| `pdf_source_id` | 不透明 token | 回带上一轮响应的值，用于指向同一个来源版本。 |
+| `pdf_cursor` | 不透明 token | 原样回带上一轮响应给出的值。它同时携带来源版本，以及响应停在页内时的续读位置。 |
 
 页数限制的是一次调用的工作量：
 
@@ -180,6 +176,7 @@ Git Bash 在启动 Windows 原生程序前，会转换看起来像 POSIX 路径�
 | `CODEXSHIM_BASH` | 自动探测 | GNU bash 的绝对路径。 |
 | `CODEXSHIM_LOG_MODE` | `errors` | 取值 `off`、`errors`、`all` 之一。 |
 | `CODEXSHIM_LOG_DIR` | 平台默认 | 用绝对路径覆盖日志目录。 |
+| `CODEXSHIM_RESPECT_GITIGNORE` | `false` | 设为 `true` 时，`grep` 与 `glob` 才套用 `.gitignore`／`.ignore`。省略 `include_ignored` 时跟随此默认值；由于调用方读不到这项设定，过滤生效且结果为空时，响应末尾会附上一行建议改用 `include_ignored=true`。`.git` 以及 `node_modules`、`target`、`.venv`、`venv`、`dist`、`build`、`__pycache__` 无论开关都排除。binary、输出预算与内存上限仍会挡住内容。 |
 
 ## 诊断
 
@@ -196,6 +193,12 @@ codexshim logs purge
 ```
 
 记录包含标识符、阶段、结果、计时与错误类别——绝不包含 MCP 参数、grep 模式、进程参数、stdin、文件内容或 stdout/stderr。复现工具加载失败时，将 `CODEXSHIM_LOG_MODE=all`。
+
+## 致谢
+
+PDF 读取基于 [PDFOxide](https://github.com/yfedoseev/pdf_oxide)，token 计数基于 [Gigatoken](https://github.com/marcelroed/gigatoken)。感谢这两个项目的工作。
+
+设计和测量 `read`、`grep` 与 `glob` 时，我们也从 [FastCtx](https://github.com/yc-duan/fastctx) 学到很多。
 
 ## 许可证
 

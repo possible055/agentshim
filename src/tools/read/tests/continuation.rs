@@ -17,12 +17,68 @@ fn an_oversized_first_page_becomes_an_offset_continuation() {
 
     assert_eq!(delivered_pages(&text), vec![1]);
     assert!(
-        text.contains("pdf_text_offset="),
+        resume_offset_of(&text).is_some(),
         "an unfinished page must offer a resume offset, got {text}"
     );
     // The old behaviour ended the body with an unrecoverable marker.
     assert!(!text.contains("[page truncated]"));
     assert!(text.is_char_boundary(text.len()));
+}
+
+#[test]
+fn pdf_continuation_stays_inside_fitted_ceilings() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    fs::write(
+        fixture.path().join("bulky.pdf"),
+        pdf_with_bulky_pages(2, 900),
+    )
+    .expect("pdf");
+    let access = access(fixture.path());
+    let cancellation = CancellationToken::new();
+    let page = request("bulky.pdf");
+    let prepared = prepare(&access, &page, &cancellation, budgets()).expect("prepare bulky pdf");
+    let burst_512 = crate::output::CallOutputBudget::new(
+        crate::output::OutputTokenGate::load_shared().expect("token gate"),
+        crate::output::BurstOutputGate::new(512).begin_call(),
+    );
+    let Attempt::Stable(output) =
+        execute_prepared_with_budget(&access, &page, prepared, &cancellation, &burst_512)
+            .expect("512-token pdf page")
+    else {
+        panic!("pdf read must stay stable");
+    };
+
+    assert!(output.contains("Partial:"));
+    assert!(output.contains("pdf_cursor="));
+    assert!(output.fits_call_budget(&burst_512, &cancellation));
+    assert!(output.fits_call_budget(
+        &crate::output::CallOutputBudget::standalone(),
+        &cancellation
+    ));
+    assert!(output.fits_model_budget(&cancellation));
+}
+
+#[test]
+fn pdf_returns_burst_limit_when_even_the_envelope_cannot_fit() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    fs::write(
+        fixture.path().join("bulky.pdf"),
+        pdf_with_bulky_pages(1, 900),
+    )
+    .expect("pdf");
+    let access = access(fixture.path());
+    let cancellation = CancellationToken::new();
+    let page = request("bulky.pdf");
+    let prepared = prepare(&access, &page, &cancellation, budgets()).expect("prepare bulky pdf");
+    let empty = crate::output::CallOutputBudget::new(
+        crate::output::OutputTokenGate::load_shared().expect("token gate"),
+        crate::output::BurstOutputGate::new(0).begin_call(),
+    );
+
+    assert!(matches!(
+        execute_prepared_with_budget(&access, &page, prepared, &cancellation, &empty),
+        Err(ReadError::Output(crate::output::OutputError::BurstLimit))
+    ));
 }
 
 /// The next range is as wide as what was actually delivered, not as wide as what was
@@ -94,12 +150,12 @@ fn continuation_rejects_a_source_id_from_another_version() {
 
     let mut matching = request("document.pdf");
     matching.pages = Some("1".to_owned());
-    matching.pdf_source_id = Some(source);
+    matching.pdf_cursor = Some(source);
     execute(&access, &matching, &cancellation).expect("matching source id is accepted");
 
     let mut stale = request("document.pdf");
     stale.pages = Some("1".to_owned());
-    stale.pdf_source_id = Some("0000000000000000".to_owned());
+    stale.pdf_cursor = Some("0000000000000000".to_owned());
     assert!(matches!(
         execute(&access, &stale, &cancellation),
         Err(ReadError::Changed)
@@ -383,7 +439,6 @@ fn a_single_page_reassembles_losslessly_across_rounds() {
     let mut first = request("bulky.pdf");
     first.pages = Some("1".to_owned());
     let opening = execute(&access, &first, &cancellation).expect("first round");
-    let source = source_id_of(&opening);
 
     let mut assembled = String::new();
     let mut response = opening;
@@ -392,13 +447,12 @@ fn a_single_page_reassembles_losslessly_across_rounds() {
         rounds += 1;
         assert!(rounds < 64, "continuation did not terminate");
         assembled.push_str(page_body_of(&response));
-        let Some(offset) = next_offset_of(&response) else {
+        let Some(next) = next_cursor_of(&response) else {
             break;
         };
         let mut resume = request("bulky.pdf");
         resume.pages = Some("1".to_owned());
-        resume.pdf_text_offset = Some(offset);
-        resume.pdf_source_id = Some(source.clone());
+        resume.pdf_cursor = Some(next);
         response = execute(&access, &resume, &cancellation).expect("resume round");
     }
 
@@ -432,13 +486,21 @@ fn page_body_of(text: &str) -> &str {
     &text[body_start..body_start + tail]
 }
 
-fn next_offset_of(text: &str) -> Option<usize> {
-    let marker = "pdf_text_offset=";
-    let start = text.find(marker)? + marker.len();
-    let end = text[start..]
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(text.len() - start);
-    text[start..start + end].parse().ok()
+fn resume_offset_of(text: &str) -> Option<usize> {
+    let cursor = next_cursor_of(text)?;
+    crate::tools::read::cursor::decode(&cursor)
+        .expect("a printed cursor must decode")
+        .text_offset
+}
+
+/// Replays the continuation exactly as a caller would: whatever the `Partial:` line
+/// printed, sent back verbatim.
+fn next_cursor_of(text: &str) -> Option<String> {
+    let partial = text.lines().find(|line| line.starts_with("Partial: "))?;
+    let marker = "pdf_cursor=\"";
+    let start = partial.find(marker)? + marker.len();
+    let end = partial[start..].find('"')?;
+    Some(partial[start..start + end].to_owned())
 }
 
 #[test]
@@ -454,8 +516,10 @@ fn offset_continuation_rejects_out_of_range_and_reports_completion() {
 
     let mut beyond = request("document.pdf");
     beyond.pages = Some("1".to_owned());
-    beyond.pdf_text_offset = Some(length + 1);
-    beyond.pdf_source_id = Some(source.clone());
+    beyond.pdf_cursor = Some(crate::tools::read::cursor::encode(
+        &source,
+        Some(length + 1),
+    ));
     assert!(
         execute(&access, &beyond, &cancellation).is_err(),
         "an offset past the page must be rejected"
@@ -463,8 +527,7 @@ fn offset_continuation_rejects_out_of_range_and_reports_completion() {
 
     let mut at_end = request("document.pdf");
     at_end.pages = Some("1".to_owned());
-    at_end.pdf_text_offset = Some(length);
-    at_end.pdf_source_id = Some(source);
+    at_end.pdf_cursor = Some(crate::tools::read::cursor::encode(&source, Some(length)));
     let complete = execute(&access, &at_end, &cancellation).expect("offset at end");
     assert!(complete.contains("No remaining text at this offset."));
 }

@@ -38,6 +38,7 @@ pub const GREP_MEMORY_BYTES_ENV: &str = "CODEXSHIM_GREP_MEMORY_BYTES";
 pub const GLOB_MEMORY_BYTES_ENV: &str = "CODEXSHIM_GLOB_MEMORY_BYTES";
 pub const PDF_TEXT_MEMORY_BYTES_ENV: &str = "CODEXSHIM_PDF_TEXT_MEMORY_BYTES";
 pub const PDF_IMAGE_MEMORY_BYTES_ENV: &str = "CODEXSHIM_PDF_IMAGE_MEMORY_BYTES";
+pub const RESPECT_GITIGNORE_ENV: &str = "CODEXSHIM_RESPECT_GITIGNORE";
 
 /// Default shelf matching the `tool_timeout_sec = 600` documented in every example. The
 /// server's own execution ceiling stays below this by the cleanup deadline plus protocol
@@ -63,6 +64,7 @@ pub struct RuntimeConfig {
     pub pdf_image_memory_bytes: usize,
     pub memory_bytes: usize,
     pub tool_timeout_shelf: Duration,
+    pub respect_gitignore: bool,
 }
 
 impl RuntimeConfig {
@@ -119,6 +121,8 @@ impl RuntimeConfig {
         let memory_bytes = global_memory_bytes(grep_memory_bytes, glob_memory_bytes);
         let tool_timeout_shelf =
             parse_tool_timeout_shelf(env::var_os(TOOL_TIMEOUT_SHELF_ENV).as_deref())?;
+        let respect_gitignore =
+            parse_respect_gitignore(env::var_os(RESPECT_GITIGNORE_ENV).as_deref())?;
         // A per-call reservation larger than the pool it is drawn from could never be
         // satisfied, so the call would fail at admission on every attempt.
         for (environment, bytes) in [
@@ -148,6 +152,7 @@ impl RuntimeConfig {
             pdf_image_memory_bytes,
             memory_bytes,
             tool_timeout_shelf,
+            respect_gitignore,
         })
     }
 
@@ -169,7 +174,13 @@ impl RuntimeConfig {
             pdf_image_memory_bytes: DEFAULT_PDF_IMAGE_MEMORY_BYTES,
             memory_bytes: DEFAULT_MEMORY_BYTES,
             tool_timeout_shelf: DEFAULT_TOOL_TIMEOUT_SHELF,
+            respect_gitignore: false,
         }
+    }
+
+    #[must_use]
+    pub fn include_ignored(&self, request: Option<bool>) -> bool {
+        request.unwrap_or(!self.respect_gitignore)
     }
 }
 
@@ -241,6 +252,26 @@ pub(super) fn parse_process_calls(value: Option<&OsStr>) -> io::Result<usize> {
                         "{PROCESS_CALLS_ENV} must be an integer from 1 to \
                          {MAX_CONFIGURED_PROCESS_CALLS}"
                     ),
+                )
+            }),
+    }
+}
+
+pub(super) fn parse_respect_gitignore(value: Option<&OsStr>) -> io::Result<bool> {
+    match value {
+        None => Ok(false),
+        Some(value) => value
+            .to_str()
+            .map(str::trim)
+            .and_then(|value| match value.to_ascii_lowercase().as_str() {
+                "0" | "false" => Some(false),
+                "1" | "true" => Some(true),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{RESPECT_GITIGNORE_ENV} must be 0, 1, true, or false"),
                 )
             }),
     }

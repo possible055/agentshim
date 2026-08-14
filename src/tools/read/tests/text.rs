@@ -3,14 +3,14 @@ use super::*;
 #[test]
 fn continuation_parameter_combinations_are_rejected_before_io() {
     let mut offset_without_pages = request("document.pdf");
-    offset_without_pages.pdf_text_offset = Some(0);
+    offset_without_pages.pdf_cursor = Some(sample_cursor(Some(0)));
     assert!(matches!(
         offset_without_pages.validate(),
         Err(ReadError::Validation(_))
     ));
 
     let mut offset_with_range = request("document.pdf");
-    offset_with_range.pdf_text_offset = Some(0);
+    offset_with_range.pdf_cursor = Some(sample_cursor(Some(0)));
     offset_with_range.pages = Some("1-3".to_owned());
     assert!(matches!(
         offset_with_range.validate(),
@@ -18,7 +18,7 @@ fn continuation_parameter_combinations_are_rejected_before_io() {
     ));
 
     let mut offset_with_image = request("document.pdf");
-    offset_with_image.pdf_text_offset = Some(0);
+    offset_with_image.pdf_cursor = Some(sample_cursor(Some(0)));
     offset_with_image.pages = Some("2".to_owned());
     offset_with_image.pdf_mode = Some(PdfMode::Image);
     assert!(matches!(
@@ -26,35 +26,27 @@ fn continuation_parameter_combinations_are_rejected_before_io() {
         Err(ReadError::Validation(_))
     ));
 
-    let mut resume_without_source = request("document.pdf");
-    resume_without_source.pdf_text_offset = Some(512);
-    resume_without_source.pages = Some("2".to_owned());
+    // Token shapes are covered by the cursor module's own tests; this only proves
+    // validation surfaces a decode failure rather than reaching the filesystem.
+    let mut malformed_cursor = request("document.pdf");
+    malformed_cursor.pdf_cursor = Some("512".to_owned());
     assert!(matches!(
-        resume_without_source.validate(),
-        Err(ReadError::Validation(_))
-    ));
-
-    let mut empty_source = request("document.pdf");
-    empty_source.pdf_source_id = Some(String::new());
-    assert!(matches!(
-        empty_source.validate(),
+        malformed_cursor.validate(),
         Err(ReadError::Validation(_))
     ));
 
     let mut valid = request("document.pdf");
-    valid.pdf_text_offset = Some(512);
+    valid.pdf_cursor = Some(sample_cursor(Some(512)));
     valid.pages = Some("2".to_owned());
-    valid.pdf_source_id = Some("abcdef0123456789".to_owned());
     valid
         .validate()
         .expect("a complete resume request is valid");
 
-    let mut zero_offset = request("document.pdf");
-    zero_offset.pdf_text_offset = Some(0);
-    zero_offset.pages = Some("2".to_owned());
-    zero_offset
+    let mut whole_page = request("document.pdf");
+    whole_page.pdf_cursor = Some(sample_cursor(None));
+    whole_page
         .validate()
-        .expect("a zero offset needs no source id");
+        .expect("a cursor without an offset needs no page selector");
 }
 
 #[test]
@@ -153,6 +145,46 @@ fn token_dense_text_preserves_the_next_line_cursor() {
     assert!(output.contains("Partial: next_start_line="));
     assert!(output.contains("(output budget)"));
     assert!(!output.contains("750\t x"));
+}
+
+#[test]
+fn partial_pages_keep_the_shown_cursor_under_burst_and_item_ceilings() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let dense = format!("{}\n", " x".repeat(12)).repeat(750);
+    fs::write(fixture.path().join("dense.txt"), dense).expect("dense text");
+    let root = access(fixture.path());
+    let cancellation = CancellationToken::new();
+    let page = request("dense.txt");
+    let prepared = prepare(&root, &page, &cancellation, budgets()).expect("prepare dense read");
+    let burst_512 = crate::output::CallOutputBudget::new(
+        crate::output::OutputTokenGate::load_shared().expect("token gate"),
+        crate::output::BurstOutputGate::new(512).begin_call(),
+    );
+    let crate::tools::read::Attempt::Stable(output) =
+        execute_prepared_with_budget(&root, &page, prepared, &cancellation, &burst_512)
+            .expect("512-token page")
+    else {
+        panic!("dense read must stay stable");
+    };
+
+    let next = output
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("Partial: next_start_line=")?
+                .split('.')
+                .next()?
+                .parse::<usize>()
+                .ok()
+        })
+        .expect("partial cursor");
+    let shown = output.lines().filter(|line| line.contains('\t')).count();
+    assert_eq!(next, shown + 1);
+    assert!(output.fits_call_budget(&burst_512, &cancellation));
+    assert!(output.fits_call_budget(
+        &crate::output::CallOutputBudget::standalone(),
+        &cancellation
+    ));
+    assert!(output.fits_model_budget(&cancellation));
 }
 
 #[test]

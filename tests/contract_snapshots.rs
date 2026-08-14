@@ -1,5 +1,64 @@
-use codexshim::{CodexShim, ReadScope};
+use codexshim::{
+    CodexShim, NEXT_OFFSET_FIELD, NEXT_START_LINE_FIELD, PARTIAL_MARKER, PDF_CURSOR_FIELD,
+    ReadScope,
+};
 use serde_json::{Value, json};
+
+/// Descriptions are written for a model that can only act on what it can observe, so a
+/// server-side setting it cannot read must never appear in one: naming it says "the
+/// behaviour of omitting this argument is unknowable to you".
+#[test]
+fn descriptions_never_reference_server_environment() {
+    for scope in [ReadScope::Normal, ReadScope::Unrestricted] {
+        let catalog = serialized_catalog(scope);
+        assert!(
+            !catalog.contains("CODEXSHIM_"),
+            "descriptions must not name server environment variables: {catalog}"
+        );
+    }
+}
+
+/// The descriptions instruct the caller to copy continuation values out of the response
+/// verbatim, which is only true while the renderers still emit those exact field names.
+/// Both ends are pinned to the same constants, so renaming one without the other fails
+/// here rather than silently leaving the caller following an instruction that no longer
+/// matches any output.
+#[test]
+fn descriptions_quote_real_continuation_markers() {
+    for scope in [ReadScope::Normal, ReadScope::Unrestricted] {
+        let result =
+            serde_json::to_value(CodexShim::tools_result_for(scope)).expect("serialize tools");
+        let tools = result["tools"].as_array().expect("tools array");
+
+        for (name, field) in [
+            ("read", NEXT_START_LINE_FIELD),
+            ("grep", NEXT_OFFSET_FIELD),
+            ("glob", NEXT_OFFSET_FIELD),
+        ] {
+            let rendered = tool(tools, name).to_string();
+            assert!(
+                rendered.contains(PARTIAL_MARKER),
+                "{name} must tell the caller how to recognise a truncated response"
+            );
+            assert!(
+                rendered.contains(field),
+                "{name} must name the {field} argument the renderer actually emits"
+            );
+        }
+
+        assert!(
+            tool(tools, "read").to_string().contains(PDF_CURSOR_FIELD),
+            "read must name the PDF continuation argument the renderer actually emits"
+        );
+    }
+}
+
+/// Every tool description, argument description, and title as one string. Scanning the
+/// whole catalog rather than walking it field by field keeps the check total: a leak into
+/// a field nobody thought to visit still fails.
+fn serialized_catalog(scope: ReadScope) -> String {
+    serde_json::to_string(&CodexShim::tools_result_for(scope)).expect("serialize tools")
+}
 
 #[test]
 fn server_discover_advertises_supported_versions_and_tool_capability() {

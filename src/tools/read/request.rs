@@ -4,6 +4,7 @@ use serde::Deserialize;
 #[cfg(any(test, feature = "bench-internals"))]
 use tokio_util::sync::CancellationToken;
 
+use super::cursor::{self, PdfCursor};
 use super::pdf::parse_page_selector;
 #[cfg(any(test, feature = "bench-internals"))]
 use super::prepared::{Attempt, PdfMemoryBudgets, execute_prepared, prepare};
@@ -39,8 +40,7 @@ pub struct ReadRequest {
     pub encoding: Option<String>,
     pub pdf_mode: Option<PdfMode>,
     pub pages: Option<String>,
-    pub pdf_text_offset: Option<usize>,
-    pub pdf_source_id: Option<String>,
+    pub pdf_cursor: Option<String>,
 }
 
 impl ReadRequest {
@@ -78,17 +78,16 @@ impl ReadRequest {
     /// Continuation parameters constrain each other regardless of the file's type, so
     /// they are checked before any filesystem work.
     fn validate_continuation(&self) -> Result<(), ReadError> {
-        if self.pdf_source_id.as_ref().is_some_and(String::is_empty) {
-            return Err(ReadError::Validation(
-                "pdf_source_id must not be empty".to_owned(),
-            ));
-        }
-        let Some(offset) = self.pdf_text_offset else {
+        let Some(cursor) = self.decoded_pdf_cursor()? else {
             return Ok(());
         };
+        if cursor.text_offset.is_none() {
+            return Ok(());
+        }
         if self.pdf_mode == Some(PdfMode::Image) {
             return Err(ReadError::Validation(
-                "pdf_text_offset does not apply to pdf_mode=\"image\"".to_owned(),
+                "a pdf_cursor that resumes inside a page does not apply to pdf_mode=\"image\""
+                    .to_owned(),
             ));
         }
         let single_page = match self.pages.as_deref() {
@@ -98,19 +97,21 @@ impl ReadRequest {
             }
             None => false,
         };
-        if !single_page {
-            return Err(ReadError::Validation(
-                "pdf_text_offset requires pages to name exactly one page".to_owned(),
-            ));
-        }
-        if offset > 0 && self.pdf_source_id.is_none() {
-            return Err(ReadError::Validation(
-                "a non-zero pdf_text_offset must carry the pdf_source_id from the previous \
-                 response"
+        if single_page {
+            Ok(())
+        } else {
+            Err(ReadError::Validation(
+                "a pdf_cursor that resumes inside a page requires pages to name exactly one page"
                     .to_owned(),
-            ));
+            ))
         }
-        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Returns a validation error when the token was not produced by this server.
+    pub(super) fn decoded_pdf_cursor(&self) -> Result<Option<PdfCursor<'_>>, ReadError> {
+        self.pdf_cursor.as_deref().map(cursor::decode).transpose()
     }
 }
 
@@ -141,7 +142,7 @@ pub enum ReadError {
     #[error(
         "no selected PDF page has extractable text; retry pages {pages} with pdf_mode=\"image\""
     )]
-    PdfImageRequired { pages: String, source_id: String },
+    PdfImageRequired { pages: String, cursor: String },
     /// Every selected page failed to process. A single failed page is a placeholder;
     /// only a selection with nothing usable in it becomes an error.
     #[error("PDF processing failed: {0}")]

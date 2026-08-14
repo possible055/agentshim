@@ -20,8 +20,9 @@ SCALE_COUNTS = {"1k": 1000, "10k": 10000, "100k": 100000}
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Codexshim evals: compare read/grep/glob/bash against fastctx/pi/opencode, "
-            "plus extra PDF read and a codexshim-only run_program suite"
+            "Codexshim evals: rank read/grep/glob against fastctx/pi/opencode, "
+            "plus extra PDF read and a codexshim-only run_program suite. "
+            "bash is available but not part of the ranking compare default."
         )
     )
     parser.add_argument(
@@ -46,8 +47,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tools",
         nargs="+",
-        default=["read", "grep", "glob", "bash"],
-        help="Compare-suite tools (default: read grep glob bash)",
+        default=["read", "grep", "glob"],
+        help="Compare-suite tools (default: read grep glob). bash is optional and not ranked.",
     )
     parser.add_argument(
         "--warm",
@@ -124,7 +125,8 @@ def _prepare_compare_corpus(scales: list[str]) -> dict[str, Path]:
     corpus_paths: dict[str, Path] = {}
     for scale in scales:
         corpus_dir = corpus_base / f"codebase_{scale}"
-        if not corpus_dir.exists():
+        expected_path = corpus_dir / "expected.json"
+        if not corpus_dir.exists() or not expected_path.is_file():
             print(f"Generating synthetic {scale} corpus at {corpus_dir}...", file=sys.stderr)
             generate_codebase(corpus_dir, SCALE_COUNTS[scale])
         corpus_paths[scale] = corpus_dir

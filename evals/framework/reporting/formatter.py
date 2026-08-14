@@ -41,9 +41,16 @@ class ReportGenerator:
         concurrencies = sorted({key[3] for key in grouped})
         targets = sorted({result.target for result in self.results})
 
-        md_sections = ["# Multi-Target Benchmark Comparison Summary\n"]
+        md_sections = [
+            "# Ranking Benchmark: read / grep / glob\n",
+            "Warm single-call latency is ranked only for samples that passed the same-work gate.",
+            (
+                "Concurrent throughput is retained for diagnosis "
+                "and is sensitive to admission and shared runtimes.\n"
+            ),
+        ]
 
-        md_sections.append("## 1. Single-Call Latency (Warm p50 / p95 ms)\n")
+        md_sections.append("## 1. Ranked Single-Call Latency (Warm p50 / p95 ms)\n")
         header = (
             "| Scale | Tool | Scenario | "
             + " | ".join(f"{target} (p50 / p95)" for target in targets)
@@ -74,7 +81,9 @@ class ReportGenerator:
 
         multi_concs = [concurrency for concurrency in concurrencies if concurrency > 1]
         if multi_concs:
-            md_sections.append("## 2. Concurrent Throughput (ops/s)\n")
+            md_sections.append(
+                "## 2. Concurrent Throughput (ops/s, sensitive to admission / shared runtime)\n"
+            )
             for concurrency in multi_concs:
                 md_sections.append(f"### Concurrency Level: {concurrency}\n")
                 c_header = (

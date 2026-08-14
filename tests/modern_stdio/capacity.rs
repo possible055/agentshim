@@ -46,13 +46,16 @@ fn parallel_large_reads_share_one_projected_burst_budget() {
         session.send(&modern_request(id, "tools/call", call));
     }
     let responses = (0..CALLS).map(|_| session.receive()).collect::<Vec<_>>();
+    let burst_limit = codexshim::ClientProfile::Codex.default_burst_tokens();
     assert!(
-        projected_success_tokens(&responses) <= 8_192,
+        projected_success_tokens(&responses) <= burst_limit,
         "content-bearing responses exceeded the shared burst budget"
     );
     assert!(responses.iter().all(|response| {
         response["result"]["isError"] == false
-            || response["result"]["structuredContent"]["error"]["code"] == "output_budget"
+            && response["result"]["content"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Partial: next_start_line="))
     }));
     session.close();
 }

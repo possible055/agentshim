@@ -1,6 +1,7 @@
 use std::fmt::Write as _;
 
 use super::{PdfMode, PdfReadOutcome, mode_label};
+use crate::tools::read::cursor;
 
 pub(super) fn format_pdf_outcome(absolute: &str, outcome: &PdfReadOutcome) -> String {
     let first = outcome.pages[0].index + 1;
@@ -39,25 +40,24 @@ pub(super) fn format_pdf_outcome(absolute: &str, outcome: &PdfReadOutcome) -> St
     if let Some(continuation) = &outcome.continuation {
         write!(
             text,
-            "\n\nPartial: pdf_mode=\"{}\" pages=\"{}\"",
+            "\n\n{} pdf_mode=\"{}\" pages=\"{}\" {}=\"{}\".",
+            crate::output::PARTIAL_MARKER,
             mode_label(outcome.mode),
-            continuation.pages
+            continuation.pages,
+            crate::output::PDF_CURSOR_FIELD,
+            cursor::encode(&outcome.source_id, continuation.text_offset)
         )
         .expect("writing to String cannot fail");
-        if let Some(offset) = continuation.text_offset {
-            write!(text, " and pdf_text_offset={offset}").expect("writing to String cannot fail");
-        }
-        write!(text, " and pdf_source_id=\"{}\".", outcome.source_id)
-            .expect("writing to String cannot fail");
     }
 
     for retry in &outcome.retry_with {
         write!(
             text,
-            "\nRetry: pdf_mode=\"{}\" pages=\"{}\" pdf_source_id=\"{}\".",
+            "\nRetry: pdf_mode=\"{}\" pages=\"{}\" {}=\"{}\".",
             mode_label(retry.mode),
             retry.pages,
-            outcome.source_id
+            crate::output::PDF_CURSOR_FIELD,
+            cursor::encode(&outcome.source_id, None)
         )
         .expect("writing to String cannot fail");
     }

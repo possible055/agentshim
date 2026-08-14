@@ -122,8 +122,7 @@ pub(super) fn benchmark_read(
                 encoding: None,
                 pdf_mode: None,
                 pages: None,
-                pdf_text_offset: None,
-                pdf_source_id: None,
+                pdf_cursor: None,
             },
             cancellation,
         )
@@ -302,6 +301,9 @@ pub(super) fn grep_request(directory: &str, files: usize) -> GrepRequest {
         context_lines: None,
         offset: Some(grep_offset()),
         limit: Some(grep_limit()),
+        include_ignored: None,
+        encoding: None,
+        fallback_encoding: None,
     }
 }
 

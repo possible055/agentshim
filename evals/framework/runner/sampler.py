@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 from ..adapters.base import TargetAdapter, UnsupportedError
+from ..gates import GateError
 from ..monitor.base import BaseMonitor
 
 SampleStatus = Literal["ok", "error", "unsupported", "skipped"]
@@ -30,6 +31,8 @@ class SampleResult:
 def _status_for_error(error: BaseException) -> SampleStatus:
     if isinstance(error, UnsupportedError):
         return "unsupported"
+    if isinstance(error, GateError):
+        return "error"
     return "error"
 
 

@@ -1,12 +1,28 @@
 from typing import Any
 
 from .base import UnsupportedError
-from .mcp import CargoMcpAdapter
+from .mcp import CargoMcpAdapter, ExternalToolMap
 
 
 class FastctxAdapter(CargoMcpAdapter):
     def __init__(self, name: str = "fastctx", config: dict[str, Any] | None = None):
         super().__init__(name, config)
+
+    def extra_process_names(self) -> set[str]:
+        return {"fastctx", "fastctx.exe"}
+
+    def fallback_tools(self) -> ExternalToolMap:
+        return ExternalToolMap(
+            read_tool="inspect_local_file",
+            grep_tool="grep",
+            glob_tool="glob",
+            bash_tool="run",
+            read_start_line="offset",
+            read_line_count="limit",
+            grep_pattern="query",
+            grep_summary="summary_only",
+            grep_mode=None,
+        )
 
     def invoke_read(
         self,
@@ -17,14 +33,14 @@ class FastctxAdapter(CargoMcpAdapter):
         pages: str | None = None,
         timeout_s: float = 60.0,
     ) -> dict[str, Any]:
-        args: dict[str, Any] = {"path": path}
-        if start_line is not None:
-            args["offset"] = start_line
-        if line_count is not None:
-            args["limit"] = line_count
         if pdf_mode is not None or pages is not None:
             raise UnsupportedError("fastctx does not implement PDF read")
-        return self.require_client().call_tool("read", args, timeout_s=timeout_s)
+        return super().invoke_read(
+            path,
+            start_line=start_line,
+            line_count=line_count,
+            timeout_s=timeout_s,
+        )
 
     def invoke_grep(
         self,
@@ -34,32 +50,18 @@ class FastctxAdapter(CargoMcpAdapter):
         mode: str = "content",
         case: str = "smart",
         fixed_strings: bool = False,
+        limit: int | None = None,
         timeout_s: float = 60.0,
     ) -> dict[str, Any]:
-        args: dict[str, Any] = {"path": path, "query": pattern}
-        if glob is not None:
-            args["glob"] = glob
-        if mode == "files":
-            args["summary_only"] = True
-        return self.require_client().call_tool("grep", args, timeout_s=timeout_s)
-
-    def invoke_glob(
-        self,
-        path: str,
-        pattern: str = "**/*",
-        timeout_s: float = 60.0,
-    ) -> dict[str, Any]:
-        return self.require_client().call_tool(
-            "glob", {"path": path, "pattern": pattern}, timeout_s=timeout_s
+        if mode in {"count", "files"} and not self.tools.grep_summary and not self.tools.grep_mode:
+            raise UnsupportedError("fastctx cannot express full-scan grep summary")
+        return super().invoke_grep(
+            path,
+            pattern,
+            glob=glob,
+            mode=mode,
+            case=case,
+            fixed_strings=fixed_strings,
+            limit=limit,
+            timeout_s=timeout_s,
         )
-
-    def invoke_bash(
-        self,
-        command: str,
-        timeout_ms: int | None = None,
-        timeout_s: float = 60.0,
-    ) -> dict[str, Any]:
-        args: dict[str, Any] = {"command": command, "login_shell": False}
-        if timeout_ms is not None:
-            args["timeout_ms"] = timeout_ms
-        return self.require_client().call_tool("bash", args, timeout_s=timeout_s)

@@ -50,6 +50,7 @@ class BaselineCliAdapter(TargetAdapter):
         mode: str = "content",
         case: str = "smart",
         fixed_strings: bool = False,
+        limit: int | None = None,
         timeout_s: float = 60.0,
     ) -> dict[str, Any]:
         start = time.perf_counter()
@@ -118,6 +119,7 @@ class BaselineCliAdapter(TargetAdapter):
         self,
         path: str,
         pattern: str = "**/*",
+        limit: int | None = None,
         timeout_s: float = 60.0,
     ) -> dict[str, Any]:
         start = time.perf_counter()
@@ -133,13 +135,18 @@ class BaselineCliAdapter(TargetAdapter):
                 check=False,
             )
             duration_ms = (time.perf_counter() - start) * 1000.0
+            stdout = res.stdout
+            if limit is not None:
+                stdout = "\n".join(stdout.splitlines()[:limit])
             return {
-                "response": {"stdout": res.stdout, "exit_code": res.returncode},
+                "response": {"stdout": stdout, "exit_code": res.returncode},
                 "duration_ms": duration_ms,
             }
 
         root_p = Path(path)
         found = [str(candidate) for candidate in root_p.glob(pattern) if candidate.is_file()]
+        if limit is not None:
+            found = found[:limit]
         duration_ms = (time.perf_counter() - start) * 1000.0
         return {
             "response": {"stdout": "\n".join(found), "count": len(found)},

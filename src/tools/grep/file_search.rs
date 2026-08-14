@@ -34,6 +34,24 @@ pub(super) struct SearchPlan {
     pub(super) context: usize,
     pub(super) probe: usize,
     pub(super) allow_early_stop: bool,
+    /// Forces the decoding of a single-file target. Validated to a canonical label before
+    /// the search starts, so no candidate pays for label resolution.
+    pub(super) encoding: Option<&'static str>,
+    /// Applies only where detection cannot name an encoding on its own. It never displaces
+    /// a BOM, valid UTF-8, or a detected legacy encoding, because forcing one label across
+    /// a whole directory would corrupt the files that were already readable.
+    pub(super) fallback_encoding: Option<&'static str>,
+}
+
+/// How one candidate's bytes must be treated before the matcher sees them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SourceHandling {
+    /// Bytes are searched as they are, through the existing fast paths.
+    Native,
+    /// Bytes are legacy-encoded text and must be decoded before searching.
+    Transcode(&'static str),
+    /// Nothing can read this file as text.
+    Skip(SkipReason),
 }
 
 pub(super) struct FileSearchContext<'a> {
@@ -218,6 +236,23 @@ pub(super) fn search_opened_candidate_with_searcher(
     file: File,
     before: &FileFingerprint,
 ) -> Result<FileOutcome, GrepError> {
+    let mut file = file;
+    let handling = match classify_source(&mut file, context.plan, context.cancellation) {
+        Ok(handling) => handling,
+        Err(SearchError::Cancelled) => return Err(GrepError::Cancelled),
+        Err(_) => {
+            return Ok(FileOutcome::skipped(
+                Some(Arc::clone(&candidate.path)),
+                SkipReason::Io,
+            ));
+        }
+    };
+    if let SourceHandling::Skip(reason) = handling {
+        return Ok(FileOutcome::skipped(
+            Some(Arc::clone(&candidate.path)),
+            reason,
+        ));
+    }
     let mut sink = PlanSink::new(
         context.matcher,
         context.plan,
@@ -226,33 +261,17 @@ pub(super) fn search_opened_candidate_with_searcher(
     );
     context.profiler.record_searched_candidate();
     let scan_span = context.profiler.span(GrepStage::SearchScanWorker);
-    let (search_result, file) = search_source(file, before, context, searcher, &mut sink);
+    let (search_result, file) = match handling {
+        SourceHandling::Transcode(label) => {
+            search_transcoded(file, label, context, searcher, &mut sink)
+        }
+        SourceHandling::Native | SourceHandling::Skip(_) => {
+            search_source(file, before, context, searcher, &mut sink)
+        }
+    };
     drop(scan_span);
-    match search_result {
-        Ok(()) => {}
-        Err(SearchError::Cancelled) => return Err(GrepError::Cancelled),
-        Err(SearchError::Retired) => return Ok(FileOutcome::retired()),
-        Err(SearchError::CaptureMemory) => {
-            return Ok(sink.finish_capture_overflow(Arc::clone(&candidate.path)));
-        }
-        Err(SearchError::HeapLimit) => {
-            return Ok(FileOutcome::skipped(
-                Some(Arc::clone(&candidate.path)),
-                SkipReason::LineExceedsSearchHeap,
-            ));
-        }
-        Err(SearchError::Io) => {
-            return Ok(FileOutcome::skipped(
-                Some(Arc::clone(&candidate.path)),
-                SkipReason::Io,
-            ));
-        }
-        Err(SearchError::Undecodable) => {
-            return Ok(FileOutcome::skipped(
-                Some(Arc::clone(&candidate.path)),
-                SkipReason::Undecodable,
-            ));
-        }
+    if let Err(error) = search_result {
+        return outcome_for_search_error(error, candidate, sink);
     }
     after_search();
     let verify_span = context.profiler.span(GrepStage::SearchVerifyWorker);
@@ -366,12 +385,20 @@ fn search_source(
                         result
                     }
                 } else {
-                    if !transcoded_bom {
+                    // These bytes were just proven NUL-free, so detection only costs work
+                    // here. It must be rearmed afterwards: one searcher serves every
+                    // candidate this worker handles, and leaving it disarmed let a later
+                    // binary file be searched as text instead of reported as binary.
+                    let disarmed = !transcoded_bom;
+                    if disarmed {
                         searcher.set_binary_detection(BinaryDetection::none());
                     }
                     context.profiler.record_search_slice();
                     let source_span = context.profiler.span(GrepStage::SearchSliceWorker);
                     let result = searcher.search_slice(context.matcher, &bytes, sink);
+                    if disarmed {
+                        searcher.set_binary_detection(BinaryDetection::quit(0));
+                    }
                     drop(source_span);
                     result
                 }
@@ -402,6 +429,128 @@ fn search_source(
         drop(source_span);
         (result, file)
     }
+}
+
+/// Every way one candidate's search can end without a result, mapped to what the page
+/// reports for it. Cancellation is the only one that fails the whole call.
+fn outcome_for_search_error(
+    error: SearchError,
+    candidate: &Candidate,
+    sink: PlanSink<'_>,
+) -> Result<FileOutcome, GrepError> {
+    let path = || Some(Arc::clone(&candidate.path));
+    match error {
+        SearchError::Cancelled => Err(GrepError::Cancelled),
+        SearchError::Retired => Ok(FileOutcome::retired()),
+        SearchError::CaptureMemory => Ok(sink.finish_capture_overflow(Arc::clone(&candidate.path))),
+        SearchError::HeapLimit => Ok(FileOutcome::skipped(
+            path(),
+            SkipReason::LineExceedsSearchHeap,
+        )),
+        SearchError::Io => Ok(FileOutcome::skipped(path(), SkipReason::Io)),
+        SearchError::Undecodable => Ok(FileOutcome::skipped(path(), SkipReason::Undecodable)),
+        SearchError::Transcode(reason) => Ok(FileOutcome::skipped(path(), reason)),
+    }
+}
+
+const ENCODING_SNIFF_BYTES: usize = 8 * 1024;
+
+/// Decide how one candidate's bytes must be treated before the matcher sees them.
+///
+/// A prefix that is already valid UTF-8 — which includes every pure-ASCII file — returns
+/// `Native` and reaches the unchanged search paths below, so a UTF-8 tree pays only for
+/// this one bounded read.
+fn classify_source(
+    file: &mut File,
+    plan: SearchPlan,
+    cancellation: &CancellationToken,
+) -> Result<SourceHandling, SearchError> {
+    if let Some(label) = plan.encoding {
+        return Ok(SourceHandling::Transcode(label));
+    }
+    if cancellation.is_cancelled() {
+        return Err(SearchError::Cancelled);
+    }
+    let mut prefix = vec![0_u8; ENCODING_SNIFF_BYTES];
+    let mut filled = 0_usize;
+    while filled < prefix.len() {
+        match file.read(&mut prefix[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return Err(SearchError::Io),
+        }
+    }
+    let whole_file = filled < prefix.len();
+    prefix.truncate(filled);
+    if file.seek(SeekFrom::Start(0)).is_err() {
+        return Err(SearchError::Io);
+    }
+    // UTF-16 is transcoded by the searcher's own BOM sniffing, and anything else carrying
+    // NUL is binary. Both must keep reaching the existing paths so they are still reported
+    // as binary rather than as an encoding problem.
+    if prefix.starts_with(&[0xFF, 0xFE]) || prefix.starts_with(&[0xFE, 0xFF]) {
+        return Ok(SourceHandling::Native);
+    }
+    if prefix.contains(&0) {
+        return Ok(SourceHandling::Native);
+    }
+    Ok(
+        match crate::encoding::detect_legacy_encoding(&prefix, None, whole_file) {
+            Ok(None) => SourceHandling::Native,
+            Ok(Some(label)) => SourceHandling::Transcode(label),
+            Err(_) => plan.fallback_encoding.map_or(
+                SourceHandling::Skip(SkipReason::Undecodable),
+                SourceHandling::Transcode,
+            ),
+        },
+    )
+}
+
+/// Search a legacy-encoded candidate by decoding it to UTF-8 first.
+///
+/// Line structure survives decoding, so the line numbers the sink reports still address
+/// the source file. The decoded copy is bounded by the same heap limit the searcher uses,
+/// and a file that will not fit is skipped with a reason rather than searched partially.
+fn search_transcoded(
+    file: File,
+    label: &'static str,
+    context: &FileSearchContext<'_>,
+    searcher: &mut Searcher,
+    sink: &mut PlanSink<'_>,
+) -> (Result<(), SearchError>, File) {
+    let mut file = file;
+    let mut decoded = String::new();
+    let outcome = crate::encoding::decode_stream(
+        &mut file,
+        Some(label),
+        SEARCH_HEAP_BYTES,
+        context.cancellation,
+        |chunk| {
+            decoded.push_str(chunk);
+            Ok(crate::encoding::DecodeControl::Continue)
+        },
+    );
+    if let Err(error) = outcome {
+        let failure = match error {
+            crate::encoding::DecodeError::Cancelled => SearchError::Cancelled,
+            crate::encoding::DecodeError::Io(_) => SearchError::Io,
+            crate::encoding::DecodeError::TooLarge => {
+                SearchError::Transcode(SkipReason::TranscodeMemory)
+            }
+            _ => SearchError::Transcode(SkipReason::Undecodable),
+        };
+        return (Err(failure), file);
+    }
+    context.profiler.record_search_slice();
+    let source_span = context.profiler.span(GrepStage::SearchSliceWorker);
+    // Decoded UTF-8 from a candidate that carried no NUL cannot be binary, and leaving the
+    // detector armed would quit on any replacement byte the decode produced.
+    searcher.set_binary_detection(BinaryDetection::none());
+    let result = searcher.search_slice(context.matcher, decoded.as_bytes(), sink);
+    searcher.set_binary_detection(BinaryDetection::quit(0));
+    drop(source_span);
+    (result, file)
 }
 
 fn memory_source_limit(source: GrepSourcePolicy) -> u64 {
@@ -574,6 +723,7 @@ pub(super) enum PlanSink<'a> {
     Content(ContentSink<'a>),
 }
 
+#[derive(Clone, Copy)]
 pub(super) enum SearchError {
     Cancelled,
     Retired,
@@ -581,6 +731,9 @@ pub(super) enum SearchError {
     HeapLimit,
     Undecodable,
     Io,
+    /// A legacy-encoded candidate that could not be decoded for searching, carrying the
+    /// reason so the skip report says which of the two causes applied.
+    Transcode(SkipReason),
 }
 
 impl SinkError for SearchError {

@@ -1,6 +1,6 @@
 from typing import Any
 
-from .mcp import CargoMcpAdapter
+from .mcp import CargoMcpAdapter, ExternalToolMap
 
 
 class CodexshimAdapter(CargoMcpAdapter):
@@ -9,6 +9,14 @@ class CodexshimAdapter(CargoMcpAdapter):
 
     def supports_pdf_read(self) -> bool:
         return True
+
+    def fallback_tools(self) -> ExternalToolMap:
+        return ExternalToolMap(
+            read_tool="read",
+            grep_tool="grep",
+            glob_tool="glob",
+            bash_tool="bash",
+        )
 
     def invoke_run_program(
         self,
@@ -50,6 +58,7 @@ class CodexshimAdapter(CargoMcpAdapter):
         mode: str = "content",
         case: str = "smart",
         fixed_strings: bool = False,
+        limit: int | None = None,
         timeout_s: float = 60.0,
     ) -> dict[str, Any]:
         args: dict[str, Any] = {
@@ -61,17 +70,21 @@ class CodexshimAdapter(CargoMcpAdapter):
         }
         if glob is not None:
             args["glob"] = glob
+        if limit is not None:
+            args["limit"] = limit
         return self.require_client().call_tool("grep", args, timeout_s=timeout_s)
 
     def invoke_glob(
         self,
         path: str,
         pattern: str = "**/*",
+        limit: int | None = None,
         timeout_s: float = 60.0,
     ) -> dict[str, Any]:
-        return self.require_client().call_tool(
-            "glob", {"path": path, "pattern": pattern}, timeout_s=timeout_s
-        )
+        args: dict[str, Any] = {"path": path, "pattern": pattern}
+        if limit is not None:
+            args["limit"] = limit
+        return self.require_client().call_tool("glob", args, timeout_s=timeout_s)
 
     def invoke_bash(
         self,

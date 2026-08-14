@@ -1,3 +1,4 @@
+mod cursor;
 mod fingerprint;
 mod hooks;
 mod pdf;

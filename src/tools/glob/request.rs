@@ -304,7 +304,7 @@ fn execute_inner_with_traversal(
         scan_stopped: false,
         terminal_error: None,
     };
-    let regular_plan = regular_collect_plan(request, selection.threads);
+    let regular_plan = regular_collect_plan(request, resources, selection.threads);
     #[cfg(any(test, feature = "bench-internals"))]
     let prefix_plan = GlobCollectPlan {
         include_ignored: regular_plan.include_ignored,
@@ -442,10 +442,11 @@ struct GlobCollectPlan<'a> {
 
 fn regular_collect_plan(
     request: &GlobRequest,
+    resources: &RuntimeResources,
     traversal_threads: usize,
 ) -> GlobCollectPlan<'static> {
     GlobCollectPlan {
-        include_ignored: request.include_ignored.unwrap_or(false),
+        include_ignored: resources.config().include_ignored(request.include_ignored),
         entry_type: request.entry_type.unwrap_or_default(),
         literal_prefix: None,
         traversal_threads,

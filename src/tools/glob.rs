@@ -18,7 +18,7 @@ pub(crate) use request::{execute_output_with_budget, memory_charge};
 #[cfg(test)]
 use request::{MAX_MATCHES, PATH_OMISSION};
 #[cfg(test)]
-use result::{GlobMatch, TopK, render};
+use result::{GlobMatch, TopK, render, render_with_budget};
 
 #[cfg(test)]
 #[path = "glob/tests.rs"]

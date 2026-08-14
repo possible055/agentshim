@@ -16,7 +16,21 @@ pub(crate) use burst_gate::{
     BurstOutputGate, BurstTicket, MAX_CONTROL_RESPONSE_TOKENS, configured_burst_tokens,
 };
 
-pub(crate) use skip_notes::{SkipNotes, SkipReason, search_tail};
+pub(crate) use skip_notes::{
+    GITIGNORE_RETRY_HINT, SkipNotes, SkipReason, UNDECODABLE_RETRY_HINT, search_tail,
+};
+
+/// The continuation vocabulary, named verbatim in the tool descriptions.
+///
+/// A description tells the caller to copy these back from the response, so a renderer
+/// that stops emitting one turns the description into a lie the caller cannot detect.
+/// Both ends read these constants and `tests/contract_snapshots.rs` asserts the
+/// descriptions still contain them, so renaming a field here fails the build until the
+/// description follows.
+pub const PARTIAL_MARKER: &str = "Partial:";
+pub const NEXT_START_LINE_FIELD: &str = "next_start_line";
+pub const NEXT_OFFSET_FIELD: &str = "next_offset";
+pub const PDF_CURSOR_FIELD: &str = "pdf_cursor";
 pub(crate) use token_gate::{
     GateDecision, OutputTokenGate, ProjectedTokenCost, ProjectionDecision,
     structured_result_fits_model_budget,
@@ -404,7 +418,7 @@ mod tests {
             "Path: /repo/file.rs",
             vec![
                 "Skipped: 2 inaccessible entries.".to_owned(),
-                "Partial: continue with {\"start_line\":42}.".to_owned(),
+                "Partial: next_start_line=42. (output budget)".to_owned(),
             ],
             limits,
         )
@@ -419,7 +433,7 @@ mod tests {
         }
         let output = formatter.finish(&cancellation).expect("finish output");
         assert!(output.contains("Skipped: 2 inaccessible entries."));
-        assert!(output.ends_with("Partial: continue with {\"start_line\":42}."));
+        assert!(output.ends_with("Partial: next_start_line=42. (output budget)"));
         assert!(output.len() <= limits.bytes);
     }
 

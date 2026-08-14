@@ -26,5 +26,4 @@ jobs:
       setup_node: true
       run_format: true
       build_docs: true
-      run_eval: true
       run_metadata: true

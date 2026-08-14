@@ -245,6 +245,10 @@ fn run_doctor(config: RuntimeLimits, options: &ServeOptions) -> Result<(), Box<d
         service.runtime_limits().detached_calls
     );
     println!("output bytes: {}", service.runtime_limits().output_bytes);
+    println!(
+        "respect gitignore: {}",
+        service.runtime_limits().respect_gitignore
+    );
     println!("client profile: {}", service.client_profile());
     println!("tool output tokens: {}", service.tool_output_token_limit());
     println!("burst tokens: {}", service.burst_token_limit());

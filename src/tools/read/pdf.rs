@@ -120,10 +120,7 @@ pub(super) fn has_pdf_header(prefix: &[u8]) -> bool {
 }
 
 pub(super) fn has_pdf_parameters(request: &ReadRequest) -> bool {
-    request.pdf_mode.is_some()
-        || request.pages.is_some()
-        || request.pdf_text_offset.is_some()
-        || request.pdf_source_id.is_some()
+    request.pdf_mode.is_some() || request.pages.is_some() || request.pdf_cursor.is_some()
 }
 
 pub(super) fn read_pdf(
@@ -184,11 +181,11 @@ pub(super) fn read_pdf(
 }
 
 /// A continuation that names a different source version must fail rather than stitch
-/// two documents together. A request without an id keeps the pre-existing fingerprint
+/// two documents together. A request without a cursor keeps the pre-existing fingerprint
 /// behaviour and is reported as unverified.
 fn verify_source_id(request: &ReadRequest, source_id: &str) -> Result<(), ReadError> {
-    match request.pdf_source_id.as_deref() {
-        Some(supplied) if supplied != source_id => Err(ReadError::Changed),
+    match request.decoded_pdf_cursor()? {
+        Some(cursor) if cursor.source_id != source_id => Err(ReadError::Changed),
         _ => Ok(()),
     }
 }

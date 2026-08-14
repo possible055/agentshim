@@ -96,6 +96,18 @@ class McpClient:
         self._write_stdin((json.dumps(init_notif) + "\n").encode("utf-8"))
         return resp
 
+    def list_tools(self, timeout_s: float = 60.0) -> list[dict[str, Any]]:
+        response = self.send_request("tools/list", {}, timeout_s=timeout_s)
+        if response.get("error"):
+            raise RuntimeError(f"tools/list failed: {response['error']}")
+        result = response.get("result")
+        if not isinstance(result, dict):
+            return []
+        tools = result.get("tools")
+        if not isinstance(tools, list):
+            return []
+        return [tool for tool in tools if isinstance(tool, dict)]
+
     def call_tool(
         self, tool_name: str, arguments: dict[str, Any], timeout_s: float = 60.0
     ) -> dict[str, Any]:
@@ -103,6 +115,9 @@ class McpClient:
         start = time.perf_counter()
         response = self.send_request("tools/call", params, timeout_s=timeout_s)
         duration_ms = (time.perf_counter() - start) * 1000.0
+        from .gates import raise_if_mcp_error
+
+        raise_if_mcp_error(response)
         return {
             "response": response,
             "duration_ms": duration_ms,

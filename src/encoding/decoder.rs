@@ -7,6 +7,22 @@ use super::io::{DecodeError, SourceEncoding};
 
 const MIN_AUTODETECT_NON_ASCII_BYTES: usize = 8;
 
+/// Resolve a caller-supplied WHATWG label to the canonical name `encoding_rs` uses.
+///
+/// Returning `&'static str` lets a label validated once travel through the `Copy` search
+/// plan without allocating again for every candidate file.
+///
+/// # Errors
+///
+/// Returns [`DecodeError::UnknownEncoding`] for a label `encoding_rs` does not resolve, or
+/// resolves only to the replacement encoding.
+pub(crate) fn normalize_label(label: &str) -> Result<&'static str, DecodeError> {
+    let trimmed = label.trim_matches(char::is_whitespace);
+    Encoding::for_label_no_replacement(trimmed.as_bytes())
+        .map(Encoding::name)
+        .ok_or_else(|| DecodeError::UnknownEncoding(trimmed.to_owned()))
+}
+
 pub(crate) fn detect_legacy_encoding(
     prefix: &[u8],
     explicit: Option<&str>,

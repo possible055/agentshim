@@ -35,7 +35,10 @@ pub(super) fn read_pdf_text(
         page_count,
         source_id,
     } = *read;
-    if let Some(offset) = request.pdf_text_offset {
+    if let Some(offset) = request
+        .decoded_pdf_cursor()?
+        .and_then(|cursor| cursor.text_offset)
+    {
         return resume_page(
             document,
             read,
@@ -116,7 +119,7 @@ pub(super) fn read_pdf_text(
         {
             return Err(ReadError::PdfImageRequired {
                 pages: page_range_label(selected_first, selected_last),
-                source_id: source_id.to_owned(),
+                cursor: crate::tools::read::cursor::encode(source_id, None),
             });
         }
     }
@@ -254,7 +257,7 @@ fn fits(
 
 /// Deliver as much of one page as fits, starting at `offset`.
 ///
-/// The returned `next_pdf_text_offset` is a UTF-8 boundary into this page's own Markdown,
+/// The offset carried by the returned cursor is a UTF-8 boundary into this page's Markdown,
 /// so concatenating the rounds reproduces the page exactly. Nothing here is discarded and
 /// re-extracted: the chunk is cut to the largest prefix the envelope can hold.
 fn resume_page(

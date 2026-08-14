@@ -48,6 +48,11 @@ pub struct TraversalSummary {
     pub io_errors: usize,
     pub escaped_entries: usize,
     pub non_unicode_entries: usize,
+    /// Whether this walk applied gitignore filtering. The `ignore` crate drops those
+    /// entries before the visitor runs, so they cannot be counted; this records only
+    /// that the policy was active, which is what a caller needs to decide whether an
+    /// empty result is worth retrying with `include_ignored`.
+    pub gitignore_filtered: bool,
     pub(crate) skips: SkipNotes,
 }
 
@@ -103,6 +108,8 @@ pub enum TraversalError {
     Cancelled,
     #[error("traversal root must be a directory")]
     NotDirectory,
+    #[error("traversal root is a blocked large directory")]
+    DeniedDirectory,
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -149,13 +156,7 @@ fn walk_filtered(
     literal_prefix: Option<&Path>,
     mut visitor: impl for<'entry> FnMut(TraversalEntry<'entry>) -> TraversalControl,
 ) -> Result<TraversalSummary, TraversalError> {
-    access.root().verify()?;
-    if base.is_ambient() && access.symlink_metadata_kind(base)?.is_symlink {
-        return Err(TraversalError::NotDirectory);
-    }
-    if !access.metadata_kind(base)?.is_dir {
-        return Err(TraversalError::NotDirectory);
-    }
+    prepare_walk(access, base)?;
 
     let mut builder = WalkBuilder::new(base.absolute());
     builder.follow_links(false).hidden(false).require_git(false);
@@ -169,7 +170,10 @@ fn walk_filtered(
     }
     configure_entry_filter(&mut builder, access, base, literal_prefix);
 
-    let mut summary = TraversalSummary::default();
+    let mut summary = TraversalSummary {
+        gitignore_filtered: !include_ignored,
+        ..TraversalSummary::default()
+    };
     for result in builder.build() {
         if cancellation.is_cancelled() {
             return Err(TraversalError::Cancelled);
@@ -270,13 +274,7 @@ where
     P: for<'entry> Fn(TraversalEntry<'entry>) -> bool + Send + Sync,
     V: Fn(&[OwnedTraversalEntry]) -> TraversalControl + Send + Sync,
 {
-    access.root().verify()?;
-    if base.is_ambient() && access.symlink_metadata_kind(base)?.is_symlink {
-        return Err(TraversalError::NotDirectory);
-    }
-    if !access.metadata_kind(base)?.is_dir {
-        return Err(TraversalError::NotDirectory);
-    }
+    prepare_walk(access, base)?;
     if cancellation.is_cancelled() {
         return Err(TraversalError::Cancelled);
     }
@@ -369,7 +367,7 @@ where
             }
         }
     }
-    Ok(summary.snapshot())
+    Ok(summary.snapshot(!include_ignored))
 }
 
 #[must_use]
@@ -399,7 +397,7 @@ fn configure_entry_filter(
     literal_prefix: Option<&Path>,
 ) {
     let Some(literal_prefix) = literal_prefix else {
-        builder.filter_entry(|entry| entry.depth() == 0 || !is_git_entry(entry));
+        builder.filter_entry(|entry| entry.depth() == 0 || !is_blocked_directory_entry(entry));
         return;
     };
     let logical_root = traversal_logical_root(access, base).to_path_buf();
@@ -408,7 +406,7 @@ fn configure_entry_filter(
         if entry.depth() == 0 {
             return true;
         }
-        if is_git_entry(entry) {
+        if is_blocked_directory_entry(entry) {
             return false;
         }
         let Ok(key) = entry.path().strip_prefix(&logical_root) else {
@@ -459,11 +457,12 @@ impl AtomicTraversalSummary {
             .record(path, reason);
     }
 
-    fn snapshot(&self) -> TraversalSummary {
+    fn snapshot(&self, gitignore_filtered: bool) -> TraversalSummary {
         TraversalSummary {
             io_errors: self.io_errors.load(Ordering::Relaxed),
             escaped_entries: self.escaped_entries.load(Ordering::Relaxed),
             non_unicode_entries: self.non_unicode_entries.load(Ordering::Relaxed),
+            gitignore_filtered,
             skips: self
                 .skips
                 .lock()
@@ -538,6 +537,67 @@ fn traversal_logical_root<'a>(access: &'a FileAccess, base: &'a ResolvedPath) ->
     }
 }
 
+fn prepare_walk(access: &FileAccess, base: &ResolvedPath) -> Result<(), TraversalError> {
+    access.root().verify()?;
+    if base.is_ambient() && access.symlink_metadata_kind(base)?.is_symlink {
+        return Err(TraversalError::NotDirectory);
+    }
+    if !access.metadata_kind(base)?.is_dir {
+        return Err(TraversalError::NotDirectory);
+    }
+    reject_denied_base(base)
+}
+
+fn reject_denied_base(base: &ResolvedPath) -> Result<(), TraversalError> {
+    let name = base
+        .absolute()
+        .file_name()
+        .unwrap_or_else(|| base.key().as_os_str());
+    if is_denied_directory_name(name) {
+        Err(TraversalError::DeniedDirectory)
+    } else {
+        Ok(())
+    }
+}
+
+const DENIED_DIRECTORY_NAMES: &[&str] = &[
+    "node_modules",
+    "target",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    "__pycache__",
+];
+
+fn name_eq(left: &str, right: &str) -> bool {
+    #[cfg(windows)]
+    {
+        left.eq_ignore_ascii_case(right)
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
+fn is_denied_directory_name(name: &std::ffi::OsStr) -> bool {
+    name.to_str().is_some_and(|name| {
+        DENIED_DIRECTORY_NAMES
+            .iter()
+            .any(|denied| name_eq(name, denied))
+    })
+}
+
+fn is_denied_directory_entry(entry: &DirEntry) -> bool {
+    entry.file_type().is_none_or(|file_type| file_type.is_dir())
+        && is_denied_directory_name(entry.file_name())
+}
+
+fn is_blocked_directory_entry(entry: &DirEntry) -> bool {
+    is_git_entry(entry) || is_denied_directory_entry(entry)
+}
+
 fn is_git_entry(entry: &DirEntry) -> bool {
     #[cfg(windows)]
     {
@@ -578,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn fixed_policy_includes_hidden_respects_ignores_and_excludes_git() {
+    fn default_walk_includes_hidden_and_gitignored_but_excludes_git() {
         let fixture = tempfile::tempdir().expect("fixture");
         fs::write(fixture.path().join(".gitignore"), "ignored.txt\n").expect("ignore");
         fs::write(fixture.path().join("visible.txt"), "visible").expect("visible");
@@ -588,16 +648,27 @@ mod tests {
         fs::write(fixture.path().join(".git/config"), "config").expect("git config");
         let root = access(fixture.path());
         let base = root.resolve(Path::new(".")).expect("base");
-        let mut paths = Vec::new();
-        walk(&root, &base, false, &CancellationToken::new(), |entry| {
-            paths.push(crate::path::slash_path(entry.key).expect("model path"));
+        let mut included = Vec::new();
+        walk(&root, &base, true, &CancellationToken::new(), |entry| {
+            included.push(crate::path::slash_path(entry.key).expect("model path"));
             TraversalControl::Continue
         })
-        .expect("walk");
-        assert!(paths.contains(&"visible.txt".to_owned()));
-        assert!(paths.contains(&".hidden".to_owned()));
-        assert!(!paths.contains(&"ignored.txt".to_owned()));
-        assert!(!paths.iter().any(|path| path.starts_with(".git/")));
+        .expect("include ignored walk");
+        assert!(included.contains(&"visible.txt".to_owned()));
+        assert!(included.contains(&".hidden".to_owned()));
+        assert!(included.contains(&"ignored.txt".to_owned()));
+        assert!(!included.iter().any(|path| path.starts_with(".git/")));
+
+        let mut respected = Vec::new();
+        walk(&root, &base, false, &CancellationToken::new(), |entry| {
+            respected.push(crate::path::slash_path(entry.key).expect("model path"));
+            TraversalControl::Continue
+        })
+        .expect("respect ignore walk");
+        assert!(respected.contains(&"visible.txt".to_owned()));
+        assert!(respected.contains(&".hidden".to_owned()));
+        assert!(!respected.contains(&"ignored.txt".to_owned()));
+        assert!(!respected.iter().any(|path| path.starts_with(".git/")));
     }
 
     #[test]
@@ -786,6 +857,35 @@ mod tests {
         assert!(!serial.contains(&Path::new("src/deep/ignored.rs").to_path_buf()));
         assert!(!serial.iter().any(|path| path.starts_with("src/sibling")));
         assert!(!serial.iter().any(|path| path.starts_with("other")));
+    }
+
+    #[test]
+    fn walk_skips_denied_directories_and_rejects_them_as_roots() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        fs::create_dir_all(fixture.path().join("node_modules/pkg")).expect("node_modules");
+        fs::create_dir_all(fixture.path().join("target/debug")).expect("target");
+        fs::write(fixture.path().join("src.rs"), "source").expect("source");
+        fs::write(fixture.path().join("node_modules/pkg/index.js"), "pkg").expect("pkg");
+        fs::write(fixture.path().join("target/debug/out.rs"), "out").expect("out");
+        let root = access(fixture.path());
+        let base = root.resolve(Path::new(".")).expect("base");
+        let mut paths = Vec::new();
+        walk(&root, &base, true, &CancellationToken::new(), |entry| {
+            paths.push(crate::path::slash_path(entry.key).expect("model path"));
+            TraversalControl::Continue
+        })
+        .expect("walk");
+        assert!(paths.contains(&"src.rs".to_owned()));
+        assert!(!paths.iter().any(|path| path.starts_with("node_modules")));
+        assert!(!paths.iter().any(|path| path.starts_with("target")));
+
+        let denied = root.resolve(Path::new("node_modules")).expect("denied");
+        assert!(matches!(
+            walk(&root, &denied, true, &CancellationToken::new(), |_| {
+                TraversalControl::Continue
+            }),
+            Err(super::TraversalError::DeniedDirectory)
+        ));
     }
 
     #[test]

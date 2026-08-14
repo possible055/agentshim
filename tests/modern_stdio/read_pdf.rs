@@ -101,9 +101,9 @@ fn pdf_image_required_carries_structured_retry_parameters_over_real_stdio() {
     assert_eq!(retry["pdf_mode"], "image");
     assert_eq!(retry["pages"], "1");
     assert!(
-        retry["pdf_source_id"]
+        retry["pdf_cursor"]
             .as_str()
-            .is_some_and(|id| id.len() == 16)
+            .is_some_and(|cursor| cursor.len() == 16)
     );
     session.close();
 }
@@ -140,7 +140,7 @@ fn pdf_text_read_reports_its_source_id_over_real_stdio() {
         json!({
             "path": "document.pdf",
             "pages": "1",
-            "pdf_source_id": "0000000000000000"
+            "pdf_cursor": "0000000000000000"
         }),
     );
     assert_eq!(stale["result"]["isError"], true);
@@ -152,7 +152,7 @@ fn pdf_text_read_reports_its_source_id_over_real_stdio() {
         json!({
             "path": "document.pdf",
             "pages": "1",
-            "pdf_source_id": source
+            "pdf_cursor": source
         }),
     );
     assert_eq!(matching["result"]["isError"], false);

@@ -14,7 +14,9 @@ pub use diagnostics::{
     DiagnosticsConfig, DiagnosticsGuard, LogMode, LogStatus, PurgeReport, capacity_bytes, purge,
     retention_days, status,
 };
-pub use output::bounded_diagnostic;
+pub use output::{
+    NEXT_OFFSET_FIELD, NEXT_START_LINE_FIELD, PARTIAL_MARKER, PDF_CURSOR_FIELD, bounded_diagnostic,
+};
 pub use path::ReadScope;
 pub use profile::ClientProfile;
 

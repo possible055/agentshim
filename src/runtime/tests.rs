@@ -9,8 +9,9 @@ mod tests {
         MAX_PDF_IMAGE_MEMORY_BYTES, MAX_PDF_TEXT_MEMORY_BYTES, MAX_READ_ONLY_CALLS,
         MAX_TOOL_MEMORY_BYTES, MAX_TOOL_TIMEOUT_SHELF, MIN_PDF_IMAGE_MEMORY_BYTES,
         MIN_PDF_TEXT_MEMORY_BYTES, MIN_TOOL_MEMORY_BYTES, MemoryReservation,
-        PDF_IMAGE_MEMORY_BYTES_ENV, PDF_TEXT_MEMORY_BYTES_ENV, RuntimeConfig, RuntimeResources,
-        blocking_threads, global_memory_bytes, parse_memory_bytes_in_range, parse_process_calls,
+        PDF_IMAGE_MEMORY_BYTES_ENV, PDF_TEXT_MEMORY_BYTES_ENV, RESPECT_GITIGNORE_ENV,
+        RuntimeConfig, RuntimeResources, blocking_threads, global_memory_bytes,
+        parse_memory_bytes_in_range, parse_process_calls, parse_respect_gitignore,
         parse_tool_memory_bytes, parse_tool_timeout_shelf,
     };
     use tokio_util::sync::CancellationToken;
@@ -145,6 +146,30 @@ mod tests {
         );
 
         drop((gate, reservation, text));
+    }
+
+    #[test]
+    fn respect_gitignore_defaults_false_and_accepts_boolean_tokens() {
+        assert!(!parse_respect_gitignore(None).expect("default"));
+        for value in ["0", "false", "False", " FALSE "] {
+            assert!(!parse_respect_gitignore(Some(OsStr::new(value))).expect(value));
+        }
+        for value in ["1", "true", "True", " TRUE "] {
+            assert!(parse_respect_gitignore(Some(OsStr::new(value))).expect(value));
+        }
+        for value in ["yes", "2", ""] {
+            let error = parse_respect_gitignore(Some(OsStr::new(value))).expect_err(value);
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains(RESPECT_GITIGNORE_ENV));
+        }
+        let config = RuntimeConfig::for_tests(1);
+        assert!(config.include_ignored(None));
+        assert!(!config.include_ignored(Some(false)));
+        assert!(config.include_ignored(Some(true)));
+        let mut respect = config;
+        respect.respect_gitignore = true;
+        assert!(!respect.include_ignored(None));
+        assert!(respect.include_ignored(Some(true)));
     }
 
     #[test]

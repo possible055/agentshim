@@ -174,10 +174,17 @@ fn page_tail(
     summary: &TraversalSummary,
     scan_stopped: bool,
     next_offset: Option<usize>,
+    nothing_matched: bool,
 ) -> Vec<String> {
-    let extras = scan_stopped.then(|| {
-        format!("Scan stopped: more than {MAX_MATCHES} paths matched; narrow pattern or path.")
-    });
+    let mut extras = Vec::new();
+    if scan_stopped {
+        extras.push(format!(
+            "Scan stopped: more than {MAX_MATCHES} paths matched; narrow pattern or path."
+        ));
+    }
+    if nothing_matched && summary.gitignore_filtered {
+        extras.push(crate::output::GITIGNORE_RETRY_HINT.to_owned());
+    }
     search_tail(
         &summary.skips,
         !scan_stopped && next_offset.is_none(),
@@ -236,7 +243,7 @@ pub(super) fn render_with_budget(
     let mut cap = available;
     loop {
         let next_offset = (offset.saturating_add(cap) < total).then(|| offset.saturating_add(cap));
-        let tail = page_tail(summary, scan_stopped, next_offset);
+        let tail = page_tail(summary, scan_stopped, next_offset, total == 0);
         let header = if available == 0 {
             if offset == 0 {
                 "No paths matched.".to_owned()
@@ -268,7 +275,7 @@ pub(super) fn render_with_budget(
         }
         if cap == 1 {
             let next_offset = (offset.saturating_add(1) < total).then(|| offset.saturating_add(1));
-            let tail = page_tail(summary, scan_stopped, next_offset);
+            let tail = page_tail(summary, scan_stopped, next_offset, total == 0);
             let mut formatter = OutputFormatter::new(String::new(), tail, limits)?;
             if formatter.try_push_line(PATH_OMISSION, cancellation)? {
                 let fallback = ToolOutput::new(formatter.finish(cancellation)?);

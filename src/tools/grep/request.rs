@@ -222,6 +222,9 @@ pub struct GrepRequest {
     pub context_lines: Option<usize>,
     pub offset: Option<usize>,
     pub limit: Option<usize>,
+    pub include_ignored: Option<bool>,
+    pub encoding: Option<String>,
+    pub fallback_encoding: Option<String>,
 }
 
 impl GrepRequest {
@@ -249,7 +252,57 @@ impl GrepRequest {
                 "limit must be from 1 to 1000".to_owned(),
             ));
         }
+        self.encoding_labels()?;
         Ok(())
+    }
+
+    /// Resolve both encoding arguments against the target kind that was just determined.
+    ///
+    /// Each argument is rejected for the wrong kind rather than ignored: an argument that
+    /// silently does nothing is exactly the failure this contract exists to prevent.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error for an unknown label or a target-kind mismatch.
+    fn resolved_encodings_inner(
+        &self,
+        single_file: bool,
+    ) -> Result<(Option<&'static str>, Option<&'static str>), GrepError> {
+        let (encoding, fallback_encoding) = self.encoding_labels()?;
+        if encoding.is_some() && !single_file {
+            return Err(GrepError::Validation(
+                "encoding applies to a single-file path; use fallback_encoding for a directory"
+                    .to_owned(),
+            ));
+        }
+        if fallback_encoding.is_some() && single_file {
+            return Err(GrepError::Validation(
+                "fallback_encoding applies to a directory path; use encoding for a single file"
+                    .to_owned(),
+            ));
+        }
+        Ok((encoding, fallback_encoding))
+    }
+
+    /// Resolve both encoding arguments to canonical labels.
+    ///
+    /// Done once per request so a rejected label fails before any filesystem work, and so
+    /// the per-candidate path never has to resolve a label again.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error for a label `encoding_rs` does not recognise.
+    pub(super) fn encoding_labels(
+        &self,
+    ) -> Result<(Option<&'static str>, Option<&'static str>), GrepError> {
+        let resolve = |label: &Option<String>| {
+            label
+                .as_deref()
+                .map(crate::encoding::normalize_label)
+                .transpose()
+                .map_err(|error| GrepError::Validation(error.to_string()))
+        };
+        Ok((resolve(&self.encoding)?, resolve(&self.fallback_encoding)?))
     }
 }
 
@@ -556,10 +609,12 @@ fn execute_inner(
         .as_deref()
         .and_then(crate::traversal::literal_path_prefix);
     drop(setup_span);
+    let include_ignored = resources.config().include_ignored(request.include_ignored);
     let (candidates, traversal_summary, single_file) = collect_candidates(
         access,
         request.path.as_deref().unwrap_or("."),
         glob.as_ref(),
+        include_ignored,
         cancellation,
         traversal,
         resources,
@@ -582,11 +637,14 @@ fn execute_inner(
         .saturating_add(request.limit.unwrap_or(DEFAULT_LIMIT))
         .saturating_add(1);
     let mode = request.mode.unwrap_or_default();
+    let (encoding, fallback_encoding) = request.resolved_encodings_inner(single_file)?;
     let plan = SearchPlan {
         mode,
         context: request.context_lines.unwrap_or(0),
         probe,
         allow_early_stop: !single_file && matches!(mode, GrepMode::Content | GrepMode::Files),
+        encoding,
+        fallback_encoding,
     };
     let lanes = resources
         .file_work_pool()

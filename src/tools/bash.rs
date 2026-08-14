@@ -32,6 +32,8 @@ pub(crate) mod locate;
 mod tests;
 
 const BASH_MEMORY_BYTES: usize = 2 * 1024 * 1024;
+const MSYS_RETRY_HINT: &str =
+    "Retry: msys_argument_conversion=\"disabled\" if a native program rejected a /X switch.";
 #[cfg(windows)]
 const MSYS2_ARG_CONV_EXCL: &str = "MSYS2_ARG_CONV_EXCL";
 
@@ -138,6 +140,17 @@ fn invalid(message: impl Into<String>) -> ProcessError {
     ProcessError::Validation(message.into())
 }
 
+/// Every command goes through the same non-interactive, profile-free invocation, which is
+/// what the tool description promises the caller.
+fn bash_args(command: &str) -> Vec<String> {
+    vec![
+        "--noprofile".to_owned(),
+        "--norc".to_owned(),
+        "-c".to_owned(),
+        command.to_owned(),
+    ]
+}
+
 fn environment(
     runtime: &locate::BashRuntime,
     msys_argument_conversion: MsysArgumentConversion,
@@ -229,12 +242,7 @@ pub(crate) fn execute_output_with_budget(
     };
     ensure_before_spawn(deadline, request.timeout_ms())?;
     let environment = environment(&runtime, request.msys_argument_conversion);
-    let args = vec![
-        "--noprofile".to_owned(),
-        "--norc".to_owned(),
-        "-c".to_owned(),
-        request.command.clone(),
-    ];
+    let args = bash_args(&request.command);
     if request.detach {
         let launch = DetachedLaunch {
             resolved: &resolved,
@@ -272,6 +280,7 @@ pub(crate) fn execute_output_with_budget(
                 exit: outcome.exit,
                 duration: outcome.duration,
                 output: expect_one(outcome.captures),
+                msys_retry_available: msys_retry_available(request),
             },
             cancellation,
             output_budget,
@@ -390,6 +399,7 @@ struct CompletedBash {
     exit: String,
     duration: Duration,
     output: Capture,
+    msys_retry_available: bool,
 }
 
 struct TimedOutBash {
@@ -430,6 +440,36 @@ fn render_completed_with_budget(
     .map_err(|error| normalize_burst_render_error(error, output_budget))
 }
 
+/// Offered from the command text rather than from the child's diagnostics: every native
+/// program words an unknown-switch failure differently, but the syntax that provokes Git
+/// Bash into rewriting the argument is fixed. Deliberately conservative — a missed hint
+/// costs nothing because the parameter is still documented, while a hint on every failing
+/// `ls /tmp` would be noise on the most common commands.
+fn msys_retry_available(request: &BashRequest) -> bool {
+    cfg!(windows)
+        && matches!(
+            request.msys_argument_conversion,
+            MsysArgumentConversion::Default
+        )
+        && request.command.split_whitespace().any(is_slash_switch)
+}
+
+/// `/E` and `/MIR` are switches; `/tmp` and `/usr/bin` are POSIX paths. Requiring short,
+/// uppercase bodies keeps single-segment absolute paths out.
+fn is_slash_switch(token: &str) -> bool {
+    let Some(switch) = token.strip_prefix('/') else {
+        return false;
+    };
+    !switch.is_empty()
+        && switch.len() <= 3
+        && switch
+            .chars()
+            .all(|character| character.is_ascii_uppercase() || character.is_ascii_digit())
+        && switch
+            .chars()
+            .any(|character| character.is_ascii_uppercase())
+}
+
 fn completed_output(completed: &CompletedBash, output: &RenderedCapture) -> ToolOutput {
     let child_nonzero = completed.exit != "0";
     let mut rendered = String::with_capacity(output.text.len().saturating_add(192));
@@ -450,6 +490,9 @@ fn completed_output(completed: &CompletedBash, output: &RenderedCapture) -> Tool
             &mut rendered,
             &format!("Duration ms: {}", completed.duration.as_millis()),
         );
+        if completed.msys_retry_available {
+            push_output_line(&mut rendered, MSYS_RETRY_HINT);
+        }
     }
     push_capture_diagnostics(&mut rendered, "Output", completed.output.bytes_read, output);
     ToolOutput::with_child_nonzero(rendered, child_nonzero)

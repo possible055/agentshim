@@ -17,13 +17,9 @@ English | [简体中文](README.zh-CN.md)
 | --- | --- |
 | `read` | Read source files with line numbers. Supports UTF-8, BOM-detected UTF-16, and WHATWG encoding labels. Also reads PDFs. |
 | `grep` | Search file contents with Rust regex or literal strings. |
-| `glob` | Find files while respecting repository ignore rules. |
+| `glob` | Find files. Gitignored files are included by default; `.git` and common large directories stay excluded. |
 | `run_program` | Run one program with a literal argument list, without a shell. |
 | `bash` | Run a POSIX bash command line and return merged stdout and stderr. |
-
-Successful calls return bounded text. Partial `read`, `grep`, and `glob` results include a continuation cursor so you can pick up where you left off. Failures return a stable `{ error: { code, message, retryable, details } }` envelope.
-
-Directory `grep` and `glob` list skipped paths as `path — reason` and always report the true total (`Skipped: N files.` or `showing M`). A single-file `grep` that cannot be searched returns a distinct error for that reason instead of folding binary, change, and I/O together. `limit` and `offset` are pagination cursors; the token and byte budget is the output window. Search heap and per-file capture are safety valves that skip or truncate that file — they are not a silent drop and not a call-level hard fail. One instance's shared `memory_bytes` pool defaults to 256 MiB and cannot exceed 1 GiB.
 
 ## Install
 
@@ -67,19 +63,13 @@ startup_timeout_sec = 15
 tool_timeout_sec = 600
 enabled_tools = ["read", "grep", "glob", "run_program", "bash"]
 default_tools_approval_mode = "writes"
-env = { CODEX_MCP_PROTOCOL_VERSION = "2026-07-28" }
 
 [mcp_servers.codexshim.tools.run_program]
 approval_mode = "on-request"
 
 [mcp_servers.codexshim.tools.bash]
 approval_mode = "prompt"
-
-[features]
-mcp_2026_07_28 = true
 ```
-
-`run_program` can be approved on request; `bash` always prompts. Neither tool is a security sandbox. On Windows, use a single-quoted TOML path to avoid escaping backslashes. `tool_timeout_sec` must match `CODEXSHIM_TOOL_TIMEOUT_SHELF` (both default to 600); the server stays 10 seconds below the shelf so its Timeout response reaches the client before the client's own deadline fires.
 
 ## Configure Cursor
 
@@ -103,11 +93,18 @@ On Windows, JSON paths must escape each backslash.
 
 ### `--client-profile`
 
-Selects the aggregate output policy. `codex` is the default; `cursor` permits a larger rapid-response aggregate.
+Selects the aggregate burst policy. These layers are not the same limit:
+
+| Layer | Value | Meaning |
+| --- | ---: | --- |
+| Codex per-item truncation | 10,000 tokens or bytes | Client history cap after `Wall time:` / `Output:` |
+| Server content ceiling | 9,872 | 10,000 minus 128 wrapper tokens |
+| Per-call ceiling | 8,192 | Both profiles; a single page cannot exceed this today |
+| Burst aggregate | profile default | Remaining budget split across in-flight calls |
 
 | Value | Per-call token ceiling | Default burst tokens |
 | --- | ---: | ---: |
-| `codex` (default) | 8,192 | 8,192 |
+| `codex` (default) | 8,192 | 16,384 |
 | `cursor` | 8,192 | 32,768 |
 
 ### `--read-scope`
@@ -151,8 +148,7 @@ Git Bash converts arguments that look like POSIX paths before launching native W
 | --- | --- | --- |
 | `pdf_mode` | `auto` (default), `text`, `image` | `auto`/`text` return page Markdown; `image` renders PNG content blocks. |
 | `pages` | `"7"` or `"7-12"` | One page or one continuous range. |
-| `pdf_text_offset` | integer ≥ 0 | Resume one page's Markdown at a UTF-8 byte offset. |
-| `pdf_source_id` | opaque token | Replayed from a previous response to target the same source version. |
+| `pdf_cursor` | opaque token | Replayed verbatim from a previous response. Carries the source version and, when the response stopped inside a page, where to resume in it. |
 
 Page counts bound the work of one call:
 
@@ -180,6 +176,7 @@ The response tells you how far it got and how to continue. A document that mixes
 | `CODEXSHIM_BASH` | probed | Absolute path to a GNU bash. |
 | `CODEXSHIM_LOG_MODE` | `errors` | One of `off`, `errors`, `all`. |
 | `CODEXSHIM_LOG_DIR` | platform default | Override the log directory with an absolute path. |
+| `CODEXSHIM_RESPECT_GITIGNORE` | `false` | When `true`, `grep` and `glob` apply `.gitignore` / `.ignore` filters. Omitted `include_ignored` follows this default; because the caller cannot read this setting, an empty result under active filtering ends with a line recommending `include_ignored=true`. `.git` and `node_modules`, `target`, `.venv`, `venv`, `dist`, `build`, `__pycache__` stay excluded either way. Binary, output-budget, and memory limits still apply. |
 
 ## Diagnostics
 
@@ -196,6 +193,12 @@ codexshim logs purge
 ```
 
 Records contain identifiers, phases, outcomes, timings, and error classes — never MCP arguments, grep patterns, process arguments, stdin, file contents, or stdout/stderr. Set `CODEXSHIM_LOG_MODE=all` while reproducing tool-loading failures.
+
+## Acknowledgments
+
+PDF reading is based on [PDFOxide](https://github.com/yfedoseev/pdf_oxide). Token counting is based on [Gigatoken](https://github.com/marcelroed/gigatoken). We're grateful to both projects for their work.
+
+We've also learned a lot from [FastCtx](https://github.com/yc-duan/fastctx) while designing and measuring `read`, `grep`, and `glob`.
 
 ## License
 
