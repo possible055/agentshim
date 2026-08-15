@@ -2,6 +2,7 @@
 mod tests {
     use std::ffi::{OsStr, OsString};
 
+    use crate::ClientProfile;
     use crate::runtime::{
         DEFAULT_GLOB_MEMORY_BYTES, DEFAULT_GREP_MEMORY_BYTES, DEFAULT_MEMORY_BYTES,
         DEFAULT_PDF_IMAGE_MEMORY_BYTES, DEFAULT_PDF_TEXT_MEMORY_BYTES, DEFAULT_PROCESS_CALLS,
@@ -12,7 +13,7 @@ mod tests {
         PDF_IMAGE_MEMORY_BYTES_ENV, PDF_TEXT_MEMORY_BYTES_ENV, RESPECT_GITIGNORE_ENV,
         RuntimeConfig, RuntimeResources, blocking_threads, global_memory_bytes,
         parse_memory_bytes_in_range, parse_process_calls, parse_respect_gitignore,
-        parse_tool_memory_bytes, parse_tool_timeout_shelf,
+        parse_tool_memory_bytes, parse_tool_timeout_shelf, resolve_tool_timeout_shelf_from,
     };
     use tokio_util::sync::CancellationToken;
 
@@ -212,6 +213,26 @@ mod tests {
                 parse_tool_timeout_shelf(Some(OsStr::new(value))).expect_err("invalid shelf");
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         }
+    }
+
+    #[test]
+    fn resolve_tool_timeout_shelf_uses_profile_default_when_env_unset_and_env_when_set() {
+        assert_eq!(
+            resolve_tool_timeout_shelf_from(None, ClientProfile::Codex),
+            DEFAULT_TOOL_TIMEOUT_SHELF,
+        );
+        assert_eq!(
+            resolve_tool_timeout_shelf_from(None, ClientProfile::Cursor),
+            std::time::Duration::from_secs(120),
+        );
+        assert_eq!(
+            resolve_tool_timeout_shelf_from(Some(OsString::from("300")), ClientProfile::Cursor),
+            std::time::Duration::from_secs(300),
+        );
+        assert_eq!(
+            resolve_tool_timeout_shelf_from(Some(OsString::from("600")), ClientProfile::Codex),
+            DEFAULT_TOOL_TIMEOUT_SHELF,
+        );
     }
 
     #[test]

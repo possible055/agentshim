@@ -28,6 +28,14 @@ use super::{
 pub(crate) const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 /// Round-trip slack beyond `CLEANUP_DEADLINE` for the MCP response carrying the Timeout.
 pub(super) const PROTOCOL_SLACK: Duration = Duration::from_secs(5);
+
+/// The per-call timeout used when the caller omits `timeout_ms`. Clamped below
+/// `max_timeout_ms()` so a shelf smaller than `DEFAULT_TIMEOUT_MS` (e.g. Cursor's
+/// 120-second shelf) cannot produce a default that exceeds the validated maximum.
+#[must_use]
+pub(crate) fn default_timeout_ms() -> u64 {
+    DEFAULT_TIMEOUT_MS.min(max_timeout_ms())
+}
 /// The default shelf when no override has been installed. Matches the
 /// `tool_timeout_sec = 600` documented in every example.
 const DEFAULT_SHELF: Duration = Duration::from_secs(600);

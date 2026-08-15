@@ -10,6 +10,9 @@ on:
         type: choice
         options:
           - all
+          - linux-x86-64
+          - linux-arm64
+          - macos-arm64
           - windows-arm64
           - macos-x86-64
 
@@ -21,6 +24,51 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  linux-x86-64:
+    if: ${{ inputs.platform == 'all' || inputs.platform == 'linux-x86-64' }}
+    name: Linux x86-64 CI
+    uses: ./.github/workflows/rust-validation.yml
+    with:
+      runner: ubuntu-24.04
+      platform: unix
+      system: Linux
+      machine: x86_64
+      runner_arch: X64
+      setup_node: false
+      run_format: true
+      build_docs: true
+      run_metadata: true
+
+  linux-arm64:
+    if: ${{ inputs.platform == 'all' || inputs.platform == 'linux-arm64' }}
+    name: Linux ARM64 CI
+    uses: ./.github/workflows/rust-validation.yml
+    with:
+      runner: ubuntu-24.04-arm
+      platform: unix
+      system: Linux
+      machine: aarch64
+      runner_arch: ARM64
+      setup_node: false
+      run_format: true
+      build_docs: true
+      run_metadata: true
+
+  macos-arm64:
+    if: ${{ inputs.platform == 'all' || inputs.platform == 'macos-arm64' }}
+    name: macOS ARM64 CI
+    uses: ./.github/workflows/rust-validation.yml
+    with:
+      runner: macos-26
+      platform: unix
+      system: Darwin
+      machine: arm64
+      runner_arch: ARM64
+      setup_node: false
+      run_format: true
+      build_docs: true
+      run_metadata: true
+
   windows-arm64:
     if: ${{ inputs.platform == 'all' || inputs.platform == 'windows-arm64' }}
     name: Windows ARM64 CI

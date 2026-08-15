@@ -1,4 +1,9 @@
-use std::{env, ffi::OsStr, io, time::Duration};
+use std::{
+    env,
+    ffi::{OsStr, OsString},
+    io,
+    time::Duration,
+};
 
 pub const MAX_READ_ONLY_CALLS: usize = 16;
 pub const MAX_SEARCH_LANES: usize = 16;
@@ -295,6 +300,24 @@ pub(super) fn parse_tool_timeout_shelf(value: Option<&OsStr>) -> io::Result<Dura
                     ),
                 )
             }),
+    }
+}
+
+/// Resolve the effective tool-timeout shelf: use the environment override when set,
+/// otherwise fall back to the client-profile default. Called from `build()` after the
+/// profile is known, because `RuntimeConfig::from_env()` predates the profile selection
+/// and always uses `DEFAULT_TOOL_TIMEOUT_SHELF`.
+pub(crate) fn resolve_tool_timeout_shelf(profile: crate::ClientProfile) -> Duration {
+    resolve_tool_timeout_shelf_from(env::var_os(TOOL_TIMEOUT_SHELF_ENV), profile)
+}
+
+pub(super) fn resolve_tool_timeout_shelf_from(
+    env_value: Option<OsString>,
+    profile: crate::ClientProfile,
+) -> Duration {
+    match env_value {
+        None => profile.default_tool_timeout_shelf(),
+        Some(value) => parse_tool_timeout_shelf(Some(&value)).unwrap_or(DEFAULT_TOOL_TIMEOUT_SHELF),
     }
 }
 

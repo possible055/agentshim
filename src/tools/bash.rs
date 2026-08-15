@@ -19,7 +19,7 @@ use crate::{
             },
             resolve::{ResolvedProgram, launcher_for},
             spawn::{
-                self, DEFAULT_TIMEOUT_MS, EnvironmentPlan, ExecFailure, ExecPlan, Streams,
+                self, EnvironmentPlan, ExecFailure, ExecPlan, Streams, default_timeout_ms,
                 max_timeout_ms,
             },
         },
@@ -124,7 +124,7 @@ impl BashRequest {
 
     #[must_use]
     pub fn timeout_ms(&self) -> u64 {
-        self.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS)
+        self.timeout_ms.unwrap_or(default_timeout_ms())
     }
 
     #[must_use]

@@ -1,7 +1,12 @@
-use std::{fmt::Display, io, str::FromStr};
+use std::{fmt::Display, io, str::FromStr, time::Duration};
 
 pub(crate) const CODEX_BURST_TOKENS: usize = 16_384;
 pub(crate) const CURSOR_BURST_TOKENS: usize = 32_768;
+
+/// Cursor's MCP client enforces a fixed 120-second `tools/call` timeout with no
+/// configuration override, so the server shelf must stay at or below that ceiling
+/// for the server's own Timeout response to arrive before the client gives up.
+pub(crate) const CURSOR_TOOL_TIMEOUT_SHELF: Duration = Duration::from_secs(120);
 
 /// Client-specific defaults for aggregate tool-response output.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -20,6 +25,16 @@ impl ClientProfile {
         match self {
             Self::Codex => CODEX_BURST_TOKENS,
             Self::Cursor => CURSOR_BURST_TOKENS,
+        }
+    }
+
+    /// Return the default tool-timeout shelf for this client when
+    /// `CODEXSHIM_TOOL_TIMEOUT_SHELF` is not set in the environment.
+    #[must_use]
+    pub const fn default_tool_timeout_shelf(self) -> Duration {
+        match self {
+            Self::Codex => crate::runtime::DEFAULT_TOOL_TIMEOUT_SHELF,
+            Self::Cursor => CURSOR_TOOL_TIMEOUT_SHELF,
         }
     }
 }
@@ -50,7 +65,11 @@ impl FromStr for ClientProfile {
 
 #[cfg(test)]
 mod tests {
-    use super::{CODEX_BURST_TOKENS, CURSOR_BURST_TOKENS, ClientProfile};
+    use super::{
+        CODEX_BURST_TOKENS, CURSOR_BURST_TOKENS, CURSOR_TOOL_TIMEOUT_SHELF, ClientProfile,
+    };
+    use crate::runtime::DEFAULT_TOOL_TIMEOUT_SHELF;
+    use std::time::Duration;
 
     #[test]
     fn profile_burst_defaults_match_the_client_contract() {
@@ -63,5 +82,18 @@ mod tests {
             ClientProfile::Cursor.default_burst_tokens(),
             CURSOR_BURST_TOKENS
         );
+    }
+
+    #[test]
+    fn profile_tool_timeout_shelf_defaults_match_the_client_contract() {
+        assert_eq!(
+            ClientProfile::Codex.default_tool_timeout_shelf(),
+            DEFAULT_TOOL_TIMEOUT_SHELF,
+        );
+        assert_eq!(
+            ClientProfile::Cursor.default_tool_timeout_shelf(),
+            CURSOR_TOOL_TIMEOUT_SHELF,
+        );
+        assert_eq!(CURSOR_TOOL_TIMEOUT_SHELF, Duration::from_secs(120));
     }
 }

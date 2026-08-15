@@ -47,4 +47,4 @@ Compatibility-supported platforms receive native release assets. Every release v
 - Linux ARM64
 - macOS ARM64
 
-Windows ARM64 and macOS x86-64 may be tested manually through the optional platform workflow. They and all other Rust targets are possible-support source builds with no release assets, CI guarantee, service level, or support commitment.
+The optional platform workflow can run the current Windows-aligned validation suite on those three platforms, as well as Windows ARM64 and macOS x86-64. Windows ARM64, macOS x86-64, and all other Rust targets are possible-support source builds with no release assets, CI guarantee, service level, or support commitment.

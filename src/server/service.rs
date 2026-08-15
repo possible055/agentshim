@@ -121,16 +121,19 @@ impl CodexShimBuilder {
     /// Returns the repository root validation or capability-open error.
     pub fn build(self) -> io::Result<CodexShim> {
         let root = Arc::new(RepositoryRoot::open(self.root)?);
-        crate::tools::exec::spawn::install_max_timeout_ms(self.runtime.tool_timeout_shelf);
+        let mut runtime = self.runtime;
+        runtime.tool_timeout_shelf =
+            crate::runtime::resolve_tool_timeout_shelf(self.client_profile);
+        crate::tools::exec::spawn::install_max_timeout_ms(runtime.tool_timeout_shelf);
         let output_token_gate = OutputTokenGate::load_shared().map_err(io::Error::other)?;
         let burst_output_gate =
             BurstOutputGate::new(crate::output::configured_burst_tokens(self.client_profile)?);
         Ok(CodexShim {
             file_access: Arc::new(FileAccess::new(Arc::clone(&root), self.read_scope)),
             root,
-            detached: DetachedTrees::new(self.runtime.detached_calls),
+            detached: DetachedTrees::new(runtime.detached_calls),
             bash_locator: BashLocator::capture(),
-            resources: RuntimeResources::new(self.runtime),
+            resources: RuntimeResources::new(runtime),
             process_resolver: ProcessResolver::capture(),
             output_token_gate,
             burst_output_gate,

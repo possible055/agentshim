@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use crate::{
     path::ReadScope,
-    tools::exec::spawn::{DEFAULT_TIMEOUT_MS, max_timeout_ms},
+    tools::exec::spawn::{default_timeout_ms, max_timeout_ms},
 };
 
 pub(super) fn tool_catalog(read_scope: ReadScope) -> &'static [Tool; 5] {
@@ -241,6 +241,7 @@ fn glob_tool(read_scope: ReadScope) -> Tool {
 
 fn run_program_tool() -> Tool {
     let max = max_timeout_ms();
+    let default = default_timeout_ms();
     Tool::new(
         "run_program",
         "Run one local program directly with literal arguments and no shell. Use this by default \
@@ -287,7 +288,7 @@ fn run_program_tool() -> Tool {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": max,
-                    "default": DEFAULT_TIMEOUT_MS,
+                    "default": default,
                     "description": "Execution timeout in milliseconds. On timeout the program is terminated and a Timeout error is returned."
                 },
                 "unset_env": {
@@ -312,6 +313,7 @@ fn run_program_tool() -> Tool {
 
 fn bash_tool() -> Tool {
     let max = max_timeout_ms();
+    let default = default_timeout_ms();
     let description = format!(
         "Run a POSIX bash command line and return merged stdout and stderr with the exit code. \
          Write POSIX bash, never PowerShell, on every platform. The command runs \
@@ -320,7 +322,7 @@ fn bash_tool() -> Tool {
          error. stdout and stderr come back merged, with no way to tell which line came from \
          which, and their relative order is not reliable. Output too large for one response is \
          truncated in the middle and cannot be continued: redirect it to a file and page that \
-         with read when you need all of it. The default timeout is {DEFAULT_TIMEOUT_MS} ms and \
+         with read when you need all of it. The default timeout is {default} ms and \
          the maximum is {max} ms; for \
          work that needs longer, set detach with a log_path and read that file instead of \
          waiting. On Windows, prefer run_program for one native program with literal arguments. \
@@ -363,7 +365,7 @@ fn bash_tool() -> Tool {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": max,
-                    "default": DEFAULT_TIMEOUT_MS,
+                    "default": default,
                     "description": "Execution timeout in milliseconds. On timeout the command is terminated and a Timeout error is returned. Forbidden when detach is true."
                 }
             },
