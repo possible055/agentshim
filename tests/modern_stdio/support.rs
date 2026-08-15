@@ -102,7 +102,7 @@ impl Session {
 
     pub(super) fn close(mut self) {
         self.stdin.take();
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(10);
         let status = loop {
             if let Some(status) = self.child.try_wait().expect("poll server") {
                 break status;

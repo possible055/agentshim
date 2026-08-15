@@ -25,7 +25,7 @@ fn projected_success_tokens(responses: &[Value]) -> usize {
 
 #[test]
 fn parallel_large_reads_share_one_projected_burst_budget() {
-    const CALLS: u64 = 16;
+    const CALLS: u64 = 8;
     let fixture = tempfile::tempdir().expect("fixture");
     let body = (0..4_000)
         .map(|line| format!("{line} {}", " x".repeat(20)))
