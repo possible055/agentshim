@@ -22,12 +22,15 @@
 {"id":"npm-test","legacy":"npm.cmd test","category":"cmd-compat","tool":"run_process","replacement":{"program":"npm.cmd","args":["test"]}}
 {"id":"npx-version","legacy":"npx.cmd --version","category":"cmd-compat","tool":"run_process","replacement":{"program":"npx.cmd","args":["--version"]}}
 {"id":"project-shim","legacy":"tools\\build.cmd release","category":"cmd-compat","tool":"run_process","replacement":{"program":"tools\\build.cmd","args":["release"]}}
-{"id":"pipe","legacy":"producer | consumer","category":"unsupported","reason":"pipe grammar"}
-{"id":"redirect","legacy":"cargo test > test.log","category":"unsupported","reason":"redirection"}
-{"id":"and-chain","legacy":"git status && cargo test","category":"unsupported","reason":"conditional shell execution"}
-{"id":"shell-cd","legacy":"cd subdir && cargo test","category":"unsupported","reason":"shell state; use cwd for the single executable when separable"}
-{"id":"wildcard-expansion","legacy":"tool *.rs","category":"unsupported","reason":"shell wildcard expansion"}
-{"id":"background","legacy":"server &","category":"unsupported","reason":"background jobs are not supported"}
+{"id":"pipe","legacy":"producer | consumer","category":"shell","tool":"bash","replacement":{"command":"producer | consumer"}}
+{"id":"redirect","legacy":"cargo test > test.log","category":"shell","tool":"bash","replacement":{"command":"cargo test > test.log"}}
+{"id":"and-chain","legacy":"git status && cargo test","category":"shell","tool":"bash","replacement":{"command":"git status && cargo test"}}
+{"id":"shell-cd","legacy":"cd subdir && cargo test","category":"shell","tool":"bash","replacement":{"command":"cd subdir && cargo test"}}
+{"id":"wildcard-expansion","legacy":"tool *.rs","category":"shell","tool":"bash","replacement":{"command":"tool *.rs"}}
+{"id":"env-prefix","legacy":"FOO=1 cargo test","category":"shell","tool":"bash","replacement":{"command":"FOO=1 cargo test"}}
+{"id":"for-loop","legacy":"for f in *.rs; do rustfmt \"$f\"; done","category":"shell","tool":"bash","replacement":{"command":"for f in *.rs; do rustfmt \"$f\"; done"}}
+{"id":"background","legacy":"server &","category":"shell","tool":"bash","replacement":{"command":"server","detach":true,"log_path":"server.log"}}
+{"id":"long-running","legacy":"cargo test 2>&1 | tee test.log","category":"shell-detach","tool":"bash","replacement":{"command":"cargo test 2>&1 | tee test.log","detach":true,"log_path":"test.log"}}
 {"id":"interactive","legacy":"python -i","category":"unsupported","reason":"TTY and interactive prompts are not supported"}
 {"id":"powershell-command","legacy":"pwsh -Command Get-Process","category":"unsupported","reason":"command-evaluation shell form is rejected"}
 {"id":"cmd-command","legacy":"cmd.exe /c echo hello","category":"unsupported","reason":"caller-supplied cmd command string is rejected"}

@@ -661,15 +661,18 @@ impl DetachedTree {
         self.pid
     }
 
-    pub(crate) fn is_running(&mut self) -> bool {
+    /// Fallible on purpose: a failed `kill(-pgroup, 0)` probe says nothing about the tree,
+    /// and callers must keep the owner rather than treat the tree as reaped.
+    pub(crate) fn is_running(&mut self) -> io::Result<bool> {
         let _ = self.child.try_wait();
-        let running = group_exists(self.process_group).unwrap_or(false);
+        let running = group_exists(self.process_group)?;
         if !running {
             let _ = self.child.wait();
         }
-        running
+        Ok(running)
     }
 
+    #[cfg(test)]
     pub(crate) fn terminate(&mut self) {
         if terminate(
             self.process_group,
@@ -682,6 +685,18 @@ impl DetachedTree {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+    }
+
+    /// Terminate the process group and confirm it died before `deadline`, sharing one
+    /// deadline across every tree a shutdown owns instead of budgeting five seconds each.
+    pub(crate) fn terminate_and_wait(&mut self, deadline: Instant) -> Result<(), ProcessError> {
+        let outcome = terminate(self.process_group, &mut self.child, deadline);
+        if outcome.is_err() {
+            let _ = signal_group(self.process_group, libc::SIGKILL);
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+        outcome
     }
 }
 

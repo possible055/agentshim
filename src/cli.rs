@@ -174,22 +174,35 @@ pub(super) async fn run(config: RuntimeLimits, command: CliCommand) -> Result<()
                 termination_reported: false,
             };
             tracing::info!(target: "codexshim", event = "server_start", phase = "lifecycle", read_scope = %read_scope, client_profile = %service.client_profile(), tool_output_tokens = service.tool_output_token_limit(), burst_tokens = service.burst_token_limit());
-            let shutdown = service.clone();
             let shutdown_token = service.shutdown_token();
             let transport = (reader, stdout).into_transport();
             let (transport, transport_failure) =
                 DiagnosticTransport::new(transport, shutdown_token.clone());
+            // Process shutdown begins the moment the global token fires — EOF, transport
+            // failure, or explicit stop — and runs in parallel with the protocol drain,
+            // instead of waiting for the service to finish first.
+            let shutdown_watcher = {
+                let shutdown_service = service.clone();
+                let watcher_token = shutdown_token.clone();
+                tokio::spawn(async move {
+                    watcher_token.cancelled().await;
+                    shutdown_service.shutdown_processes().await;
+                })
+            };
+            let drain_service = service.clone();
             let running = match service.serve_with_ct(transport, shutdown_token).await {
                 Ok(running) => running,
                 Err(error) => {
-                    shutdown.terminate_detached();
+                    drain_service.shutdown_processes().await;
+                    let _ = shutdown_watcher.await;
                     tracing::error!(target: "codexshim", event = "server_stop", phase = "lifecycle", outcome = "error", error_class = initialize_error_class(&error));
                     return Err(error.into());
                 }
             };
             tracing::info!(target: "codexshim", event = "server_ready", phase = "lifecycle");
             let outcome = running.waiting().await;
-            shutdown.terminate_detached();
+            drain_service.shutdown_processes().await;
+            let _ = shutdown_watcher.await;
             match outcome {
                 Ok(QuitReason::Closed) if transport_failure.failed() => {
                     tracing::error!(target: "codexshim", event = "server_stop", phase = "lifecycle", outcome = "error", error_class = "transport");

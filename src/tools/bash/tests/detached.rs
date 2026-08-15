@@ -109,7 +109,7 @@ fn detached_windows_bash_receives_the_disabled_argument_conversion_environment()
 }
 
 #[test]
-fn a_full_detached_roster_reports_resource_busy_and_frees_finished_slots() {
+fn a_full_detached_roster_reports_resource_busy() {
     if !bash_is_available() {
         return;
     }
@@ -125,10 +125,34 @@ fn a_full_detached_roster_reports_resource_busy_and_frees_finished_slots() {
     let message = busy.to_string();
     assert!(message.contains("first.log"), "{message}");
     assert!(message.contains("pid "), "{message}");
-
     trees.terminate_all();
-    spawn_detached(&root, &trees, "sleep 30", "third.log")
-        .expect("a finished tree frees its slot at the next admission");
+}
+
+/// A finished tree frees its slot at the next admission sweep, so a short-lived command's
+/// path and capacity become reusable without any reaper thread.
+#[test]
+fn a_finished_tree_frees_its_slot_for_the_next_admission() {
+    if !bash_is_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("fixture");
+    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+    let trees = DetachedTrees::new(1);
+
+    spawn_detached(&root, &trees, "true", "first.log").expect("first detached bash");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let reused = loop {
+        match spawn_detached(&root, &trees, "true", "second.log") {
+            Ok(reused) => break reused,
+            Err(ProcessError::ResourceBusy(_)) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => panic!("unexpected error while waiting for the slot: {error}"),
+        }
+    };
+
+    assert!(reused.contains("second.log"), "{reused}");
+    assert_eq!(trees.live_count(), 1);
     trees.terminate_all();
 }
 
@@ -428,4 +452,185 @@ fn a_backgrounded_child_does_not_hold_the_foreground_call_open() {
         !fixture.path().join("delayed-marker").exists(),
         "the backgrounded child survived long enough to write after the response"
     );
+}
+
+/// A failed liveness query is a degraded observation, not an exit report: the roster must
+/// keep the job owner and its capacity booked, because dropping the slot would close the
+/// only handle and kill a tree that may still be running.
+#[test]
+fn a_degraded_liveness_query_keeps_the_owner_and_capacity() {
+    if !bash_is_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("fixture");
+    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+    let trees = trees();
+
+    spawn_detached(
+        &root,
+        &trees,
+        "while :; do printf x >> degraded-marker; sleep 0.1; done",
+        "degraded.log",
+    )
+    .expect("detached bash");
+    let marker = fixture.path().join("degraded-marker");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if std::fs::read_to_string(&marker).is_ok_and(|body| !body.is_empty()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        !std::fs::read_to_string(&marker)
+            .unwrap_or_default()
+            .is_empty(),
+        "the detached tree did not start"
+    );
+
+    trees.fail_next_liveness_query();
+    trees
+        .admit()
+        .expect("the roster has fifteen free slots beside the degraded one");
+
+    assert_eq!(
+        trees.live_count(),
+        1,
+        "a degraded liveness query dropped the owner of a running tree"
+    );
+    let before = std::fs::read_to_string(&marker).unwrap_or_default().len();
+    std::thread::sleep(Duration::from_millis(750));
+    let after = std::fs::read_to_string(&marker).unwrap_or_default().len();
+    assert!(
+        after > before,
+        "the running tree was killed by a slot dropped on a query error"
+    );
+    trees.terminate_all();
+}
+
+/// L2/L3: `begin_shutdown` closes admission, and the spawn-to-commit window re-checks it.
+/// A tree that committed after the shutdown must be rolled back by the caller — terminated
+/// with a bounded, verified wait — never adopted by a roster that has already swept.
+#[test]
+fn shutdown_racing_a_detached_call_rolls_back_the_late_commit() {
+    if !bash_is_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("fixture");
+    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+    let trees = trees();
+    let locator = BashLocator::capture();
+    locator
+        .resolve(&CancellationToken::new())
+        .expect("probed bash");
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    let release = Arc::new(std::sync::Barrier::new(2));
+    let hook_entered = Arc::clone(&entered);
+    let hook_release = Arc::clone(&release);
+    trees.set_after_open_hook(move || {
+        hook_entered.wait();
+        hook_release.wait();
+    });
+    let admission = trees.admit().expect("detached admission");
+    let worker_root = Arc::clone(&root);
+    let worker_locator = locator.clone();
+    let worker = std::thread::spawn(move || {
+        execute_output(
+            &worker_root,
+            &worker_locator,
+            Some(admission),
+            &detach_request(
+                "while :; do printf x >> late-marker; sleep 0.1; done",
+                "late.log",
+            ),
+            Duration::ZERO,
+            &CancellationToken::new(),
+        )
+    });
+    entered.wait();
+    let swept = trees.begin_shutdown();
+    assert!(swept.is_empty(), "no tree had committed yet");
+    assert!(!trees.is_accepting());
+    release.wait();
+    let error = worker
+        .join()
+        .expect("detached worker")
+        .expect_err("a late commit during shutdown must fail the call");
+
+    assert!(matches!(error, ProcessError::Cancelled), "{error}");
+    assert_eq!(trees.live_count(), 0, "the late tree entered the roster");
+    assert_eq!(trees.reserved_count(), 0, "the reservation was released");
+    std::thread::sleep(Duration::from_millis(1_500));
+    assert!(
+        std::fs::read_to_string(fixture.path().join("late-marker"))
+            .unwrap_or_default()
+            .is_empty(),
+        "the rolled-back tree kept running after shutdown"
+    );
+}
+
+#[test]
+fn a_roster_that_stopped_accepting_rejects_new_detached_admissions() {
+    if !bash_is_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("fixture");
+    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+    let trees = trees();
+
+    assert!(trees.is_accepting());
+    let swept = trees.begin_shutdown();
+    assert!(swept.is_empty());
+    assert!(!trees.is_accepting());
+    let again = trees.begin_shutdown();
+    assert!(again.is_empty(), "the transition is idempotent");
+
+    let error = spawn_detached(&root, &trees, "sleep 30", "after-stop.log")
+        .expect_err("a stopped roster must not admit");
+    assert!(matches!(error, ProcessError::ResourceBusy(_)), "{error}");
+    assert!(error.to_string().contains("stopping"), "{error}");
+    assert_eq!(trees.live_count(), 0);
+    assert_eq!(trees.reserved_count(), 0);
+}
+
+/// Two calls in one instance cannot share an observation pipe: the duplicate is rejected
+/// at reservation time, before the log is opened, and the path is reusable once the
+/// previous owner has finished.
+#[test]
+fn an_active_log_path_is_not_reused_and_frees_when_the_owner_finishes() {
+    if !bash_is_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("fixture");
+    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+    let trees = trees();
+
+    spawn_detached(&root, &trees, "sleep 1", "shared.log").expect("first detached bash");
+    let conflict = spawn_detached(&root, &trees, "sleep 30", "shared.log")
+        .expect_err("a duplicate log_path must be refused");
+
+    assert!(
+        matches!(conflict, ProcessError::ResourceBusy(_)),
+        "{conflict}"
+    );
+    assert!(
+        conflict.to_string().contains("already in use"),
+        "{conflict}"
+    );
+    assert_eq!(trees.live_count(), 1);
+    assert_eq!(trees.reserved_count(), 0, "the refused call kept its key");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let reused = loop {
+        match spawn_detached(&root, &trees, "true", "shared.log") {
+            Ok(reused) => break reused,
+            Err(ProcessError::ResourceBusy(_)) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => panic!("unexpected error while waiting for the path: {error}"),
+        }
+    };
+
+    assert!(reused.contains("shared.log"), "{reused}");
+    trees.terminate_all();
 }

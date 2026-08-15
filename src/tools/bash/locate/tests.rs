@@ -280,3 +280,152 @@ fn a_git_layout_gains_its_own_toolchain_directories_ahead_of_the_inherited_path(
         }
     }
 }
+
+#[test]
+fn search_path_returns_every_hit_in_order() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let first = fixture.path().join("first");
+    let second = fixture.path().join("second");
+    std::fs::create_dir_all(&first).expect("first directory");
+    std::fs::create_dir_all(&second).expect("second directory");
+    std::fs::write(first.join("bash.exe"), b"").expect("first hit");
+    std::fs::write(second.join("bash.exe"), b"").expect("second hit");
+    let inherited = std::env::join_paths([&first, &second]).expect("joined PATH");
+
+    let hits = search_path("bash.exe", &inherited);
+
+    assert_eq!(hits, vec![first.join("bash.exe"), second.join("bash.exe")]);
+}
+
+#[cfg(windows)]
+#[test]
+fn system_root_exclusion_respects_component_boundaries_and_slash_forms() {
+    let root = OsString::from("C:\\Windows");
+    for excluded in [
+        r"C:\Windows\System32\bash.exe",
+        r"C:/Windows/System32/bash.exe",
+        r"c:\WINDOWS\bash.exe",
+        r"C:\Windows",
+        r"C:\Windows\",
+    ] {
+        assert!(
+            is_excluded_with(Path::new(excluded), Some(&root)),
+            "{excluded} must be excluded"
+        );
+    }
+    for kept in [
+        r"C:\Windows-Tools\bash.exe",
+        r"C:\Windowsity\bash.exe",
+        r"D:\Windows\System32\bash.exe",
+        r"C:\Users\me\Git\usr\bin\bash.exe",
+    ] {
+        assert!(
+            !is_excluded_with(Path::new(kept), Some(&root)),
+            "{kept} must not be excluded"
+        );
+    }
+    assert!(!is_excluded_with(
+        Path::new(r"C:\Windows\System32\bash.exe"),
+        None
+    ));
+    assert!(!is_excluded_with(
+        Path::new(r"C:\Windows\System32\bash.exe"),
+        Some(&OsString::new())
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn windowsapps_exclusion_matches_a_component_in_either_slash_form() {
+    let root = OsString::from("C:\\Windows");
+    for excluded in [
+        r"C:\Users\me\AppData\Local\Microsoft\WindowsApps\bash.exe",
+        r"C:\Users\me\AppData\Local\Microsoft\windowsapps\bash.exe",
+        r"C:/Users/me/AppData/Local/Microsoft/WindowsApps/bash.exe",
+        r"D:\Tools\WindowsApps\bash.exe",
+    ] {
+        assert!(
+            is_excluded_with(Path::new(excluded), Some(&root)),
+            "{excluded} must be excluded"
+        );
+    }
+    assert!(
+        !is_excluded_with(Path::new(r"C:\Tools\windows-apps\bash.exe"), Some(&root)),
+        "a lookalike component is not the Store alias directory"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn an_excluded_override_is_rejected_without_entering_wsl() {
+    for override_path in [
+        r"C:\Windows\System32\bash.exe",
+        r"C:/Windows/System32/bash.exe",
+        r"C:\Users\me\AppData\Local\Microsoft\WindowsApps\bash.exe",
+    ] {
+        let locator = BashLocator::for_tests(
+            Some(OsString::from(override_path)),
+            Vec::new(),
+            OsString::new(),
+        );
+        let error = locator
+            .resolve(&CancellationToken::new())
+            .expect_err("an excluded override must not be used");
+
+        let LocateError::Unavailable(message) = error else {
+            panic!("expected an unavailable error for {override_path}");
+        };
+        assert!(
+            message.contains("WSL launcher"),
+            "the message must name the WSL launcher: {message}"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn a_later_path_hit_is_used_when_the_first_bash_exe_is_excluded() {
+    let Some(runtime) = available_bash() else {
+        return;
+    };
+    let fixture = tempfile::tempdir().expect("fixture");
+    let store_alias = fixture.path().join("Microsoft").join("WindowsApps");
+    std::fs::create_dir_all(&store_alias).expect("Store alias directory");
+    std::fs::write(store_alias.join("bash.exe"), b"").expect("alias hit");
+    let real_directory = runtime
+        .executable
+        .parent()
+        .expect("bash parent directory")
+        .to_owned();
+    let inherited = std::env::join_paths([&store_alias, &real_directory]).expect("joined PATH");
+
+    let candidates = search_path("bash.exe", &inherited);
+    assert_eq!(candidates.len(), 2, "both hits must be collected");
+    let locator = BashLocator::for_tests(None, candidates, inherited);
+    let resolved = locator
+        .resolve(&CancellationToken::new())
+        .expect("the excluded first hit falls through to the later one");
+
+    assert_eq!(resolved.executable, runtime.executable);
+}
+
+#[cfg(windows)]
+#[test]
+fn an_arm64_git_layout_prefixes_clangarm64_bin() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let own = fixture.path().join("usr").join("bin");
+    let arm64 = fixture.path().join("clangarm64").join("bin");
+    std::fs::create_dir_all(&own).expect("usr/bin");
+    std::fs::create_dir_all(&arm64).expect("clangarm64/bin");
+    std::fs::write(own.join("bash.exe"), b"").expect("layout bash");
+
+    let path = toolchain_path(&own.join("bash.exe"), &OsString::new())
+        .expect("a bin layout must yield a toolchain PATH");
+    let entries = std::env::split_paths(&path).collect::<Vec<_>>();
+
+    assert!(
+        entries.contains(&arm64),
+        "clangarm64/bin is missing: {path}"
+    );
+    assert_eq!(entries.last(), Some(&own));
+}

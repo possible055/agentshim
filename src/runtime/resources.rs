@@ -88,6 +88,49 @@ impl RuntimeResources {
         self.shutdown.clone()
     }
 
+    /// Cancel the global shutdown token: the single irreversible
+    /// `Accepting -> Stopping` linearization point for process ownership.
+    pub fn cancel_shutdown(&self) {
+        self.shutdown.cancel();
+    }
+
+    /// Blocking quiescence barrier for foreground process owners: returns once every
+    /// configured permit is free, or `false` at `deadline`. The wait deliberately ignores
+    /// the shutdown token — cancelling it is what started the shutdown — and acquires
+    /// rather than closes the semaphore, so admission keeps working while it drains.
+    pub fn wait_for_process_quiescence(&self, deadline: std::time::Instant) -> bool {
+        let permits =
+            u32::try_from(self.config.process_calls).expect("process capacity fits u32 permits");
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                let acquisition = async {
+                    self.process_calls
+                        .clone()
+                        .acquire_many_owned(permits)
+                        .await
+                        .is_ok()
+                };
+                let bounded =
+                    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), acquisition);
+                handle.block_on(bounded).unwrap_or(false)
+            }
+            Err(_) => loop {
+                if self
+                    .process_calls
+                    .clone()
+                    .try_acquire_many_owned(permits)
+                    .is_ok()
+                {
+                    return true;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            },
+        }
+    }
+
     #[must_use]
     pub fn file_work_pool(&self) -> Arc<FileWorkPool> {
         Arc::clone(&self.file_work)
@@ -97,8 +140,17 @@ impl RuntimeResources {
         self.read_only_calls.clone().try_acquire_owned().ok()
     }
 
+    /// Admission is fail-fast and double-checked around the permit: after the global
+    /// shutdown token fires, no caller may hold — or newly acquire — a foreground slot.
     pub fn try_admit_process(&self) -> Option<OwnedSemaphorePermit> {
-        self.process_calls.clone().try_acquire_owned().ok()
+        if self.shutdown.is_cancelled() {
+            return None;
+        }
+        let permit = self.process_calls.clone().try_acquire_owned().ok()?;
+        if self.shutdown.is_cancelled() {
+            return None;
+        }
+        Some(permit)
     }
 
     /// Acquire one shared blocking/search lane.

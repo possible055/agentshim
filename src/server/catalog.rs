@@ -325,7 +325,10 @@ fn bash_tool() -> Tool {
          with read when you need all of it. The default timeout is {default} ms and \
          the maximum is {max} ms; for \
          work that needs longer, set detach with a log_path and read that file instead of \
-         waiting. On Windows, prefer run_program for one native program with literal arguments. \
+         waiting. A detached tree belongs to this server instance and runs until it exits on \
+         its own or the instance stops: when the connection or server closes, the trees it owns \
+         are terminated, and there is no reconnect, list, or kill API for them. On Windows, \
+         prefer run_program for one native program with literal arguments. \
          Do not issue state-changing commands against the same working tree in parallel calls. A \
          program that daemonizes itself may keep running after this call returns. This is not a \
          sandbox, and the call may require user approval."
@@ -349,11 +352,11 @@ fn bash_tool() -> Tool {
                 "detach": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Run the command past the end of this call. Requires log_path and forbids timeout_ms; returns the pid and log path instead of output. Poll progress by reading log_path."
+                    "description": "Run the command past the end of this call. The process tree is owned by this server instance and is terminated when the connection or server closes; there is no reconnect, list, or kill API. Requires log_path and forbids timeout_ms; returns the pid and log path instead of output. Poll progress by reading log_path."
                 },
                 "log_path": {
                     "type": "string",
-                    "description": "Repository-relative or root-absolute file for the detached command's merged output, truncated at start. Its parent directory must already exist. Required when detach is true and rejected otherwise."
+                    "description": "Repository-relative or root-absolute file for the detached command's merged output, truncated at start. Its parent directory must already exist, and it must not be in use by another active or reserved detached call in this instance; a duplicate is rejected before the log is truncated. Required when detach is true and rejected otherwise."
                 },
                 "msys_argument_conversion": {
                     "type": "string",
@@ -366,7 +369,7 @@ fn bash_tool() -> Tool {
                     "minimum": 1,
                     "maximum": max,
                     "default": default,
-                    "description": "Execution timeout in milliseconds. On timeout the command is terminated and a Timeout error is returned. Forbidden when detach is true."
+                    "description": "Execution timeout in milliseconds, capped by deployment configuration below the shown maximum. The client's own request timeout still bounds how long a call can wait, so work expected to run for tens of seconds or longer should use detach with a log_path instead. On timeout the command is terminated and a Timeout error is returned. Forbidden when detach is true."
                 }
             },
             "required": ["command"]

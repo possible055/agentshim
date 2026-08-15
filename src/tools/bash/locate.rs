@@ -317,9 +317,19 @@ fn validate_override(
             path.display()
         )));
     }
+    // The raw form first, so a WSL launcher or Store alias is rejected without executing
+    // anything; the canonical form also catches a link that resolves into an excluded tree.
+    if is_excluded(path) {
+        return Err(ProbeError::Unavailable(excluded_override_message(path)));
+    }
     let canonical = std::fs::canonicalize(path).map_err(|error| {
         ProbeError::Unavailable(format!("{BASH_OVERRIDE_ENV} cannot be opened: {error}"))
     })?;
+    if is_excluded(&canonical) {
+        return Err(ProbeError::Unavailable(excluded_override_message(
+            &canonical,
+        )));
+    }
     if !reports_gnu_bash(&canonical, budget, cancellation)? {
         return Err(ProbeError::Unavailable(format!(
             "{BASH_OVERRIDE_ENV} points at {}, which did not report GNU bash from `--version`",
@@ -329,11 +339,19 @@ fn validate_override(
     Ok(canonical)
 }
 
+fn excluded_override_message(path: &Path) -> String {
+    format!(
+        "{BASH_OVERRIDE_ENV} points at {}, which is the WSL launcher or a Store alias and \
+         is never used",
+        path.display()
+    )
+}
+
 #[cfg(windows)]
 fn candidates(inherited_path: &OsStr) -> Vec<PathBuf> {
     const RELATIVE: &str = "usr/bin/bash.exe";
     let mut candidates = Vec::new();
-    if let Some(git) = search_path("git.exe", inherited_path) {
+    if let Some(git) = search_path("git.exe", inherited_path).into_iter().next() {
         let mut directory = git.parent();
         for _ in 0..4 {
             let Some(current) = directory else { break };
@@ -354,26 +372,25 @@ fn candidates(inherited_path: &OsStr) -> Vec<PathBuf> {
                 .join(RELATIVE),
         );
     }
-    if let Some(path_bash) = search_path("bash.exe", inherited_path) {
-        candidates.push(path_bash);
-    }
+    candidates.extend(search_path("bash.exe", inherited_path));
     candidates
 }
 
 #[cfg(not(windows))]
 fn candidates(inherited_path: &OsStr) -> Vec<PathBuf> {
     let mut candidates = vec![PathBuf::from("/bin/bash"), PathBuf::from("/usr/bin/bash")];
-    if let Some(path_bash) = search_path("bash", inherited_path) {
-        candidates.push(path_bash);
-    }
+    candidates.extend(search_path("bash", inherited_path));
     candidates
 }
 
-fn search_path(name: &str, inherited_path: &OsStr) -> Option<PathBuf> {
+/// Every `PATH` hit in order: an earlier hit that discovery excludes must not hide a
+/// later Git Bash.
+fn search_path(name: &str, inherited_path: &OsStr) -> Vec<PathBuf> {
     std::env::split_paths(inherited_path)
         .filter(|entry| !entry.as_os_str().is_empty())
         .map(|entry| entry.join(name))
-        .find(|candidate| candidate.is_file())
+        .filter(|candidate| candidate.is_file())
+        .collect()
 }
 
 #[cfg(windows)]
@@ -387,7 +404,12 @@ fn toolchain_path(executable: &Path, inherited_path: &OsStr) -> Option<String> {
     }
     let mut prefix = Vec::new();
     if let Some(root) = own.parent().and_then(Path::parent) {
-        for relative in ["usr/local/bin", "mingw64/bin", "mingw32/bin"] {
+        for relative in [
+            "usr/local/bin",
+            "mingw64/bin",
+            "mingw32/bin",
+            "clangarm64/bin",
+        ] {
             let directory = root.join(relative);
             if directory.is_dir() {
                 prefix.push(directory);
@@ -426,14 +448,35 @@ fn join_ahead_of_inherited(prefix: Vec<PathBuf>, inherited_path: &OsStr) -> Opti
 
 #[cfg(windows)]
 fn is_excluded(candidate: &Path) -> bool {
-    let rendered = candidate.to_string_lossy().to_ascii_lowercase();
-    if rendered.contains("\\windowsapps\\") {
+    let system_root = std::env::var_os("SystemRoot");
+    is_excluded_with(candidate, system_root.as_deref())
+}
+
+/// Slash forms must agree (`/` and `\` are the same path to Win32), and `SystemRoot` must
+/// match on a component boundary so sibling directories like `C:\Windows-Tools` survive.
+#[cfg(windows)]
+fn is_excluded_with(candidate: &Path, system_root: Option<&OsStr>) -> bool {
+    let rendered = normalized_windows_path(candidate);
+    if rendered
+        .split('\\')
+        .any(|component| component == "windowsapps")
+    {
         return true;
     }
-    std::env::var_os("SystemRoot").is_some_and(|root| {
-        let root = root.to_string_lossy().to_ascii_lowercase();
-        !root.is_empty() && rendered.starts_with(&root)
-    })
+    let Some(root) = system_root else {
+        return false;
+    };
+    let root = normalized_windows_path(Path::new(root));
+    !root.is_empty() && (rendered == root || rendered.starts_with(&format!("{root}\\")))
+}
+
+#[cfg(windows)]
+fn normalized_windows_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .to_ascii_lowercase()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_owned()
 }
 
 #[cfg(not(windows))]
@@ -551,6 +594,9 @@ fn probe_output_in(
         },
     };
     let mut environment = EnvironmentPlan::default();
+    environment
+        .removed
+        .extend(super::STRIPPED_INHERITED_ENV.map(str::to_owned));
     if let Some(path) = path {
         environment
             .overrides

@@ -587,3 +587,52 @@ fn root_handle_preserves_repository_identity() {
         "original"
     );
 }
+
+/// Re-entrant shutdown: concurrent callers share one transaction and one report, the
+/// global token ends up cancelled, and roster admission closes for good.
+#[tokio::test]
+async fn shutdown_processes_is_idempotent_and_closes_admission() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let server = CodexShim::from_path(fixture.path()).expect("server");
+    let first = server.clone();
+    let second = server.clone();
+    let started = std::time::Instant::now();
+
+    let (first, second) = tokio::join!(first.shutdown_processes(), second.shutdown_processes());
+    let _ = (first, second);
+
+    assert!(server.shutdown_token().is_cancelled());
+    assert!(!server.detached.is_accepting());
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(6),
+        "overlapping shutdown callers each ran their own cleanup"
+    );
+}
+
+/// The shutdown transaction waits for foreground owners inside its shared deadline: a
+/// held process permit keeps it pending, and releasing the permit lets it finish.
+#[tokio::test]
+async fn shutdown_waits_for_foreground_owners_to_release() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let server = CodexShim::from_path(fixture.path()).expect("server");
+    let permit = server
+        .resources
+        .try_admit_process()
+        .expect("one foreground permit");
+
+    let shutdown = server.clone();
+    let waiter = tokio::spawn(async move {
+        shutdown.shutdown_processes().await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        !waiter.is_finished(),
+        "shutdown completed while a foreground owner still held its permit"
+    );
+
+    drop(permit);
+    tokio::time::timeout(std::time::Duration::from_secs(6), waiter)
+        .await
+        .expect("shutdown completed after the foreground owner released")
+        .expect("shutdown task");
+}

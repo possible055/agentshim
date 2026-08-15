@@ -70,7 +70,40 @@ pub struct CodexShim {
     pub(super) bash_locator: BashLocator,
     pub(super) output_token_gate: Arc<OutputTokenGate>,
     pub(super) burst_output_gate: Arc<BurstOutputGate>,
+    shutdown_execution: Arc<ShutdownExecution>,
     client_profile: crate::ClientProfile,
+}
+
+/// EOF, transport failure, initialize failure, and explicit shutdown can overlap, but they
+/// must share one shutdown run and one report. The first caller starts the transaction on
+/// a blocking task; everyone else — including callers whose await is cancelled — observes
+/// the same completion through the watch channel, and a dropped wait never aborts the
+/// cleanup itself.
+struct ShutdownExecution {
+    slot: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    completed: tokio::sync::watch::Sender<bool>,
+    observed: tokio::sync::watch::Receiver<bool>,
+}
+
+impl ShutdownExecution {
+    fn new() -> Self {
+        let (completed, observed) = tokio::sync::watch::channel(false);
+        Self {
+            slot: tokio::sync::Mutex::new(None),
+            completed,
+            observed,
+        }
+    }
+}
+
+/// Signals completion even when the transaction task panics: waiters — including the CLI's
+/// final await — must never hang on a cleanup that will never report.
+struct CompleteOnDrop(tokio::sync::watch::Sender<bool>);
+
+impl Drop for CompleteOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.send(true);
+    }
 }
 
 pub struct CodexShimBuilder {
@@ -137,6 +170,7 @@ impl CodexShimBuilder {
             process_resolver: ProcessResolver::capture(),
             output_token_gate,
             burst_output_gate,
+            shutdown_execution: Arc::new(ShutdownExecution::new()),
             client_profile: self.client_profile,
         })
     }
@@ -193,9 +227,26 @@ impl CodexShim {
         self.resources.shutdown_token()
     }
 
-    /// Terminate every detached tree this instance still owns.
-    pub fn terminate_detached(&self) {
-        self.detached.terminate_all();
+    /// The single, re-entrant server-level process shutdown. The first caller runs one
+    /// transaction — cancel the global token, stop roster admission, terminate committed
+    /// trees in parallel, wait for foreground owners and reservations to drain — under one
+    /// shared deadline; later and concurrent callers observe the same result. Cancelling
+    /// the awaiting future never cancels the cleanup itself.
+    pub async fn shutdown_processes(&self) {
+        let mut slot = self.shutdown_execution.slot.lock().await;
+        if slot.is_none() {
+            let resources = self.resources.clone();
+            let detached = self.detached.clone();
+            let completed = self.shutdown_execution.completed.clone();
+            *slot = Some(tokio::task::spawn_blocking(move || {
+                let completion = CompleteOnDrop(completed);
+                shutdown_transaction(&resources, &detached);
+                drop(completion);
+            }));
+        }
+        let mut observed = self.shutdown_execution.observed.clone();
+        drop(slot);
+        let _ = observed.wait_for(|done| *done).await;
     }
 
     #[must_use]
@@ -443,6 +494,53 @@ impl CodexShim {
         .instrument(span)
         .await
     }
+}
+
+/// One complete ownership shutdown, bounded by a single deadline counted from the token
+/// cancellation rather than one budget per tree. Committed trees are terminated in
+/// parallel outside the roster lock; a tree that cannot be confirmed dead is reported by
+/// pid, and the RAII handle close stays the last resort instead of the mechanism.
+fn shutdown_transaction(resources: &RuntimeResources, detached: &DetachedTrees) {
+    let started = std::time::Instant::now();
+    let deadline = started + crate::tools::exec::spawn::CLEANUP_DEADLINE;
+    resources.cancel_shutdown();
+    let trees = detached.begin_shutdown();
+    let tree_count = trees.len();
+    let mut remaining: Vec<u32> = Vec::new();
+    std::thread::scope(|scope| {
+        let outcomes = trees
+            .into_iter()
+            .map(|mut tree| {
+                let pid = tree.pid();
+                scope.spawn(move || (pid, tree.terminate_and_wait(deadline)))
+            })
+            .collect::<Vec<_>>();
+        for outcome in outcomes {
+            match outcome.join() {
+                Ok((_, Ok(()))) => {}
+                Ok((pid, Err(_))) => remaining.push(pid),
+                Err(_) => remaining.push(u32::MAX),
+            }
+        }
+    });
+    let foreground_quiesced = resources.wait_for_process_quiescence(deadline);
+    let reservations_drained = detached.wait_until_quiesced(deadline);
+    let outcome = if remaining.is_empty() && foreground_quiesced && reservations_drained {
+        "verified"
+    } else {
+        "outcome_uncertain"
+    };
+    tracing::info!(
+        target: "codexshim",
+        event = "server_process_shutdown",
+        phase = "lifecycle",
+        outcome,
+        tree_count,
+        remaining_pids = ?remaining,
+        foreground_quiesced,
+        reservations_drained,
+        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+    );
 }
 
 #[cfg(test)]

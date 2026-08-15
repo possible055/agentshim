@@ -151,11 +151,18 @@ fn bash_args(command: &str) -> Vec<String> {
     ]
 }
 
+/// Removed from the inherited environment on every bash launch, foreground and detached
+/// alike: non-interactive bash still sources `BASH_ENV` even under `--noprofile --norc`,
+/// and `ENV` is the POSIX-mode twin of the same injection path.
+pub(crate) const STRIPPED_INHERITED_ENV: [&str; 2] = ["BASH_ENV", "ENV"];
+
 fn environment(
     runtime: &locate::BashRuntime,
     msys_argument_conversion: MsysArgumentConversion,
 ) -> EnvironmentPlan {
     let mut plan = EnvironmentPlan::from_defaults(&BASH_ENVIRONMENT);
+    plan.removed
+        .extend(STRIPPED_INHERITED_ENV.map(str::to_owned));
     plan.injected
         .push(("LANG".to_owned(), runtime.locale.clone()));
     plan.injected
@@ -330,7 +337,7 @@ struct DetachedLaunch<'a> {
 /// response reports only what the agent needs to find it again: the pid and the log file.
 fn run_detached(
     root: &Arc<RepositoryRoot>,
-    admission: DetachedAdmission,
+    mut admission: DetachedAdmission,
     request: &BashRequest,
     launch: &DetachedLaunch<'_>,
     cancellation: &CancellationToken,
@@ -349,6 +356,7 @@ fn run_detached(
         .resolve(std::path::Path::new(requested))
         .map_err(|error| invalid(format!("invalid log_path: {error}")))?;
     let log_path = resolved_log.absolute().to_owned();
+    admission.reserve_log_path(resolved_log.absolute())?;
     #[cfg(test)]
     admission.before_open();
     if cancellation.is_cancelled() {
@@ -376,7 +384,19 @@ fn run_detached(
     }
     let tree = crate::platform::process::spawn_detached(&plan, environment, log)?;
     let pid = tree.pid();
-    admission.retain(tree, log_path.clone());
+    // The spawn-to-commit window is the last place a cancellation or shutdown can race the
+    // call. A tree that executed user code must never be adopted by a stopped roster, so a
+    // rejection is rolled back here with a bounded, verified termination.
+    let rollback_deadline = admission.rollback_deadline();
+    let rejected = if cancellation.is_cancelled() {
+        Some(tree)
+    } else {
+        admission.retain(tree, log_path.clone()).err()
+    };
+    if let Some(mut tree) = rejected {
+        tree.terminate_and_wait(rollback_deadline)?;
+        return Err(ProcessError::Cancelled);
+    }
     let rendered = format!(
         "Detached: pid={pid} log=\"{}\" scope={}.",
         diagnostic_path(&log_path),

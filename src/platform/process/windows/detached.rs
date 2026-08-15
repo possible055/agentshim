@@ -97,14 +97,52 @@ impl DetachedTree {
         self.pid
     }
 
-    pub(crate) fn is_running(&mut self) -> bool {
-        job_active_processes(self.job.raw()).unwrap_or(0) > 0
+    /// Fallible on purpose: a failed `QueryInformationJobObject` says nothing about the
+    /// tree, and callers must keep the job owner rather than treat the tree as reaped.
+    pub(crate) fn is_running(&mut self) -> io::Result<bool> {
+        Ok(job_active_processes(self.job.raw())? > 0)
     }
 
+    #[cfg(test)]
     pub(crate) fn terminate(&mut self) {
         unsafe {
             TerminateJobObject(self.job.raw(), TERMINATION_EXIT_CODE);
         }
+    }
+
+    /// Terminate the job and confirm active processes reached zero before `deadline`.
+    /// Termination itself is forceful; the wait is what makes the outcome verifiable, so a
+    /// failed accounting query is reported instead of guessed away. Polling backs off
+    /// instead of busy-looping on the accounting call.
+    pub(crate) fn terminate_and_wait(
+        &mut self,
+        deadline: std::time::Instant,
+    ) -> Result<(), ProcessError> {
+        if unsafe { TerminateJobObject(self.job.raw(), TERMINATION_EXIT_CODE) } == 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let mut delay = std::time::Duration::from_millis(5);
+        while std::time::Instant::now() < deadline {
+            match job_active_processes(self.job.raw()) {
+                Ok(0) => return Ok(()),
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        target: "codexshim",
+                        event = "detached_liveness_degraded",
+                        phase = "execution",
+                        outcome = "degraded",
+                        error_class = "io",
+                        io_kind = ?error.kind(),
+                        pid = self.pid
+                    );
+                    return Err(ProcessError::OutcomeUncertain);
+                }
+            }
+            std::thread::sleep(delay);
+            delay = (delay * 2).min(std::time::Duration::from_millis(50));
+        }
+        Err(ProcessError::OutcomeUncertain)
     }
 }
 

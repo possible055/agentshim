@@ -86,7 +86,11 @@ fn injected_environment_carries_the_probed_locale_and_no_colour_defaults() {
     assert_eq!(injected("PYTHONUNBUFFERED").as_deref(), Some("1"));
     assert_eq!(injected("GIT_EDITOR").as_deref(), Some("true"));
     assert_eq!(plan.injected.len(), BASH_ENVIRONMENT.len() + 2);
-    assert!(plan.removed.is_empty());
+    assert_eq!(
+        plan.removed,
+        STRIPPED_INHERITED_ENV.map(str::to_owned).to_vec(),
+        "BASH_ENV and ENV must not reach a --noprofile --norc shell"
+    );
     assert!(plan.overrides.is_empty());
 }
 

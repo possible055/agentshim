@@ -12,7 +12,7 @@ use crate::{
 };
 
 use super::{
-    BASH_ENVIRONMENT, BashRequest, CompletedBash, MsysArgumentConversion,
+    BASH_ENVIRONMENT, BashRequest, CompletedBash, MsysArgumentConversion, STRIPPED_INHERITED_ENV,
     detached::DetachedTrees,
     environment, execute_output,
     locate::{self, BashLocator},
