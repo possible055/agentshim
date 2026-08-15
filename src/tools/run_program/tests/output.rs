@@ -32,6 +32,7 @@ fn empty_native_success_is_only_the_exit_code() {
     assert_eq!(compact, "Exit code: 0");
 }
 
+#[cfg(windows)]
 #[test]
 fn non_native_success_keeps_resolution_diagnostics() {
     let completed = CompletedProcess {

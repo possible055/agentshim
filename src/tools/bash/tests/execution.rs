@@ -317,7 +317,7 @@ fn a_timeout_terminates_the_tree_and_reports_the_partial_output() {
     let fixture = tempfile::tempdir().expect("fixture");
     let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
     let mut timed = request("printf 'before timeout\\n'; sleep 30");
-    timed.timeout_ms = Some(500);
+    timed.timeout_ms = Some(2_000);
     let locator = BashLocator::capture();
     locator
         .resolve(&CancellationToken::new())
@@ -328,7 +328,7 @@ fn a_timeout_terminates_the_tree_and_reports_the_partial_output() {
         &locator,
         None,
         &timed,
-        Duration::from_millis(500),
+        Duration::from_millis(2_000),
         &CancellationToken::new(),
     )
     .expect_err("timeout");

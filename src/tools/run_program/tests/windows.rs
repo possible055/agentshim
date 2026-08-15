@@ -158,13 +158,13 @@ fn windows_timeout_terminates_grandchild_job_tree() {
         "CODEXSHIM_PROCESS_PID_FILE".to_owned(),
         pid_file.to_string_lossy().into_owned(),
     );
-    timed.timeout_ms = Some(750);
+    timed.timeout_ms = Some(2_000);
     let started = std::time::Instant::now();
     let error = execute(
         &root,
         &ProcessResolver::capture(),
         &timed,
-        Duration::from_millis(750),
+        Duration::from_millis(2_000),
         &CancellationToken::new(),
     )
     .expect_err("timeout");

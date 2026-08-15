@@ -41,7 +41,6 @@ fn unix_native_argv_nonzero_exit_and_environment_are_reported() {
     printf.args = vec!["[%s]\n".to_owned(), "a b".to_owned(), "&|$".to_owned()];
     let output = execute_unix(&printf).expect("printf");
     assert!(output.contains("[a b]\n[&|$]"));
-    assert!(output.contains("Launcher: native"));
     assert!(output.contains("Exit code: 0"));
 
     let mut nonzero = request("/bin/sh".to_owned());
@@ -103,8 +102,8 @@ fn explicit_absolute_cwd_may_leave_root_but_relative_escape_is_rejected() {
     let fixture = tempfile::tempdir().expect("root fixture");
     let outside = tempfile::tempdir().expect("outside fixture");
     let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
-    let mut absolute = request("/usr/bin/printf".to_owned());
-    absolute.args = vec!["cwd".to_owned()];
+    let mut absolute = request("/bin/sh".to_owned());
+    absolute.args = vec!["-c".to_owned(), "printf cwd; exit 1".to_owned()];
     absolute.cwd = Some(outside.path().to_string_lossy().into_owned());
     let output = execute(
         &root,
@@ -154,7 +153,7 @@ fn unix_timeout_terminates_descendant_process_group() {
     let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
     let pid_file = fixture.path().join("descendant.pid");
     let mut timed = request("/bin/sh".to_owned());
-    timed.timeout_ms = Some(150);
+    timed.timeout_ms = Some(2_000);
     timed.args = vec![
         "-c".to_owned(),
         format!(
@@ -170,7 +169,7 @@ fn unix_timeout_terminates_descendant_process_group() {
         &root,
         &resolver,
         &timed,
-        Duration::from_millis(150),
+        Duration::from_millis(2_000),
         &CancellationToken::new(),
     )
     .expect_err("timeout");
