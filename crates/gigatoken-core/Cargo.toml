@@ -5,6 +5,11 @@ edition = "2024"
 rust-version = "1.88"
 license = "MIT"
 publish = false
+autotests = true
+
+[[test]]
+name = "performance"
+test = false
 
 [dependencies]
 base64 = "=0.22.1"

@@ -23,7 +23,7 @@ jobs:
       platform: windows
       runner_arch: X64
       os_architecture: X64
-      setup_node: true
+      setup_node: false
       run_format: true
       build_docs: true
       run_metadata: true

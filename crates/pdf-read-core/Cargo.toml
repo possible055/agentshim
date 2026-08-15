@@ -6,6 +6,7 @@ rust-version = "1.88"
 license = "Apache-2.0"
 publish = false
 description = "Internal read-only PDF core for codexshim"
+autotests = true
 
 [lib]
 name = "codexshim_pdf_read"
@@ -66,6 +67,14 @@ rendering = [
     "dep:tiny-skia",
 ]
 test-support = []
+
+[[test]]
+name = "corpus_probe"
+test = false
+
+[[test]]
+name = "upstream_corpus"
+test = false
 
 [lints.clippy]
 # The retained upstream source predates this repository's lint profile.

@@ -11,11 +11,12 @@ resolver = "3"
 
 [package]
 name = "codexshim"
-version = "0.1.3-alpha.7"
+version = "0.1.3-alpha.8"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
 description = "Capability-aware MCP repository tools for Codex"
+autotests = true
 
 [dependencies]
 base64 = "=0.22.1"
@@ -71,6 +72,10 @@ required-features = ["bench-internals"]
 [[bench]]
 name = "stdio_performance"
 harness = false
+
+[[test]]
+name = "resource_soak"
+test = false
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

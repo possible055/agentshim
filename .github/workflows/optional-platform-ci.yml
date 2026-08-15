@@ -41,4 +41,4 @@ jobs:
       system: Darwin
       machine: x86_64
       runner_arch: X64
-      setup_node: true
+      setup_node: false

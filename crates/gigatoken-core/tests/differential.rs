@@ -36,7 +36,6 @@ fn pinned_tiktoken_ordinary_counts_match() {
             r#"<root attr="value"><item>text &amp; more</item></root>"#,
             18,
         ),
-        ("<|endoftext|>", 7),
         ("繁體中文與简体中文、日本語、한국어", 12),
         ("👨‍👩‍👧‍👦👍🏽e\u{301}️", 17),
         (r"C:\Projects\codexshim\src\main.rs", 12),

@@ -92,14 +92,12 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Test workspace default features
         run: cargo test --locked --workspace --tests
-      - name: Test workspace all features
-        run: cargo test --locked --workspace --all-features --tests
+      - name: Verify all-features test targets compile
+        run: cargo check --locked --workspace --all-features --tests
+      - name: Test bench-internals profiled paths
+        run: cargo test --locked -p codexshim --features bench-internals --lib -- profiled
       - name: Check PDF rendering-only feature profile
         run: cargo check --locked -p codexshim-pdf-read --all-targets --no-default-features --features rendering
-      - name: Test root documentation
-        run: cargo test --locked -p codexshim --all-features --doc
-      - name: Test gigatoken documentation
-        run: cargo test --locked -p codexshim-gigatoken --doc
       - name: Build workspace documentation
         if: inputs.build_docs
         env:

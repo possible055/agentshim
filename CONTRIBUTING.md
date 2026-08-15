@@ -10,6 +10,8 @@ cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked
 ```
 
+Probe, soak, and other `#[ignore]` integration binaries stay out of the default run. Build one explicitly with `cargo test --locked --test <name> -- --ignored`.
+
 Changes to feature-gated PDF code must also compile the rendering-only profile:
 
 ```console
