@@ -38,9 +38,8 @@ export const Config = z.object({
 
 /**
  * Publish only names the agent already had, plus the shell/filesystem
- * companions those names imply: hiding `pwsh` still yields `bash`, and a
- * filesystem agent still gets `run_program`. A bash-only catalog (the
- * minimal preset) therefore stays two tools after replacement.
+ * companions those names imply: hiding `pwsh` still yields `bash`, `bash`
+ * always yields `bash_status`, and a filesystem agent gets `run_program`.
  */
 function replacementNames(present: readonly string[]): Array<(typeof EXPECTED_TOOL_ORDER)[number]> {
   const selected = new Set<string>()
@@ -48,6 +47,7 @@ function replacementNames(present: readonly string[]): Array<(typeof EXPECTED_TO
     if ((EXPECTED_TOOL_ORDER as readonly string[]).includes(name)) selected.add(name)
   }
   if (present.includes('pwsh')) selected.add('bash')
+  if (selected.has('bash')) selected.add('bash_status')
   if (selected.has('read') || selected.has('grep') || selected.has('glob')) {
     selected.add('run_program')
   }
@@ -69,9 +69,9 @@ interface AgentInstallation {
 /**
  * Install this adapter's contributions on every root-matched agent: restrict
  * only the inherited names that already exist, register the matching
- * agent-local definitions, and shadow those prompt sections. The five-tool
- * catalog stays available; a composition that only mounted `bash` (the
- * minimal preset) therefore stays a two-tool catalog after replacement.
+ * agent-local definitions, and shadow those prompt sections. The six-tool
+ * catalog stays available; a composition that only mounted `bash` also gets
+ * its managed-job `bash_status` companion after replacement.
  * Every step is one transaction — a failure rolls back and (for new agents)
  * vetoes publication. Agents whose canonical cwd is not exactly the plugin
  * root are left completely untouched.
@@ -149,11 +149,12 @@ function installAgentTools(
 
 /**
  * Start the private agentshim MCP session, block activation on a validated
- * five-tool catalog, then replace overlapping tool names in every
- * root-matched agent scope. The catalog is still five tools; only names the
- * agent already had are published. Any resolution, spawn, validation, or
- * execution-world failure rejects the fiber (Cordis rolls the plugin back)
- * — the adapter never silently falls back to the DSH built-in tools.
+ * six-tool catalog, then replace overlapping tool names in every
+ * root-matched agent scope. The catalog is still six tools; replacements and
+ * the companions implied by them are published. Any resolution, spawn,
+ * validation, or execution-world failure rejects the fiber (Cordis rolls the
+ * plugin back) — the adapter never silently falls back to the DSH built-in
+ * tools.
  */
 export async function apply(ctx: Context, config: Config): Promise<void> {
   const resolved = await resolveSessionConfig(config)

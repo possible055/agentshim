@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { FsTarget } from '@deepseek-ai/dsh-fs'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
-import { assertExecutionWorld, completeReadObservation, createProcessPolicy } from '../src/policy.ts'
+import { assertExecutionWorld, augmentProcessParameters, completeReadObservation, createProcessPolicy } from '../src/policy.ts'
 
 const signal = new AbortController().signal
 
@@ -22,6 +22,21 @@ function stubExec(overrides: Record<string, unknown> = {}): ToolExecution {
 }
 
 describe('createProcessPolicy', () => {
+  it('augments every bash oneOf control shape with adapter-only approval fields', () => {
+    const { policy } = confinedPolicy('workspace-write')
+    const parameters = augmentProcessParameters({
+      oneOf: [
+        { type: 'object', properties: { command: { type: 'string' } } },
+        { type: 'object', properties: { action: { const: 'terminate' }, job_id: { type: 'string' } } },
+      ],
+    }, policy)
+    const alternatives = parameters.oneOf as Array<{ properties: Record<string, unknown> }>
+    for (const alternative of alternatives) {
+      expect(alternative.properties).toHaveProperty('sandbox_permissions')
+      expect(alternative.properties).toHaveProperty('justification')
+    }
+  })
+
   it('runs directly with no sandboxing executor, refusing fields that still arrive', async () => {
     const policy = createProcessPolicy(stubContext({ shell: {} }))
     expect(policy.advertisesEscalation).toBe(false)

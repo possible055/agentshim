@@ -102,8 +102,8 @@ fn control_plane_fields_are_persisted_without_sensitive_inputs() {
         tracing::info!(
             target: "agentshim",
             event = "tools_list",
-            tool_count = 5_u64,
-            toolset = "read,grep,glob,run_program,bash",
+            tool_count = 6_u64,
+            toolset = "read,grep,glob,run_program,bash,bash_status",
             has_cursor = false,
             cache_ttl_ms = 300_000_u64,
             cache_scope = "private",
@@ -124,8 +124,11 @@ fn control_plane_fields_are_persisted_without_sensitive_inputs() {
         .expect("control-plane record")
         .records
         .remove(0);
-    assert_eq!(record["tool_count"], 5);
-    assert_eq!(record["toolset"], "read,grep,glob,run_program,bash");
+    assert_eq!(record["tool_count"], 6);
+    assert_eq!(
+        record["toolset"],
+        "read,grep,glob,run_program,bash,bash_status"
+    );
     assert_eq!(record["has_cursor"], false);
     assert_eq!(record["cache_ttl_ms"], 300_000);
     assert_eq!(record["cache_scope"], "private");

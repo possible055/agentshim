@@ -30,7 +30,7 @@ fn modern_lifecycle_serves_a_tool_call_and_shuts_down_at_eof() {
             .iter()
             .map(|tool| tool["name"].as_str().expect("tool name"))
             .collect::<Vec<_>>(),
-        ["read", "grep", "glob", "run_program", "bash"]
+        ["read", "grep", "glob", "run_program", "bash", "bash_status"]
     );
 
     let mut call = empty_params();
@@ -156,7 +156,7 @@ fn initialize_uses_the_native_legacy_lifecycle() {
             .iter()
             .map(|tool| tool["name"].as_str().expect("tool name"))
             .collect::<Vec<_>>(),
-        ["read", "grep", "glob", "run_program", "bash"]
+        ["read", "grep", "glob", "run_program", "bash", "bash_status"]
     );
 
     session.send(&json!({
@@ -221,7 +221,7 @@ fn initialize_accepts_all_supported_versions() {
         }));
         let list = session.receive();
         assert_eq!(list["id"], 2);
-        assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(5));
+        assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(6));
         session.close();
     }
 }
@@ -255,6 +255,6 @@ fn initialize_unknown_version_falls_back_without_method_error() {
     }));
     let list = session.receive();
     assert_eq!(list["id"], 2);
-    assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(5));
+    assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(6));
     session.close();
 }

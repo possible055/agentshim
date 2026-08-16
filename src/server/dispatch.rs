@@ -17,7 +17,11 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
 
 use crate::tools::{
-    bash::{BashRequest, detached::DetachedAdmission},
+    bash::{
+        BashRequest, BashToolRequest,
+        detached::{DetachedAdmission, TerminateStart},
+        status::BashStatusRequest,
+    },
     exec::ProcessError,
     run_program::ProcessRequest,
 };
@@ -38,7 +42,15 @@ pub(super) enum ToolAdmission {
     /// which limits living process trees rather than threads and output memory, and the two
     /// must not be able to starve each other.
     Detached(DetachedAdmission),
+    DetachedControl,
     None,
+}
+
+fn requests_bash_terminate(arguments: Option<&JsonObject>) -> bool {
+    arguments
+        .and_then(|arguments| arguments.get("action"))
+        .and_then(Value::as_str)
+        == Some("terminate")
 }
 
 #[derive(Debug)]
@@ -528,19 +540,78 @@ impl AgentShim {
         response
     }
 
-    // Admission, detached ownership, execution, and final verification share one lifetime.
-    #[allow(clippy::too_many_lines)]
-    async fn call_bash(
+    pub(super) async fn call_bash(
         &self,
         arguments: Option<JsonObject>,
         request_cancellation: &CancellationToken,
         admission: ToolAdmission,
         output_budget: &crate::output::CallOutputBudget,
     ) -> CallToolResponse {
-        let bash_request: BashRequest = match parse_request(arguments, "bash") {
+        let request: BashToolRequest = match parse_request(arguments, "bash") {
             Ok(request) => request,
             Err(error) => return classified_tool_error("validation", error),
         };
+        match request {
+            BashToolRequest::Run(request) => {
+                self.call_bash_run(request, request_cancellation, admission, output_budget)
+                    .await
+            }
+            BashToolRequest::Terminate(request) => {
+                if let Err(error) = request.validate() {
+                    return classified_tool_error("validation", error.to_string());
+                }
+                if !matches!(admission, ToolAdmission::DetachedControl) {
+                    return classified_tool_error(
+                        "validation",
+                        "bash terminate request reached an incompatible admission class",
+                    );
+                }
+                let started = Instant::now();
+                let action = self.detached.begin_terminate(&request.job_id);
+                let render_budget = output_budget.clone();
+                let result = match action {
+                    Ok(TerminateStart::Immediate(snapshot)) => {
+                        let rendered = crate::tools::bash::status::render_termination_with_budget(
+                            &snapshot,
+                            &CancellationToken::new(),
+                            &render_budget,
+                        );
+                        Ok(rendered)
+                    }
+                    Ok(TerminateStart::Accepted(work)) => {
+                        tokio::task::spawn_blocking(move || {
+                            let snapshot = work.run();
+                            crate::tools::bash::status::render_termination_with_budget(
+                                &snapshot,
+                                &CancellationToken::new(),
+                                &render_budget,
+                            )
+                        })
+                        .await
+                    }
+                    Err(error) => Ok(Err(error)),
+                };
+                blocking_response(
+                    "bash",
+                    duration_ms(started.elapsed()),
+                    result,
+                    &self.output_token_gate,
+                    request_cancellation,
+                    output_budget,
+                )
+            }
+        }
+    }
+
+    // Admission, detached ownership, execution, and final verification share one lifetime.
+    #[allow(clippy::too_many_lines)]
+    async fn call_bash_run(
+        &self,
+        bash_request: BashRequest,
+        request_cancellation: &CancellationToken,
+        admission: ToolAdmission,
+        output_budget: &crate::output::CallOutputBudget,
+    ) -> CallToolResponse {
         if let Err(error) = bash_request.validate() {
             return classified_tool_error("validation", error.to_string());
         }
@@ -602,6 +673,7 @@ impl AgentShim {
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
         let response_cancellation = cancellation.clone();
+        let detached_response = bash_request.detach;
         let execute_output_budget = output_budget.clone();
         let span = tracing::Span::current();
         let running = Instant::now();
@@ -632,16 +704,75 @@ impl AgentShim {
             })
         })
         .await;
+        let committed_response_cancellation = CancellationToken::new();
         let response = blocking_response(
             "bash",
             duration_ms(running.elapsed()),
             result,
             &self.output_token_gate,
-            &response_cancellation,
+            if detached_response {
+                &committed_response_cancellation
+            } else {
+                &response_cancellation
+            },
             output_budget,
         );
         cancellation_relay.abort();
         response
+    }
+
+    async fn call_bash_status(
+        &self,
+        arguments: Option<JsonObject>,
+        request_cancellation: &CancellationToken,
+        admission: OwnedSemaphorePermit,
+        output_budget: &crate::output::CallOutputBudget,
+    ) -> CallToolResponse {
+        let request: BashStatusRequest = match parse_request(arguments, "bash_status") {
+            Ok(request) => request,
+            Err(error) => return classified_tool_error("validation", error),
+        };
+        if let Err(error) = request.validate() {
+            return classified_tool_error("validation", error.to_string());
+        }
+        let worker = self.resources.acquire_worker(request_cancellation).await;
+        let memory = self
+            .resources
+            .reserve_memory(request.memory_charge(), request_cancellation)
+            .await;
+        let permits = match (worker, memory) {
+            (Ok(worker), Ok(memory)) => (admission, worker, memory),
+            _ => {
+                return classified_tool_error(
+                    cancellation_class(request_cancellation, &self.resources.shutdown_token()),
+                    "bash_status cancelled while waiting for runtime capacity",
+                );
+            }
+        };
+        let detached = self.detached.clone();
+        let cancellation = request_cancellation.clone();
+        let execute_budget = output_budget.clone();
+        let started = Instant::now();
+        let result = tokio::task::spawn_blocking(move || {
+            let snapshot = detached.status(&request.job_id, request.tail_bytes)?;
+            let rendered = crate::tools::bash::status::render_with_budget(
+                &snapshot,
+                request.tail_bytes,
+                &cancellation,
+                &execute_budget,
+            );
+            drop(permits);
+            rendered
+        })
+        .await;
+        blocking_response(
+            "bash_status",
+            duration_ms(started.elapsed()),
+            result,
+            &self.output_token_gate,
+            request_cancellation,
+            output_budget,
+        )
     }
     pub(super) async fn dispatch_tool(
         &self,
@@ -663,11 +794,17 @@ impl AgentShim {
             ("run_program", ToolAdmission::Process(admission)) => Ok(self
                 .call_process(request.arguments, &context.ct, admission, output_budget)
                 .await),
-            ("bash", admission @ (ToolAdmission::Process(_) | ToolAdmission::Detached(_))) => {
-                Ok(self
-                    .call_bash(request.arguments, &context.ct, admission, output_budget)
-                    .await)
-            }
+            (
+                "bash",
+                admission @ (ToolAdmission::Process(_)
+                | ToolAdmission::Detached(_)
+                | ToolAdmission::DetachedControl),
+            ) => Ok(self
+                .call_bash(request.arguments, &context.ct, admission, output_budget)
+                .await),
+            ("bash_status", ToolAdmission::ReadOnly(admission)) => Ok(self
+                .call_bash_status(request.arguments, &context.ct, admission, output_budget)
+                .await),
             (_, ToolAdmission::None) => {
                 tracing::error!(target: "agentshim", event = "tool_unknown", phase = "request", error_class = "validation");
                 Err(McpError::new(
@@ -685,11 +822,14 @@ impl AgentShim {
         request: &CallToolRequestParams,
     ) -> Result<ToolAdmission, ToolAdmissionFailure> {
         match request.name.as_ref() {
-            "read" | "glob" | "grep" => self
+            "read" | "glob" | "grep" | "bash_status" => self
                 .resources
                 .try_admit_read_only()
                 .map(ToolAdmission::ReadOnly)
                 .ok_or(ToolAdmissionFailure::Capacity("read_only")),
+            "bash" if requests_bash_terminate(request.arguments.as_ref()) => {
+                Ok(ToolAdmission::DetachedControl)
+            }
             "bash" if requests_detach(request.arguments.as_ref()) => self
                 .detached
                 .admit()

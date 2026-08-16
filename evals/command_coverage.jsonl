@@ -29,8 +29,10 @@
 {"id":"wildcard-expansion","legacy":"tool *.rs","category":"shell","tool":"bash","replacement":{"command":"tool *.rs"}}
 {"id":"env-prefix","legacy":"FOO=1 cargo test","category":"shell","tool":"bash","replacement":{"command":"FOO=1 cargo test"}}
 {"id":"for-loop","legacy":"for f in *.rs; do rustfmt \"$f\"; done","category":"shell","tool":"bash","replacement":{"command":"for f in *.rs; do rustfmt \"$f\"; done"}}
-{"id":"background","legacy":"server &","category":"shell","tool":"bash","replacement":{"command":"server","detach":true,"log_path":"server.log"}}
-{"id":"long-running","legacy":"cargo test 2>&1 | tee test.log","category":"shell-detach","tool":"bash","replacement":{"command":"cargo test 2>&1 | tee test.log","detach":true,"log_path":"test.log"}}
+{"id":"background","legacy":"server &","category":"shell","tool":"bash","replacement":{"command":"server","detach":true,"log_path":"server.log"},"follow_up":{"tool":"bash_status","arguments":{"job_id":"<returned-job-id>","tail_bytes":8192}}}
+{"id":"long-running","legacy":"cargo test 2>&1 | tee test.log","category":"shell-detach","tool":"bash","replacement":{"command":"cargo test 2>&1 | tee test.log","detach":true,"log_path":"test.log"},"follow_up":{"tool":"bash_status","arguments":{"job_id":"<returned-job-id>","tail_bytes":8192}}}
+{"id":"background-status","legacy":"poll background pid and tail test.log","category":"managed-shell-status","tool":"bash_status","replacement":{"job_id":"<returned-job-id>","tail_bytes":8192}}
+{"id":"background-terminate","legacy":"kill process tree by pid","category":"managed-shell-control","tool":"bash","replacement":{"action":"terminate","job_id":"<returned-job-id>"}}
 {"id":"interactive","legacy":"python -i","category":"unsupported","reason":"TTY and interactive prompts are not supported"}
 {"id":"powershell-command","legacy":"pwsh -Command Get-Process","category":"unsupported","reason":"command-evaluation shell form is rejected"}
 {"id":"cmd-command","legacy":"cmd.exe /c echo hello","category":"unsupported","reason":"caller-supplied cmd command string is rejected"}

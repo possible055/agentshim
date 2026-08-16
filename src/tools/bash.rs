@@ -1,4 +1,8 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -28,6 +32,7 @@ use crate::{
 
 pub(crate) mod detached;
 pub(crate) mod locate;
+pub(crate) mod status;
 #[cfg(test)]
 mod tests;
 
@@ -74,6 +79,32 @@ pub struct BashRequest {
     pub log_path: Option<String>,
     #[serde(default)]
     pub msys_argument_conversion: MsysArgumentConversion,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BashTerminateRequest {
+    pub action: BashControlAction,
+    pub job_id: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BashControlAction {
+    Terminate,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum BashToolRequest {
+    Terminate(BashTerminateRequest),
+    Run(BashRequest),
+}
+
+impl BashTerminateRequest {
+    pub(crate) fn validate(&self) -> Result<(), ProcessError> {
+        status::validate_job_id(&self.job_id)
+    }
 }
 
 impl BashRequest {
@@ -208,6 +239,10 @@ pub(crate) fn execute_output(
     )
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "foreground and detached Bash share one validated launch plan"
+)]
 pub(crate) fn execute_output_with_budget(
     root: &Arc<RepositoryRoot>,
     locator: &BashLocator,
@@ -262,7 +297,14 @@ pub(crate) fn execute_output_with_budget(
                 "detached bash request reached execution without a reserved slot".to_owned(),
             )
         })?;
-        return run_detached(root, admission, request, &launch, cancellation);
+        return run_detached(
+            root,
+            admission,
+            request,
+            &launch,
+            cancellation,
+            output_budget,
+        );
     }
     let timeout = deadline
         .and_then(|deadline| deadline.checked_duration_since(std::time::Instant::now()))
@@ -341,6 +383,7 @@ fn run_detached(
     request: &BashRequest,
     launch: &DetachedLaunch<'_>,
     cancellation: &CancellationToken,
+    output_budget: &crate::output::CallOutputBudget,
 ) -> Result<ToolOutput, ProcessError> {
     let DetachedLaunch {
         resolved,
@@ -356,6 +399,11 @@ fn run_detached(
         .resolve(std::path::Path::new(requested))
         .map_err(|error| invalid(format!("invalid log_path: {error}")))?;
     let log_path = resolved_log.absolute().to_owned();
+    verify_detached_response(
+        &detached_response(admission.job_id(), u32::MAX, &log_path),
+        cancellation,
+        output_budget,
+    )?;
     admission.reserve_log_path(resolved_log.absolute())?;
     #[cfg(test)]
     admission.before_open();
@@ -382,27 +430,54 @@ fn run_detached(
     if let Some(error) = admission.injected_spawn_error() {
         return Err(error);
     }
-    let tree = crate::platform::process::spawn_detached(&plan, environment, log)?;
+    let tree = crate::platform::process::spawn_detached(&plan, environment, log.writer)?;
     let pid = tree.pid();
+    let job_id = admission.job_id().to_owned();
+    let output = detached_response(&job_id, pid, &log_path);
     // The spawn-to-commit window is the last place a cancellation or shutdown can race the
     // call. A tree that executed user code must never be adopted by a stopped roster, so a
     // rejection is rolled back here with a bounded, verified termination.
     let rollback_deadline = admission.rollback_deadline();
-    let rejected = if cancellation.is_cancelled() {
-        Some(tree)
-    } else {
-        admission.retain(tree, log_path.clone()).err()
-    };
-    if let Some(mut tree) = rejected {
+    let rejected =
+        if let Err(error) = verify_detached_response(&output, cancellation, output_budget) {
+            Some((tree, error))
+        } else if cancellation.is_cancelled() {
+            Some((tree, ProcessError::Cancelled))
+        } else if let Err(tree) = admission.retain(tree, log_path.clone(), log.reader) {
+            Some((tree, ProcessError::Cancelled))
+        } else {
+            None
+        };
+    if let Some((mut tree, error)) = rejected {
         tree.terminate_and_wait(rollback_deadline)?;
+        return Err(error);
+    }
+    Ok(output)
+}
+
+fn detached_response(job_id: &str, pid: u32, log_path: &Path) -> ToolOutput {
+    ToolOutput::new(format!(
+        "Detached: job_id={job_id} pid={pid} log=\"{}\" scope={}.",
+        diagnostic_path(log_path),
+        crate::tools::exec::containment_scope()
+    ))
+}
+
+fn verify_detached_response(
+    output: &ToolOutput,
+    cancellation: &CancellationToken,
+    output_budget: &crate::output::CallOutputBudget,
+) -> Result<(), ProcessError> {
+    if output.fits_content_and_call(output_budget, cancellation) {
+        return Ok(());
+    }
+    if cancellation.is_cancelled() {
         return Err(ProcessError::Cancelled);
     }
-    let rendered = format!(
-        "Detached: pid={pid} log=\"{}\" scope={}.",
-        diagnostic_path(&log_path),
-        crate::tools::exec::containment_scope()
-    );
-    Ok(ToolOutput::new(rendered))
+    if output.encoded_len() > crate::output::OutputLimits::for_content(&output.text).bytes {
+        return Err(crate::output::OutputError::RequiredContentTooLarge.into());
+    }
+    Err(crate::output::OutputError::BurstLimit.into())
 }
 
 fn expect_one(captures: Vec<Capture>) -> Capture {

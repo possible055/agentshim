@@ -128,17 +128,43 @@ const baseTools = [
     title: 'Bash',
     description: 'Run a POSIX bash command line and return merged output with the exit code.',
     annotations: processHints,
+    inputSchema: { type: 'object', oneOf: [
+      {
+        type: 'object',
+        additionalProperties: false,
+        required: ['command'],
+        properties: {
+          command: { type: 'string', minLength: 1, description: 'POSIX bash command line.' },
+          cwd: { type: 'string', description: 'Working directory.' },
+          detach: { type: 'boolean', default: false, description: 'Run past the end of this call.' },
+          log_path: { type: 'string', description: 'Output file for detached runs.' },
+          msys_argument_conversion: { type: 'string', enum: ['default', 'disabled'], default: 'default', description: 'Windows Git Bash only.' },
+          timeout_ms: { type: 'integer', minimum: 1, maximum: 590000, default: 120000, description: 'Execution timeout.' },
+        },
+      },
+      {
+        type: 'object',
+        additionalProperties: false,
+        required: ['action', 'job_id'],
+        properties: {
+          action: { type: 'string', const: 'terminate', description: 'Terminate the complete detached tree.' },
+          job_id: { type: 'string', pattern: '^bash-', description: 'Opaque instance-bound job id.' },
+        },
+      },
+    ] },
+  },
+  {
+    name: 'bash_status',
+    title: 'Bash Status',
+    description: 'Return an immediate detached Bash lifecycle snapshot and bounded log tail.',
+    annotations: readOnlyHints,
     inputSchema: {
       type: 'object',
       additionalProperties: false,
-      required: ['command'],
+      required: ['job_id'],
       properties: {
-        command: { type: 'string', minLength: 1, description: 'POSIX bash command line.' },
-        cwd: { type: 'string', description: 'Working directory.' },
-        detach: { type: 'boolean', default: false, description: 'Run past the end of this call.' },
-        log_path: { type: 'string', description: 'Output file for detached runs.' },
-        msys_argument_conversion: { type: 'string', enum: ['default', 'disabled'], default: 'default', description: 'Windows Git Bash only.' },
-        timeout_ms: { type: 'integer', minimum: 1, maximum: 590000, default: 120000, description: 'Execution timeout.' },
+        job_id: { type: 'string', pattern: '^bash-', description: 'Opaque instance-bound job id.' },
+        tail_bytes: { type: 'integer', minimum: 0, maximum: 16384, default: 8192, description: 'Bounded tail bytes.' },
       },
     },
   },
@@ -149,7 +175,7 @@ if (mode === 'missing') tools = baseTools.filter(tool => tool.name !== 'grep')
 if (mode === 'extra') {
   tools = [...baseTools, {
     name: 'invoke',
-    description: 'Extra tool outside the fixed five-name contract.',
+    description: 'Extra tool outside the fixed six-name contract.',
     inputSchema: { type: 'object', additionalProperties: false, properties: {} },
   }]
 }

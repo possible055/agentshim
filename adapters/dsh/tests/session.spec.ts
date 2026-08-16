@@ -178,7 +178,7 @@ describe('pure schema helpers', () => {
 })
 
 describe('validateCatalog', () => {
-  it('accepts the fixed five-name contract and returns published entries', () => {
+  it('accepts the fixed six-name contract and returns published entries', () => {
     const snapshot = validateCatalog(syntheticCatalog())
     expect(snapshot.tools.map(tool => tool.name)).toEqual([...EXPECTED_TOOL_ORDER])
     expect(snapshot.fingerprint).toMatch(/^[0-9a-f]{64}$/)
@@ -202,7 +202,7 @@ describe('validateCatalog', () => {
   })
 
   it('fails loud on missing, extra, reordered, and duplicate names', () => {
-    expect(() => validateCatalog(syntheticCatalog(tools => tools.splice(1, 1)))).toThrow(/exactly \[read, grep, glob, run_program, bash\]/)
+    expect(() => validateCatalog(syntheticCatalog(tools => tools.splice(1, 1)))).toThrow(/exactly \[read, grep, glob, run_program, bash, bash_status\]/)
     expect(() => validateCatalog(syntheticCatalog(tools => tools.push(tools[0] as Tool)))).toThrow(/more than once/)
     expect(() => validateCatalog(syntheticCatalog(tools => tools.reverse()))).toThrow(/in this order/)
   })
@@ -275,7 +275,7 @@ describe('config resolution', () => {
 })
 
 describe('session against the fixture server', () => {
-  it('starts, validates the five-tool catalog in order, and publishes runtime schemas', async () => {
+  it('starts, validates the six-tool catalog in order, and publishes runtime schemas', async () => {
     const fixture = await setupFixture()
     const session = startSession(fixture)
     const snapshot = await session.ready
@@ -300,8 +300,8 @@ describe('session against the fixture server', () => {
   })
 
   for (const [mode, pattern] of [
-    ['missing', /got \[read, glob, run_program, bash\]/],
-    ['extra', /exactly \[read, grep, glob, run_program, bash\].*invoke/],
+    ['missing', /got \[read, glob, run_program, bash, bash_status\]/],
+    ['extra', /exactly \[read, grep, glob, run_program, bash, bash_status\].*invoke/],
     ['duplicate', /more than once/],
     ['unsupported', /outside the supported subset/],
     ['task-required', /task-based execution/],

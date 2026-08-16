@@ -38,15 +38,19 @@ fn stdin_eof_cancels_in_flight_process_and_exits_server() {
     session.send(&modern_request(2, "tools/call", call));
 
     let child_start_deadline = Instant::now() + Duration::from_secs(5);
-    while !pid_file.exists() && Instant::now() < child_start_deadline {
+    let child_pid = loop {
+        if let Some(pid) = std::fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+        {
+            break pid;
+        }
+        assert!(
+            Instant::now() < child_start_deadline,
+            "in-flight child did not publish its PID"
+        );
         thread::sleep(Duration::from_millis(10));
-    }
-    assert!(pid_file.exists(), "in-flight child did not start");
-    let child_pid = std::fs::read_to_string(&pid_file)
-        .expect("child PID")
-        .trim()
-        .parse::<u32>()
-        .expect("numeric child PID");
+    };
 
     session.stdin.take();
     let shutdown_deadline = Instant::now() + Duration::from_secs(12);

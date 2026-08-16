@@ -306,8 +306,11 @@ fn all_mode_persists_modern_discovery_and_tool_list_metadata() {
         .find(|record| record["event"] == "tools_list")
         .expect("tools list event");
     assert_eq!(tools_list["protocol"], "2026-07-28");
-    assert_eq!(tools_list["tool_count"], 5);
-    assert_eq!(tools_list["toolset"], "read,grep,glob,run_program,bash");
+    assert_eq!(tools_list["tool_count"], 6);
+    assert_eq!(
+        tools_list["toolset"],
+        "read,grep,glob,run_program,bash,bash_status"
+    );
     assert_eq!(tools_list["has_cursor"], false);
     assert_eq!(tools_list["cache_ttl_ms"], 300_000);
     assert_eq!(tools_list["cache_scope"], "private");
@@ -376,7 +379,7 @@ fn all_mode_persists_legacy_initialization_and_tool_list_metadata() {
         .expect("tools list event");
     assert_eq!(tools_list["protocol"], "2025-11-25");
     assert_eq!(tools_list["client_name"], "diagnostics-legacy");
-    assert_eq!(tools_list["tool_count"], 5);
+    assert_eq!(tools_list["tool_count"], 6);
     let request_id = tools_list["request_id"]
         .as_str()
         .expect("opaque request ID");

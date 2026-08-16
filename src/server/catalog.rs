@@ -8,9 +8,9 @@ use crate::{
     tools::exec::spawn::{default_timeout_ms, max_timeout_ms},
 };
 
-pub(super) fn tool_catalog(read_scope: ReadScope) -> &'static [Tool; 5] {
-    static NORMAL_TOOLS: OnceLock<[Tool; 5]> = OnceLock::new();
-    static UNRESTRICTED_TOOLS: OnceLock<[Tool; 5]> = OnceLock::new();
+pub(super) fn tool_catalog(read_scope: ReadScope) -> &'static [Tool; 6] {
+    static NORMAL_TOOLS: OnceLock<[Tool; 6]> = OnceLock::new();
+    static UNRESTRICTED_TOOLS: OnceLock<[Tool; 6]> = OnceLock::new();
     let tools = match read_scope {
         ReadScope::Normal => &NORMAL_TOOLS,
         ReadScope::Unrestricted => &UNRESTRICTED_TOOLS,
@@ -22,6 +22,7 @@ pub(super) fn tool_catalog(read_scope: ReadScope) -> &'static [Tool; 5] {
             glob_tool(read_scope),
             run_program_tool(),
             bash_tool(),
+            bash_status_tool(),
         ]
     })
 }
@@ -326,10 +327,10 @@ fn bash_tool() -> Tool {
          truncated in the middle and cannot be continued: redirect it to a file and page that \
          with read when you need all of it. The default timeout is {default} ms and \
          the maximum is {max} ms; for \
-         work that needs longer, set detach with a log_path and read that file instead of \
-         waiting. A detached tree belongs to this server instance and runs until it exits on \
-         its own or the instance stops: when the connection or server closes, the trees it owns \
-         are terminated, and there is no reconnect, list, or kill API for them. On Windows, \
+         work that needs longer, set detach with a log_path and observe its returned instance-bound \
+         job_id with bash_status. A detached tree belongs to this server instance and runs until \
+         it exits, is terminated with action=terminate and its job_id, or the instance stops. \
+         There is no reconnect or list API. On Windows, \
          prefer run_program for one native program with literal arguments. \
          Do not issue state-changing commands against the same working tree in parallel calls. A \
          program that daemonizes itself may keep running after this call returns. This is not a \
@@ -340,8 +341,11 @@ fn bash_tool() -> Tool {
         description,
         schema(json!({
             "type": "object",
-            "additionalProperties": false,
-            "properties": {
+            "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
                 "command": {
                     "type": "string",
                     "minLength": 1,
@@ -354,7 +358,7 @@ fn bash_tool() -> Tool {
                 "detach": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Run the command past the end of this call. The process tree is owned by this server instance and is terminated when the connection or server closes; there is no reconnect, list, or kill API. Requires log_path and forbids timeout_ms; returns the pid and log path instead of output. Poll progress by reading log_path."
+                    "description": "Run the command past the end of this call. Requires log_path and forbids timeout_ms; returns an instance-bound opaque job_id plus the diagnostic pid and log path. Use bash_status for immediate lifecycle snapshots and bounded log tails."
                 },
                 "log_path": {
                     "type": "string",
@@ -373,8 +377,27 @@ fn bash_tool() -> Tool {
                     "default": default,
                     "description": "Execution timeout in milliseconds, capped by deployment configuration below the shown maximum. The client's own request timeout still bounds how long a call can wait, so work expected to run for tens of seconds or longer should use detach with a log_path instead. On timeout the command is terminated and a Timeout error is returned. Forbidden when detach is true."
                 }
+              },
+              "required": ["command"]
             },
-            "required": ["command"]
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "const": "terminate",
+                  "description": "Terminate the complete server-owned process tree for job_id."
+                },
+                "job_id": {
+                  "type": "string",
+                  "pattern": "^bash-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
+                  "description": "Opaque instance-bound identifier returned by bash(detach=true)."
+                }
+              },
+              "required": ["action", "job_id"]
+            }
+            ]
         })),
     )
     .with_title("Bash")
@@ -385,6 +408,34 @@ fn bash_tool() -> Tool {
             .idempotent(false)
             .open_world(true),
     )
+}
+
+fn bash_status_tool() -> Tool {
+    Tool::new(
+        "bash_status",
+        "Return an immediate lifecycle snapshot for one instance-bound detached Bash job, with the primary exit status and a bounded tail from the original log file identity. This does not wait for new output and provides no list, reconnect, or cursor API. Unknown or expired IDs are validation errors.",
+        schema(json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "job_id": {
+                    "type": "string",
+                    "pattern": "^bash-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
+                    "description": "Opaque instance-bound identifier returned by bash(detach=true)."
+                },
+                "tail_bytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 16384,
+                    "default": 8192,
+                    "description": "Candidate maximum raw log bytes to show. Set 0 for lifecycle metadata only; output budgets may reduce a non-zero tail."
+                }
+            },
+            "required": ["job_id"]
+        })),
+    )
+    .with_title("Bash Status")
+    .with_annotations(read_only_annotations())
 }
 
 fn schema(value: Value) -> Arc<JsonObject> {

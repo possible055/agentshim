@@ -5,6 +5,8 @@ mod platform;
 #[path = "windows/runner.rs"]
 mod runner;
 
+#[cfg(test)]
+pub(crate) use detached::set_after_primary_observation_hook_for_tests;
 pub(crate) use detached::{DetachedTree, spawn_detached};
 pub(crate) use runner::run;
 

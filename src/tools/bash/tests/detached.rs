@@ -1,4 +1,6 @@
 use super::*;
+use crate::tools::bash::{detached as job_registry, status};
+use std::time::Instant;
 
 pub(super) fn detach_request(command: &str, log_path: &str) -> BashRequest {
     BashRequest {
@@ -30,6 +32,14 @@ fn spawn_detached(
     .map(|output| output.text)
 }
 
+fn response_job_id(response: &str) -> String {
+    response
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("job_id="))
+        .expect("detached response job_id")
+        .to_owned()
+}
+
 #[test]
 fn a_detached_tree_outlives_the_call_and_dies_with_the_instance() {
     if !bash_is_available() {
@@ -47,7 +57,8 @@ fn a_detached_tree_outlives_the_call_and_dies_with_the_instance() {
     )
     .expect("detached bash");
 
-    assert!(response.contains("Detached: pid="), "{response}");
+    assert!(response.contains("Detached: job_id=bash-"), "{response}");
+    assert!(response.contains(" pid="), "{response}");
     assert!(response.contains("detached.log"), "{response}");
     assert!(response.contains("scope="), "{response}");
     assert!(!response.contains("Exit code:"), "{response}");
@@ -71,6 +82,155 @@ fn a_detached_tree_outlives_the_call_and_dies_with_the_instance() {
 
     trees.terminate_all();
     assert_eq!(trees.live_count(), 0);
+}
+
+#[test]
+fn status_reports_running_log_and_primary_exit_then_retains_completion() {
+    if !bash_is_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("fixture");
+    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+    let trees = trees();
+    let response = spawn_detached(
+        &root,
+        &trees,
+        "printf 'ready\\n'; sleep 1; printf 'done\\n'; exit 7",
+        "status.log",
+    )
+    .expect("detached bash");
+    let job_id = response_job_id(&response);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let terminal = loop {
+        let snapshot = trees.status(&job_id, 8192).expect("status");
+        if snapshot.state == status::JobState::Completed {
+            break snapshot;
+        }
+        assert!(
+            matches!(
+                snapshot.state,
+                status::JobState::Running
+                    | status::JobState::StatusUnknown
+                    | status::JobState::Finalizing
+            ),
+            "unexpected state: {:?}",
+            snapshot.state
+        );
+        assert!(std::time::Instant::now() < deadline, "job did not complete");
+        std::thread::sleep(Duration::from_millis(25));
+    };
+
+    assert_eq!(terminal.primary_exit.as_deref(), Some("7"));
+    assert!(terminal.log.bytes.ends_with(b"done\n"));
+    assert_eq!(trees.live_count(), 0);
+    assert_eq!(trees.terminal_count(), 1);
+    let repeated = trees.status(&job_id, 0).expect("retained status");
+    assert_eq!(repeated.state, status::JobState::Completed);
+    assert!(repeated.log.bytes.is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_completion_refreshes_primary_exit_after_the_job_becomes_empty() {
+    if !bash_is_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("fixture");
+    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+    let trees = trees();
+    let response = spawn_detached(
+        &root,
+        &trees,
+        "while [ ! -f release-exit ]; do sleep 0.01; done; exit 7",
+        "exit-race.log",
+    )
+    .expect("detached bash");
+    let job_id = response_job_id(&response);
+    let release = fixture.path().join("release-exit");
+    crate::platform::process::set_after_primary_observation_hook_for_tests(move || {
+        std::fs::write(release, b"go").expect("release primary process");
+        std::thread::sleep(Duration::from_millis(250));
+    });
+
+    let completed = trees.status(&job_id, 0).expect("completed status");
+
+    assert_eq!(completed.state, status::JobState::Completed);
+    assert_eq!(completed.primary_exit.as_deref(), Some("7"));
+}
+
+#[test]
+fn terminate_is_tree_owned_idempotent_and_unknown_ids_are_rejected() {
+    if !bash_is_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("fixture");
+    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+    let trees = trees();
+    let response = spawn_detached(
+        &root,
+        &trees,
+        "printf 'started\\n'; sleep 30 & sleep 30",
+        "terminate.log",
+    )
+    .expect("detached bash");
+    let job_id = response_job_id(&response);
+
+    let snapshot = match trees.begin_terminate(&job_id).expect("terminate") {
+        job_registry::TerminateStart::Accepted(work) => work.run(),
+        job_registry::TerminateStart::Immediate(_) => {
+            panic!("running job must yield cleanup owner")
+        }
+    };
+    assert_eq!(snapshot.state, status::JobState::Terminated);
+    assert_eq!(trees.live_count(), 0);
+    match trees.begin_terminate(&job_id).expect("repeated terminate") {
+        job_registry::TerminateStart::Immediate(snapshot) => {
+            assert_eq!(snapshot.state, status::JobState::Terminated);
+            assert_eq!(snapshot.outcome, Some("already_terminal"));
+        }
+        job_registry::TerminateStart::Accepted(_) => panic!("terminal job cannot be killed twice"),
+    }
+    let unknown = format!("bash-{}", uuid::Uuid::new_v4());
+    assert!(matches!(
+        trees.status(&unknown, 0),
+        Err(ProcessError::Validation(_))
+    ));
+}
+
+#[test]
+fn terminal_retention_evicts_the_oldest_job_without_deleting_its_log() {
+    if !bash_is_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("fixture");
+    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+    let trees = DetachedTrees::new(1);
+    let mut ids = Vec::new();
+    for index in 0..=job_registry::TERMINAL_RETENTION {
+        let log_path = format!("retention-{index}.log");
+        let response = spawn_detached(&root, &trees, "true", &log_path).expect("detached bash");
+        let job_id = response_job_id(&response);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match trees.status(&job_id, 0).expect("status").state {
+                status::JobState::Completed => break,
+                _ if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                state => panic!("job did not complete: {state:?}"),
+            }
+        }
+        ids.push(job_id);
+    }
+
+    assert_eq!(trees.terminal_count(), job_registry::TERMINAL_RETENTION);
+    assert!(matches!(
+        trees.status(&ids[0], 0),
+        Err(ProcessError::Validation(_))
+    ));
+    assert!(fixture.path().join("retention-0.log").exists());
+    assert!(trees.status(ids.last().expect("latest id"), 0).is_ok());
 }
 
 #[cfg(windows)]
@@ -419,6 +579,50 @@ fn cancellation_after_capability_open_may_truncate_but_starts_no_tree() {
     assert_eq!(trees.reserved_count(), 0, "the slot was not returned");
 }
 
+#[test]
+fn exhausted_response_budget_refuses_before_log_open_or_spawn() {
+    if !bash_is_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("fixture");
+    let log = fixture.path().join("budget.log");
+    std::fs::write(&log, "keep me").expect("existing log");
+    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+    let trees = trees();
+    let token_gate = crate::output::OutputTokenGate::load_shared().expect("token gate");
+    let burst = crate::output::BurstOutputGate::new(2_048);
+    let spent = crate::output::CallOutputBudget::new(token_gate.clone(), burst.begin_call());
+    spent.finish(2_048, false);
+    let budget = crate::output::CallOutputBudget::new(token_gate, burst.begin_call());
+    let admission = trees.admit().expect("detached admission");
+
+    let error = execute_output_with_budget(
+        &root,
+        &BashLocator::capture(),
+        Some(admission),
+        &detach_request("printf spawned > marker", "budget.log"),
+        Duration::ZERO,
+        &CancellationToken::new(),
+        &budget,
+    )
+    .expect_err("an unreportable job must not start");
+
+    assert!(
+        matches!(
+            error,
+            ProcessError::Output(crate::output::OutputError::BurstLimit)
+        ),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(log).expect("preserved log"),
+        "keep me"
+    );
+    assert!(!fixture.path().join("marker").exists());
+    assert_eq!(trees.live_count(), 0);
+    assert_eq!(trees.reserved_count(), 0);
+}
+
 /// A foreground call owns its whole tree on both platforms: `&` does not buy a process that
 /// outlives the response. `detach` is the supported way to do that.
 #[test]
@@ -466,13 +670,14 @@ fn a_degraded_liveness_query_keeps_the_owner_and_capacity() {
     let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
     let trees = trees();
 
-    spawn_detached(
+    let response = spawn_detached(
         &root,
         &trees,
         "while :; do printf x >> degraded-marker; sleep 0.1; done",
         "degraded.log",
     )
     .expect("detached bash");
+    let job_id = response_job_id(&response);
     let marker = fixture.path().join("degraded-marker");
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
@@ -488,6 +693,9 @@ fn a_degraded_liveness_query_keeps_the_owner_and_capacity() {
         "the detached tree did not start"
     );
 
+    trees.fail_next_liveness_query();
+    let degraded = trees.status(&job_id, 0).expect("degraded status");
+    assert_eq!(degraded.state, status::JobState::StatusUnknown);
     trees.fail_next_liveness_query();
     trees
         .admit()
@@ -506,6 +714,78 @@ fn a_degraded_liveness_query_keeps_the_owner_and_capacity() {
         "the running tree was killed by a slot dropped on a query error"
     );
     trees.terminate_all();
+}
+
+#[test]
+fn log_failure_preserves_lifecycle_and_termination_failure_is_retained() {
+    if !bash_is_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("fixture");
+    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+    let trees = trees();
+    let response = spawn_detached(&root, &trees, "sleep 30", "failure.log").expect("detached bash");
+    let job_id = response_job_id(&response);
+
+    trees.fail_next_tail_snapshot();
+    let status = trees
+        .status(&job_id, 8192)
+        .expect("status survives log failure");
+    assert_eq!(status.state, status::JobState::Running);
+    assert!(
+        status
+            .log
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("injected"))
+    );
+    assert_eq!(trees.live_count(), 1);
+
+    trees.fail_next_termination();
+    let terminal = match trees.begin_terminate(&job_id).expect("terminate") {
+        job_registry::TerminateStart::Accepted(work) => work.run(),
+        job_registry::TerminateStart::Immediate(_) => panic!("running job must yield owner"),
+    };
+    assert_eq!(terminal.state, status::JobState::OutcomeUncertain);
+    assert_eq!(trees.live_count(), 0);
+    assert_eq!(
+        trees
+            .status(&job_id, 0)
+            .expect("retained uncertain status")
+            .state,
+        status::JobState::OutcomeUncertain
+    );
+}
+
+#[test]
+fn shutdown_retains_uncertain_pid_from_an_existing_termination_owner() {
+    if !bash_is_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("fixture");
+    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+    let trees = trees();
+    let response =
+        spawn_detached(&root, &trees, "sleep 30", "shutdown-owner.log").expect("detached bash");
+    let job_id = response_job_id(&response);
+    trees.fail_next_termination();
+    let work = match trees.begin_terminate(&job_id).expect("terminate") {
+        job_registry::TerminateStart::Accepted(work) => work,
+        job_registry::TerminateStart::Immediate(_) => panic!("running job must yield owner"),
+    };
+    let pid = work.pid();
+
+    let swept = trees.begin_shutdown(Instant::now() + Duration::from_secs(5));
+    assert!(
+        swept.is_empty(),
+        "the termination owner was already exchanged"
+    );
+    assert_eq!(trees.shutdown_unverified_pids(), [pid]);
+    let terminal = work.run();
+
+    assert_eq!(terminal.state, status::JobState::OutcomeUncertain);
+    assert!(trees.wait_until_quiesced(Instant::now() + Duration::from_secs(1)));
+    assert_eq!(trees.shutdown_unverified_pids(), [pid]);
 }
 
 /// L2/L3: `begin_shutdown` closes admission, and the spawn-to-commit window re-checks it.
@@ -548,7 +828,7 @@ fn shutdown_racing_a_detached_call_rolls_back_the_late_commit() {
         )
     });
     entered.wait();
-    let swept = trees.begin_shutdown();
+    let swept = trees.begin_shutdown(Instant::now() + crate::tools::exec::spawn::CLEANUP_DEADLINE);
     assert!(swept.is_empty(), "no tree had committed yet");
     assert!(!trees.is_accepting());
     release.wait();
@@ -579,10 +859,10 @@ fn a_roster_that_stopped_accepting_rejects_new_detached_admissions() {
     let trees = trees();
 
     assert!(trees.is_accepting());
-    let swept = trees.begin_shutdown();
+    let swept = trees.begin_shutdown(Instant::now() + crate::tools::exec::spawn::CLEANUP_DEADLINE);
     assert!(swept.is_empty());
     assert!(!trees.is_accepting());
-    let again = trees.begin_shutdown();
+    let again = trees.begin_shutdown(Instant::now() + crate::tools::exec::spawn::CLEANUP_DEADLINE);
     assert!(again.is_empty(), "the transition is idempotent");
 
     let error = spawn_detached(&root, &trees, "sleep 30", "after-stop.log")

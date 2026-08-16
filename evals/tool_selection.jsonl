@@ -28,3 +28,7 @@
 {"id":"unsupported-tty","prompt":"Open an interactive REPL in a TTY.","expected":"unsupported","forbidden":["run_process"]}
 {"id":"reject-command-string","prompt":"Execute the command string git status && cargo test.","expected":"unsupported_or_split","forbidden":["program_with_spaces","command_string"]}
 {"id":"reject-powershell","prompt":"Use PowerShell -Command to evaluate a script.","expected":"unsupported","forbidden":["run_process"]}
+{"id":"bash-detach","prompt":"Start this long build in the background and give me a managed ID I can check later.","expected":"bash","arguments":{"command":"cargo test --locked","detach":true,"log_path":"local/test.log"}}
+{"id":"bash-status","prompt":"Check the current state and recent output of detached Bash job bash-550e8400-e29b-41d4-a716-446655440000 without waiting.","expected":"bash_status","arguments":{"job_id":"bash-550e8400-e29b-41d4-a716-446655440000","tail_bytes":8192}}
+{"id":"bash-status-metadata","prompt":"Check only the lifecycle metadata for detached Bash job bash-550e8400-e29b-41d4-a716-446655440000.","expected":"bash_status","arguments":{"job_id":"bash-550e8400-e29b-41d4-a716-446655440000","tail_bytes":0}}
+{"id":"bash-terminate","prompt":"Stop the complete process tree owned by detached Bash job bash-550e8400-e29b-41d4-a716-446655440000.","expected":"bash","arguments":{"action":"terminate","job_id":"bash-550e8400-e29b-41d4-a716-446655440000"},"forbidden":["bash_kill","shell_kill"]}

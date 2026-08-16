@@ -529,7 +529,7 @@ impl Drop for AttributeList {
 
 pub(super) struct Lifecycle {
     pid: u32,
-    process: OwnedHandle,
+    process: Option<OwnedHandle>,
     thread: Option<OwnedHandle>,
     job: Option<OwnedHandle>,
     completion: Option<OwnedHandle>,
@@ -558,7 +558,7 @@ impl Lifecycle {
         };
         Ok(Self {
             pid: info.dwProcessId,
-            process,
+            process: Some(process),
             thread: Some(thread),
             job: None,
             completion: None,
@@ -599,7 +599,10 @@ impl Lifecycle {
         if unsafe {
             AssignProcessToJobObject(
                 self.job.as_ref().expect("job installed").raw(),
-                self.process.raw(),
+                self.process
+                    .as_ref()
+                    .expect("primary process handle available")
+                    .raw(),
             )
         } == 0
         {
@@ -628,14 +631,18 @@ impl Lifecycle {
     }
 
     pub(super) fn primary_exit_code(&self) -> io::Result<Option<u32>> {
-        let wait = unsafe { WaitForSingleObject(self.process.raw(), 0) };
+        let process = self
+            .process
+            .as_ref()
+            .ok_or_else(|| io::Error::other("primary process handle is unavailable"))?;
+        let wait = unsafe { WaitForSingleObject(process.raw(), 0) };
         match wait {
             WAIT_OBJECT_0 => {}
             WAIT_TIMEOUT => return Ok(None),
             _ => return Err(io::Error::last_os_error()),
         }
         let mut code = 0_u32;
-        if unsafe { GetExitCodeProcess(self.process.raw(), &raw mut code) } == 0 {
+        if unsafe { GetExitCodeProcess(process.raw(), &raw mut code) } == 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(Some(code))
@@ -706,10 +713,14 @@ impl Lifecycle {
 
     /// Hand the job over to a longer-lived owner. The lifecycle stops managing the tree, so
     /// dropping it no longer terminates the processes inside the job.
-    pub(super) fn release_job(&mut self) -> OwnedHandle {
+    pub(super) fn release_detached_handles(&mut self) -> (OwnedHandle, OwnedHandle) {
         let job = self.job.take().expect("job installed before release");
+        let process = self
+            .process
+            .take()
+            .expect("primary process handle available before release");
         self.state = LifecycleState::Complete;
-        job
+        (job, process)
     }
 }
 
@@ -726,8 +737,8 @@ impl Drop for Lifecycle {
                 if let Some(job) = &self.job {
                     TerminateJobObject(job.raw(), TERMINATION_EXIT_CODE);
                 }
-            } else {
-                TerminateProcess(self.process.raw(), TERMINATION_EXIT_CODE);
+            } else if let Some(process) = &self.process {
+                TerminateProcess(process.raw(), TERMINATION_EXIT_CODE);
             }
         }
     }

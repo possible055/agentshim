@@ -149,3 +149,158 @@ fn mixed_workload_resource_soak() {
     );
     println!("resource soak artifact: {}", artifact.path.display());
 }
+
+#[test]
+#[ignore = "manual detached Bash resource soak; run with --ignored --nocapture"]
+#[allow(clippy::too_many_lines)]
+fn detached_job_status_retention_and_termination_soak() {
+    if agentshim::bash_report().is_err() {
+        return;
+    }
+    let iterations = env::var("AGENTSHIM_BASH_JOB_SOAK_ITERATIONS")
+        .ok()
+        .map_or(200, |value| {
+            value.parse::<usize>().expect("positive iteration count")
+        });
+    assert!(iterations >= 64, "soak must cross terminal retention twice");
+    fs::create_dir_all(Path::new(env!("CARGO_MANIFEST_DIR")).join("target/resource-soak"))
+        .expect("soak log directory");
+    let mut session = Session::start_bash_soak();
+    session.discover();
+
+    let mut active = Vec::new();
+    for index in 0..16 {
+        let response = session
+            .call_tool(
+                "bash",
+                json!({
+                    "command": "sleep 300",
+                    "detach": true,
+                    "log_path": format!("target/resource-soak/active-{index}.log")
+                }),
+            )
+            .expect("fill active roster");
+        active.push(job_id(&response));
+    }
+    let full = session
+        .call_tool(
+            "bash",
+            json!({
+                "command": "true",
+                "detach": true,
+                "log_path": "target/resource-soak/active-overflow.log"
+            }),
+        )
+        .expect_err("seventeenth active job must be rejected");
+    assert_eq!(full.code, "resource_busy");
+    let saturated = platform::sample(session.pid()).expect("saturated resource sample");
+    for job_id in active {
+        let response = session
+            .call_tool("bash", json!({ "action": "terminate", "job_id": job_id }))
+            .expect("terminate at detached capacity");
+        assert!(response_text(&response).contains("State: terminated"));
+    }
+    assert!(
+        platform::sample(session.pid())
+            .expect("post-termination sample")
+            .descendants
+            .is_empty(),
+        "controlled descendants survived the 16-owner termination"
+    );
+    thread::sleep(Duration::from_millis(BURST_QUIET_MS));
+
+    let mut samples = Vec::with_capacity(iterations);
+    let mut ids = VecDeque::with_capacity(iterations);
+    for iteration in 0..iterations {
+        if iteration > 0 && iteration % 6 == 0 {
+            thread::sleep(Duration::from_millis(BURST_QUIET_MS));
+        }
+        let command = if iteration == 0 {
+            "head -c 4194304 /dev/zero | tr '\\0' x"
+        } else {
+            "printf 'completed\\n'"
+        };
+        let response = session
+            .call_tool(
+                "bash",
+                json!({
+                    "command": command,
+                    "detach": true,
+                    "log_path": "target/resource-soak/churn.log"
+                }),
+            )
+            .expect("start churn job");
+        let id = job_id(&response);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let status = session
+                .call_tool("bash_status", json!({ "job_id": id, "tail_bytes": 16384 }))
+                .expect("status churn job");
+            if response_text(&status).contains("State: completed") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "churn job did not complete");
+            thread::sleep(Duration::from_millis(10));
+        }
+        for _ in 0..4 {
+            session
+                .call_tool("bash_status", json!({ "job_id": id, "tail_bytes": 0 }))
+                .expect("repeated terminal status");
+        }
+        ids.push_back(id);
+        samples.push(
+            platform::sample(session.pid())
+                .expect("resource sample")
+                .resources,
+        );
+    }
+
+    let oldest = ids.front().expect("oldest id");
+    let expired = session
+        .call_tool("bash_status", json!({ "job_id": oldest, "tail_bytes": 0 }))
+        .expect_err("oldest terminal record must be evicted");
+    assert_eq!(expired.code, "validation");
+    session
+        .call_tool(
+            "bash_status",
+            json!({ "job_id": ids.back().expect("latest id"), "tail_bytes": 0 }),
+        )
+        .expect("latest terminal record retained");
+
+    let measured = &samples[samples.len() / 4..];
+    let resource_growth = sustained_tail_growth(measured, |sample| sample.resource_count);
+    let thread_growth = sustained_tail_growth(measured, |sample| sample.threads);
+    let final_sample = platform::sample(session.pid()).expect("final resource sample");
+    assert!(
+        final_sample.descendants.is_empty(),
+        "controlled descendants survived churn"
+    );
+    assert!(
+        !resource_growth,
+        "handle/fd count grew throughout the soak tail"
+    );
+    assert!(!thread_growth, "thread count grew throughout the soak tail");
+    assert!(
+        final_sample.resources.resource_count
+            <= saturated.resources.resource_count.saturating_add(8),
+        "terminal retention kept active OS handles: saturated={}, final={}",
+        saturated.resources.resource_count,
+        final_sample.resources.resource_count
+    );
+    let exit = session.close();
+    assert!(exit.success, "server exited with {}", exit.status);
+}
+
+fn job_id(response: &Value) -> String {
+    response_text(response)
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("job_id="))
+        .expect("detached response job_id")
+        .to_owned()
+}
+
+fn response_text(response: &Value) -> &str {
+    response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("text response")
+}

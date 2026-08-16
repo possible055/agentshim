@@ -1,5 +1,7 @@
 use std::{
+    collections::VecDeque,
     ffi::OsStr,
+    fs::File,
     io,
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex},
@@ -9,20 +11,20 @@ use std::{
 use crate::{
     path::{RepositoryRoot, ResolvedPath},
     platform::process::DetachedTree,
-    tools::exec::{ProcessError, spawn::CLEANUP_DEADLINE},
+    tools::{
+        bash::status::{
+            JobSnapshot, JobState, MAX_TAIL_BYTES, RawLogSnapshot, snapshot_tail, validate_job_id,
+        },
+        exec::{ProcessError, spawn::CLEANUP_DEADLINE},
+    },
 };
 
 pub(crate) const DETACHED_CALLS_ENV: &str = "AGENTSHIM_DETACHED_CALLS";
 pub(crate) const DEFAULT_DETACHED_CALLS: usize = 16;
 pub(crate) const MAX_DETACHED_CALLS: usize = 16;
+pub(crate) const TERMINAL_RETENTION: usize = 32;
 const QUIESCE_SLICE: Duration = Duration::from_millis(20);
 
-/// Parse the detached-tree capacity.
-///
-/// # Errors
-///
-/// Returns invalid input when the value is not an integer inside the documented range, so an
-/// invalid setting fails startup rather than a task.
 pub fn parse_detached_calls(value: Option<&OsStr>) -> io::Result<usize> {
     match value {
         None => Ok(DEFAULT_DETACHED_CALLS),
@@ -48,17 +50,63 @@ enum RosterState {
     Stopping,
 }
 
-struct Slot {
-    tree: DetachedTree,
-    log_key: String,
-    log_path: PathBuf,
+enum ActivePhase {
+    Running(DetachedTree),
+    Finalizing,
+    Terminating,
 }
 
-/// Fixed-capacity ownership of detached process trees, scanned at admission rather than by a
-/// reaper thread: a finished tree frees its slot on the next detached call, which is the only
-/// moment the count matters. Reservations and live slots together hold normalized
-/// `log_path` keys, so two calls in one instance cannot share an observation pipe; that
-/// uniqueness is an instance-local protection, not an enumerable or persistent registry.
+struct ActiveJob {
+    job_id: String,
+    pid: u32,
+    started_at: Instant,
+    log_key: String,
+    log_path: PathBuf,
+    log_reader: Arc<File>,
+    phase: ActivePhase,
+    primary_exit: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminalState {
+    Completed,
+    Terminated,
+    OutcomeUncertain,
+}
+
+impl TerminalState {
+    const fn model_state(self) -> JobState {
+        match self {
+            Self::Completed => JobState::Completed,
+            Self::Terminated => JobState::Terminated,
+            Self::OutcomeUncertain => JobState::OutcomeUncertain,
+        }
+    }
+}
+
+struct TerminalJob {
+    job_id: String,
+    pid: u32,
+    started_at: Instant,
+    finished_at: Instant,
+    log_path: PathBuf,
+    state: TerminalState,
+    primary_exit: Option<String>,
+    final_log: RawLogSnapshot,
+}
+
+#[derive(Default)]
+struct Roster {
+    state: RosterState,
+    active: Vec<ActiveJob>,
+    terminal: VecDeque<TerminalJob>,
+    reserved: usize,
+    reserved_paths: Vec<String>,
+    reserved_job_ids: Vec<String>,
+    shutdown_deadline: Option<Instant>,
+    shutdown_uncertain_pids: Vec<u32>,
+}
+
 #[derive(Clone)]
 pub(crate) struct DetachedTrees {
     capacity: usize,
@@ -68,16 +116,10 @@ pub(crate) struct DetachedTrees {
     hooks: Arc<Mutex<TestHooks>>,
 }
 
-#[derive(Default)]
-struct Roster {
-    state: RosterState,
-    live: Vec<Slot>,
-    /// Admissions that have not yet produced a tree. Counted alongside `live` so two callers
-    /// cannot both observe the same free slot between admission and spawn.
-    reserved: usize,
-    /// Normalized `log_path` keys held by admissions that resolved their log.
-    reserved_paths: Vec<String>,
-    shutdown_deadline: Option<Instant>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RefreshOutcome {
+    Stable,
+    StatusUnknown,
 }
 
 impl DetachedTrees {
@@ -93,16 +135,16 @@ impl DetachedTrees {
     }
 
     pub(crate) fn admit(&self) -> Result<DetachedAdmission, ProcessError> {
+        self.refresh_all_completed();
         let mut state = self.lock();
         if state.state != RosterState::Accepting {
             return Err(stopping_admission_error());
         }
-        self.sweep_liveness(&mut state);
-        if state.live.len().saturating_add(state.reserved) >= self.capacity {
+        if state.active.len().saturating_add(state.reserved) >= self.capacity {
             let busy = state
-                .live
+                .active
                 .iter()
-                .map(|slot| format!("pid {} -> {}", slot.tree.pid(), slot.log_path.display()))
+                .map(|job| format!("pid {} -> {}", job.pid, job.log_path.display()))
                 .collect::<Vec<_>>()
                 .join("; ");
             return Err(ProcessError::ResourceBusy(format!(
@@ -110,22 +152,24 @@ impl DetachedTrees {
                 self.capacity
             )));
         }
+        let job_id = unique_job_id(&state);
         state.reserved = state.reserved.saturating_add(1);
+        state.reserved_job_ids.push(job_id.clone());
         drop(state);
         Ok(DetachedAdmission {
             trees: self.clone(),
+            job_id,
             reserved_key: None,
             settled: false,
         })
     }
 
-    /// Convert a reservation into a live slot without leaving the count low in between.
-    /// A roster that stopped accepting hands the tree back: the caller — not the roster —
-    /// must roll it back, so the owner can never be lost on an error path.
     fn commit(
         &self,
+        job_id: String,
         tree: DetachedTree,
         log_path: PathBuf,
+        log_reader: Arc<File>,
         reserved_key: Option<String>,
     ) -> Result<(), DetachedTree> {
         let mut state = self.lock();
@@ -133,90 +177,262 @@ impl DetachedTrees {
             return Err(tree);
         }
         state.reserved = state.reserved.saturating_sub(1);
+        state.reserved_job_ids.retain(|held| held != &job_id);
         if let Some(key) = &reserved_key {
             state.reserved_paths.retain(|held| held != key);
         }
-        state.live.push(Slot {
-            tree,
+        let pid = tree.pid();
+        state.active.push(ActiveJob {
+            job_id,
+            pid,
+            started_at: Instant::now(),
             log_key: reserved_key.unwrap_or_default(),
             log_path,
+            log_reader,
+            phase: ActivePhase::Running(tree),
+            primary_exit: None,
         });
         self.changed.notify_all();
         Ok(())
     }
 
-    fn release(&self, reserved_key: Option<&str>) {
+    fn release(&self, job_id: &str, reserved_key: Option<&str>) {
         let mut state = self.lock();
         state.reserved = state.reserved.saturating_sub(1);
+        state.reserved_job_ids.retain(|held| held != job_id);
         if let Some(key) = reserved_key {
             state.reserved_paths.retain(|held| held != key);
         }
         self.changed.notify_all();
     }
 
-    /// Enter `Stopping` and hand out every committed tree for termination outside the
-    /// roster lock. Idempotent: overlapping shutdown triggers share one transition.
-    pub(crate) fn begin_shutdown(&self) -> Vec<DetachedTree> {
+    pub(crate) fn status(
+        &self,
+        job_id: &str,
+        tail_bytes: usize,
+    ) -> Result<JobSnapshot, ProcessError> {
+        validate_job_id(job_id)?;
+        let refresh = self.refresh_job(job_id);
+        let source = {
+            let state = self.lock();
+            if let Some(job) = state.active.iter().find(|job| job.job_id == job_id) {
+                let model_state = match (&job.phase, refresh) {
+                    (ActivePhase::Running(_), RefreshOutcome::StatusUnknown) => {
+                        JobState::StatusUnknown
+                    }
+                    (ActivePhase::Running(_), RefreshOutcome::Stable) => JobState::Running,
+                    (ActivePhase::Finalizing, _) => JobState::Finalizing,
+                    (ActivePhase::Terminating, _) => JobState::Terminating,
+                };
+                SnapshotSource::Active {
+                    base: active_snapshot(job, model_state, None),
+                    reader: Arc::clone(&job.log_reader),
+                }
+            } else if let Some(job) = state.terminal.iter().find(|job| job.job_id == job_id) {
+                SnapshotSource::Terminal(terminal_snapshot(job, None))
+            } else {
+                return Err(unknown_job_error());
+            }
+        };
+        Ok(match source {
+            SnapshotSource::Active { mut base, reader } => {
+                base.log = self.snapshot_log(&reader, tail_bytes.min(MAX_TAIL_BYTES));
+                base
+            }
+            SnapshotSource::Terminal(mut snapshot) => {
+                if tail_bytes < snapshot.log.bytes.len() {
+                    snapshot.log.bytes = snapshot.log.bytes
+                        [snapshot.log.bytes.len().saturating_sub(tail_bytes)..]
+                        .to_vec();
+                }
+                snapshot
+            }
+        })
+    }
+
+    pub(crate) fn begin_terminate(&self, job_id: &str) -> Result<TerminateStart, ProcessError> {
+        validate_job_id(job_id)?;
+        let _ = self.refresh_job(job_id);
+        let mut state = self.lock();
+        if let Some(job) = state.terminal.iter().find(|job| job.job_id == job_id) {
+            return Ok(TerminateStart::Immediate(terminal_snapshot(
+                job,
+                Some("already_terminal"),
+            )));
+        }
+        let Some(index) = state.active.iter().position(|job| job.job_id == job_id) else {
+            return Err(unknown_job_error());
+        };
+        let job = &mut state.active[index];
+        match &job.phase {
+            ActivePhase::Finalizing => Ok(TerminateStart::Immediate(active_snapshot(
+                job,
+                JobState::Finalizing,
+                Some("already_completed"),
+            ))),
+            ActivePhase::Terminating => Ok(TerminateStart::Immediate(active_snapshot(
+                job,
+                JobState::Terminating,
+                Some("already_requested"),
+            ))),
+            ActivePhase::Running(_) => {
+                let phase = std::mem::replace(&mut job.phase, ActivePhase::Terminating);
+                let ActivePhase::Running(tree) = phase else {
+                    unreachable!("matched running phase")
+                };
+                let work = TerminationWork {
+                    trees: self.clone(),
+                    job_id: job.job_id.clone(),
+                    pid: job.pid,
+                    log_reader: Arc::clone(&job.log_reader),
+                    primary_exit: job.primary_exit.clone(),
+                    tree,
+                };
+                tracing::info!(target: "agentshim", event = "detached_terminate_accepted", phase = "lifecycle", outcome = "accepted", pid = job.pid);
+                self.changed.notify_all();
+                Ok(TerminateStart::Accepted(work))
+            }
+        }
+    }
+
+    pub(crate) fn begin_shutdown(&self, deadline: Instant) -> Vec<TerminationWork> {
+        self.refresh_all_completed();
         let mut state = self.lock();
         state.state = RosterState::Stopping;
-        state.shutdown_deadline = Some(Instant::now() + CLEANUP_DEADLINE);
+        state.shutdown_deadline.get_or_insert(deadline);
+        let mut work = Vec::new();
+        for job in &mut state.active {
+            if matches!(job.phase, ActivePhase::Running(_)) {
+                let phase = std::mem::replace(&mut job.phase, ActivePhase::Terminating);
+                let ActivePhase::Running(tree) = phase else {
+                    unreachable!("matched running phase")
+                };
+                work.push(TerminationWork {
+                    trees: self.clone(),
+                    job_id: job.job_id.clone(),
+                    pid: job.pid,
+                    log_reader: Arc::clone(&job.log_reader),
+                    primary_exit: job.primary_exit.clone(),
+                    tree,
+                });
+            }
+        }
         self.changed.notify_all();
-        state.live.drain(..).map(|slot| slot.tree).collect()
+        work
     }
 
-    /// Reap finished trees and count what is still live, including reservations that
-    /// have not spawned yet. The idle watchdog treats a non-zero count as client
-    /// activity: a quiet conversation with a running build must not be reaped out
-    /// from under it.
     pub(crate) fn live_tree_count(&self) -> usize {
-        let mut state = self.lock();
-        self.sweep_liveness(&mut state);
-        state.live.len().saturating_add(state.reserved)
+        self.refresh_all_completed();
+        let state = self.lock();
+        state.active.len().saturating_add(state.reserved)
     }
 
-    /// Drop finished trees from the roster. A failed liveness query is a degraded
-    /// observation, not an exit report: dropping the slot would close the only job
-    /// handle and kill a tree that may still be running, so the owner and its capacity
-    /// stay booked.
-    fn sweep_liveness(&self, state: &mut Roster) {
-        state
-            .live
-            .retain_mut(|slot| match self.liveness(&mut slot.tree) {
-                Ok(running) => running,
+    fn refresh_all_completed(&self) {
+        let ids = self
+            .lock()
+            .active
+            .iter()
+            .filter(|job| matches!(job.phase, ActivePhase::Running(_)))
+            .map(|job| job.job_id.clone())
+            .collect::<Vec<_>>();
+        for job_id in ids {
+            let _ = self.refresh_job(&job_id);
+        }
+    }
+
+    fn refresh_job(&self, job_id: &str) -> RefreshOutcome {
+        let finalize = {
+            let mut state = self.lock();
+            let Some(job) = state.active.iter_mut().find(|job| job.job_id == job_id) else {
+                return RefreshOutcome::Stable;
+            };
+            let ActivePhase::Running(tree) = &mut job.phase else {
+                return RefreshOutcome::Stable;
+            };
+            let observation = match self.observation(tree) {
+                Ok(observation) => observation,
                 Err(error) => {
-                    tracing::warn!(
-                        target: "agentshim",
-                        event = "detached_liveness_degraded",
-                        phase = "execution",
-                        outcome = "degraded",
-                        error_class = "io",
-                        io_kind = ?error.kind(),
-                        pid = slot.tree.pid()
-                    );
-                    true
+                    tracing::warn!(target: "agentshim", event = "detached_status_observation_degraded", phase = "lifecycle", outcome = "degraded", error_class = "io", io_kind = ?error.kind(), pid = job.pid);
+                    return RefreshOutcome::StatusUnknown;
                 }
-            });
+            };
+            if let Some(exit) = observation.primary_exit {
+                job.primary_exit = Some(exit);
+            }
+            if observation.tree_running {
+                return RefreshOutcome::Stable;
+            }
+            let phase = std::mem::replace(&mut job.phase, ActivePhase::Finalizing);
+            let ActivePhase::Running(tree) = phase else {
+                unreachable!("matched running phase")
+            };
+            drop(tree);
+            Some(FinalizeWork {
+                job_id: job.job_id.clone(),
+                log_reader: Arc::clone(&job.log_reader),
+            })
+        };
+        if let Some(work) = finalize {
+            let log = self.snapshot_log(&work.log_reader, MAX_TAIL_BYTES);
+            self.finish_terminal(&work.job_id, TerminalState::Completed, log, None);
+        }
+        RefreshOutcome::Stable
     }
 
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn is_accepting(&self) -> bool {
-        matches!(self.lock().state, RosterState::Accepting)
+    fn finish_terminal(
+        &self,
+        job_id: &str,
+        terminal_state: TerminalState,
+        final_log: RawLogSnapshot,
+        primary_exit: Option<String>,
+    ) -> JobSnapshot {
+        let mut state = self.lock();
+        let index = state
+            .active
+            .iter()
+            .position(|job| job.job_id == job_id)
+            .expect("terminal transition keeps its active placeholder");
+        let mut active = state.active.remove(index);
+        if primary_exit.is_some() {
+            active.primary_exit = primary_exit;
+        }
+        if state.state == RosterState::Stopping
+            && terminal_state == TerminalState::OutcomeUncertain
+            && !state.shutdown_uncertain_pids.contains(&active.pid)
+        {
+            state.shutdown_uncertain_pids.push(active.pid);
+        }
+        let terminal = TerminalJob {
+            job_id: active.job_id,
+            pid: active.pid,
+            started_at: active.started_at,
+            finished_at: Instant::now(),
+            log_path: active.log_path,
+            state: terminal_state,
+            primary_exit: active.primary_exit,
+            final_log,
+        };
+        let snapshot = terminal_snapshot(&terminal, None);
+        if state.terminal.len() == TERMINAL_RETENTION {
+            state.terminal.pop_front();
+        }
+        state.terminal.push_back(terminal);
+        self.changed.notify_all();
+        snapshot
     }
 
-    /// The shared shutdown deadline, if this roster has stopped accepting.
     #[must_use]
     pub(crate) fn shutdown_deadline(&self) -> Option<Instant> {
         self.lock().shutdown_deadline
     }
 
-    /// Block until no reservation or live tree remains, bounded by `deadline`. Returns
-    /// whether the roster actually reached zero.
     pub(crate) fn wait_until_quiesced(&self, deadline: Instant) -> bool {
         let mut state = self.lock();
         loop {
-            let quiet =
-                state.reserved == 0 && state.reserved_paths.is_empty() && state.live.is_empty();
+            let quiet = state.reserved == 0
+                && state.reserved_paths.is_empty()
+                && state.reserved_job_ids.is_empty()
+                && state.active.is_empty();
             if quiet || Instant::now() >= deadline {
                 return quiet;
             }
@@ -231,18 +447,25 @@ impl DetachedTrees {
         }
     }
 
-    /// Test-only emergency sweep: production shutdown goes through the single
-    /// `shutdown_processes` transaction, which also waits for quiescence.
+    pub(crate) fn shutdown_unverified_pids(&self) -> Vec<u32> {
+        let state = self.lock();
+        let mut pids = state.shutdown_uncertain_pids.clone();
+        pids.extend(
+            state
+                .active
+                .iter()
+                .filter_map(|job| matches!(job.phase, ActivePhase::Terminating).then_some(job.pid)),
+        );
+        pids.sort_unstable();
+        pids.dedup();
+        pids
+    }
+
     #[cfg(test)]
     pub(crate) fn terminate_all(&self) {
-        let mut state = self.lock();
-        for slot in &mut state.live {
-            slot.tree.terminate();
+        for work in self.begin_shutdown(Instant::now() + CLEANUP_DEADLINE) {
+            let _ = work.run();
         }
-        state.state = RosterState::Stopping;
-        state.live.clear();
-        state.reserved_paths.clear();
-        self.changed.notify_all();
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Roster> {
@@ -252,8 +475,18 @@ impl DetachedTrees {
     }
 
     #[cfg(test)]
+    pub(crate) fn is_accepting(&self) -> bool {
+        matches!(self.lock().state, RosterState::Accepting)
+    }
+
+    #[cfg(test)]
     pub(crate) fn live_count(&self) -> usize {
-        self.lock().live.len()
+        self.lock().active.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn terminal_count(&self) -> usize {
+        self.lock().terminal.len()
     }
 
     #[cfg(test)]
@@ -261,17 +494,33 @@ impl DetachedTrees {
         self.lock().reserved
     }
 
-    // Only the test build reaches the hook through `self`; the production body is a plain
-    // forward and keeps the receiver only to mirror the test signature.
     #[cfg_attr(not(test), allow(clippy::unused_self))]
-    fn liveness(&self, tree: &mut DetachedTree) -> io::Result<bool> {
+    fn observation(
+        &self,
+        tree: &mut DetachedTree,
+    ) -> io::Result<crate::platform::process::DetachedObservation> {
         #[cfg(test)]
         if std::mem::take(&mut self.lock_hooks().fail_liveness_query) {
             return Err(io::Error::other(
                 "injected degraded liveness query for lifecycle testing",
             ));
         }
-        tree.is_running()
+        tree.observe()
+    }
+
+    #[cfg_attr(
+        not(test),
+        allow(
+            clippy::unused_self,
+            reason = "test builds inject registry-owned log failures"
+        )
+    )]
+    fn snapshot_log(&self, file: &File, tail_bytes: usize) -> RawLogSnapshot {
+        #[cfg(test)]
+        if std::mem::take(&mut self.lock_hooks().fail_tail_snapshot) {
+            return RawLogSnapshot::empty_with_error("injected detached log read failure");
+        }
+        snapshot_tail(file, tail_bytes)
     }
 
     #[cfg(test)]
@@ -285,6 +534,11 @@ impl DetachedTrees {
     }
 
     #[cfg(test)]
+    pub(crate) fn set_after_commit_hook(&self, hook: impl FnOnce() + Send + 'static) {
+        self.lock_hooks().after_commit = Some(Box::new(hook));
+    }
+
+    #[cfg(test)]
     pub(crate) fn fail_next_spawn(&self) {
         self.lock_hooks().fail_spawn = true;
     }
@@ -295,25 +549,44 @@ impl DetachedTrees {
     }
 
     #[cfg(test)]
+    pub(crate) fn fail_next_tail_snapshot(&self) {
+        self.lock_hooks().fail_tail_snapshot = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_termination(&self) {
+        self.lock_hooks().fail_termination = true;
+    }
+
+    #[cfg(test)]
+    fn take_termination_failure(&self) -> bool {
+        std::mem::take(&mut self.lock_hooks().fail_termination)
+    }
+
+    #[cfg(test)]
     fn run_before_open_hook(&self) {
-        let hook = self.lock_hooks().before_open.take();
-        if let Some(hook) = hook {
+        if let Some(hook) = self.lock_hooks().before_open.take() {
             hook();
         }
     }
 
     #[cfg(test)]
     fn run_after_open_hook(&self) {
-        let hook = self.lock_hooks().after_open.take();
-        if let Some(hook) = hook {
+        if let Some(hook) = self.lock_hooks().after_open.take() {
+            hook();
+        }
+    }
+
+    #[cfg(test)]
+    fn run_after_commit_hook(&self) {
+        if let Some(hook) = self.lock_hooks().after_commit.take() {
             hook();
         }
     }
 
     #[cfg(test)]
     fn take_spawn_failure(&self) -> bool {
-        let mut hooks = self.lock_hooks();
-        std::mem::take(&mut hooks.fail_spawn)
+        std::mem::take(&mut self.lock_hooks().fail_spawn)
     }
 
     #[cfg(test)]
@@ -324,14 +597,122 @@ impl DetachedTrees {
     }
 }
 
+enum SnapshotSource {
+    Active {
+        base: JobSnapshot,
+        reader: Arc<File>,
+    },
+    Terminal(JobSnapshot),
+}
+
+struct FinalizeWork {
+    job_id: String,
+    log_reader: Arc<File>,
+}
+
+pub(crate) enum TerminateStart {
+    Immediate(JobSnapshot),
+    Accepted(TerminationWork),
+}
+
+pub(crate) struct TerminationWork {
+    trees: DetachedTrees,
+    job_id: String,
+    pid: u32,
+    log_reader: Arc<File>,
+    primary_exit: Option<String>,
+    tree: DetachedTree,
+}
+
+impl TerminationWork {
+    pub(crate) fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    pub(crate) fn run(mut self) -> JobSnapshot {
+        let deadline = self.trees.shutdown_deadline().map_or_else(
+            || Instant::now() + CLEANUP_DEADLINE,
+            |shutdown| shutdown.min(Instant::now() + CLEANUP_DEADLINE),
+        );
+        #[cfg(test)]
+        let injected_failure = self.trees.take_termination_failure();
+        #[cfg(not(test))]
+        let injected_failure = false;
+        let terminal_state = if injected_failure {
+            TerminalState::OutcomeUncertain
+        } else {
+            match self.tree.terminate_and_wait(deadline) {
+                Ok(()) => TerminalState::Terminated,
+                Err(_) => TerminalState::OutcomeUncertain,
+            }
+        };
+        if let Ok(observation) = self.tree.observe()
+            && observation.primary_exit.is_some()
+        {
+            self.primary_exit = observation.primary_exit;
+        }
+        let final_log = self.trees.snapshot_log(&self.log_reader, MAX_TAIL_BYTES);
+        let state = terminal_state.model_state().label();
+        let snapshot =
+            self.trees
+                .finish_terminal(&self.job_id, terminal_state, final_log, self.primary_exit);
+        tracing::info!(target: "agentshim", event = "detached_terminate_finished", phase = "lifecycle", outcome = state, pid = self.pid);
+        snapshot
+    }
+}
+
+fn active_snapshot(job: &ActiveJob, state: JobState, outcome: Option<&'static str>) -> JobSnapshot {
+    JobSnapshot {
+        job_id: job.job_id.clone(),
+        state,
+        pid: job.pid,
+        runtime: job.started_at.elapsed(),
+        primary_exit: job.primary_exit.clone(),
+        log_path: job.log_path.clone(),
+        log: RawLogSnapshot {
+            total: 0,
+            bytes: Vec::new(),
+            error: None,
+        },
+        outcome,
+    }
+}
+
+fn terminal_snapshot(job: &TerminalJob, outcome: Option<&'static str>) -> JobSnapshot {
+    JobSnapshot {
+        job_id: job.job_id.clone(),
+        state: job.state.model_state(),
+        pid: job.pid,
+        runtime: job.finished_at.saturating_duration_since(job.started_at),
+        primary_exit: job.primary_exit.clone(),
+        log_path: job.log_path.clone(),
+        log: job.final_log.clone(),
+        outcome,
+    }
+}
+
+fn unique_job_id(state: &Roster) -> String {
+    loop {
+        let candidate = format!("bash-{}", uuid::Uuid::new_v4());
+        let used = state.active.iter().any(|job| job.job_id == candidate)
+            || state.terminal.iter().any(|job| job.job_id == candidate)
+            || state.reserved_job_ids.iter().any(|held| held == &candidate);
+        if !used {
+            return candidate;
+        }
+    }
+}
+
+fn unknown_job_error() -> ProcessError {
+    ProcessError::Validation("unknown or expired bash job_id for this server instance".to_owned())
+}
+
 fn stopping_admission_error() -> ProcessError {
     ProcessError::ResourceBusy(
         "detached bash is no longer admitting: the server is stopping".to_owned(),
     )
 }
 
-/// Windows matches `log_path` keys case-insensitively and treats `/` and `\` as the same
-/// separator; Unix keeps the platform's native case semantics.
 fn normalized_log_key(path: &Path) -> String {
     let rendered = path.to_string_lossy().to_string();
     #[cfg(windows)]
@@ -346,30 +727,32 @@ fn normalized_log_key(path: &Path) -> String {
 
 #[cfg(test)]
 #[derive(Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent one-shot lifecycle failure hooks keep tests deterministic"
+)]
 struct TestHooks {
     before_open: Option<Box<dyn FnOnce() + Send>>,
     after_open: Option<Box<dyn FnOnce() + Send>>,
+    after_commit: Option<Box<dyn FnOnce() + Send>>,
     fail_spawn: bool,
     fail_liveness_query: bool,
+    fail_tail_snapshot: bool,
+    fail_termination: bool,
 }
 
-/// A slot held from admission until a tree fills it. Dropping without [`Self::retain`] — a
-/// cancelled request, a failed spawn, a `?` on any step in between — returns the slot and
-/// its `log_path` key, so the capacity is never leaked and never double-issued.
 pub(crate) struct DetachedAdmission {
     trees: DetachedTrees,
+    job_id: String,
     reserved_key: Option<String>,
     settled: bool,
 }
 
 impl DetachedAdmission {
-    /// Reserve the normalized `log_path` key against live slots and other reservations.
-    /// Called before the log is truncated, so a duplicate never destroys an existing log.
-    ///
-    /// # Errors
-    ///
-    /// Returns a resource conflict when the path is already in use, or busy when the
-    /// roster has stopped accepting.
+    pub(crate) fn job_id(&self) -> &str {
+        &self.job_id
+    }
+
     pub(crate) fn reserve_log_path(&mut self, path: &Path) -> Result<(), ProcessError> {
         let key = normalized_log_key(path);
         let mut state = self.trees.lock();
@@ -377,11 +760,10 @@ impl DetachedAdmission {
             return Err(stopping_admission_error());
         }
         if state.reserved_paths.iter().any(|held| held == &key)
-            || state.live.iter().any(|slot| slot.log_key == key)
+            || state.active.iter().any(|job| job.log_key == key)
         {
             return Err(ProcessError::ResourceBusy(format!(
-                "log_path {} is already in use by an active or reserved detached call in \
-                 this instance",
+                "log_path {} is already in use by an active or reserved detached call in this instance",
                 path.display()
             )));
         }
@@ -390,32 +772,39 @@ impl DetachedAdmission {
         Ok(())
     }
 
-    /// Commit the tree. On rejection the tree is returned to the caller, which must
-    /// terminate it: user code may already have run.
     pub(crate) fn retain(
         mut self,
         tree: DetachedTree,
         log_path: PathBuf,
+        log_reader: Arc<File>,
     ) -> Result<(), DetachedTree> {
-        match self.trees.commit(tree, log_path, self.reserved_key.clone()) {
+        match self.trees.commit(
+            self.job_id.clone(),
+            tree,
+            log_path,
+            log_reader,
+            self.reserved_key.clone(),
+        ) {
             Ok(()) => {
                 self.settled = true;
+                #[cfg(test)]
+                self.trees.run_after_commit_hook();
                 Ok(())
             }
             Err(tree) => Err(tree),
         }
     }
 
-    /// A late rollback shares the roster's shutdown deadline when one is running, so a
-    /// shutdown never waits longer than its own single budget for a straggler call.
     #[must_use]
     pub(crate) fn rollback_deadline(&self) -> Instant {
-        let budget = match self.trees.shutdown_deadline() {
-            Some(deadline) => deadline
-                .saturating_duration_since(Instant::now())
-                .min(CLEANUP_DEADLINE),
-            None => CLEANUP_DEADLINE,
-        };
+        let budget = self
+            .trees
+            .shutdown_deadline()
+            .map_or(CLEANUP_DEADLINE, |deadline| {
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(CLEANUP_DEADLINE)
+            });
         Instant::now() + budget
     }
 
@@ -443,26 +832,26 @@ impl Drop for DetachedAdmission {
     fn drop(&mut self) {
         if !self.settled {
             let key = self.reserved_key.take();
-            self.trees.release(key.as_deref());
+            self.trees.release(&self.job_id, key.as_deref());
         }
     }
 }
 
-/// Open the log in truncating mode through the repository capability, never through an ambient
-/// path. [`RepositoryRoot::resolve`] is lexical admission only, so a symlink or junction that
-/// lives inside the repository but points outside it passes that check; going through the
-/// retained directory handle is what actually keeps the write inside the root.
-///
-/// The parent directory must already exist: creating it implicitly would let a typo silently
-/// scatter files through the repository.
+pub(crate) struct DetachedLog {
+    pub(crate) writer: File,
+    pub(crate) reader: Arc<File>,
+}
+
 pub(crate) fn open_log(
     root: &RepositoryRoot,
     path: &ResolvedPath,
-) -> Result<std::fs::File, ProcessError> {
-    root.create_truncated(path).map_err(|error| {
+) -> Result<DetachedLog, ProcessError> {
+    let writer = root.create_truncated(path).map_err(|error| {
         ProcessError::Validation(format!(
             "cannot open log_path {}: {error}",
             path.absolute().display()
         ))
-    })
+    })?;
+    let reader = Arc::new(writer.try_clone().map_err(ProcessError::Io)?);
+    Ok(DetachedLog { writer, reader })
 }

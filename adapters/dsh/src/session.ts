@@ -14,7 +14,7 @@ import { assertSupportedJsonSchema, TOOL_ABORTED } from '@deepseek-ai/dsh-tools'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 
 /** The only tool names this adapter may ever serve, in the server's fixed order. */
-export const EXPECTED_TOOL_ORDER = ['read', 'grep', 'glob', 'run_program', 'bash'] as const
+export const EXPECTED_TOOL_ORDER = ['read', 'grep', 'glob', 'run_program', 'bash', 'bash_status'] as const
 
 export type AgentshimToolName = (typeof EXPECTED_TOOL_ORDER)[number]
 
@@ -159,6 +159,7 @@ function projectSchemaForGate(schema: unknown): unknown {
     for (const [key, value] of Object.entries(node)) {
       if (GATE_OMITTED_KEYWORDS.has(key)) continue
       if (key === 'additionalProperties' && typeof value !== 'boolean') continue
+      if (key === 'type' && Array.isArray(node.oneOf)) continue
       out[key] = value
     }
     return out
@@ -201,7 +202,7 @@ function toolExecution(tool: Tool): Record<string, unknown> | undefined {
 }
 
 /**
- * Validate a drained tools/list against the fixed five-name contract: exact
+ * Validate a drained tools/list against the fixed six-name contract: exact
  * set and order, no duplicates, no required task execution, and every input
  * schema inside the DSH-supported subset after the deterministic rewrites.
  * Returns the published entries plus their fingerprint.
@@ -352,7 +353,7 @@ function abortError(): HarnessError {
 
 /**
  * One private agentshim MCP session: spawns `agentshim serve` over stdio,
- * validates the five-tool catalog before going live, serves raw tools/call
+ * validates the six-tool catalog before going live, serves raw tools/call
  * requests, and reconnects at most once per new call after an unexpected
  * close — never on a timer, never replaying in-flight calls.
  */

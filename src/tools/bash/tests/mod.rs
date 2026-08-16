@@ -14,7 +14,7 @@ use crate::{
 use super::{
     BASH_ENVIRONMENT, BashRequest, CompletedBash, MsysArgumentConversion, STRIPPED_INHERITED_ENV,
     detached::DetachedTrees,
-    environment, execute_output,
+    environment, execute_output, execute_output_with_budget,
     locate::{self, BashLocator},
     render_completed,
 };

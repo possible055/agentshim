@@ -1,4 +1,24 @@
 use super::*;
+use crate::tools::bash::BashToolRequest;
+
+#[test]
+fn bash_wire_request_rejects_mixed_run_and_terminate_shapes() {
+    let job_id = format!("bash-{}", uuid::Uuid::new_v4());
+    let terminate: BashToolRequest = serde_json::from_value(serde_json::json!({
+        "action": "terminate",
+        "job_id": job_id.clone()
+    }))
+    .expect("terminate request");
+    assert!(matches!(terminate, BashToolRequest::Terminate(_)));
+
+    for invalid in [
+        serde_json::json!({ "command": "true", "action": "terminate", "job_id": job_id.clone() }),
+        serde_json::json!({ "action": "terminate", "job_id": job_id.clone(), "timeout_ms": 1 }),
+        serde_json::json!({ "action": "terminate", "job_id": job_id, "unknown": true }),
+    ] {
+        assert!(serde_json::from_value::<BashToolRequest>(invalid).is_err());
+    }
+}
 
 #[test]
 fn omitted_msys_argument_conversion_uses_the_default_and_unknown_values_are_rejected() {

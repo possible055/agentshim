@@ -80,7 +80,7 @@ fn server_discover_advertises_supported_versions_and_tool_capability() {
 fn successful_tools_do_not_advertise_output_schemas() {
     let result = serde_json::to_value(AgentShim::tools_result()).expect("serialize tools");
     let tools = result["tools"].as_array().expect("tools array");
-    for name in ["read", "grep", "glob", "run_program", "bash"] {
+    for name in ["read", "grep", "glob", "run_program", "bash", "bash_status"] {
         assert!(
             tool(tools, name).get("outputSchema").is_none(),
             "{name} must not advertise an output schema"
@@ -93,7 +93,7 @@ fn tool_annotations_match_codex_approval_contract() {
     let result = serde_json::to_value(AgentShim::tools_result()).expect("serialize tools");
     let tools = result["tools"].as_array().expect("tools array");
 
-    for name in ["read", "grep", "glob"] {
+    for name in ["read", "grep", "glob", "bash_status"] {
         assert_eq!(
             tool(tools, name)["annotations"],
             json!({
@@ -127,12 +127,44 @@ fn unrestricted_catalog_keeps_approval_annotations() {
         .as_array()
         .expect("unrestricted tools array");
 
-    for name in ["read", "grep", "glob", "run_program", "bash"] {
+    for name in ["read", "grep", "glob", "run_program", "bash", "bash_status"] {
         assert_eq!(
             tool(normal_tools, name)["annotations"],
             tool(unrestricted_tools, name)["annotations"]
         );
     }
+}
+
+#[test]
+fn bash_job_tools_have_fixed_order_and_mutually_exclusive_schemas() {
+    let result = serde_json::to_value(AgentShim::tools_result()).expect("serialize tools");
+    let tools = result["tools"].as_array().expect("tools array");
+    assert_eq!(
+        tools
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name"))
+            .collect::<Vec<_>>(),
+        ["read", "grep", "glob", "run_program", "bash", "bash_status"]
+    );
+
+    let bash_schema = &tool(tools, "bash")["inputSchema"];
+    let alternatives = bash_schema["oneOf"].as_array().expect("bash oneOf");
+    assert_eq!(alternatives.len(), 2);
+    assert_eq!(alternatives[0]["required"], json!(["command"]));
+    assert_eq!(alternatives[1]["required"], json!(["action", "job_id"]));
+    assert_eq!(
+        alternatives[1]["properties"]["action"]["const"],
+        "terminate"
+    );
+    assert_eq!(alternatives[0]["additionalProperties"], false);
+    assert_eq!(alternatives[1]["additionalProperties"], false);
+
+    let status_schema = &tool(tools, "bash_status")["inputSchema"];
+    assert_eq!(status_schema["required"], json!(["job_id"]));
+    assert_eq!(status_schema["additionalProperties"], false);
+    assert_eq!(status_schema["properties"]["tail_bytes"]["minimum"], 0);
+    assert_eq!(status_schema["properties"]["tail_bytes"]["maximum"], 16384);
+    assert_eq!(status_schema["properties"]["tail_bytes"]["default"], 8192);
 }
 
 fn tool<'a>(tools: &'a [Value], name: &str) -> &'a Value {

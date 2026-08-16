@@ -144,7 +144,7 @@ async function runTool(ctx: Context, agent: Agent, name: string, args: Record<st
 }
 
 describe('agent scope replacement', () => {
-  it('replaces the five tools for a root-matched agent, hides pwsh, keeps the rest', async () => {
+  it('replaces the six tools for a root-matched agent, hides pwsh, keeps the rest', async () => {
     const root = await makeRoot()
     const ctx = await mountComposition(root)
     registerInheritedTools(ctx, ['read', 'grep', 'glob', 'bash', 'pwsh', 'write', 'edit', 'read_image', 'todo'])
@@ -157,6 +157,7 @@ describe('agent scope replacement', () => {
     expect(names).toContain('glob')
     expect(names).toContain('run_program')
     expect(names).toContain('bash')
+    expect(names).toContain('bash_status')
     expect(names).toContain('write')
     expect(names).toContain('edit')
     expect(names).toContain('read_image')
@@ -186,9 +187,10 @@ describe('agent scope replacement', () => {
     expect(prompt).not.toContain('INHERITED-READ-GUIDANCE')
     expect(prompt).not.toContain('INHERITED-PWSH-GUIDANCE')
     expect(prompt).toContain('do not persist')
+    expect(prompt).toContain('immediate lifecycle snapshot')
   })
 
-  it('replaces only bash on a minimal two-tool catalog and leaves the editor', async () => {
+  it('adds bash_status beside bash on a minimal catalog and leaves the editor', async () => {
     const root = await makeRoot()
     const ctx = new Context()
     contexts.push(ctx)
@@ -207,11 +209,14 @@ describe('agent scope replacement', () => {
     const { agent } = await mintAgent(ctx, 'minimal', root)
     ctx.emit('agent/created', { agent })
 
-    expect(visibleNames(ctx, agent)).toEqual(['bash', 'str_replace_editor'])
+    expect(visibleNames(ctx, agent)).toEqual(['bash', 'bash_status', 'str_replace_editor'])
     const bash = ctx.tools.get('bash', agent)
     expect(bash?.description).toContain('POSIX')
-    const properties = (bash!.parameters as { properties?: Record<string, unknown> }).properties
-    expect(properties).not.toHaveProperty('sandbox_permissions')
+    const alternatives = (bash!.parameters as { oneOf?: Array<{ properties?: Record<string, unknown> }> }).oneOf ?? []
+    expect(alternatives).toHaveLength(2)
+    for (const alternative of alternatives) {
+      expect(alternative.properties).not.toHaveProperty('sandbox_permissions')
+    }
     expect(JSON.parse(await runTool(ctx, agent, 'bash', { command: 'true' })))
       .toEqual({ name: 'bash', arguments: { command: 'true' } })
     expect(await runTool(ctx, agent, 'str_replace_editor', { command: 'view', path: 'notes.txt' }))
@@ -220,6 +225,7 @@ describe('agent scope replacement', () => {
     const assembly = await ctx.systemPrompt.assemble({ scope: agent })
     const prompt = JSON.stringify(assembly)
     expect(prompt).toContain('do not persist')
+    expect(prompt).toContain('immediate lifecycle snapshot')
     expect(prompt).not.toContain('next_start_line')
     expect(prompt).not.toContain('Prefer run_program')
   })
@@ -386,8 +392,11 @@ describe('agent scope replacement', () => {
     expect(await exists(join(root, 'boot.txt'))).toBe(true)
     const unconfinedBash = ctx.tools.get('bash', existing.agent)
     expect(unconfinedBash).toBeDefined()
-    const unconfinedProperties = (unconfinedBash!.parameters as { properties?: Record<string, unknown> }).properties
-    expect(unconfinedProperties).not.toHaveProperty('sandbox_permissions')
+    const unconfinedAlternatives = (unconfinedBash!.parameters as { oneOf?: Array<{ properties?: Record<string, unknown> }> }).oneOf ?? []
+    expect(unconfinedAlternatives).toHaveLength(2)
+    for (const alternative of unconfinedAlternatives) {
+      expect(alternative.properties).not.toHaveProperty('sandbox_permissions')
+    }
     expect(JSON.parse(await runTool(ctx, existing.agent, 'bash', { command: 'true' })))
       .toEqual({ name: 'bash', arguments: { command: 'true' } })
 

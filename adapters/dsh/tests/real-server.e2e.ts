@@ -112,7 +112,9 @@ async function callText(ctx: Context, agent: Agent, name: string, args: Record<s
     arguments: args,
     agent,
   })
-  expect(result.isError).toBe(false)
+  if (result.isError) {
+    throw new Error(`real tool ${name} failed: ${JSON.stringify(result)}`)
+  }
   return result.content
     .filter(block => block.type === 'text')
     .map(block => block.type === 'text' ? block.text : '')
@@ -120,7 +122,7 @@ async function callText(ctx: Context, agent: Agent, name: string, args: Record<s
 }
 
 describe.runIf(enabled)('real DSH composition and cargo server', () => {
-  it('executes all five tools through DSH, the adapter, MCP, and cargo run', async () => {
+  it('executes all six tools and managed Bash termination through DSH, the adapter, MCP, and cargo run', async () => {
     const composition = await startRealComposition()
     try {
       expect(await callText(composition.ctx, composition.agent, 'read', { path: 'adapters/dsh/package.json' })).toContain('dsh-agentshim')
@@ -128,6 +130,22 @@ describe.runIf(enabled)('real DSH composition and cargo server', () => {
       expect(await callText(composition.ctx, composition.agent, 'glob', { pattern: 'adapters/dsh/package.json' })).toContain('adapters/dsh/package.json')
       expect(await callText(composition.ctx, composition.agent, 'run_program', { program: process.execPath, args: ['--version'] })).toMatch(/v\d+/)
       expect(await callText(composition.ctx, composition.agent, 'bash', { command: 'node --version' })).toMatch(/v\d+/)
+      const detached = await callText(composition.ctx, composition.agent, 'bash', {
+        command: 'while :; do printf x >> local/dsh-real-e2e-marker; sleep 0.05; done',
+        detach: true,
+        log_path: 'local/dsh-real-e2e-managed.log',
+      })
+      const jobId = detached.match(/job_id=(bash-[0-9a-f-]+)/)?.[1]
+      expect(jobId).toMatch(/^bash-/)
+      if (jobId === undefined) throw new Error(`missing detached job_id: ${detached}`)
+      expect(await callText(composition.ctx, composition.agent, 'bash_status', {
+        job_id: jobId,
+        tail_bytes: 0,
+      })).toContain('State: running')
+      expect(await callText(composition.ctx, composition.agent, 'bash', {
+        action: 'terminate',
+        job_id: jobId,
+      })).toContain('State: terminated')
     } finally {
       await composition.dispose()
     }

@@ -185,17 +185,23 @@ export function createProcessPolicy(ctx: Context): ProcessPolicy {
 export function augmentProcessParameters(parameters: Record<string, unknown>, policy: ProcessPolicy): Record<string, unknown> {
   if (!policy.advertisesEscalation) return parameters
   const augmented = structuredClone(parameters)
-  const properties = isRecord(augmented.properties) ? augmented.properties : undefined
-  if (properties === undefined) return parameters
-  properties[ESCALATION_PERMISSION_FIELD] = {
-    type: 'string',
-    enum: [ESCALATION_TARGET],
-    description: `The wider access this command needs. Only valid as a one-shot retry of a call refused with AGENTSHIM_PROCESS_REQUIRES_FULL_ACCESS; requires a justification and user approval.`,
+  const schemas = [augmented, ...(Array.isArray(augmented.oneOf) ? augmented.oneOf.filter(isRecord) : [])]
+  let changed = false
+  for (const schema of schemas) {
+    const properties = isRecord(schema.properties) ? schema.properties : undefined
+    if (properties === undefined) continue
+    changed = true
+    properties[ESCALATION_PERMISSION_FIELD] = {
+      type: 'string',
+      enum: [ESCALATION_TARGET],
+      description: `The wider access this command needs. Only valid as a one-shot retry of a call refused with AGENTSHIM_PROCESS_REQUIRES_FULL_ACCESS; requires a justification and user approval.`,
+    }
+    properties[ESCALATION_JUSTIFICATION_FIELD] = {
+      type: 'string',
+      description: `Required with ${ESCALATION_PERMISSION_FIELD}: one sentence for the user explaining why this exact command needs full access.`,
+    }
   }
-  properties[ESCALATION_JUSTIFICATION_FIELD] = {
-    type: 'string',
-    description: `Required with ${ESCALATION_PERMISSION_FIELD}: one sentence for the user explaining why this exact command needs full access.`,
-  }
+  if (!changed) return parameters
   return augmented
 }
 

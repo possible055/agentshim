@@ -659,6 +659,7 @@ pub(crate) fn spawn_detached(
         pid,
         process_group,
         child,
+        primary_exit: None,
     })
 }
 
@@ -666,6 +667,7 @@ pub(crate) struct DetachedTree {
     pid: u32,
     process_group: i32,
     child: Child,
+    primary_exit: Option<String>,
 }
 
 impl DetachedTree {
@@ -675,28 +677,22 @@ impl DetachedTree {
 
     /// Fallible on purpose: a failed `kill(-pgroup, 0)` probe says nothing about the tree,
     /// and callers must keep the owner rather than treat the tree as reaped.
-    pub(crate) fn is_running(&mut self) -> io::Result<bool> {
-        let _ = self.child.try_wait();
+    pub(crate) fn observe(&mut self) -> io::Result<super::DetachedObservation> {
+        if self.primary_exit.is_none()
+            && let Some(status) = self.child.try_wait()?
+        {
+            self.primary_exit = Some(exit_label(status));
+        }
         let running = group_exists(self.process_group)?;
         if !running {
-            let _ = self.child.wait();
+            if self.primary_exit.is_none() {
+                self.primary_exit = Some(exit_label(self.child.wait()?));
+            }
         }
-        Ok(running)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn terminate(&mut self) {
-        if terminate(
-            self.process_group,
-            &mut self.child,
-            Instant::now() + CLEANUP_DEADLINE,
-        )
-        .is_err()
-        {
-            let _ = signal_group(self.process_group, libc::SIGKILL);
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
+        Ok(super::DetachedObservation {
+            tree_running: running,
+            primary_exit: self.primary_exit.clone(),
+        })
     }
 
     /// Terminate the process group and confirm it died before `deadline`, sharing one

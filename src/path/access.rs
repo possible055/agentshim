@@ -139,7 +139,7 @@ impl RepositoryRoot {
             ));
         }
         let mut options = OpenOptions::new();
-        options.write(true).create(true).truncate(true);
+        options.read(true).write(true).create(true).truncate(true);
         self.capability.open_with(key, &options).map(File::into_std)
     }
 

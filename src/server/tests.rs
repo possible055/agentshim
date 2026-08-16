@@ -1,4 +1,4 @@
-use std::fs;
+use std::{fs, sync::Arc};
 
 use rmcp::model::{CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock};
 use serde_json::json;
@@ -7,7 +7,7 @@ use super::{
     AgentShim, ToolAdmission, ToolAdmissionFailure, blocking_response, diagnostic_tool_error,
     pdf_busy, pdf_timeout, queue_timeout_message, shell_delegate, tool_error,
 };
-use crate::output::MODEL_BYTE_LIMIT;
+use crate::{output::MODEL_BYTE_LIMIT, server::response::finalize_tool_response};
 
 fn pdf_fixture() -> Vec<u8> {
     let bodies: [&[u8]; 5] = [
@@ -440,6 +440,25 @@ fn bash_request(command: &str) -> CallToolRequestParams {
     .expect("bash request")
 }
 
+fn bash_terminate_request() -> CallToolRequestParams {
+    serde_json::from_value(json!({
+        "name": "bash",
+        "arguments": {
+            "action": "terminate",
+            "job_id": format!("bash-{}", uuid::Uuid::new_v4())
+        }
+    }))
+    .expect("bash terminate request")
+}
+
+fn bash_status_request() -> CallToolRequestParams {
+    serde_json::from_value(json!({
+        "name": "bash_status",
+        "arguments": { "job_id": format!("bash-{}", uuid::Uuid::new_v4()) }
+    }))
+    .expect("bash status request")
+}
+
 #[test]
 fn shell_delegate_classifies_only_the_first_token_file_stem() {
     for (command, expected) in [
@@ -512,6 +531,93 @@ fn foreground_saturation_does_not_consume_detached_capacity() {
         .expect("detached admission remains independent");
     assert!(matches!(detached, ToolAdmission::Detached(_)));
     drop(foreground);
+}
+
+#[test]
+fn detached_control_bypasses_process_and_detached_capacity() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let mut runtime = crate::runtime::RuntimeConfig::for_tests(1);
+    runtime.process_calls = 1;
+    runtime.detached_calls = 1;
+    let server = AgentShim::builder(fixture.path())
+        .expect("builder")
+        .runtime_limits(runtime)
+        .build()
+        .expect("server");
+    let _foreground = server
+        .resources
+        .try_admit_process()
+        .expect("foreground admission");
+    let _detached = server.detached.admit().expect("detached reservation");
+
+    assert!(matches!(
+        server
+            .try_admit_tool(&bash_terminate_request())
+            .expect("detached control"),
+        ToolAdmission::DetachedControl
+    ));
+    assert!(matches!(
+        server
+            .try_admit_tool(&bash_status_request())
+            .expect("status admission"),
+        ToolAdmission::ReadOnly(_)
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancellation_after_detached_commit_preserves_the_job_id_response() {
+    if crate::bash_report().is_err() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("fixture");
+    let server = AgentShim::from_path(fixture.path()).expect("server");
+    let request = detached_request();
+    let admission = server.try_admit_tool(&request).expect("detached admission");
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    let release = Arc::new(std::sync::Barrier::new(2));
+    let hook_entered = Arc::clone(&entered);
+    let hook_release = Arc::clone(&release);
+    server.detached.set_after_commit_hook(move || {
+        hook_entered.wait();
+        hook_release.wait();
+    });
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let worker_cancellation = cancellation.clone();
+    let budget = crate::output::CallOutputBudget::standalone();
+    let worker_budget = budget.clone();
+    let worker_server = server.clone();
+    let worker = tokio::spawn(async move {
+        worker_server
+            .call_bash(
+                request.arguments,
+                &worker_cancellation,
+                admission,
+                &worker_budget,
+            )
+            .await
+    });
+
+    entered.wait();
+    cancellation.cancel();
+    release.wait();
+    let response = worker.await.expect("detached worker");
+    let response = finalize_tool_response("bash", &budget, Ok(response), &cancellation)
+        .expect("final response");
+    let CallToolResponse::Complete(result) = response else {
+        panic!("detached response must be complete");
+    };
+    let ContentBlock::Text(content) = &result.content[0] else {
+        panic!("detached response must contain text");
+    };
+    let job_id = content
+        .text
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("job_id="))
+        .expect("detached job id");
+
+    assert_eq!(result.is_error, Some(false));
+    assert!(server.detached.status(job_id, 0).is_ok());
+    server.detached.terminate_all();
 }
 
 #[test]

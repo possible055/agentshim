@@ -7,7 +7,7 @@ AgentShim gives coding agents a small, focused set of tools for working with sou
 ## Why use it
 
 - **Bounded file access.** `read`, `grep`, and `glob` stay inside your repository by default, with optional access to Codex skill and plugin directories.
-- **Two ways to run commands.** `run_program` takes one executable and a literal argument list — no shell ever parses the arguments. `bash` takes a POSIX command line when you need pipelines, redirection, or composition, replacing the unreliable pwsh7 shell that Cursor's built-in Shell uses on Windows.
+- **Managed long-running Bash.** `run_program` takes one executable and literal arguments. `bash` handles POSIX composition and can detach work under an instance-bound `job_id`; `bash_status` reports lifecycle, primary exit status, and a bounded log tail, while `bash` can terminate the complete owned tree.
 - **Cross-platform.** Full support for Windows x86-64, with compatibility release assets for Linux x86-64, Linux ARM64, and macOS Apple Silicon.
 - **Reads PDFs.** `read` detects PDFs by content, not extension, and returns page text or rendered images with continuation cursors for long documents.
 
@@ -20,6 +20,7 @@ AgentShim gives coding agents a small, focused set of tools for working with sou
 | `glob` | Find files. Gitignored files are included by default; `.git` and common large directories stay excluded. |
 | `run_program` | Run one program with a literal argument list, without a shell. |
 | `bash` | Run a POSIX bash command line and return merged stdout and stderr. |
+| `bash_status` | Inspect one detached Bash job and its bounded log tail. |
 
 ## Install
 
@@ -45,7 +46,7 @@ cargo build --release --locked
 
 The binary is at `target/release/agentshim` (Linux and macOS) or `target/release/agentshim.exe` (Windows).
 
-An existing `codexshim` installation is not removed or overwritten. After installing AgentShim, update each client to the new executable and MCP server name, verify the five tools, and then remove the old installation if it is no longer needed.
+An existing `codexshim` installation is not removed or overwritten. After installing AgentShim, update each client to the new executable and MCP server name, verify the six tools, and then remove the old installation if it is no longer needed.
 
 ## Configure Codex
 
@@ -63,7 +64,7 @@ required = true
 supports_parallel_tool_calls = true
 startup_timeout_sec = 15
 tool_timeout_sec = 600
-enabled_tools = ["read", "grep", "glob", "run_program", "bash"]
+enabled_tools = ["read", "grep", "glob", "run_program", "bash", "bash_status"]
 default_tools_approval_mode = "writes"
 
 [mcp_servers.agentshim.tools.run_program]
@@ -142,13 +143,25 @@ args = ["serve", "--read-scope", "normal"]
 
 ### Long-running work
 
-`bash` accepts `detach` with a `log_path` inside the repository. Output goes to that file and the call returns the pid and log path immediately:
+`bash` accepts `detach` with a `log_path` inside the repository. Output goes to that file and the call returns an opaque instance-bound `job_id`, plus the diagnostic pid and log path:
 
 ```json
 { "command": "cargo test > /dev/null; echo EXIT=$?", "detach": true, "log_path": "local/test.log" }
 ```
 
-Poll progress with `read` on `log_path`. Up to 16 detached trees may be live at once.
+Use `bash_status` for an immediate state/exit snapshot and a bounded tail (`tail_bytes: 0` returns metadata only):
+
+```json
+{ "job_id": "bash-550e8400-e29b-41d4-a716-446655440000", "tail_bytes": 8192 }
+```
+
+Terminate the complete server-owned tree through `bash` itself:
+
+```json
+{ "action": "terminate", "job_id": "bash-550e8400-e29b-41d4-a716-446655440000" }
+```
+
+Up to 16 detached trees may be active. The instance retains the latest 32 terminal records, each with at most 16 KiB of final log tail; IDs do not survive reconnect or restart, and there is no list API. The full log remains available through `read(log_path)` and terminal eviction never deletes it.
 
 ### Windows Bash argument conversion
 

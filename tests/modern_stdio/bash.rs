@@ -218,6 +218,88 @@ fn detached_roster_saturation_fails_before_blocking_scheduling_over_stdio() {
 }
 
 #[test]
+fn detached_job_status_and_termination_work_over_real_stdio_at_capacity() {
+    if agentshim::bash_report().is_err() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("fixture");
+    let mut session = Session::start_for_bash(fixture.path(), 1, None);
+    session.send(&modern_request(1, "server/discover", empty_params()));
+    assert_eq!(session.receive()["id"], 1);
+    let detached = call_tool(
+        &mut session,
+        2,
+        "bash",
+        json!({
+            "command": "while :; do printf x >> marker; sleep 0.05; done",
+            "detach": true,
+            "log_path": "managed.log"
+        }),
+    );
+    assert_eq!(detached["result"]["isError"], false);
+    let detached_text = response_text(&detached);
+    let job_id = detached_text
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("job_id="))
+        .expect("job_id")
+        .to_owned();
+
+    let status = call_tool(
+        &mut session,
+        3,
+        "bash_status",
+        json!({ "job_id": job_id.clone(), "tail_bytes": 0 }),
+    );
+    assert_eq!(status["result"]["isError"], false);
+    assert!(response_text(&status).contains("State: running"));
+    assert!(response_text(&status).contains("Exit: pending"));
+
+    let terminated = call_tool(
+        &mut session,
+        4,
+        "bash",
+        json!({ "action": "terminate", "job_id": job_id.clone() }),
+    );
+    assert_eq!(terminated["result"]["isError"], false);
+    assert!(response_text(&terminated).contains("State: terminated"));
+    assert!(response_text(&terminated).contains("Outcome: verified"));
+
+    let marker = fixture.path().join("marker");
+    let observed = std::fs::metadata(&marker).map_or(0, |metadata| metadata.len());
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        std::fs::metadata(&marker).map_or(0, |metadata| metadata.len()),
+        observed,
+        "terminated process tree kept writing"
+    );
+    let terminal = call_tool(
+        &mut session,
+        5,
+        "bash_status",
+        json!({ "job_id": job_id, "tail_bytes": 16384 }),
+    );
+    assert_eq!(terminal["result"]["isError"], false);
+    assert!(response_text(&terminal).contains("State: terminated"));
+
+    let unknown = call_tool(
+        &mut session,
+        6,
+        "bash_status",
+        json!({ "job_id": format!("bash-{}", uuid::Uuid::new_v4()) }),
+    );
+    assert_eq!(unknown["result"]["isError"], true);
+    assert_eq!(
+        unknown["result"]["structuredContent"]["error"]["code"],
+        "validation"
+    );
+    assert_eq!(
+        unknown["result"]["structuredContent"]["error"]["retryable"],
+        false
+    );
+    session.close();
+}
+
+#[test]
 fn missing_bash_is_non_retryable_over_real_stdio() {
     let fixture = tempfile::tempdir().expect("fixture");
     let missing = fixture.path().join("missing-bash");

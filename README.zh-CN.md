@@ -7,7 +7,7 @@ AgentShim 为 coding agent 提供一组精简而专注的源代码工具。Codex
 ## 为什么使用
 
 - **受限的文件访问。** `read`、`grep` 和 `glob` 默认仅在仓库内操作，可选访问 Codex skill 和 plugin 目录。
-- **两种命令执行方式。** `run_program` 接收一个可执行文件和字面量参数列表——参数不经任何 shell 解析。需要管道、重定向或命令组合时使用 `bash`，它接收 POSIX 命令行，用以替代 Cursor 内置 Shell 在 Windows 上不可靠的 pwsh7。
+- **可管理的长时间 Bash。** `run_program` 接收单一可执行文件和字面量参数。`bash` 处理 POSIX 命令组合，也可用 instance-bound `job_id` detach；`bash_status` 回报生命周期、primary exit status 与 bounded log tail，`bash` 还能终止完整的 server-owned tree。
 - **跨平台。** 完全支持 Windows x86-64，并为 Linux x86-64、Linux ARM64 与 macOS Apple Silicon 提供兼容性发行资产。
 - **可读 PDF。** `read` 依内容识别 PDF（不靠扩展名），返回页面文字或渲染图片，长文档带续读游标。
 
@@ -20,6 +20,7 @@ AgentShim 为 coding agent 提供一组精简而专注的源代码工具。Codex
 | `glob` | 查找文件。默认包含被 gitignore 的文件；`.git` 与常见超大目录仍排除。 |
 | `run_program` | 以字面量参数列表运行单个程序，不经 shell。 |
 | `bash` | 运行 POSIX bash 命令行，返回合并后的 stdout 与 stderr。 |
+| `bash_status` | 检查一笔 detached Bash job 与 bounded log tail。 |
 
 ## 安装
 
@@ -45,7 +46,7 @@ cargo build --release --locked
 
 二进制位于 `target/release/agentshim`（Linux 与 macOS）或 `target/release/agentshim.exe`（Windows）。
 
-现有 `codexshim` 安装不会被删除或覆盖。安装 AgentShim 后，请先将各客户端切换到新的可执行文件与 MCP server 名称，确认五个工具可用，再视需要移除旧安装。
+现有 `codexshim` 安装不会被删除或覆盖。安装 AgentShim 后，请先将各客户端切换到新的可执行文件与 MCP server 名称，确认六个工具可用，再视需要移除旧安装。
 
 ## 配置 Codex
 
@@ -63,7 +64,7 @@ required = true
 supports_parallel_tool_calls = true
 startup_timeout_sec = 15
 tool_timeout_sec = 600
-enabled_tools = ["read", "grep", "glob", "run_program", "bash"]
+enabled_tools = ["read", "grep", "glob", "run_program", "bash", "bash_status"]
 default_tools_approval_mode = "writes"
 
 [mcp_servers.agentshim.tools.run_program]
@@ -142,13 +143,25 @@ args = ["serve", "--read-scope", "normal"]
 
 ### 长时间任务
 
-`bash` 接受 `detach` 与仓库内的 `log_path`。输出写入该文件，调用立即返回 pid 与 log 路径：
+`bash` 接受 `detach` 与仓库内的 `log_path`。输出写入该文件，调用立即返回仅限当前实例使用的 opaque `job_id`，以及诊断用 pid 与 log 路径：
 
 ```json
 { "command": "cargo test > /dev/null; echo EXIT=$?", "detach": true, "log_path": "local/test.log" }
 ```
 
-用 `read` 读取 `log_path` 观察进度。同时最多可有 16 棵存活的 detached 进程树。
+使用 `bash_status` 取得即时状态、primary exit status 与 bounded log tail（`tail_bytes=0` 只返回 metadata）：
+
+```json
+{ "job_id": "bash-550e8400-e29b-41d4-a716-446655440000", "tail_bytes": 8192 }
+```
+
+通过 `bash` 本身终止 server 持有的完整进程树：
+
+```json
+{ "action": "terminate", "job_id": "bash-550e8400-e29b-41d4-a716-446655440000" }
+```
+
+同时最多可有 16 棵 active detached 进程树。实例保留最近 32 笔 terminal record，每笔最多 16 KiB final tail；ID 不跨 reconnect 或 restart，也不提供 list API。完整 log 仍可用 `read(log_path)` 读取，terminal eviction 不会删除该文件。
 
 ### Windows Bash 参数转换
 

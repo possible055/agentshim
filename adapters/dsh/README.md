@@ -1,11 +1,11 @@
 # dsh-agentshim
 
-`dsh-agentshim` exposes the five agentshim tools — `read`, `grep`, `glob`,
-`run_program`, and `bash` — as native DSH tools. It replaces only those
-overlapping names the agent already has (plus `pwsh`, when present) in agents
-whose canonical working directory matches the configured root. A two-tool
-minimal catalog therefore stays `bash` plus `str_replace_editor`; standard
-presets keep `write`, `edit`, and `read_image`.
+`dsh-agentshim` exposes the six agentshim tools — `read`, `grep`, `glob`,
+`run_program`, `bash`, and `bash_status` — as native DSH tools. It replaces overlapping
+names the agent already has (plus `pwsh`, when present) in agents whose canonical working
+directory matches the configured root. `run_program` accompanies filesystem tools, and
+`bash_status` always accompanies `bash`, so a minimal catalog becomes `bash`, `bash_status`,
+and `str_replace_editor`; standard presets keep `write`, `edit`, and `read_image`.
 
 The plugin runs a private agentshim MCP session over stdio. MCP is transport
 only; no `mcp__*` tool name is exposed to the agent.
@@ -84,7 +84,7 @@ plugin is reloaded.
 
 ## Timeouts and detached commands
 
-All five definitions declare `timeoutMs` (600 seconds by default). DSH enforces
+All six definitions declare `timeoutMs` (600 seconds by default). DSH enforces
 that deadline only when the composition includes
 `dsh-tool-call-timeout-policy`; standard DSH bundles include it, but a custom
 composition without it has no DSH-side 600-second deadline. The private MCP
@@ -94,8 +94,9 @@ budget.
 
 agentshim's runtime catalog is authoritative for `bash.timeout_ms`, including
 its default and maximum. Long-running work that exceeds that cap must use
-`detach: true` with a repository-local `log_path`, then poll the log with this
-plugin's `read` tool. The returned pid and log path are not DSH jobs:
+`detach: true` with a repository-local `log_path`, retain the returned
+instance-bound `job_id`, inspect it with `bash_status`, and stop it with
+`bash({ action: "terminate", job_id })`. These are not DSH jobs:
 `job_output` and `job_kill` cannot inspect or control them. Unloading the
 plugin closes the private server, which cleans up detached process trees it
 owns.

@@ -7,6 +7,16 @@ use std::{
     ptr::{null, null_mut},
 };
 
+#[cfg(test)]
+use std::cell::RefCell;
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_PRIMARY_OBSERVATION: RefCell<Option<Box<dyn FnOnce()>>> = const {
+        RefCell::new(None)
+    };
+}
+
 use windows_sys::Win32::{
     Foundation::{HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation},
     System::{
@@ -16,7 +26,8 @@ use windows_sys::Win32::{
         },
         Threading::{
             CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
-            EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
+            EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, PROCESS_INFORMATION,
+            WaitForSingleObject,
         },
     },
 };
@@ -81,15 +92,22 @@ pub(crate) fn spawn_detached(
     lifecycle.install_job()?;
     lifecycle.resume()?;
     let pid = process_info.dwProcessId;
-    let job = lifecycle.release_job();
+    let (job, process) = lifecycle.release_detached_handles();
     drop(log);
     drop(null_input);
-    Ok(DetachedTree { pid, job })
+    Ok(DetachedTree {
+        pid,
+        job,
+        process,
+        primary_exit: None,
+    })
 }
 
 pub(crate) struct DetachedTree {
     pid: u32,
     job: OwnedHandle,
+    process: OwnedHandle,
+    primary_exit: Option<String>,
 }
 
 impl DetachedTree {
@@ -99,14 +117,45 @@ impl DetachedTree {
 
     /// Fallible on purpose: a failed `QueryInformationJobObject` says nothing about the
     /// tree, and callers must keep the job owner rather than treat the tree as reaped.
-    pub(crate) fn is_running(&mut self) -> io::Result<bool> {
-        Ok(job_active_processes(self.job.raw())? > 0)
+    pub(crate) fn observe(&mut self) -> io::Result<super::super::DetachedObservation> {
+        self.refresh_primary_exit()?;
+        #[cfg(test)]
+        run_after_primary_observation_hook();
+        let tree_running = job_active_processes(self.job.raw())? > 0;
+        if !tree_running && self.primary_exit.is_none() {
+            self.refresh_primary_exit()?;
+            if self.primary_exit.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "job is empty while the primary process handle is not signaled",
+                ));
+            }
+        }
+        Ok(super::super::DetachedObservation {
+            tree_running,
+            primary_exit: self.primary_exit.clone(),
+        })
     }
 
-    #[cfg(test)]
-    pub(crate) fn terminate(&mut self) {
-        unsafe {
-            TerminateJobObject(self.job.raw(), TERMINATION_EXIT_CODE);
+    fn refresh_primary_exit(&mut self) -> io::Result<()> {
+        if self.primary_exit.is_some() {
+            return Ok(());
+        }
+        let wait = unsafe { WaitForSingleObject(self.process.raw(), 0) };
+        match wait {
+            windows_sys::Win32::Foundation::WAIT_OBJECT_0 => {
+                let mut code = 0_u32;
+                if unsafe { GetExitCodeProcess(self.process.raw(), &raw mut code) } == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                self.primary_exit = Some(code.to_string());
+                Ok(())
+            }
+            windows_sys::Win32::Foundation::WAIT_TIMEOUT => Ok(()),
+            windows_sys::Win32::Foundation::WAIT_FAILED => Err(io::Error::last_os_error()),
+            other => Err(io::Error::other(format!(
+                "unexpected primary process wait result: {other:#x}"
+            ))),
         }
     }
 
@@ -144,6 +193,22 @@ impl DetachedTree {
         }
         Err(ProcessError::OutcomeUncertain)
     }
+}
+
+#[cfg(test)]
+fn run_after_primary_observation_hook() {
+    AFTER_PRIMARY_OBSERVATION.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn set_after_primary_observation_hook_for_tests(hook: impl FnOnce() + 'static) {
+    AFTER_PRIMARY_OBSERVATION.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
 }
 
 fn job_active_processes(job: HANDLE) -> io::Result<u32> {

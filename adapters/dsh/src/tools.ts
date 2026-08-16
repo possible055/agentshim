@@ -7,7 +7,7 @@ import { EXPECTED_TOOL_ORDER } from './session.ts'
 import { materializeContent, normalizeMcpResult } from './content.ts'
 import { augmentProcessParameters, beginReadObservation, completeReadObservation, createProcessPolicy } from './policy.ts'
 
-/** Canonical output contract shared by all five tools (§9): content blocks plus optional lossless JSON. */
+/** Canonical output contract shared by all six tools (§9): content blocks plus optional lossless JSON. */
 const outputSchema: JsonSchemaNode = {
   type: 'object',
   properties: {
@@ -62,10 +62,20 @@ function presentRunProgramCall(args: unknown): ToolCallView | undefined {
 }
 
 function presentBashCall(args: unknown): ToolCallView | undefined {
+  const action = stringArg(args, 'action')
+  const jobId = stringArg(args, 'job_id')
+  if (action === 'terminate' && jobId !== undefined) {
+    return { card: 'terminal', title: `Terminate ${jobId}` }
+  }
   const command = stringArg(args, 'command')
   if (command === undefined) return undefined
   const cwd = stringArg(args, 'cwd')
   return { card: 'terminal', title: command, ...(cwd !== undefined ? { cwd } : {}) }
+}
+
+function presentBashStatusCall(args: unknown): ToolCallView | undefined {
+  const jobId = stringArg(args, 'job_id')
+  return jobId === undefined ? undefined : { card: 'terminal', title: `Status ${jobId}` }
 }
 
 function presentTerminalResult(_args: unknown, result: { content: ContentBlock[]; isError: boolean }): ToolResultView | undefined {
@@ -97,7 +107,7 @@ async function callAndMaterialize(deps: ToolDependencies, name: string, args: Re
 }
 
 /**
- * Build the five native tool definitions from the validated runtime catalog:
+ * Build the six native tool definitions from the validated runtime catalog:
  * names/descriptions/parameters are cloned from the catalog, `timeoutMs`
  * declares the DSH 600-second shelf (enforced only when the composition loads
  * `dsh-tool-call-timeout-policy`), and only `read`/`grep`/`glob` opt into
@@ -140,7 +150,7 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<Agents
       },
       timeoutMs: deps.config.toolCallTimeoutMs,
       execute,
-      ...(entry.name === 'read' || entry.name === 'grep' || entry.name === 'glob'
+      ...(entry.name === 'read' || entry.name === 'grep' || entry.name === 'glob' || entry.name === 'bash_status'
         ? { isConcurrencySafe: () => true }
         : {}),
       ...(entry.name === 'read' ? { presentCall: presentReadCall } : {}),
@@ -148,7 +158,8 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<Agents
       ...(entry.name === 'glob' ? { presentCall: presentSearchCall('Glob', 'pattern') } : {}),
       ...(entry.name === 'run_program' ? { presentCall: presentRunProgramCall } : {}),
       ...(entry.name === 'bash' ? { presentCall: presentBashCall } : {}),
-      ...(isProcessTool
+      ...(entry.name === 'bash_status' ? { presentCall: presentBashStatusCall } : {}),
+      ...(isProcessTool || entry.name === 'bash_status'
         ? { presentResult: (args: unknown, result) => presentTerminalResult(args, result) }
         : {}),
     }
@@ -183,7 +194,12 @@ export function promptSections(): ReadonlyArray<{ readonly name: string; readonl
     {
       name: 'tool:bash',
       order: 105,
-      text: 'Each call is a fresh non-interactive bash: cwd, exports, and functions do not persist — pass cwd instead of using cd. A non-zero exit code is a normal result, not a tool error. For work that needs longer than the timeout, set detach with a log_path and poll that file with read; a detached process belongs to the agentshim server instance, not to DSH jobs (job_output/job_kill cannot see it).',
+      text: 'Each call is a fresh non-interactive bash: cwd, exports, and functions do not persist — pass cwd instead of using cd. A non-zero exit code is a normal result, not a tool error. For long work, set detach with a log_path, retain the returned job_id, inspect it with bash_status, and stop its complete server-owned tree with bash action=terminate. Detached Bash jobs belong to this agentshim server instance, not to DSH jobs (job_output/job_kill cannot see them).',
+    },
+    {
+      name: 'tool:bash_status',
+      order: 105.5,
+      text: 'Use bash_status with the opaque job_id returned by bash(detach=true) for an immediate lifecycle snapshot and bounded log tail. It does not list jobs, wait for output, or reconnect across server restarts; tail_bytes=0 requests metadata only.',
     },
   ]
 }

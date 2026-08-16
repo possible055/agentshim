@@ -28,6 +28,27 @@ impl Session {
         }
     }
 
+    pub(super) fn start_bash_soak() -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_agentshim"))
+            .arg("serve")
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .env("AGENTSHIM_DETACHED_CALLS", "16")
+            .env("AGENTSHIM_BURST_TOKENS", "32768")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start agentshim");
+        let stdin = child.stdin.take().expect("server stdin");
+        let stdout = BufReader::new(child.stdout.take().expect("server stdout"));
+        Self {
+            child,
+            stdin: Some(stdin),
+            stdout,
+            next_id: 1,
+        }
+    }
+
     pub(super) fn pid(&self) -> u32 {
         self.child.id()
     }

@@ -45,8 +45,8 @@ use super::{
     response::{blocking_response, pdf_busy, pdf_timeout},
 };
 
-pub const SERVER_INSTRUCTIONS: &str = "Local repository and Codex extension tools for reading source files, searching contents, finding paths, running one program with literal arguments, and running POSIX bash command lines.";
-pub const UNRESTRICTED_SERVER_INSTRUCTIONS: &str = "Local filesystem tools for reading files, searching contents, and finding paths, plus one program with literal arguments and POSIX bash command lines. Read scope is the structured access range of read, grep, and glob; it does not bound what a spawned process can reach.";
+pub const SERVER_INSTRUCTIONS: &str = "Local repository and Codex extension tools for reading source files, searching contents, finding paths, running one program with literal arguments, and running POSIX bash command lines with instance-bound managed detached-job status and termination.";
+pub const UNRESTRICTED_SERVER_INSTRUCTIONS: &str = "Local filesystem tools for reading files, searching contents, and finding paths, plus one program with literal arguments and POSIX bash command lines with instance-bound managed detached-job status and termination. Read scope is the structured access range of read, grep, and glob; it does not bound what a spawned process can reach.";
 
 const SUPPORTED_PROTOCOLS: &[ProtocolVersion] = &[
     ProtocolVersion::V_2026_07_28,
@@ -55,8 +55,8 @@ const SUPPORTED_PROTOCOLS: &[ProtocolVersion] = &[
     ProtocolVersion::V_2025_03_26,
     ProtocolVersion::V_2024_11_05,
 ];
-const TOOLSET: &str = "read,grep,glob,run_program,bash";
-const TOOL_COUNT: u64 = 5;
+const TOOLSET: &str = "read,grep,glob,run_program,bash,bash_status";
+const TOOL_COUNT: u64 = 6;
 const TOOLS_CACHE_TTL_MS: u64 = 300_000;
 const TOOLS_CACHE_SCOPE: &str = "private";
 
@@ -514,27 +514,35 @@ fn shutdown_transaction(resources: &RuntimeResources, detached: &DetachedTrees) 
     let started = std::time::Instant::now();
     let deadline = started + crate::tools::exec::spawn::CLEANUP_DEADLINE;
     resources.cancel_shutdown();
-    let trees = detached.begin_shutdown();
+    let trees = detached.begin_shutdown(deadline);
     let tree_count = trees.len();
     let mut remaining: Vec<u32> = Vec::new();
     std::thread::scope(|scope| {
         let outcomes = trees
             .into_iter()
-            .map(|mut tree| {
-                let pid = tree.pid();
-                scope.spawn(move || (pid, tree.terminate_and_wait(deadline)))
+            .map(|work| {
+                let pid = work.pid();
+                scope.spawn(move || {
+                    let snapshot = work.run();
+                    let verified =
+                        snapshot.state == crate::tools::bash::status::JobState::Terminated;
+                    (pid, verified)
+                })
             })
             .collect::<Vec<_>>();
         for outcome in outcomes {
             match outcome.join() {
-                Ok((_, Ok(()))) => {}
-                Ok((pid, Err(_))) => remaining.push(pid),
+                Ok((_, true)) => {}
+                Ok((pid, false)) => remaining.push(pid),
                 Err(_) => remaining.push(u32::MAX),
             }
         }
     });
     let foreground_quiesced = resources.wait_for_process_quiescence(deadline);
     let reservations_drained = detached.wait_until_quiesced(deadline);
+    remaining.extend(detached.shutdown_unverified_pids());
+    remaining.sort_unstable();
+    remaining.dedup();
     let outcome = if remaining.is_empty() && foreground_quiesced && reservations_drained {
         "verified"
     } else {
