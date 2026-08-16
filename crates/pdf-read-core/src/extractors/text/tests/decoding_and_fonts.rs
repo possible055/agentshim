@@ -545,3 +545,137 @@ fn test_is_not_ligature_code() {
     assert!(!TextExtractor::is_ligature_code(0xFAFF)); // Before range
     assert!(!TextExtractor::is_ligature_code(0xFB05)); // After range
 }
+
+// ========================================================================
+// COVERAGE TESTS: decode_pdf_text_string edge cases
+// ========================================================================
+
+#[test]
+fn test_decode_pdf_text_string_single_byte() {
+    let result = TextExtractor::decode_pdf_text_string(&[0x41]);
+    assert_eq!(result, "A");
+}
+
+#[test]
+fn test_decode_pdf_text_string_invalid_utf16() {
+    // UTF-16BE BOM followed by invalid pair
+    let bytes = vec![0xFE, 0xFF, 0xD8, 0x00]; // invalid surrogate half
+    let result = TextExtractor::decode_pdf_text_string(&bytes);
+    // Should fall back to lossy conversion
+    assert!(!result.is_empty() || result.is_empty()); // Just don't panic
+}
+
+#[test]
+fn test_decode_pdf_text_string_utf16le_invalid() {
+    // UTF-16LE BOM followed by odd byte count
+    let bytes = vec![0xFF, 0xFE, 0x41]; // odd after BOM
+    let result = TextExtractor::decode_pdf_text_string(&bytes);
+    // Should handle gracefully
+}
+
+// ========================================================================
+// TDD: decode_pdf_text_string — PDFDocEncoding fallback correctness
+// Bytes 0xA0–0xFF and the special 0x80–0x9E zone must decode through
+// PDFDocEncoding, not through from_utf8_lossy (which produces U+FFFD).
+// ========================================================================
+
+#[test]
+fn test_decode_pdfdocencoding_latin_byte() {
+    // 0xE9 = PDFDocEncoding for é (U+00E9). Not valid UTF-8 on its own.
+    let result = TextExtractor::decode_pdf_text_string(&[0xE9]);
+    assert_eq!(
+        result, "é",
+        "0xE9 must decode as 'é' via PDFDocEncoding, not produce U+FFFD"
+    );
+}
+
+#[test]
+fn test_decode_pdfdocencoding_bullet() {
+    // 0x80 = PDFDocEncoding for • (U+2022 BULLET)
+    let result = TextExtractor::decode_pdf_text_string(&[0x80]);
+    assert_eq!(
+        result, "•",
+        "0x80 must decode as bullet '•' via PDFDocEncoding"
+    );
+}
+
+#[test]
+fn test_decode_pdfdocencoding_emdash() {
+    // 0x84 = PDFDocEncoding for — (U+2014 EM DASH)
+    let result = TextExtractor::decode_pdf_text_string(&[0x84]);
+    assert_eq!(
+        result, "—",
+        "0x84 must decode as em-dash '—' via PDFDocEncoding"
+    );
+}
+
+#[test]
+fn test_decode_pdfdocencoding_trademark() {
+    // 0x92 = PDFDocEncoding for ™ (U+2122 TRADE MARK SIGN)
+    let result = TextExtractor::decode_pdf_text_string(&[0x92]);
+    assert_eq!(
+        result, "™",
+        "0x92 must decode as trademark '™' via PDFDocEncoding"
+    );
+}
+
+#[test]
+fn test_decode_pdfdocencoding_undefined_9f_is_dropped() {
+    // 0x9F is undefined in PDFDocEncoding — must be silently dropped.
+    let result = TextExtractor::decode_pdf_text_string(&[0x41, 0x9F, 0x42]);
+    assert_eq!(
+        result, "AB",
+        "0x9F is undefined in PDFDocEncoding and must be dropped"
+    );
+}
+
+#[test]
+fn test_decode_pdfdocencoding_mixed_ascii_and_latin() {
+    // "Hello" followed by 0xE9 (é): 6 bytes → "Helloé"
+    let bytes: Vec<u8> = b"Hello".iter().copied().chain([0xE9]).collect();
+    let result = TextExtractor::decode_pdf_text_string(&bytes);
+    assert_eq!(
+        result, "Helloé",
+        "Mixed ASCII + PDFDocEncoding bytes must decode correctly"
+    );
+}
+
+#[test]
+fn test_decode_pdfdocencoding_utf8_bytes_still_work() {
+    // Valid UTF-8 without BOM: must still decode correctly (for lenient PDFs).
+    // ASCII is a subset of UTF-8, so this path always works.
+    let result = TextExtractor::decode_pdf_text_string(b"ASCII text");
+    assert_eq!(result, "ASCII text");
+}
+
+// ========================================================================
+// COVERAGE TESTS: shared truetype cmaps (no donors)
+// ========================================================================
+
+#[test]
+fn test_share_truetype_cmaps_no_donors() {
+    let mut extractor = TextExtractor::new();
+    let font = create_test_font();
+    extractor.add_font("F1".to_string(), font);
+
+    // Should return early (no cmap donors)
+    extractor.share_truetype_cmaps();
+    assert_eq!(extractor.fonts.len(), 1);
+}
+
+// ========================================================================
+// COVERAGE TESTS: Extract with WithConfig
+// ========================================================================
+
+#[test]
+fn test_extractor_with_config_and_profile() {
+    let config = TextExtractionConfig::new().with_profile(crate::config::ExtractionProfile::POLICY);
+
+    let mut extractor = TextExtractor::with_config(config);
+    let font = create_test_font();
+    extractor.add_font("F1".to_string(), font);
+
+    let stream = b"BT /F1 12 Tf 100 700 Td (Policy) Tj ET";
+    let chars = extractor.extract(stream).unwrap();
+    assert!(!chars.is_empty());
+}

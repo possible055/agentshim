@@ -1,56 +1,31 @@
+use super::common::session::TestSession;
 use super::*;
 
 pub(super) struct Session {
-    child: Child,
-    pub(super) stdin: Option<ChildStdin>,
-    stdout: BufReader<ChildStdout>,
+    transport: TestSession,
     next_id: u64,
 }
 
 impl Session {
     pub(super) fn start() -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_agentshim"))
-            .arg("serve")
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .env_remove("AGENTSHIM_PROCESS_CALLS")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start agentshim");
-        let stdin = child.stdin.take().expect("server stdin");
-        let stdout = BufReader::new(child.stdout.take().expect("server stdout"));
         Self {
-            child,
-            stdin: Some(stdin),
-            stdout,
+            transport: TestSession::start(),
             next_id: 1,
         }
     }
 
     pub(super) fn start_bash_soak() -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_agentshim"))
-            .arg("serve")
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .env("AGENTSHIM_DETACHED_CALLS", "16")
-            .env("AGENTSHIM_BURST_TOKENS", "32768")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start agentshim");
-        let stdin = child.stdin.take().expect("server stdin");
-        let stdout = BufReader::new(child.stdout.take().expect("server stdout"));
         Self {
-            child,
-            stdin: Some(stdin),
-            stdout,
+            transport: TestSession::builder()
+                .detached_calls(16)
+                .burst_tokens(32_768)
+                .spawn(),
             next_id: 1,
         }
     }
 
     pub(super) fn pid(&self) -> u32 {
-        self.child.id()
+        self.transport.pid()
     }
 
     pub(super) fn discover(&mut self) {
@@ -98,10 +73,7 @@ impl Session {
             "method": method,
             "params": params,
         });
-        let stdin = self.stdin.as_mut().expect("server stdin");
-        serde_json::to_writer(&mut *stdin, &message).expect("write request");
-        stdin.write_all(b"\n").expect("write request delimiter");
-        stdin.flush().expect("flush request");
+        self.transport.send(&message);
         id
     }
 
@@ -112,28 +84,11 @@ impl Session {
     }
 
     pub(super) fn receive_any(&mut self) -> Value {
-        let mut line = String::new();
-        assert_ne!(
-            self.stdout.read_line(&mut line).expect("read response"),
-            0,
-            "server closed stdout before responding"
-        );
-        serde_json::from_str(&line).expect("response JSON")
+        self.transport.receive()
     }
 
-    pub(super) fn close(mut self) -> SessionExit {
-        self.stdin.take();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let status = loop {
-            if let Some(status) = self.child.try_wait().expect("poll server") {
-                break status;
-            }
-            if Instant::now() >= deadline {
-                self.child.kill().expect("kill hung server");
-                panic!("server did not exit after stdin EOF");
-            }
-            thread::sleep(Duration::from_millis(10));
-        };
+    pub(super) fn close(self) -> SessionExit {
+        let status = self.transport.shutdown();
         SessionExit {
             success: status.success(),
             status: status.to_string(),
@@ -169,16 +124,6 @@ impl ToolCallFailure {
             code,
             details,
             response,
-        }
-    }
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        self.stdin.take();
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
         }
     }
 }

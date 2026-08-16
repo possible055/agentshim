@@ -51,10 +51,13 @@ fn make_font(overrides: impl FnOnce(&mut FontInfo)) -> FontInfo {
 
 mod basics;
 mod cid_metrics;
-mod encodings_a;
-mod encodings_b;
+mod cmap_tables;
+mod glyph_names;
 mod glyphs_and_widths;
 mod loading;
+mod standard_encodings;
 mod traits;
-mod weights_a;
-mod weights_b;
+mod unicode_mapping;
+mod weight_names;
+mod weight_resolution;
+mod widths_and_flags;

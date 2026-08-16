@@ -1,9 +1,6 @@
 use std::{fs, sync::Arc};
 
-use rmcp::{
-    ServerHandler,
-    model::{CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock},
-};
+use rmcp::model::{CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock};
 use serde_json::json;
 
 use super::{
@@ -339,97 +336,6 @@ fn successful_tool_responses_omit_structured_content() {
         panic!("cursor response must be complete");
     };
     assert_eq!(cursor_result.structured_content, None);
-}
-
-#[test]
-fn dsh_successful_tool_responses_preserve_typed_structured_content() {
-    let structured = json!({
-        "bridgeVersion": 1,
-        "kind": "process",
-        "exitCode": 0,
-        "stdout": "ready\n",
-        "stderr": "",
-        "wireDiagnostic": "x".repeat(200_000)
-    });
-    let output =
-        crate::tools::ToolOutput::new("ready\n".to_owned()).with_structured(structured.clone());
-    let gate = crate::output::OutputTokenGate::load_shared().expect("token gate");
-    let cancellation = tokio_util::sync::CancellationToken::new();
-    let budget = crate::output::CallOutputBudget::standalone();
-    let response = blocking_response_for_profile::<crate::tools::exec::ProcessError>(
-        "run_program",
-        3,
-        Ok(Ok(output)),
-        Some(&gate),
-        &cancellation,
-        &budget,
-        ClientProfile::Dsh,
-    );
-    let finalized = finalize_tool_response("run_program", &budget, Ok(response), &cancellation)
-        .expect("finalized response");
-    let CallToolResponse::Complete(result) = finalized else {
-        panic!("tool response must be complete");
-    };
-
-    assert_eq!(result.structured_content, Some(structured));
-    assert_eq!(result.is_error, Some(false));
-}
-
-#[test]
-fn dsh_catalog_and_server_info_advertise_the_versioned_six_tool_bridge() {
-    let fixture = tempfile::tempdir().expect("fixture");
-    let server = AgentShim::builder(fixture.path())
-        .expect("builder")
-        .client_profile(ClientProfile::Dsh)
-        .build()
-        .expect("server");
-    let info = server.get_info();
-    assert_eq!(
-        info.meta.expect("DSH server metadata").0["agentshim.dshBridge"]["version"],
-        2
-    );
-
-    let catalog =
-        crate::server::catalog::tool_catalog(crate::path::ReadScope::Normal, ClientProfile::Dsh);
-    assert_eq!(
-        catalog
-            .iter()
-            .map(|tool| tool.name.as_ref())
-            .collect::<Vec<_>>(),
-        ["read", "grep", "glob", "run_program", "bash", "bash_status"]
-    );
-    for tool in catalog {
-        assert_eq!(
-            tool.meta.as_ref().expect("DSH tool metadata").0["agentshim.dshBridge"]["version"],
-            2,
-            "{} must advertise the DSH bridge version",
-            tool.name
-        );
-    }
-    assert!(
-        !serde_json::to_string(catalog[4].input_schema.as_ref())
-            .expect("DSH bash schema")
-            .contains("server_capture")
-    );
-    assert!(
-        !serde_json::to_string(catalog[5].input_schema.as_ref())
-            .expect("DSH bash_status schema")
-            .contains("cursor")
-    );
-
-    let legacy =
-        crate::server::catalog::tool_catalog(crate::path::ReadScope::Normal, ClientProfile::Codex);
-    assert!(legacy.iter().all(|tool| tool.meta.is_none()));
-    assert!(
-        !serde_json::to_string(legacy[4].input_schema.as_ref())
-            .expect("legacy bash schema")
-            .contains("server_capture")
-    );
-    assert!(
-        !serde_json::to_string(legacy[5].input_schema.as_ref())
-            .expect("legacy bash_status schema")
-            .contains("cursor")
-    );
 }
 
 #[test]

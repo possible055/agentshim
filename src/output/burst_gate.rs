@@ -15,12 +15,6 @@ pub(crate) const BURST_QUIET_PERIOD: Duration = Duration::from_secs(2);
 pub(crate) const MAX_CONTROL_RESPONSE_TOKENS: usize = 192;
 
 pub(crate) fn configured_burst_tokens(profile: crate::ClientProfile) -> io::Result<usize> {
-    if profile == crate::ClientProfile::Dsh {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "the DSH profile has no token burst budget",
-        ));
-    }
     parse_burst_tokens(
         env::var_os(BURST_TOKENS_ENV).as_deref(),
         profile.default_burst_tokens(),

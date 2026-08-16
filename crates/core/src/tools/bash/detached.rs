@@ -964,7 +964,7 @@ pub fn open_log(root: &RepositoryRoot, path: &ResolvedPath) -> Result<DetachedLo
 
 pub fn server_log_path(job_id: &str) -> PathBuf {
     std::env::temp_dir()
-        .join("agentshim-dsh-capture")
+        .join("agentshim-background-capture")
         .join(format!("{job_id}.log"))
 }
 

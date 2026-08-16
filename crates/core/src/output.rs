@@ -23,8 +23,6 @@ pub const PDF_CURSOR_FIELD: &str = "pdf_cursor";
 
 pub const CALL_OUTPUT_TOKEN_LIMIT: usize = 8_192;
 pub const MODEL_BYTE_LIMIT: usize = 32_000;
-pub const DSH_NATIVE_PREVIEW_BYTES: usize = 50_000;
-pub const DSH_WIRE_BYTE_LIMIT: usize = 1024 * 1024;
 pub const MIN_OUTPUT_BYTES: usize = 4_096;
 pub const MAX_OUTPUT_BYTES: usize = 262_144;
 pub const OUTPUT_BYTES_ENV: &str = "AGENTSHIM_OUTPUT_BYTES";
@@ -322,8 +320,7 @@ pub enum ProjectionDecision {
 
 /// Per-call output budget supplied by the embedding host.
 ///
-/// The engine treats the budget as opaque: the MCP shell backs it with the shared
-/// tokenizer and burst gates, while a native host can supply plain byte budgets.
+/// The engine treats the host-provided budget as opaque.
 /// Implementations must be deterministic for the lifetime of one call.
 pub trait CallBudget: Send + Sync {
     /// Hard byte ceiling for one tool response's model-visible text.
@@ -353,9 +350,8 @@ pub trait CallBudget: Send + Sync {
     ) -> ProjectionDecision;
 }
 
-/// Deterministic byte-derived budget for core tests and benches. The real tokenizer
-/// and burst gates live in the MCP shell; engine tests only need a budget whose
-/// projection is stable, so projected tokens mirror the MCP gate's byte upper bound:
+/// Deterministic byte-derived budget for core tests and benches. Projected tokens use
+/// a stable byte upper bound:
 /// one token per JSON-escaped payload byte plus the wrapper and image model costs.
 #[cfg(any(test, feature = "bench-internals"))]
 #[derive(Clone, Copy, Debug)]

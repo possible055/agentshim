@@ -331,7 +331,6 @@ fn render(snapshot: &JobSnapshot, tail_bytes: usize) -> ToolOutput {
         .start
         .saturating_add(u64::try_from(snapshot.log.bytes.len()).unwrap_or(u64::MAX));
     ToolOutput::new(text.clone()).with_structured(serde_json::json!({
-        "bridgeVersion": crate::dsh_bridge::DSH_BRIDGE_VERSION,
         "tool": "bash_status",
         "job": {
             "jobId": snapshot.job_id,

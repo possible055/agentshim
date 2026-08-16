@@ -1,9 +1,6 @@
 use std::{
     env,
-    sync::{
-        Arc, OnceLock,
-        atomic::{AtomicU8, Ordering},
-    },
+    sync::{Arc, OnceLock},
 };
 
 use rmcp::model::{CallToolResult, ContentBlock};
@@ -21,11 +18,11 @@ pub(crate) use token_gate::{GateDecision, OutputTokenGate, structured_result_fit
 // non-test builds; not every item is referenced in both.
 #[allow(unused_imports)]
 pub use agentshim_core::output::{
-    CALL_OUTPUT_TOKEN_LIMIT, DSH_NATIVE_PREVIEW_BYTES, DSH_WIRE_BYTE_LIMIT, MAX_OUTPUT_BYTES,
-    MIN_OUTPUT_BYTES, MODEL_BYTE_LIMIT, NEXT_OFFSET_FIELD, NEXT_START_LINE_FIELD, OUTPUT_BYTES_ENV,
-    OutputError, OutputFormatter, OutputLimits, PARTIAL_MARKER, PDF_CURSOR_FIELD,
-    ProjectedTokenCost, ProjectionDecision, SkipNotes, SkipReason, json_string_content_encoded_len,
-    tool_error_structure, tool_result_encoded_len,
+    CALL_OUTPUT_TOKEN_LIMIT, MAX_OUTPUT_BYTES, MIN_OUTPUT_BYTES, MODEL_BYTE_LIMIT,
+    NEXT_OFFSET_FIELD, NEXT_START_LINE_FIELD, OUTPUT_BYTES_ENV, OutputError, OutputFormatter,
+    OutputLimits, PARTIAL_MARKER, PDF_CURSOR_FIELD, ProjectedTokenCost, ProjectionDecision,
+    SkipNotes, SkipReason, json_string_content_encoded_len, tool_error_structure,
+    tool_result_encoded_len,
 };
 
 #[derive(Clone)]
@@ -44,10 +41,6 @@ impl CallOutputBudget {
         Self {
             model: Some(ModelOutputBudget { token_gate, ticket }),
         }
-    }
-
-    pub(crate) const fn dsh() -> Self {
-        Self { model: None }
     }
 
     pub(crate) fn standalone() -> Self {
@@ -198,43 +191,11 @@ pub fn configured_byte_limit() -> std::io::Result<usize> {
 #[must_use]
 pub fn effective_byte_limit() -> usize {
     static LIMIT: OnceLock<usize> = OnceLock::new();
-    if output_profile() == crate::ClientProfile::Dsh {
-        DSH_NATIVE_PREVIEW_BYTES
-    } else {
-        *LIMIT.get_or_init(|| configured_byte_limit().unwrap_or(MODEL_BYTE_LIMIT))
-    }
-}
-
-static OUTPUT_PROFILE: AtomicU8 = AtomicU8::new(0);
-
-pub(crate) fn install_output_profile(profile: crate::ClientProfile) {
-    #[cfg(test)]
-    let _ = profile;
-    #[cfg(not(test))]
-    {
-        let value = match profile {
-            crate::ClientProfile::Codex => 0,
-            crate::ClientProfile::Cursor => 1,
-            crate::ClientProfile::Dsh => 2,
-        };
-        OUTPUT_PROFILE.store(value, Ordering::Release);
-    }
-}
-
-fn output_profile() -> crate::ClientProfile {
-    match OUTPUT_PROFILE.load(Ordering::Acquire) {
-        1 => crate::ClientProfile::Cursor,
-        2 => crate::ClientProfile::Dsh,
-        _ => crate::ClientProfile::Codex,
-    }
+    *LIMIT.get_or_init(|| configured_byte_limit().unwrap_or(MODEL_BYTE_LIMIT))
 }
 
 pub(crate) fn wire_byte_limit() -> usize {
-    if output_profile() == crate::ClientProfile::Dsh {
-        DSH_WIRE_BYTE_LIMIT
-    } else {
-        effective_byte_limit()
-    }
+    effective_byte_limit()
 }
 
 pub(crate) fn tool_result_fits_budget(

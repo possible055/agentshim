@@ -3,20 +3,17 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
-import { createSession, MIN_TOOL_CALL_TIMEOUT_MS, resolveSessionConfig } from './session.ts'
-import type { CatalogSnapshot, ResolvedSessionConfig } from './session.ts'
+import { MIN_TOOL_CALL_TIMEOUT_MS, resolvePluginConfig } from './config.ts'
+import type { ResolvedPluginConfig } from './config.ts'
 import { assertExecutionWorld, sameExecutionPath } from './policy.ts'
 import { buildToolDefinitions, promptSections, RESTRICT_CANDIDATES } from './tools.ts'
 import { PUBLIC_TOOL_NAMES } from './contracts.ts'
 import { BackgroundJobManager } from './jobs.ts'
 import { loadNativeAddon, nativeEngineEnv } from './native.ts'
-import type { NativeEngine } from './native.ts'
 import {
-  CaptureStore,
   DEFAULT_CAPTURE_MAX_BYTES,
   MAX_CAPTURE_MAX_BYTES,
   MIN_CAPTURE_MAX_BYTES,
-  resolveCaptureRoot,
 } from './capture.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -27,30 +24,27 @@ export const inject: readonly string[] = ['fs']
 export interface Config {
   /** Plugin working root; defaults to the host's `process.cwd()`. */
   root: string
-  /** agentshim executable; defaults to the platform install path. Must be absolute when set. */
-  command: string
-  /** Arguments placed before the fixed server argv, e.g. `run --locked --` behind a `cargo` command. */
-  commandArgs: string[]
   readScope: 'normal' | 'unrestricted'
   /** Extra environment merged on top of the scrubbed parent environment, e.g. `AGENTSHIM_*` settings. */
   env: Record<string, string>
-  /** Applied to both the DSH tool deadline and the private MCP request timeout. */
+  /** DSH tool deadline; the native process ceiling is derived from this shelf. */
   toolCallTimeoutMs: number
   /** Private persistent root for byte-exact process capture artifacts. */
   captureRoot?: string
   /** Aggregate raw capture ceiling for one process call. */
   captureMaxBytes?: number
+  /** Artifact retention for the current Engine session. */
+  captureCleanup?: 'never' | 'session-end'
 }
 
 export const Config = z.object({
   root: z.string().default(''),
-  command: z.string().default(''),
-  commandArgs: z.array(String).default([]),
   readScope: z.union([z.const('normal'), z.const('unrestricted')]).default('normal'),
   env: z.dict(String).default({}),
   toolCallTimeoutMs: z.number().min(MIN_TOOL_CALL_TIMEOUT_MS).default(MIN_TOOL_CALL_TIMEOUT_MS),
   captureRoot: z.string().default(''),
   captureMaxBytes: z.number().min(MIN_CAPTURE_MAX_BYTES).max(MAX_CAPTURE_MAX_BYTES).default(DEFAULT_CAPTURE_MAX_BYTES),
+  captureCleanup: z.union([z.const('never'), z.const('session-end')]).default('never'),
 }) as unknown as z<Config>
 
 /**
@@ -96,7 +90,7 @@ interface AgentInstallation {
  */
 function installAgentTools(
   ctx: Context,
-  resolved: ResolvedSessionConfig,
+  resolved: ResolvedPluginConfig,
   definitions: ReadonlyMap<string, ToolDefinition>,
 ): void {
   const installed = new Map<Agent, AgentInstallation>()
@@ -165,40 +159,28 @@ function installAgentTools(
   }
 }
 
-/**
- * Start the private agentshim MCP session, block activation on a validated
- * six-tool catalog, then replace overlapping tool names in every
- * root-matched agent scope. The catalog is still six tools; replacements and
- * the companions implied by them are published. Any resolution, spawn,
- * validation, or execution-world failure rejects the fiber (Cordis rolls the
- * plugin back) — the adapter never silently falls back to the DSH built-in
- * tools.
- */
+/** Load the native engine and replace overlapping tools in every matching agent scope. */
 export async function apply(ctx: Context, config: Config): Promise<void> {
-  const captureRoot = resolveCaptureRoot(config.captureRoot ?? '')
-  const captureMaxBytes = config.captureMaxBytes ?? DEFAULT_CAPTURE_MAX_BYTES
-  const resolved = await resolveSessionConfig({ ...config, captureRoot, captureMaxBytes })
+  const resolved = await resolvePluginConfig(config)
   await assertExecutionWorld(ctx, resolved.root)
-  const captureStore = new CaptureStore(captureRoot, captureMaxBytes)
-  ctx.effect(() => () => captureStore.dispose(), 'agentshim.captureStore')
-  const session = createSession(resolved, { logger: ctx.logger, captureStore })
-  ctx.effect(() => () => session.dispose(), 'agentshim.session')
   const jobs = new BackgroundJobManager()
-  ctx.effect(() => () => jobs.dispose(), 'agentshim.jobs')
-  const snapshot: CatalogSnapshot = await session.ready
-  let native: NativeEngine | undefined
   const loaded = loadNativeAddon()
-  if (loaded.engine !== undefined) {
-    native = new loaded.engine.Engine(resolved.root, {
-      env: nativeEngineEnv(config.env),
-      timeoutCeilingMs: MIN_TOOL_CALL_TIMEOUT_MS,
-    })
-    ctx.effect(() => () => {
-      void native?.close().catch(() => {})
-    }, 'agentshim.nativeEngine')
-  } else {
-    ctx.logger.warn(`dsh-agentshim: native engine unavailable (${loaded.failure.reason}: ${loaded.failure.detail}); read/grep/glob stay on the MCP bridge`)
+  if (loaded.engine === undefined) {
+    throw new Error(`dsh-agentshim: native engine activation failed (${loaded.failure.reason}): ${loaded.failure.detail}`)
   }
-  const definitions = buildToolDefinitions({ ctx, session, snapshot, config: resolved, jobs, captureStore, ...(native === undefined ? {} : { native }) })
+  const native = new loaded.engine.Engine(resolved.root, {
+    env: nativeEngineEnv(config.env),
+    readScope: resolved.readScope,
+    pageBudgetBytes: 50_000,
+    toolTimeoutShelfMs: resolved.toolCallTimeoutMs,
+    captureRoot: resolved.captureRoot,
+    captureMaxBytes: resolved.captureMaxBytes,
+    captureCleanup: resolved.captureCleanup,
+  })
+  ctx.effect(() => async () => {
+    await jobs.dispose()
+    await native.close()
+  }, 'agentshim.nativeEngine')
+  const definitions = buildToolDefinitions({ ctx, config: resolved, jobs, native })
   installAgentTools(ctx, resolved, definitions)
 }

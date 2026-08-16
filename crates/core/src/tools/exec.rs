@@ -53,7 +53,7 @@ pub enum CaptureFailureKind {
 
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
-pub struct CaptureTransportError {
+pub struct CaptureSinkError {
     pub kind: CaptureFailureKind,
     pub message: String,
 }
@@ -62,7 +62,7 @@ impl From<std::io::Error> for ProcessError {
     fn from(error: std::io::Error) -> Self {
         if let Some(capture) = error
             .get_ref()
-            .and_then(|source| source.downcast_ref::<CaptureTransportError>())
+            .and_then(|source| source.downcast_ref::<CaptureSinkError>())
         {
             return Self::Capture {
                 kind: capture.kind,

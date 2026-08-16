@@ -36,7 +36,6 @@ fn request(program: String) -> ProcessRequest {
         unset_env: Vec::new(),
         stdin: None,
         timeout_ms: Some(2_000),
-        capture: None,
     }
 }
 

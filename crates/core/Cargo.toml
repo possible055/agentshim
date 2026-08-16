@@ -4,7 +4,7 @@ version = "0.1.4-alpha.1"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
-description = "Host-neutral repository tool engine shared by the agentshim MCP shell and native hosts"
+description = "Host-neutral repository and process tool engine"
 
 [dependencies]
 agentshim-pdf-read = { path = "../pdf-read-core" }
@@ -45,9 +45,7 @@ unsafe_op_in_unsafe_fn = "deny"
 [lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
-# The engine's compute surface was lifted wholesale from the MCP shell; doc-attribute
-# pedantry that only fires on `pub` items would flood this crate until the typed Engine
-# API curates the surface in the napi phase.
+# Public documentation is being tightened alongside the typed host API.
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 must_use_candidate = "allow"

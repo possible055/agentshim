@@ -131,8 +131,10 @@ fn make_span_with_width(
     s
 }
 
-mod basics_a;
-mod basics_b;
+mod formatting_and_bidi;
+mod headings_and_lists;
 mod layout_and_tables;
-mod regressions_a;
-mod regressions_b;
+mod layout_boundaries;
+mod list_and_heading_regressions;
+mod table_regressions;
+mod text_regressions;

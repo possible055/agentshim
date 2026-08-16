@@ -1,16 +1,13 @@
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 import type { ParameterSchemaSpec, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
-import type { CaptureArtifact } from './capture.ts'
 
-export const BRIDGE_VERSION = 2
 export const PUBLIC_TOOL_NAMES = ['read', 'grep', 'glob', 'run_program', 'bash', 'bash_status'] as const
-export const REQUIRED_BRIDGE_OPERATIONS = [...PUBLIC_TOOL_NAMES] as const
 
 export type PublicToolName = (typeof PUBLIC_TOOL_NAMES)[number]
-export type BridgeOperation = (typeof REQUIRED_BRIDGE_OPERATIONS)[number]
 
 export const readParameters = {
   path: { type: 'string', required: true, description: 'Platform-native path to one file.' },
+  artifact_offset: { type: 'integer', description: 'Byte offset for a published binary artifact page.' },
   encoding: { type: 'string', description: 'Optional WHATWG encoding label.' },
   line_count: { type: 'integer', description: 'Maximum lines to return, from 1 through 2000.' },
   pages: { type: 'string', description: 'PDF page or inclusive page range, such as "3" or "1-5".' },
@@ -182,10 +179,6 @@ export const bashStatusOutputSchema = {
   },
 } as const satisfies ValueSchemaSpec
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 export function assertExactKeys(args: Record<string, unknown>, allowed: readonly string[]): void {
   const unknown = Object.keys(args).filter(key => !allowed.includes(key))
   if (unknown.length > 0) throw new HarnessError(`invalid arguments: unknown properties: ${unknown.join(', ')}`, 'INVALID_ARGS')
@@ -213,106 +206,4 @@ export function assertStringRecord(value: Record<string, unknown> | undefined, n
   for (const [key, entry] of Object.entries(value)) {
     if (typeof entry !== 'string') throw new HarnessError(`invalid arguments: ${name}.${key} must be a string`, 'INVALID_ARGS')
   }
-}
-
-export function bridgeText(value: unknown, tool: BridgeOperation, text = ''): string {
-  if (!isRecord(value) || value.bridgeVersion !== BRIDGE_VERSION || value.tool !== tool || 'text' in value) {
-    throw new HarnessError(`agentshim tool "${tool}" returned an incompatible DSH bridge payload`, 'AGENTSHIM_MALFORMED_RESULT')
-  }
-  return text
-}
-
-export interface BridgeProcessStream {
-  readonly text: string
-  readonly totalBytes: number
-  readonly shownBytes: number
-  readonly omittedBytes: number
-  readonly artifact?: CaptureArtifact
-}
-
-export interface BridgeProcess {
-  readonly text: string
-  readonly exitCode: string | null
-  readonly stdout: BridgeProcessStream
-  readonly stderr: BridgeProcessStream
-}
-
-function processStream(value: unknown): BridgeProcessStream | undefined {
-  if (!isRecord(value) || typeof value.text !== 'string') return undefined
-  const numbers = [value.totalBytes, value.shownBytes, value.omittedBytes]
-  if (numbers.some(number => !Number.isSafeInteger(number) || (number as number) < 0)) return undefined
-  return {
-    text: value.text,
-    totalBytes: value.totalBytes as number,
-    shownBytes: value.shownBytes as number,
-    omittedBytes: value.omittedBytes as number,
-  }
-}
-
-export function bridgeProcess(value: unknown, tool: 'run_program' | 'bash', renderedText = ''): BridgeProcess {
-  const text = bridgeText(value, tool, renderedText)
-  const process = isRecord(value) && isRecord(value.process) ? value.process : undefined
-  const stdout = processStream(process?.stdout)
-  const stderr = processStream(process?.stderr)
-  const exitCode = process?.exitCode
-  if (stdout === undefined || stderr === undefined || (typeof exitCode !== 'string' && exitCode !== null)) {
-    throw new HarnessError(`agentshim tool "${tool}" returned malformed process facts`, 'AGENTSHIM_MALFORMED_RESULT')
-  }
-  return { text, exitCode, stdout, stderr }
-}
-
-export function bridgeJobStart(value: unknown): string {
-  bridgeText(value, 'bash', '')
-  const job = isRecord(value) && isRecord(value.job) ? value.job : undefined
-  if (typeof job?.jobId !== 'string' || job.jobId.length === 0) {
-    throw new HarnessError('agentshim bash returned a malformed private job handle', 'AGENTSHIM_MALFORMED_RESULT')
-  }
-  return job.jobId
-}
-
-export interface BridgeJobStatus {
-  readonly jobId: string
-  readonly state: string
-  readonly exitCode: string | null
-  readonly totalBytes: number
-  readonly chunkStart: number
-  readonly nextCursor: number
-  readonly chunk: string
-  readonly invalidUtf8Bytes: number
-  readonly capture: 'server-spool' | 'remote-spool'
-  readonly truncated: boolean
-  readonly error: string | null
-}
-
-export function bridgeJobStatus(value: unknown, expectedJobId?: string): BridgeJobStatus {
-  bridgeText(value, 'bash_status', '')
-  const job = isRecord(value) && isRecord(value.job) ? value.job : undefined
-  if (job === undefined
-    || typeof job.jobId !== 'string'
-    || job.jobId.length === 0
-    || typeof job.state !== 'string'
-    || (typeof job.exitCode !== 'string' && job.exitCode !== null)) {
-    throw new HarnessError('agentshim bash_status returned malformed lifecycle fields', 'AGENTSHIM_MALFORMED_RESULT')
-  }
-  if (expectedJobId !== undefined && job.jobId !== expectedJobId) {
-    throw new HarnessError('agentshim bash_status returned a mismatched private job handle', 'AGENTSHIM_MALFORMED_RESULT')
-  }
-  for (const key of ['totalBytes', 'chunkStart', 'nextCursor', 'invalidUtf8Bytes'] as const) {
-    if (!Number.isSafeInteger(job[key]) || (job[key] as number) < 0) {
-      throw new HarnessError(`agentshim bash_status returned invalid ${key}`, 'AGENTSHIM_MALFORMED_RESULT')
-    }
-  }
-  if (typeof job.chunk !== 'string'
-    || (job.capture !== 'server-spool' && job.capture !== 'remote-spool')
-    || typeof job.truncated !== 'boolean'
-    || (typeof job.error !== 'string' && job.error !== null)) {
-    throw new HarnessError('agentshim bash_status returned malformed output fields', 'AGENTSHIM_MALFORMED_RESULT')
-  }
-  const nextCursor = job.nextCursor as number
-  const chunkStart = job.chunkStart as number
-  const totalBytes = job.totalBytes as number
-  if (nextCursor < chunkStart || nextCursor > totalBytes) {
-    throw new HarnessError('agentshim bash_status returned an invalid cursor interval', 'AGENTSHIM_MALFORMED_RESULT')
-  }
-  return job as unknown as BridgeJobStatus
 }

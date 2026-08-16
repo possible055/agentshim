@@ -1,10 +1,10 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { createUserMessage, HarnessError } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { JsonValue, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 
-/** One MCP image block still in wire form (base64 + declared MIME). */
+/** One native image block before DSH attachment materialization. */
 export interface RawImageBlock {
   readonly type: 'image'
   readonly data: string
@@ -14,83 +14,6 @@ export interface RawImageBlock {
 export type RawContentBlock =
   | { readonly type: 'text'; readonly text: string }
   | RawImageBlock
-
-export interface NormalizedResult {
-  readonly content: readonly RawContentBlock[]
-  readonly structuredContent: JsonValue | undefined
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function resultText(content: unknown): string {
-  if (!Array.isArray(content)) return ''
-  return content
-    .filter(isRecord)
-    .filter(block => block.type === 'text' && typeof block.text === 'string')
-    .map(block => block.text as string)
-    .join('\n')
-}
-
-/**
- * The server error code as `AGENTSHIM_<SERVER_CODE>`: agentshim tool errors
- * carry `{ error: { code } }` in structuredContent; a missing or malformed
- * payload falls back to `AGENTSHIM_TOOL_ERROR`. Only name/code survive the
- * DSH tool registry, so nothing else is relied upon.
- */
-export function serverErrorCode(raw: Record<string, unknown>): string {
-  const code = isRecord(raw.structuredContent)
-    ? isRecord(raw.structuredContent.error) && typeof raw.structuredContent.error.code === 'string'
-      ? raw.structuredContent.error.code
-      : undefined
-    : undefined
-  if (code === undefined) return 'AGENTSHIM_TOOL_ERROR'
-  const sanitized = code.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
-  return sanitized === '' ? 'AGENTSHIM_TOOL_ERROR' : `AGENTSHIM_${sanitized}`
-}
-
-/** Map an `isError: true` MCP result to the stable HarnessError the adapter throws. */
-export function mcpToolError(raw: Record<string, unknown>, toolName: string): HarnessError {
-  const message = resultText(raw.content)
-  return new HarnessError(
-    message === '' ? `agentshim tool "${toolName}" failed without a message` : message,
-    serverErrorCode(raw),
-  )
-}
-
-/**
- * Trust boundary over a raw tools/call result: the request schema validated
- * only a record, so every content block is validated here. First version
- * accepts text and image blocks only; anything else fails loud.
- */
-export function normalizeMcpResult(raw: Record<string, unknown>, toolName: string): NormalizedResult {
-  if (raw.isError === true) throw mcpToolError(raw, toolName)
-  if (!Array.isArray(raw.content)) {
-    throw new HarnessError(`agentshim tool "${toolName}" returned no content array`, 'AGENTSHIM_MALFORMED_RESULT')
-  }
-  const content: RawContentBlock[] = []
-  for (const value of raw.content) {
-    if (!isRecord(value)) {
-      throw new HarnessError(`agentshim tool "${toolName}" returned a non-object content block`, 'AGENTSHIM_UNSUPPORTED_CONTENT_BLOCK')
-    }
-    if (value.type === 'text' && typeof value.text === 'string') {
-      content.push({ type: 'text', text: value.text })
-    } else if (value.type === 'image' && typeof value.data === 'string' && typeof value.mimeType === 'string') {
-      content.push({ type: 'image', data: value.data, mimeType: value.mimeType })
-    } else {
-      throw new HarnessError(
-        `agentshim tool "${toolName}" returned an unsupported content block (type ${JSON.stringify(value.type)})`,
-        'AGENTSHIM_UNSUPPORTED_CONTENT_BLOCK',
-      )
-    }
-  }
-  return { content, structuredContent: raw.structuredContent === undefined ? undefined : raw.structuredContent as JsonValue }
-}
-
-export function normalizedText(result: NormalizedResult): string {
-  return result.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
-}
 
 const PDF_TEXT_RETRY_HINT = ' — retry the same call with pdf_mode: "text" to receive page Markdown instead'
 
@@ -120,7 +43,7 @@ function strictBase64Decode(data: string): Uint8Array {
 }
 
 /**
- * Convert normalized MCP blocks into DSH content: text passes through in
+ * Convert native blocks into DSH content: text passes through in
  * order, images become durable attachments referenced by ImageBlocks (no
  * base64 reaches the canonical value or the session log). A nested Code Mode
  * call additionally defers the blocks so the image enters the next model

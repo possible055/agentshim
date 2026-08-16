@@ -94,17 +94,14 @@ On Windows, JSON paths must escape each backslash.
 
 ## Configure DSH
 
-Install the AgentShim binary first, then build and install the native adapter into a DSH profile:
+Install the native adapter and its exact optional platform package into a DSH profile:
 
 ```sh
-cd adapters/dsh
-pnpm install --frozen-lockfile
-pnpm pack
-dsh plugin --profile <profile> add /absolute/path/to/dsh-agentshim-0.1.0.tgz
+dsh plugin --profile <profile> add dsh-agentshim
 dsh --profile <profile> --dump-config
 ```
 
-Publishing `dsh-agentshim` to npm is not required for tarball installation. Once the package is published, the shorter `dsh plugin --profile <profile> add dsh-agentshim` form can be used. See the [DSH adapter guide](adapters/dsh/README.md) for prerequisites, configuration, sandbox approval behavior, and removal.
+DSH loads `agentshim-core` through the platform addon in-process; it does not start the MCP server or require an installed `agentshim` executable. Unsupported platforms, missing packages, and native API mismatches fail plugin activation. See the [DSH adapter guide](adapters/dsh/README.md) for configuration, capture retention, sandbox approval behavior, and removal.
 
 ## Options
 

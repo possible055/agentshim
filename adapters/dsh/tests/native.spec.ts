@@ -4,14 +4,22 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { loadNativeAddon, nativeEngineEnv, nativePlatformTriple, REQUIRED_NATIVE_API_VERSION } from '../src/native.ts'
+import type { NativeSandboxAttribution } from '../src/native.ts'
 
-const builtDll = fileURLToPath(new URL('../../../target/debug/agentshim_napi.dll', import.meta.url))
+const builtLibrary = fileURLToPath(new URL(
+  `../../../target/debug/${process.platform === 'win32'
+    ? 'agentshim_napi.dll'
+    : process.platform === 'darwin'
+      ? 'libagentshim_napi.dylib'
+      : 'libagentshim_napi.so'}`,
+  import.meta.url,
+))
 
 async function stageAddon(): Promise<string | undefined> {
   try {
     const directory = await mkdtemp(join(tmpdir(), 'agentshim-native-'))
     const staged = join(directory, 'agentshim_napi.node')
-    await copyFile(builtDll, staged)
+    await copyFile(builtLibrary, staged)
     return staged
   } catch {
     return undefined
@@ -38,7 +46,9 @@ describe('native addon loading', () => {
 
   it('fails loudly when an explicit dev override points nowhere', () => {
     process.env.AGENTSHIM_DSH_NATIVE_DLL = join(tmpdir(), 'definitely-missing-agentshim.node')
-    expect(() => loadNativeAddon()).toThrow(/Cannot find module/)
+    const result = loadNativeAddon()
+    expect(result.failure?.reason).toBe('addon-unavailable')
+    expect(result.failure?.detail).toMatch(/Cannot find module|could not be loaded/i)
   })
 
   it('fails loudly on api version mismatch', async () => {
@@ -75,6 +85,16 @@ describe('native addon loading', () => {
 
     await expect(engine.readText({ path: '../escape.md' })).rejects.toThrow()
 
+    const outside = await mkdtemp(join(tmpdir(), 'agentshim-native-unrestricted-'))
+    const outsideFile = join(outside, 'outside.txt')
+    await writeFile(outsideFile, 'unrestricted read\n')
+    const unrestricted = new result.engine.Engine(root, {
+      env: nativeEngineEnv({}),
+      readScope: 'unrestricted',
+    })
+    expect((await unrestricted.readText({ path: outsideFile })).text).toContain('unrestricted read')
+    await unrestricted.close()
+
     const prepared = engine.prepareRunProgram({
       program: process.execPath,
       args: ['-e', 'process.stdout.write("two-stage-native")'],
@@ -83,10 +103,209 @@ describe('native addon loading', () => {
     expect(prepared.argv.length).toBeGreaterThan(1)
     const outcome = await engine.spawnPrepared(prepared.handle)
     expect(outcome.text).toContain('two-stage-native')
-    expect(outcome.errorCode).toBeUndefined()
+    expect(outcome.failure).toBeUndefined()
     await expect(engine.spawnPrepared(prepared.handle)).rejects.toThrow(/unknown|already/i)
 
     await engine.close()
+    await engine.close()
+  })
+
+  it.skipIf(stagedAddon === undefined)('classifies denials and runner failures from the settled native outcome', async () => {
+    process.env.AGENTSHIM_DSH_NATIVE_DLL = stagedAddon!
+    const result = loadNativeAddon()
+    if (result.engine === undefined) throw new Error('unreachable')
+
+    const root = await mkdtemp(join(tmpdir(), 'agentshim-native-classify-'))
+    const engine = new result.engine.Engine(root, { env: nativeEngineEnv({}) })
+    const spawn = async (statement: string, attribution?: NativeSandboxAttribution) => {
+      const prepared = engine.prepareRunProgram({
+        program: process.execPath,
+        args: ['-e', statement],
+        env: { SYSTEMROOT: process.env.SYSTEMROOT ?? '' },
+      })
+      return await engine.spawnPrepared(prepared.handle, undefined, attribution)
+    }
+    const runnerFailureRules = [{
+      allowedExitCodes: [70],
+      fatalSignatures: ['runner failed'],
+      informationalLines: ['notice'],
+    }]
+
+    const denied = await spawn(
+      'process.stderr.write("write: Permission denied"); process.exit(1)',
+      { denialSignatures: ['permission denied'] },
+    )
+    expect(denied.exitCode).toBe('1')
+    expect(denied.denied).toBe(true)
+    expect(denied.runnerFailed).toBe(false)
+
+    const runnerFailed = await spawn(
+      'process.stderr.write("notice\\nRUNNER FAILED to start"); process.exit(70)',
+      { runnerFailureRules },
+    )
+    expect(runnerFailed.exitCode).toBe('70')
+    expect(runnerFailed.denied).toBe(false)
+    expect(runnerFailed.runnerFailed).toBe(true)
+
+    const framed = await spawn(
+      'process.stderr.write("RUNNER FAILED to start"); process.exit(1)',
+      { denialSignatures: ['permission denied'], runnerFailureRules },
+    )
+    expect(framed.exitCode).toBe('1')
+    expect(framed.denied).toBe(false)
+    expect(framed.runnerFailed).toBe(false)
+
+    const clean = await spawn(
+      'process.stderr.write("permission denied in harmless prose"); process.exit(0)',
+      { denialSignatures: ['permission denied'] },
+    )
+    expect(clean.exitCode).toBe('0')
+    expect(clean.denied).toBe(false)
+    expect(clean.runnerFailed).toBe(false)
+
+    await engine.close()
+  })
+
+  it.skipIf(stagedAddon === undefined)('grants exact text and binary artifact capabilities without glob exposure', async () => {
+    process.env.AGENTSHIM_DSH_NATIVE_DLL = stagedAddon!
+    const result = loadNativeAddon()
+    if (result.engine === undefined) throw new Error('unreachable')
+
+    const root = await mkdtemp(join(tmpdir(), 'agentshim-native-artifacts-'))
+    const captureRoot = join(root, '.captures')
+    const engine = new result.engine.Engine(root, {
+      env: nativeEngineEnv({}),
+      readScope: 'unrestricted',
+      captureRoot,
+      captureMaxBytes: 1024 * 1024,
+    })
+    const run = async (script: string) => {
+      const prepared = engine.prepareRunProgram({ program: process.execPath, args: ['-e', script] })
+      return await engine.spawnPrepared(prepared.handle)
+    }
+
+    const textOutcome = await run('process.stdout.write("needle\\n".repeat(9000))')
+    const textArtifact = textOutcome.artifacts.find(artifact => artifact.stream === 'stdout')
+    expect(textArtifact).toBeDefined()
+    const textRead = await engine.readText({ path: textArtifact!.path, lineCount: 2 })
+    expect(textRead.text).toContain('needle')
+    expect((await engine.grepText({ path: textArtifact!.path, pattern: 'needle', fixedStrings: true })).text)
+      .toContain('needle')
+
+    const binaryOutcome = await run('process.stdout.write(Buffer.from([0,255,65,66]))')
+    const binaryArtifact = binaryOutcome.artifacts.find(artifact => artifact.stream === 'stdout')
+    expect(binaryArtifact).toBeDefined()
+    const binaryRead = await engine.readText({ path: binaryArtifact!.path, artifactOffset: 0 })
+    expect(binaryRead.text).toContain('Encoding: base64')
+    await expect(engine.grepText({ path: binaryArtifact!.path, pattern: 'AB', fixedStrings: true }))
+      .rejects.toThrow(/binary artifact.*artifactOffset/i)
+
+    await expect(engine.globText({ path: captureRoot, pattern: '**/*' })).rejects.toThrow(/capture root/i)
+    expect((await engine.globText({ pattern: '**/*' })).text).not.toContain('.captures')
+
+    const foreign = new result.engine.Engine(root, {
+      env: nativeEngineEnv({}),
+      readScope: 'normal',
+      captureRoot,
+    })
+    await expect(foreign.readText({ path: binaryArtifact!.path, artifactOffset: 0 })).rejects.toThrow()
+    await foreign.close()
+    await engine.close()
+  })
+
+  it.skipIf(stagedAddon === undefined)('stops at the aggregate capture ceiling and publishes an exact partial artifact', async () => {
+    process.env.AGENTSHIM_DSH_NATIVE_DLL = stagedAddon!
+    const result = loadNativeAddon()
+    if (result.engine === undefined) throw new Error('unreachable')
+    const root = await mkdtemp(join(tmpdir(), 'agentshim-native-ceiling-'))
+    const engine = new result.engine.Engine(root, {
+      env: nativeEngineEnv({}),
+      captureRoot: join(root, '.captures'),
+      captureMaxBytes: 1024 * 1024,
+    })
+    const prepared = engine.prepareRunProgram({
+      program: process.execPath,
+      args: ['-e', 'process.stdout.write(Buffer.alloc(1024 * 1024 + 1, 0x61))'],
+    })
+    const outcome = await engine.spawnPrepared(prepared.handle)
+    expect(outcome.limitExceeded).toBe(true)
+    expect(outcome.failure).toMatchObject({ code: 'AGENTSHIM_CAPTURE_LIMIT_EXCEEDED' })
+    const artifact = outcome.artifacts.find(value => value.stream === 'stdout')
+    expect(artifact?.complete).toBe(false)
+    expect(artifact?.bytes).toBeLessThanOrEqual(1024 * 1024)
+    await engine.close()
+  })
+
+  it.skipIf(stagedAddon === undefined)('starts, drains, cancels, and settles a native background bash job', async () => {
+    process.env.AGENTSHIM_DSH_NATIVE_DLL = stagedAddon!
+    const result = loadNativeAddon()
+    if (result.engine === undefined) throw new Error('unreachable')
+
+    const root = await mkdtemp(join(tmpdir(), 'agentshim-native-bg-'))
+    const engine = new result.engine.Engine(root, { env: nativeEngineEnv({}) })
+    const prepared = engine.prepareBash({
+      command: 'for i in 1 2 3 4 5 6; do printf "line-%s\\n" "$i"; sleep 0.05; done; exit 0',
+    })
+    expect(prepared.argv.length).toBeGreaterThan(1)
+
+    const handle = engine.startBackgroundPrepared(prepared.handle)
+
+    const output1 = handle.readOutput()
+    expect(output1.length).toBeGreaterThanOrEqual(0)
+
+    const outcome = await handle.done()
+    expect(outcome.status).toBe('completed')
+    expect(outcome.exitCode).toBe('0')
+
+    const finalOutput = handle.readOutput()
+    expect(finalOutput).toContain('line-1')
+    expect(finalOutput).toContain('line-6')
+
+    await handle.dispose()
+    await engine.close()
+  })
+
+  it.skipIf(stagedAddon === undefined)('settles at least three native background jobs concurrently', async () => {
+    process.env.AGENTSHIM_DSH_NATIVE_DLL = stagedAddon!
+    const result = loadNativeAddon()
+    if (result.engine === undefined) throw new Error('unreachable')
+    const root = await mkdtemp(join(tmpdir(), 'agentshim-native-bg-concurrent-'))
+    const engine = new result.engine.Engine(root, { env: nativeEngineEnv({}) })
+    const handles = Array.from({ length: 3 }, (_, index) => {
+      const prepared = engine.prepareBash({ command: `sleep 0.1; printf concurrent-${index}` })
+      return engine.startBackgroundPrepared(prepared.handle)
+    })
+    const outcomes = await Promise.all(handles.map(handle => handle.done()))
+    expect(outcomes.every(outcome => outcome.status === 'completed')).toBe(true)
+    for (const [index, handle] of handles.entries()) {
+      expect(handle.readOutput()).toContain(`concurrent-${index}`)
+      await handle.dispose()
+    }
+    await engine.close()
+  })
+
+  it.skipIf(stagedAddon === undefined)('cancels a long-running native background bash job and settles as killed', async () => {
+    process.env.AGENTSHIM_DSH_NATIVE_DLL = stagedAddon!
+    const result = loadNativeAddon()
+    if (result.engine === undefined) throw new Error('unreachable')
+
+    const root = await mkdtemp(join(tmpdir(), 'agentshim-native-bg-cancel-'))
+    const engine = new result.engine.Engine(root, { env: nativeEngineEnv({}) })
+
+    const prepared = engine.prepareBash({
+      command: 'while :; do printf x; sleep 0.05; done',
+    })
+    const handle = engine.startBackgroundPrepared(prepared.handle)
+
+    await new Promise(resolve => setTimeout(resolve, 200))
+    const partial = handle.readOutput()
+    expect(partial).toContain('x')
+
+    handle.cancel('test cancellation')
+    const outcome = await handle.done()
+    expect(outcome.status).toBe('killed')
+
+    await handle.dispose()
     await engine.close()
   })
 })

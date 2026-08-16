@@ -7,7 +7,6 @@ pub(crate) const CURSOR_BURST_TOKENS: usize = 32_768;
 /// configuration override, so the server shelf must stay at or below that ceiling
 /// for the server's own Timeout response to arrive before the client gives up.
 pub(crate) const CURSOR_TOOL_TIMEOUT_SHELF: Duration = Duration::from_secs(120);
-pub(crate) const DSH_TOOL_TIMEOUT_SHELF: Duration = Duration::from_secs(600);
 
 /// Client-specific defaults for aggregate tool-response output.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -17,8 +16,6 @@ pub enum ClientProfile {
     Codex,
     /// Larger aggregate output for Cursor's rapidly sequenced tool-call batches.
     Cursor,
-    /// Private bridge contract used by the `DeepSeek Harness` adapter.
-    Dsh,
 }
 
 impl ClientProfile {
@@ -28,7 +25,6 @@ impl ClientProfile {
         match self {
             Self::Codex => CODEX_BURST_TOKENS,
             Self::Cursor => CURSOR_BURST_TOKENS,
-            Self::Dsh => 0,
         }
     }
 
@@ -39,7 +35,6 @@ impl ClientProfile {
         match self {
             Self::Codex => crate::runtime::DEFAULT_TOOL_TIMEOUT_SHELF,
             Self::Cursor => CURSOR_TOOL_TIMEOUT_SHELF,
-            Self::Dsh => DSH_TOOL_TIMEOUT_SHELF,
         }
     }
 }
@@ -49,7 +44,6 @@ impl Display for ClientProfile {
         match self {
             Self::Codex => formatter.write_str("codex"),
             Self::Cursor => formatter.write_str("cursor"),
-            Self::Dsh => formatter.write_str("dsh"),
         }
     }
 }
@@ -64,7 +58,7 @@ pub(crate) fn resolve_idle_timeout_from(
 ) -> Option<Duration> {
     match profile {
         ClientProfile::Codex => value,
-        ClientProfile::Cursor | ClientProfile::Dsh => None,
+        ClientProfile::Cursor => None,
     }
 }
 
@@ -94,10 +88,9 @@ impl FromStr for ClientProfile {
         match value {
             "codex" => Ok(Self::Codex),
             "cursor" => Ok(Self::Cursor),
-            "dsh" => Ok(Self::Dsh),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("client profile must be `codex`, `cursor`, or `dsh`, got `{value}`"),
+                format!("client profile must be `codex` or `cursor`, got `{value}`"),
             )),
         }
     }
@@ -107,7 +100,6 @@ impl FromStr for ClientProfile {
 mod tests {
     use super::{
         CODEX_BURST_TOKENS, CURSOR_BURST_TOKENS, CURSOR_TOOL_TIMEOUT_SHELF, ClientProfile,
-        DSH_TOOL_TIMEOUT_SHELF,
     };
     use crate::runtime::DEFAULT_TOOL_TIMEOUT_SHELF;
     use std::{ffi::OsString, time::Duration};
@@ -123,7 +115,6 @@ mod tests {
             ClientProfile::Cursor.default_burst_tokens(),
             CURSOR_BURST_TOKENS
         );
-        assert_eq!(ClientProfile::Dsh.default_burst_tokens(), 0);
     }
 
     #[test]
@@ -136,12 +127,7 @@ mod tests {
             ClientProfile::Cursor.default_tool_timeout_shelf(),
             CURSOR_TOOL_TIMEOUT_SHELF,
         );
-        assert_eq!(
-            ClientProfile::Dsh.default_tool_timeout_shelf(),
-            DSH_TOOL_TIMEOUT_SHELF,
-        );
         assert_eq!(CURSOR_TOOL_TIMEOUT_SHELF, Duration::from_secs(120));
-        assert_eq!(DSH_TOOL_TIMEOUT_SHELF, Duration::from_secs(600));
     }
 
     #[test]

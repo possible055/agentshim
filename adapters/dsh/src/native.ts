@@ -1,12 +1,37 @@
 import { createRequire as nodeCreateRequire } from 'node:module'
 import { scrubbedParentEnv } from '@deepseek-ai/dsh-subprocess'
+import { HarnessError } from '@deepseek-ai/dsh-llm'
+import { TOOL_ABORTED } from '@deepseek-ai/dsh-tools'
 
 /** Native API contract version; activation refuses mismatched addons. */
-export const REQUIRED_NATIVE_API_VERSION = 1
+export const REQUIRED_NATIVE_API_VERSION = 3
+
+export interface NativeFailure {
+  readonly code: string
+  readonly message: string
+  readonly retryable: boolean
+  readonly details?: string
+}
+
+export type NativeResult<T> =
+  | { readonly value: T; readonly failure?: undefined }
+  | { readonly value?: undefined; readonly failure: NativeFailure }
+
+export function nativeFailureError(failure: NativeFailure): HarnessError {
+  const error = new HarnessError(failure.message, failure.code === 'AGENTSHIM_CANCELLED' ? TOOL_ABORTED : failure.code)
+  if (failure.code === 'AGENTSHIM_CANCELLED') error.name = 'AbortError'
+  return error
+}
+
+export interface NativeImage {
+  readonly data: string
+  readonly mimeType: string
+}
 
 export interface NativeToolText {
   readonly text: string
   readonly complete: boolean
+  readonly images: readonly NativeImage[]
 }
 
 export interface NativeReadArgs {
@@ -17,6 +42,7 @@ export interface NativeReadArgs {
   readonly pages?: string
   readonly pdfMode?: 'auto' | 'text' | 'image'
   readonly pdfCursor?: string
+  readonly artifactOffset?: number
 }
 
 export interface NativeGrepArgs {
@@ -45,8 +71,12 @@ export interface NativeGlobArgs {
 
 export interface NativeEngineOptions {
   readonly pageBudgetBytes?: number
-  readonly timeoutCeilingMs?: number
+  readonly readScope?: 'normal' | 'unrestricted'
+  readonly toolTimeoutShelfMs?: number
   readonly env?: ReadonlyArray<{ key: string; value: string }>
+  readonly captureRoot?: string
+  readonly captureMaxBytes?: number
+  readonly captureCleanup?: 'never' | 'session-end'
 }
 
 export interface NativePreparedProcess {
@@ -64,9 +94,31 @@ export interface NativeArtifactInfo {
 export interface NativeProcessOutcome {
   readonly text: string
   readonly childNonzero: boolean
+  /** Core exit label ("0", "42", "signal 9"); absent when the process never settled. */
+  readonly exitCode?: string
   readonly artifacts: NativeArtifactInfo[]
   readonly limitExceeded: boolean
-  readonly errorCode?: string
+  readonly failure?: NativeFailure
+  readonly denied: boolean
+  readonly runnerFailed: boolean
+}
+
+/** One runner-failure evidence rule, mirroring the DSH sandbox contract. */
+export interface NativeRunnerFailureRule {
+  readonly allowedExitCodes?: readonly number[]
+  readonly fatalSignatures: readonly string[]
+  readonly informationalLines?: readonly string[]
+}
+
+/**
+ * Sandbox classification inputs for one confined spawn: the backend's denial
+ * dialect and runner-failure rules, exactly as `SandboxProvider.confine`
+ * produced them for the wrapped argv. The native engine is the single
+ * classification authority; the adapter only consumes the outcome flags.
+ */
+export interface NativeSandboxAttribution {
+  readonly denialSignatures?: readonly string[]
+  readonly runnerFailureRules?: readonly NativeRunnerFailureRule[]
 }
 
 export interface NativeRunProgramArgs {
@@ -86,13 +138,37 @@ export interface NativeBashArgs {
   readonly msysArgumentConversion?: 'enabled' | 'disabled'
 }
 
+export interface NativeArtifactPublished {
+  readonly path: string
+  readonly bytes: number
+  readonly complete: boolean
+  readonly stream: string
+}
+
+export interface NativeJobOutcome {
+  readonly status: string
+  readonly detail: string
+  readonly exitCode?: string
+  readonly limitExceeded: boolean
+  readonly artifacts: readonly NativeArtifactPublished[]
+  readonly failure?: NativeFailure
+}
+
+export interface NativeJobHandle {
+  cancel(reason: string): void
+  readOutput(): string
+  done(): Promise<NativeJobOutcome>
+  dispose(): Promise<void>
+}
+
 export interface NativeEngine {
   readText(args: NativeReadArgs): Promise<NativeToolText>
   grepText(args: NativeGrepArgs): Promise<NativeToolText>
   globText(args: NativeGlobArgs): Promise<NativeToolText>
   prepareRunProgram(args: NativeRunProgramArgs): NativePreparedProcess
   prepareBash(args: NativeBashArgs): NativePreparedProcess
-  spawnPrepared(handle: string, wrappedArgv?: readonly string[]): Promise<NativeProcessOutcome>
+  spawnPrepared(handle: string, wrappedArgv?: readonly string[], attribution?: NativeSandboxAttribution): Promise<NativeProcessOutcome>
+  startBackgroundPrepared(handle: string, wrappedArgv?: readonly string[]): NativeJobHandle
   close(): Promise<void>
 }
 
@@ -128,18 +204,14 @@ export function nativePlatformTriple(): string {
   return `${process.platform}-${process.arch}`
 }
 
-function requireAddon(triple: string): NativeModule | undefined {
+function requireAddon(triple: string): NativeModule {
   const devOverride = process.env.AGENTSHIM_DSH_NATIVE_DLL
   if (devOverride !== undefined && devOverride !== '') {
     return requireAddonModule(devOverride) as NativeModule
   }
   const packageName = PLATFORM_PACKAGES[triple]
-  if (packageName === undefined) return undefined
-  try {
-    return requireAddonModule(packageName) as NativeModule
-  } catch {
-    return undefined
-  }
+  if (packageName === undefined) throw new Error(`no native package is defined for ${triple}`)
+  return requireAddonModule(packageName) as NativeModule
 }
 
 export type NativeLoadFailure =
@@ -151,11 +223,7 @@ export type NativeLoadResult =
   | { readonly engine: NativeModule; readonly failure?: undefined }
   | { readonly engine?: undefined; readonly failure: NativeLoadFailure }
 
-/**
- * Load the native engine addon for this platform. Returns a failure instead of
- * throwing so the caller can decide between the hybrid MCP bridge and failing
- * activation loudly.
- */
+/** Load and validate the exact native engine API for this platform. */
 export function loadNativeAddon(): NativeLoadResult {
   const triple = nativePlatformTriple()
   if (PLATFORM_PACKAGES[triple] === undefined && process.env.AGENTSHIM_DSH_NATIVE_DLL === undefined) {
@@ -166,9 +234,16 @@ export function loadNativeAddon(): NativeLoadResult {
       },
     }
   }
-  const addon = requireAddon(triple)
-  if (addon === undefined) {
-    return { failure: { reason: 'addon-unavailable', detail: `native addon for ${triple} is not installed` } }
+  let addon: NativeModule
+  try {
+    addon = requireAddon(triple)
+  } catch (error) {
+    return {
+      failure: {
+        reason: 'addon-unavailable',
+        detail: `native addon for ${triple} could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
+      },
+    }
   }
   const version = addon.apiVersion?.()
   if (version !== REQUIRED_NATIVE_API_VERSION) {

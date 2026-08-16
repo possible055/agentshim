@@ -1,7 +1,8 @@
-import { spawnSync } from 'node:child_process'
-import { mkdir } from 'node:fs/promises'
+import { chmod, copyFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { Context } from '@deepseek-ai/cordis'
+import { Context, Service } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
@@ -17,33 +18,47 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition, ToolPresentationMode } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it } from 'vitest'
 import * as agentshim from '../src/index.ts'
-import { MIN_TOOL_CALL_TIMEOUT_MS } from '../src/session.ts'
+import { MIN_TOOL_CALL_TIMEOUT_MS } from '../src/config.ts'
 
 const repoRoot = fileURLToPath(new URL('../../..', import.meta.url))
 const enabled = process.env.AGENTSHIM_REAL_E2E === '1'
+const builtNativeDll = fileURLToPath(new URL(
+  process.platform === 'win32'
+    ? '../../../target/debug/agentshim_napi.dll'
+    : process.platform === 'darwin'
+      ? '../../../target/debug/libagentshim_napi.dylib'
+      : '../../../target/debug/libagentshim_napi.so',
+  import.meta.url,
+))
+
+const stagedNativeAddon = await (async (): Promise<string | undefined> => {
+  try {
+    const directory = await mkdtemp(join(tmpdir(), 'agentshim-real-native-'))
+    const staged = join(directory, 'agentshim_napi.node')
+    await copyFile(builtNativeDll, staged)
+    return staged
+  } catch {
+    return undefined
+  }
+})()
+
+if (enabled && stagedNativeAddon === undefined) {
+  throw new Error('real native E2E requires `cargo build -p agentshim-napi`')
+}
+if (stagedNativeAddon !== undefined) process.env.AGENTSHIM_DSH_NATIVE_DLL = stagedNativeAddon
 
 class UnconfinedShell extends ShellExecutor {
   override resolve(): never {
-    throw new Error('real-server E2E marker shell must not execute')
+    throw new Error('native E2E marker shell must not execute')
   }
 
   override run(): Promise<never> {
-    return Promise.reject(new Error('real-server E2E marker shell must not execute'))
+    return Promise.reject(new Error('native E2E marker shell must not execute'))
   }
 
   override start(): never {
-    throw new Error('real-server E2E marker shell must not execute')
+    throw new Error('native E2E marker shell must not execute')
   }
-}
-
-function resolveCargo(): string {
-  const locator = process.platform === 'win32' ? 'where.exe' : 'which'
-  const result = spawnSync(locator, ['cargo'], { cwd: repoRoot, encoding: 'utf8' })
-  const first = result.stdout.split(/\r?\n/).find(line => line.trim() !== '')
-  if (result.status !== 0 || first === undefined) {
-    throw new Error(`could not resolve cargo for real-server E2E: ${result.stderr || result.stdout}`)
-  }
-  return first.trim()
 }
 
 function registerInheritedCatalog(ctx: Context): void {
@@ -62,7 +77,10 @@ function registerInheritedCatalog(ctx: Context): void {
   }
 }
 
-async function startRealComposition(mode: ToolPresentationMode = 'native') {
+async function startRealComposition(
+  mode: ToolPresentationMode = 'native',
+  beforeAdapter?: (ctx: Context) => Promise<void>,
+) {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt, {})
   if (mode !== 'native') await ctx.plugin(WorkerThreadCodeRuntime, {})
@@ -74,10 +92,9 @@ async function startRealComposition(mode: ToolPresentationMode = 'native') {
   await ctx.plugin(ToolJobs, { completionDelivery: 'quiet' })
   await ctx.plugin(LocalFileSystem, { cwd: repoRoot })
   await ctx.plugin(UnconfinedShell)
+  await beforeAdapter?.(ctx)
   const adapter = await ctx.plugin(agentshim, {
     root: repoRoot,
-    command: resolveCargo(),
-    commandArgs: ['run', '--locked', '--'],
     readScope: 'normal',
     env: {},
     toolCallTimeoutMs: MIN_TOOL_CALL_TIMEOUT_MS,
@@ -132,8 +149,28 @@ async function callText(ctx: Context, agent: Agent, name: string, args: Record<s
     .join('\n')
 }
 
-describe.runIf(enabled)('real DSH composition and cargo server', () => {
-  it('executes all six tools and managed Bash termination through DSH, the adapter, MCP, and cargo run', async () => {
+interface ForegroundValue {
+  readonly kind: 'foreground'
+  readonly exitCode: string
+  readonly sandbox?: { readonly denied: boolean; readonly runnerFailed: boolean }
+}
+
+async function callForeground(ctx: Context, agent: Agent, command: string, description: string): Promise<ForegroundValue> {
+  const result = await ctx.tools.execute({
+    signal: new AbortController().signal,
+    callId: CallId(`real-bash-${description}`),
+    name: 'bash',
+    arguments: { command, description },
+    agent,
+  })
+  if (result.isError) {
+    throw new Error(`real confined bash failed: ${JSON.stringify(result)}`)
+  }
+  return (result as unknown as { value: ForegroundValue }).value
+}
+
+describe.runIf(enabled)('real DSH native composition', () => {
+  it('executes all six tools and managed Bash termination without starting agentshim serve', async () => {
     await mkdir(new URL('../../../local/', import.meta.url), { recursive: true })
     const composition = await startRealComposition()
     try {
@@ -175,12 +212,12 @@ describe.runIf(enabled)('real DSH composition and cargo server', () => {
     }
   }, 180_000)
 
-  it.runIf(process.env.AGENTSHIM_LONG_E2E === '1')('keeps a DSH bash call alive past the generic MCP 60-second default', async () => {
+  it.runIf(process.env.AGENTSHIM_LONG_E2E === '1')('keeps a DSH bash call alive past 60 seconds', async () => {
     const composition = await startRealComposition()
     try {
       const output = await callText(composition.ctx, composition.agent, 'bash', {
         command: 'node -e "setTimeout(() => {}, 61000)"',
-        description: 'Wait longer than the generic MCP timeout',
+        description: 'Wait longer than 60 seconds',
       })
       expect(output).toContain('Exit code: 0')
     } finally {
@@ -203,6 +240,72 @@ describe.runIf(enabled)('real DSH composition and cargo server', () => {
       } finally {
         await composition.dispose()
       }
+    }
+  }, 180_000)
+
+  it.skipIf(stagedNativeAddon === undefined)('confines foreground bash through the native engine with native classification', async () => {
+    const previous = process.env.AGENTSHIM_DSH_NATIVE_DLL
+    process.env.AGENTSHIM_DSH_NATIVE_DLL = stagedNativeAddon
+    const outside = await mkdtemp(join(tmpdir(), 'agentshim-real-outside-'))
+    const readonlyFile = join(outside, 'readonly.txt').replaceAll('\\', '/')
+    await writeFile(readonlyFile, 'kept\n')
+    await chmod(readonlyFile, 0o444)
+    try {
+      const composition = await startRealComposition('native', async ctx => {
+        await ctx.plugin(class extends Service {
+          constructor(inner: Context) {
+            super(inner, 'sandbox')
+          }
+          confine(argv: readonly string[]) {
+            return {
+              argv: [...argv],
+              enforcement: 'partial' as const,
+              denialSignatures: ['permission denied'],
+              runnerFailureRules: [{
+                allowedExitCodes: [70],
+                fatalSignatures: ['runner failed'],
+                informationalLines: ['notice'],
+              }],
+            }
+          }
+        })
+        await ctx.plugin(class extends Service {
+          constructor(inner: Context) {
+            super(inner, 'sandboxPolicy')
+          }
+          resolve(request: { mode?: string } = {}) {
+            return { mode: request.mode ?? 'workspace-write', workspaceRoot: repoRoot }
+          }
+        })
+      })
+      try {
+        const confined = await callForeground(composition.ctx, composition.agent, 'printf real-confined-ok', 'Run a confined command through the native engine')
+        expect(confined.exitCode).toBe('0')
+        expect(confined.sandbox).toEqual({
+          mode: 'workspace-write',
+          enforcement: 'partial',
+          denied: false,
+          runnerFailed: false,
+        })
+
+        const blocked = await callForeground(composition.ctx, composition.agent, `printf denied > ${readonlyFile}`, 'Write a read-only file outside the workspace root')
+        expect(blocked.exitCode).not.toBe('0')
+        expect(blocked.sandbox?.denied).toBe(true)
+        expect(blocked.sandbox?.runnerFailed).toBe(false)
+
+        const runnerFailed = await callForeground(composition.ctx, composition.agent, 'echo notice >&2; echo "RUNNER FAILED to start" >&2; exit 70', 'Report a runner failure at the gated exit code')
+        expect(runnerFailed.sandbox?.runnerFailed).toBe(true)
+      } finally {
+        await composition.dispose()
+      }
+    } finally {
+      if (previous === undefined) {
+        delete process.env.AGENTSHIM_DSH_NATIVE_DLL
+      } else {
+        process.env.AGENTSHIM_DSH_NATIVE_DLL = previous
+      }
+      await chmod(readonlyFile, 0o644)
+      await rm(outside, { recursive: true, force: true })
     }
   }, 180_000)
 })

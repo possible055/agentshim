@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    fs, io,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -7,7 +7,6 @@ use std::{
 
 #[cfg(windows)]
 use std::{
-    io,
     sync::{
         Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -26,7 +25,7 @@ use super::{
 };
 
 pub const DEFAULT_TIMEOUT_MS: u64 = 120_000;
-/// Round-trip slack beyond `CLEANUP_DEADLINE` for the MCP response carrying the Timeout.
+/// Host response slack beyond `CLEANUP_DEADLINE`.
 pub const PROTOCOL_SLACK: Duration = Duration::from_secs(5);
 
 /// The per-call timeout used when the caller omits `timeout_ms`. Clamped below the

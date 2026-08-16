@@ -326,8 +326,6 @@ pub struct GrepRequest {
     pub include_ignored: Option<bool>,
     pub encoding: Option<String>,
     pub fallback_encoding: Option<String>,
-    #[serde(rename = "_agentshimReadGrant")]
-    pub read_grant: Option<String>,
 }
 
 impl GrepRequest {

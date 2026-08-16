@@ -41,8 +41,6 @@ pub struct ReadRequest {
     pub pdf_mode: Option<PdfMode>,
     pub pages: Option<String>,
     pub pdf_cursor: Option<String>,
-    #[serde(rename = "_agentshimReadGrant")]
-    pub read_grant: Option<String>,
 }
 
 impl ReadRequest {

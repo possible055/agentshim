@@ -50,8 +50,6 @@ pub struct ProcessRequest {
     pub unset_env: Vec<String>,
     pub stdin: Option<String>,
     pub timeout_ms: Option<u64>,
-    #[serde(rename = "_agentshimCapture")]
-    pub capture: Option<crate::dsh_bridge::DshCaptureRequest>,
 }
 
 impl ProcessRequest {
@@ -513,7 +511,6 @@ fn completed_output(
     push_capture_diagnostics(&mut rendered, "Stdout", completed.stdout.bytes_read, stdout);
     push_capture_diagnostics(&mut rendered, "Stderr", completed.stderr.bytes_read, stderr);
     ToolOutput::with_child_nonzero(rendered.clone(), child_nonzero).with_structured(json!({
-        "bridgeVersion": crate::dsh_bridge::DSH_BRIDGE_VERSION,
         "tool": "run_program",
         "process": {
             "exitCode": completed.exit,

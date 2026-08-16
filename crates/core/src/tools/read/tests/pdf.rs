@@ -1,4 +1,4 @@
-use super::continuation::{delivered_pages, pdf_with_page_densities};
+use super::continuation::delivered_pages;
 use super::*;
 
 #[test]

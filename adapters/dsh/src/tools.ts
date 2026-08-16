@@ -4,17 +4,14 @@ import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { JobId } from '@deepseek-ai/dsh-jobs'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolCallView, ToolDefinition, ToolResultView, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { createSession } from './session.ts'
-import type { CatalogSnapshot, AgentshimSession, ResolvedSessionConfig } from './session.ts'
-import { normalizeMcpResult, materializeReadAttachments, normalizedText } from './content.ts'
+import type { ResolvedPluginConfig } from './config.ts'
+import { materializeReadAttachments } from './content.ts'
 import {
   beginReadObservation,
-  classifyDenial,
-  classifyRunnerFailure,
   completeReadObservation,
   createProcessPolicy,
 } from './policy.ts'
-import type { ProcessPolicy } from './policy.ts'
+import type { ProcessPolicy, SandboxAttribution } from './policy.ts'
 import {
   assertExactKeys,
   assertIntegerRange,
@@ -25,8 +22,6 @@ import {
   bashParameters,
   bashStatusOutputSchema,
   bashStatusParameters,
-  bridgeProcess,
-  bridgeText,
   escalationParameters,
   globParameters,
   processOutputSchema,
@@ -37,11 +32,8 @@ import {
   textOutputSchema,
   grepParameters,
 } from './contracts.ts'
-import type { BridgeProcess } from './contracts.ts'
-import { startBackgroundBash } from './jobs.ts'
+import { startBackgroundBashNative } from './jobs.ts'
 import type { BackgroundJobManager } from './jobs.ts'
-import { boundedProcessText } from './capture.ts'
-import type { CaptureCompletion, CaptureStore, CaptureStreamName } from './capture.ts'
 import type {
   NativeBashArgs,
   NativeEngine,
@@ -49,17 +41,15 @@ import type {
   NativeGrepArgs,
   NativeReadArgs,
   NativeRunProgramArgs,
+  NativeSandboxAttribution,
 } from './native.ts'
+import { nativeFailureError } from './native.ts'
 
 export interface ToolDependencies {
   readonly ctx: Context
-  readonly session: AgentshimSession
-  readonly snapshot: CatalogSnapshot
-  readonly config: ResolvedSessionConfig
+  readonly config: ResolvedPluginConfig
   readonly jobs: BackgroundJobManager
-  readonly captureStore: CaptureStore
-  /** In-process engine; present only when the native addon loaded for this platform. */
-  readonly native?: NativeEngine
+  readonly native: NativeEngine
 }
 
 function nativeReadArgs(args: Record<string, unknown>): NativeReadArgs {
@@ -71,6 +61,7 @@ function nativeReadArgs(args: Record<string, unknown>): NativeReadArgs {
     ...(args.pages === undefined ? {} : { pages: args.pages as string }),
     ...(args.pdf_mode === undefined ? {} : { pdfMode: args.pdf_mode as 'auto' | 'text' | 'image' }),
     ...(args.pdf_cursor === undefined ? {} : { pdfCursor: args.pdf_cursor as string }),
+    ...(args.artifact_offset === undefined ? {} : { artifactOffset: args.artifact_offset as number }),
   }
 }
 
@@ -100,24 +91,6 @@ function nativeGlobArgs(args: Record<string, unknown>): NativeGlobArgs {
     ...(args.offset === undefined ? {} : { offset: args.offset as number }),
     ...(args.limit === undefined ? {} : { limit: args.limit as number }),
   }
-}
-
-/**
- * A read is native-eligible only when it is a plain text page: PDF reads return
- * image attachments through the bridge's structured content, and artifact paths
- * still need the bridge's exact read grant while process tools remain on the MCP
- * transport.
- */
-function nativeReadEligible(deps: ToolDependencies, args: Record<string, unknown>): boolean {
-  if (deps.native === undefined) return false
-  if (args.pages !== undefined || args.pdf_mode !== undefined || args.pdf_cursor !== undefined) return false
-  return true
-}
-
-async function nativeSearchEligible(deps: ToolDependencies, path: unknown): Promise<boolean> {
-  if (deps.native === undefined) return false
-  if (typeof path !== 'string') return true
-  return await deps.captureStore.grant(path) === undefined
 }
 
 function textBlock(text: string): ContentBlock[] {
@@ -169,22 +142,6 @@ function presentTerminalResult(_args: unknown, result: { content: ContentBlock[]
   }
 }
 
-async function callBridge(
-  deps: ToolDependencies,
-  name: 'read' | 'grep' | 'glob' | 'run_program' | 'bash',
-  args: Record<string, unknown>,
-  exec: ToolRunContext,
-) {
-  const wire = { ...args }
-  if ((name === 'read' || name === 'grep') && typeof args.path === 'string') {
-    const grant = await deps.captureStore.grant(args.path)
-    if (grant !== undefined) wire._agentshimReadGrant = grant
-  }
-  const normalized = normalizeMcpResult(await deps.session.call(name, wire, exec.signal), name)
-  const text = bridgeText(normalized.structuredContent, name, normalizedText(normalized))
-  return { normalized, text }
-}
-
 function nativeRunProgramArgs(args: Record<string, unknown>): NativeRunProgramArgs {
   const env: Record<string, string> = {}
   if (args.env !== undefined && typeof args.env === 'object') {
@@ -213,24 +170,46 @@ function nativeBashArgs(wire: Record<string, unknown>): NativeBashArgs {
 }
 
 /**
- * In-process foreground execution for unconfined calls: prepare the final argv,
- * wrap it through the standing sandbox policy (escalation stays one-call), and
- * spawn through the Engine's durable capture. Confined and dedicated-generation
- * calls stay on the MCP bridge until the sandbox-runner E2E migrates.
+ * Map a confinement decision's attribution to the native classification
+ * inputs; `undefined` when the backend supplied no evidence rules at all.
+ */
+function nativeAttribution(attribution: SandboxAttribution | undefined): NativeSandboxAttribution | undefined {
+  if (attribution === undefined) return undefined
+  const denialSignatures = attribution.denialSignatures.length === 0
+    ? undefined
+    : [...attribution.denialSignatures]
+  const runnerFailureRules = attribution.runnerFailureRules.length === 0
+    ? undefined
+    : attribution.runnerFailureRules.map(rule => ({
+        ...(rule.allowedExitCodes === undefined ? {} : { allowedExitCodes: [...rule.allowedExitCodes] }),
+        fatalSignatures: [...rule.fatalSignatures],
+        ...(rule.informationalLines === undefined ? {} : { informationalLines: [...rule.informationalLines] }),
+      }))
+  if (denialSignatures === undefined && runnerFailureRules === undefined) return undefined
+  return {
+    ...(denialSignatures === undefined ? {} : { denialSignatures }),
+    ...(runnerFailureRules === undefined ? {} : { runnerFailureRules }),
+  }
+}
+
+/**
+ * In-process foreground execution: prepare the final argv, wrap it through the
+ * standing sandbox policy (escalation stays one-call), spawn through the
+ * Engine's durable capture, and let the engine classify the settled outcome
+ * against the backend's denial dialect and runner-failure rules — the adapter
+ * only consumes the returned flags.
  */
 async function executeProcessNative(
   deps: ToolDependencies,
   policy: ProcessPolicy,
   name: 'run_program' | 'bash',
   args: Record<string, unknown>,
-  wire: Record<string, unknown>,
   exec: ToolRunContext,
 ) {
   const engine = deps.native
-  if (engine === undefined) throw new Error('dsh-agentshim: native engine unavailable')
   const prepared = name === 'run_program'
     ? engine.prepareRunProgram(nativeRunProgramArgs(args))
-    : engine.prepareBash(nativeBashArgs(wire))
+    : engine.prepareBash(nativeBashArgs(args))
   const decision = await policy.wrapArgv(name, prepared.argv, args, exec)
   if (decision.mode !== 'danger-full-access' && decision.wrappedArgv === undefined) {
     throw new HarnessError('sandbox confinement returned no wrapped argv', 'SANDBOX_UNAVAILABLE')
@@ -241,9 +220,13 @@ async function executeProcessNative(
   const outcome = await engine.spawnPrepared(
     prepared.handle,
     decision.wrappedArgv === undefined ? undefined : [...decision.wrappedArgv],
+    nativeAttribution(decision.attribution),
   )
-  if (outcome.errorCode !== undefined && outcome.errorCode !== 'AGENTSHIM_PROCESS_FAILED') {
-    throw new HarnessError(outcome.text, outcome.errorCode)
+  if (outcome.failure !== undefined) {
+    if (outcome.runnerFailed) {
+      throw new HarnessError(`sandbox runner failed before the command ran: ${outcome.text}`, 'SANDBOX_UNAVAILABLE')
+    }
+    throw nativeFailureError(outcome.failure)
   }
   const notices = outcome.artifacts
     .map(artifact => `Full raw ${artifact.stream}: ${artifact.path} (${artifact.bytes} bytes${artifact.complete ? '' : ', incomplete'})`)
@@ -251,107 +234,31 @@ async function executeProcessNative(
   return {
     kind: 'foreground' as const,
     text,
-    exitCode: outcome.childNonzero ? '1' : '0',
+    exitCode: outcome.exitCode ?? (outcome.childNonzero ? '1' : '0'),
     stdout: { text: '', totalBytes: 0, shownBytes: 0, omittedBytes: 0 },
     stderr: { text: '', totalBytes: 0, shownBytes: 0, omittedBytes: 0 },
     ...(decision.attribution === undefined ? {} : {
       sandbox: {
         mode: decision.attribution.mode,
         ...(decision.attribution.enforcement === undefined ? {} : { enforcement: decision.attribution.enforcement }),
-        denied: false,
-        runnerFailed: false,
+        denied: outcome.denied,
+        runnerFailed: outcome.runnerFailed,
       },
     }),
   }
 }
 
-async function executeProcessBridge(
+async function executeProcess(
   deps: ToolDependencies,
   policy: ProcessPolicy,
   name: 'run_program' | 'bash',
   args: Record<string, unknown>,
   exec: ToolRunContext,
-  forceDedicated = false,
 ) {
-  const plan = await policy.plan(name, args, exec, deps.config, forceDedicated)
-  if (!forceDedicated && plan.sandbox === undefined && deps.native !== undefined && plan.launch === undefined) {
-    return executeProcessNative(deps, policy, name, plan.args, plan.args, exec)
-  }
-  const session = plan.launch === undefined
-    ? deps.session
-    : createSession(deps.config, {
-        launch: plan.launch,
-        reconnect: false,
-        logger: { info() {}, warn() {}, error() {} },
-        captureStore: deps.captureStore,
-      })
-  const streamNames: readonly CaptureStreamName[] = name === 'run_program' ? ['stdout', 'stderr'] : ['output']
-  const capture = await deps.captureStore.begin({
-    sessionId: exec.agent?.session.header.id ?? `direct-${globalThis.process.pid}`,
-    callId: String(exec.callId),
-    streams: streamNames,
-  })
-  try {
-    await session.ready
-    const normalized = normalizeMcpResult(await session.call(name, {
-      ...plan.args,
-      _agentshimCapture: capture.wire,
-    }, exec.signal), name)
-    const processResult: BridgeProcess = bridgeProcess(normalized.structuredContent, name, normalizedText(normalized))
-    const completed = await capture.completion
-    const withArtifacts = processArtifacts(processResult, completed, name)
-    const runnerFailed = plan.sandbox === undefined
-      ? false
-      : classifyRunnerFailure(processResult.exitCode, processResult.stderr.text, plan.sandbox.runnerFailureRules)
-    const denied = plan.sandbox === undefined || runnerFailed
-      ? false
-      : classifyDenial(processResult.exitCode, processResult.stderr.text, plan.sandbox.denialSignatures)
-    return {
-      kind: 'foreground' as const,
-      ...withArtifacts,
-      ...(plan.sandbox === undefined ? {} : {
-        sandbox: {
-          mode: plan.sandbox.mode,
-          ...(plan.sandbox.enforcement === undefined ? {} : { enforcement: plan.sandbox.enforcement }),
-          denied,
-          runnerFailed,
-        },
-      }),
-    }
-  } catch (error) {
-    const partial = Object.values(capture.artifacts())
-      .map(artifact => `${artifact.path} (${artifact.bytes} bytes, incomplete)`)
-      .join(', ')
-    await capture.abort(error instanceof Error ? error.message : String(error))
-    if (plan.sandbox !== undefined && classifyRunnerFailure(null, session.stderrTail(), plan.sandbox.runnerFailureRules)) {
-      throw new HarnessError(`sandbox runner failed before AgentShim initialized: ${session.stderrTail()}`, 'SANDBOX_UNAVAILABLE')
-    }
-    if (partial !== '' && error instanceof Error) {
-      error.message = `${error.message}; partial raw capture: ${partial}`
-    }
-    throw error
-  } finally {
-    if (session !== deps.session) await session.dispose()
-  }
+  return executeProcessNative(deps, policy, name, args, exec)
 }
 
-function processArtifacts(
-  process: BridgeProcess,
-  completed: CaptureCompletion,
-  tool: 'run_program' | 'bash',
-): BridgeProcess {
-  const stdoutArtifact = tool === 'run_program' ? completed.artifacts.stdout : completed.artifacts.output
-  const stderrArtifact = tool === 'run_program' ? completed.artifacts.stderr : undefined
-  const stdout = { ...process.stdout, ...(stdoutArtifact === undefined ? {} : { artifact: stdoutArtifact }) }
-  const stderr = { ...process.stderr, ...(stderrArtifact === undefined ? {} : { artifact: stderrArtifact }) }
-  const notices = [
-    ...(stdoutArtifact === undefined ? [] : [`Full raw ${tool === 'bash' ? 'output' : 'stdout'}: ${stdoutArtifact.path} (${stdoutArtifact.bytes} bytes)`]),
-    ...(stderrArtifact === undefined ? [] : [`Full raw stderr: ${stderrArtifact.path} (${stderrArtifact.bytes} bytes)`]),
-  ]
-  return { ...process, text: boundedProcessText(process.text, notices), stdout, stderr }
-}
-
-function validateReadArgs(args: Record<string, unknown> & { path: string; line_count?: number; start_line?: number; pages?: string; pdf_cursor?: string }): void {
+function validateReadArgs(args: Record<string, unknown> & { path: string; line_count?: number; start_line?: number; pages?: string; pdf_cursor?: string; artifact_offset?: number }): void {
   assertExactKeys(args, Object.keys(readParameters))
   assertNonEmpty(args.path, 'path')
   assertIntegerRange(args.line_count, 'line_count', 1, 2000)
@@ -360,6 +267,7 @@ function validateReadArgs(args: Record<string, unknown> & { path: string; line_c
     throw new HarnessError('invalid arguments: pages must be a positive page or inclusive range', 'INVALID_ARGS')
   }
   if (args.pdf_cursor !== undefined) assertNonEmpty(args.pdf_cursor, 'pdf_cursor')
+  assertIntegerRange(args.artifact_offset, 'artifact_offset', 0)
 }
 
 function validateGrepArgs(args: Record<string, unknown> & { pattern: string; context_lines?: number; limit?: number; offset?: number; encoding?: string; fallback_encoding?: string }): void {
@@ -411,19 +319,14 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
     async execute(args, exec) {
       validateReadArgs(args)
       const observation = await beginReadObservation(deps.ctx, exec, deps.config.root, args.path)
-      let text: string
-      let attachments: Awaited<ReturnType<typeof materializeReadAttachments>> = []
-      if (nativeReadEligible(deps, args)) {
-        const native = await deps.native?.readText(nativeReadArgs(args))
-        if (native === undefined) throw new Error('dsh-agentshim: native engine vanished before read')
-        text = native.text
-      } else {
-        const { normalized } = await callBridge(deps, 'read', args, exec)
-        text = bridgeText(normalized.structuredContent, 'read', normalizedText(normalized))
-        attachments = await materializeReadAttachments(deps.ctx, exec, normalized.content)
-      }
+      const native = await deps.native.readText(nativeReadArgs(args))
+      const content = [
+        { type: 'text' as const, text: native.text },
+        ...native.images.map(image => ({ type: 'image' as const, data: image.data, mimeType: image.mimeType })),
+      ]
+      const attachments = await materializeReadAttachments(deps.ctx, exec, content)
       await completeReadObservation(deps.ctx, exec, observation)
-      return { kind: 'read' as const, text, attachments }
+      return { kind: 'read' as const, text: native.text, attachments }
     },
     presentCall: presentReadCall,
   })
@@ -435,15 +338,10 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
     output: { schema: textOutputSchema('grep'), render: (_args, value) => textBlock(value.text) },
     timeoutMs: deps.config.toolCallTimeoutMs,
     isConcurrencySafe: () => true,
-    async execute(args, exec) {
+    async execute(args, _exec) {
       validateGrepArgs(args)
-      if (await nativeSearchEligible(deps, args.path)) {
-        const native = await deps.native?.grepText(nativeGrepArgs(args))
-        if (native === undefined) throw new Error('dsh-agentshim: native engine vanished before grep')
-        return { kind: 'grep' as const, text: native.text }
-      }
-      const { text } = await callBridge(deps, 'grep', args, exec)
-      return { kind: 'grep' as const, text }
+      const native = await deps.native.grepText(nativeGrepArgs(args))
+      return { kind: 'grep' as const, text: native.text }
     },
     presentCall: presentSearchCall('Grep'),
   })
@@ -455,14 +353,10 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
     output: { schema: textOutputSchema('glob'), render: (_args, value) => textBlock(value.text) },
     timeoutMs: deps.config.toolCallTimeoutMs,
     isConcurrencySafe: () => true,
-    async execute(args, exec) {
+    async execute(args, _exec) {
       validateGlobArgs(args)
-      if (deps.native !== undefined) {
-        const native = await deps.native.globText(nativeGlobArgs(args))
-        return { kind: 'glob' as const, text: native.text }
-      }
-      const { text } = await callBridge(deps, 'glob', args, exec)
-      return { kind: 'glob' as const, text }
+      const native = await deps.native.globText(nativeGlobArgs(args))
+      return { kind: 'glob' as const, text: native.text }
     },
     presentCall: presentSearchCall('Glob'),
   })
@@ -478,7 +372,7 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
       assertNonEmpty(args.program, 'program')
       assertPositive(args.timeout_ms, 'timeout_ms')
       assertStringRecord(args.env, 'env')
-      return executeProcessBridge(deps, processPolicy, 'run_program', args, exec)
+      return executeProcess(deps, processPolicy, 'run_program', args, exec)
     },
     presentCall: presentRunProgramCall,
     presentResult: presentTerminalResult,
@@ -506,17 +400,18 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
         if (args.timeoutMs !== undefined) {
           throw new HarnessError('invalid arguments: timeoutMs does not apply to a background job', 'INVALID_ARGS')
         }
-        const jobId = await startBackgroundBash(deps.ctx, deps.config, processPolicy, deps.jobs, deps.captureStore, {
+        const backgroundInput = {
           command: args.command,
           wire: { ...commonWire, detach: true },
-        }, exec)
+        }
+        const jobId = await startBackgroundBashNative(deps.ctx, deps.native, processPolicy, deps.jobs, backgroundInput, exec)
         return { kind: 'background' as const, jobId }
       }
       const wire = {
         ...commonWire,
         ...(args.timeoutMs === undefined ? {} : { timeout_ms: args.timeoutMs }),
       }
-      return executeProcessBridge(deps, processPolicy, 'bash', wire, exec)
+      return executeProcess(deps, processPolicy, 'bash', wire, exec)
     },
     presentCall: presentBashCall,
     presentResult: presentTerminalResult,

@@ -7,6 +7,7 @@ use crate::capture::{
     ArtifactRecord, CAPTURE_IO_FAILED_CODE, CAPTURE_LIMIT_EXCEEDED_CODE, CallCapture,
     DEFAULT_CAPTURE_MAX_BYTES, MAX_CAPTURE_MAX_BYTES, MIN_CAPTURE_MAX_BYTES, should_publish,
 };
+use crate::classify::{Classification, SandboxAttribution, classify};
 use crate::engine::EngineState;
 
 #[napi(object)]
@@ -54,6 +55,17 @@ impl PreparedHandles {
             bash: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
+
+    pub(crate) fn clear(&self) {
+        self.run_program
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.bash
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
 }
 
 #[napi(object)]
@@ -65,12 +77,29 @@ pub struct ArtifactInfo {
 }
 
 #[napi(object)]
+#[derive(Clone)]
+pub struct NativeFailure {
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+    pub details: Option<String>,
+}
+
+#[napi(object)]
+#[allow(clippy::struct_excessive_bools)] // mirrors the TS NativeProcessOutcome wire contract
 pub struct ProcessOutcome {
     pub text: String,
     pub child_nonzero: bool,
+    /// Core exit label ("0", "42", "signal 9"); absent when the process never
+    /// settled (launch failure, timeout).
+    pub exit_code: Option<String>,
     pub artifacts: Vec<ArtifactInfo>,
     pub limit_exceeded: bool,
-    pub error_code: Option<String>,
+    pub failure: Option<NativeFailure>,
+    /// Sandbox classification of this spawn against the passed attribution;
+    /// both stay false when no attribution was supplied.
+    pub denied: bool,
+    pub runner_failed: bool,
 }
 
 pub(crate) fn clamp_capture_ceiling(bytes: Option<f64>) -> u64 {
@@ -90,7 +119,7 @@ fn artifact_infos(records: &[ArtifactRecord]) -> Vec<ArtifactInfo> {
         .collect()
 }
 
-fn register_artifacts(state: &EngineState, records: &[ArtifactRecord]) {
+pub(crate) fn register_artifacts(state: &EngineState, records: &[ArtifactRecord]) {
     let mut table = state
         .artifacts
         .lock()
@@ -100,9 +129,28 @@ fn register_artifacts(state: &EngineState, records: &[ArtifactRecord]) {
     }
 }
 
+/// Exit label and bounded stderr preview a completed core process output
+/// carries in its bridge structured content — the same evidence the MCP bridge
+/// classified on, so native classification sees identical inputs.
+fn outcome_facts(output: &agentshim_core::tools::ToolOutput) -> (Option<String>, String) {
+    let Some(structured) = &output.structured else {
+        return (None, String::new());
+    };
+    let exit = structured
+        .pointer("/process/exitCode")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let stderr = structured
+        .pointer("/process/stderr/text")
+        .and_then(serde_json::Value::as_str)
+        .map_or_else(String::new, str::to_owned);
+    (exit, stderr)
+}
+
 fn settle_outcome(
     state: &EngineState,
     capture: &CallCapture,
+    attribution: Option<&SandboxAttribution>,
     result: std::result::Result<
         agentshim_core::tools::ToolOutput,
         agentshim_core::tools::exec::ProcessError,
@@ -124,32 +172,93 @@ fn settle_outcome(
         Vec::new()
     };
     match result {
-        Ok(output) => Ok(ProcessOutcome {
-            text: output.text,
-            child_nonzero: output.child_nonzero,
-            artifacts,
-            limit_exceeded: false,
-            error_code: None,
-        }),
+        Ok(output) => {
+            let (exit_code, stderr) = outcome_facts(&output);
+            let classification = attribution.map_or(
+                Classification {
+                    denied: false,
+                    runner_failed: false,
+                },
+                |attribution| classify(exit_code.as_deref(), &stderr, attribution),
+            );
+            Ok(ProcessOutcome {
+                text: output.text,
+                child_nonzero: output.child_nonzero,
+                exit_code,
+                artifacts,
+                limit_exceeded: false,
+                failure: None,
+                denied: classification.denied,
+                runner_failed: classification.runner_failed,
+            })
+        }
         Err(error) => {
             let code = if capture.exceeded() {
                 CAPTURE_LIMIT_EXCEEDED_CODE.to_owned()
+            } else if capture.io_failure().is_some() {
+                CAPTURE_IO_FAILED_CODE.to_owned()
             } else {
-                capture
-                    .io_failure()
-                    .map_or(CAPTURE_IO_FAILED_CODE.to_owned(), |_| {
-                        CAPTURE_IO_FAILED_CODE.to_owned()
-                    })
+                process_error_code(&error).to_owned()
             };
+            let classification = attribution.map_or(
+                Classification {
+                    denied: false,
+                    runner_failed: false,
+                },
+                |attribution| classify(None, &error.to_string(), attribution),
+            );
             Ok(ProcessOutcome {
                 text: error.to_string(),
                 child_nonzero: true,
+                exit_code: None,
                 artifacts,
                 limit_exceeded: capture.exceeded(),
-                error_code: Some(code.clone()),
+                failure: Some(NativeFailure {
+                    retryable: process_error_retryable(&error),
+                    message: error.to_string(),
+                    code,
+                    details: None,
+                }),
+                denied: classification.denied,
+                runner_failed: classification.runner_failed,
             })
         }
     }
+}
+
+fn process_error_code(error: &agentshim_core::tools::exec::ProcessError) -> &'static str {
+    use agentshim_core::tools::exec::{CaptureFailureKind, ProcessError};
+
+    match error {
+        ProcessError::Validation(_) => "INVALID_ARGS",
+        ProcessError::Resolve(_) | ProcessError::Unavailable(_) => "AGENTSHIM_PROCESS_UNAVAILABLE",
+        ProcessError::Io(_) => "AGENTSHIM_PROCESS_IO",
+        ProcessError::Capture { kind, .. } => match kind {
+            CaptureFailureKind::LimitExceeded => CAPTURE_LIMIT_EXCEEDED_CODE,
+            CaptureFailureKind::Io | CaptureFailureKind::Protocol => CAPTURE_IO_FAILED_CODE,
+        },
+        ProcessError::ResourceBusy(_) => "AGENTSHIM_RESOURCE_BUSY",
+        ProcessError::Timeout { .. } | ProcessError::TimeoutBeforeSpawn { .. } => {
+            "AGENTSHIM_TIMEOUT"
+        }
+        ProcessError::Cancelled => "AGENTSHIM_CANCELLED",
+        ProcessError::OutcomeUncertain => "AGENTSHIM_OUTCOME_UNCERTAIN",
+        ProcessError::Output(_) => "AGENTSHIM_OUTPUT_FAILED",
+    }
+}
+
+fn process_error_retryable(error: &agentshim_core::tools::exec::ProcessError) -> bool {
+    use agentshim_core::tools::exec::ProcessError;
+
+    matches!(
+        error,
+        ProcessError::Io(_)
+            | ProcessError::Capture { .. }
+            | ProcessError::ResourceBusy(_)
+            | ProcessError::Timeout { .. }
+            | ProcessError::TimeoutBeforeSpawn { .. }
+            | ProcessError::OutcomeUncertain
+    )
 }
 
 enum Either {
@@ -166,6 +275,7 @@ fn process_error(error: agentshim_core::tools::exec::ProcessError) -> Error {
 pub(crate) async fn run_with_capture<R>(
     state: Arc<EngineState>,
     streams: &'static [&'static str],
+    attribution: Option<SandboxAttribution>,
     run: R,
 ) -> Result<ProcessOutcome>
 where
@@ -178,6 +288,7 @@ where
         > + Send
         + 'static,
 {
+    let _active = state.enter_call()?;
     spawn_blocking(move || {
         let call_key = uuid::Uuid::new_v4().simple().to_string();
         let capture = CallCapture::create(
@@ -197,7 +308,7 @@ where
         let dyn_sink: Arc<dyn agentshim_core::tools::exec::spawn::CaptureSink> =
             Arc::clone(&sink) as Arc<dyn agentshim_core::tools::exec::spawn::CaptureSink>;
         let result = run(&state, Some(&dyn_sink));
-        settle_outcome(&state, sink.as_ref(), result)
+        settle_outcome(&state, sink.as_ref(), attribution.as_ref(), result)
     })
     .await
     .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))?
@@ -221,7 +332,10 @@ impl EngineState {
         })
     }
 
-    fn take_bash(&self, handle: &str) -> Result<agentshim_core::tools::bash::PreparedBash> {
+    pub(crate) fn take_bash(
+        &self,
+        handle: &str,
+    ) -> Result<agentshim_core::tools::bash::PreparedBash> {
         let mut prepared = self
             .prepared
             .bash
@@ -248,7 +362,6 @@ impl EngineState {
             unset_env: args.unset_env.unwrap_or_default(),
             stdin: args.stdin,
             timeout_ms: args.timeout_ms.map(u64::from),
-            capture: None,
         };
         let resolver = agentshim_core::tools::exec::resolve::ProcessResolver::capture();
         let timeout = Duration::from_millis(
@@ -299,7 +412,6 @@ impl EngineState {
             detach: false,
             log_path: None,
             server_capture: false,
-            capture: None,
             msys_argument_conversion: msys,
         };
         let timeout = Duration::from_millis(
@@ -335,6 +447,7 @@ impl EngineState {
         self: &Arc<Self>,
         handle: String,
         wrapped_argv: Option<&[String]>,
+        attribution: Option<SandboxAttribution>,
     ) -> Result<ProcessOutcome> {
         let wrapped_argv = wrapped_argv.map(<[String]>::to_vec);
         let cancellation = self.shutdown.child_token();
@@ -354,9 +467,14 @@ impl EngineState {
                 }
             }
         };
+        let streams: &'static [&'static str] = match prepared {
+            Either::Bash(_) => &["output"],
+            Either::RunProgram(_) => &["stdout", "stderr"],
+        };
         run_with_capture(
             state,
-            &["stdout", "stderr"],
+            streams,
+            attribution,
             move |state, sink| match prepared {
                 Either::RunProgram(prepared) => {
                     agentshim_core::tools::run_program::execute_prepared_run_program(
@@ -395,14 +513,13 @@ impl EngineState {
             unset_env: args.unset_env.unwrap_or_default(),
             stdin: args.stdin,
             timeout_ms: args.timeout_ms.map(u64::from),
-            capture: None,
         };
         let ceiling = self.timeout_ceiling_ms;
         let resolver = agentshim_core::tools::exec::resolve::ProcessResolver::capture();
         let timeout = Duration::from_millis(request.timeout_ms(ceiling).min(ceiling));
         let cancellation = self.shutdown.child_token();
         let state = Arc::clone(self);
-        run_with_capture(state, &["stdout", "stderr"], move |state, sink| {
+        run_with_capture(state, &["stdout", "stderr"], None, move |state, sink| {
             let mut prepared = agentshim_core::tools::run_program::prepare_run_program(
                 &state.root,
                 &resolver,
@@ -443,14 +560,13 @@ impl EngineState {
             detach: false,
             log_path: None,
             server_capture: false,
-            capture: None,
             msys_argument_conversion: msys,
         };
         let ceiling = self.timeout_ceiling_ms;
         let timeout = Duration::from_millis(request.timeout_ms(ceiling).min(ceiling));
         let cancellation = self.shutdown.child_token();
         let state = Arc::clone(self);
-        run_with_capture(state, &["output"], move |state, sink| {
+        run_with_capture(state, &["output"], None, move |state, sink| {
             let mut prepared = agentshim_core::tools::bash::prepare_bash_foreground(
                 &state.root,
                 &state.locator,

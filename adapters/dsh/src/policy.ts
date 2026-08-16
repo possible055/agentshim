@@ -11,8 +11,6 @@ import type {
   SandboxPolicy,
 } from '@deepseek-ai/dsh-sandbox'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
-import { defaultLaunch, serverCommand } from './session.ts'
-import type { ResolvedSessionConfig, SessionLaunch } from './session.ts'
 
 export const ESCALATION_PERMISSION_FIELD = 'sandbox_permissions'
 export const ESCALATION_JUSTIFICATION_FIELD = 'justification'
@@ -59,10 +57,6 @@ function stringField(args: Record<string, unknown>, field: string): string | und
   return typeof value === 'string' ? value : undefined
 }
 
-function stripEscalationFields(args: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(args).filter(([key]) => key !== ESCALATION_PERMISSION_FIELD && key !== ESCALATION_JUSTIFICATION_FIELD))
-}
-
 export interface SandboxAttribution {
   readonly mode: SandboxMode
   readonly enforcement?: 'full' | 'partial'
@@ -70,21 +64,8 @@ export interface SandboxAttribution {
   readonly runnerFailureRules: readonly RunnerFailureRule[]
 }
 
-export interface ProcessExecutionPlan {
-  readonly args: Record<string, unknown>
-  readonly launch: SessionLaunch | undefined
-  readonly sandbox: SandboxAttribution | undefined
-}
-
 export interface ProcessPolicy {
   readonly advertisesEscalation: boolean
-  plan(
-    name: string,
-    args: Record<string, unknown>,
-    exec: ToolExecution,
-    config: ResolvedSessionConfig,
-    forceDedicated?: boolean,
-  ): Promise<ProcessExecutionPlan>
   /**
    * Standing policy + escalation for one final command argv: resolves the sandbox
    * mode, runs the one-call approval when requested, and returns the wrapped argv
@@ -104,14 +85,6 @@ export interface ConfinementDecision {
   readonly attribution: SandboxAttribution | undefined
 }
 
-function confinedLaunch(config: ResolvedSessionConfig, confined: ConfinedArgv): SessionLaunch {
-  const [command, ...args] = confined.argv
-  if (command === undefined || command.length === 0) {
-    throw new HarnessError('sandbox returned an empty command argv', 'SANDBOX_UNAVAILABLE')
-  }
-  return { ...defaultLaunch(config), command, args }
-}
-
 export function createProcessPolicy(ctx: Context): ProcessPolicy {
   const sandbox = ctx.get('sandbox')
   const sandboxPolicy = ctx.get('sandboxPolicy')
@@ -121,75 +94,6 @@ export function createProcessPolicy(ctx: Context): ProcessPolicy {
   const advertisesEscalation = sandbox !== undefined
   return {
     advertisesEscalation,
-    async plan(name, args, exec, config, forceDedicated = false) {
-      const permissions = stringField(args, ESCALATION_PERMISSION_FIELD)
-      const justification = stringField(args, ESCALATION_JUSTIFICATION_FIELD)
-      validateEscalationArgs(permissions, justification)
-      const currentSandbox = ctx.get('sandbox')
-      const currentSandboxPolicy = ctx.get('sandboxPolicy')
-      if ((currentSandbox === undefined) !== (currentSandboxPolicy === undefined)
-        || (currentSandbox !== undefined) !== advertisesEscalation) {
-        throw new HarnessError('dsh-agentshim: sandbox capability changed after tool registration', 'AGENTSHIM_PROCESS_POLICY_CHANGED')
-      }
-      if (currentSandbox === undefined || currentSandboxPolicy === undefined) {
-        if (permissions !== undefined) {
-          throw new HarnessError('sandbox_permissions is unavailable without a composed DSH sandbox', 'AGENTSHIM_ESCALATION_UNAVAILABLE')
-        }
-        return {
-          args,
-          launch: forceDedicated ? defaultLaunch(config) : undefined,
-          sandbox: undefined,
-        }
-      }
-      const session = exec.agent?.session
-      const standing = currentSandboxPolicy.resolve(session === undefined ? {} : { session })
-      const approvedMode = permissions === undefined
-        ? undefined
-        : await approveEscalation(
-            {
-              requestedMode: permissions,
-              justification: justification as string,
-              effectiveMode: standing.mode,
-              subject: 'command',
-            },
-            {
-              approver: ctx.get('approval'),
-              agent: exec.agent,
-              callId: exec.callId,
-              toolName: name,
-              signal: exec.signal,
-            },
-          )
-      const policy: SandboxExecutionPolicy = approvedMode === undefined
-        ? standing
-        : currentSandboxPolicy.resolve(session === undefined ? { mode: approvedMode } : { session, mode: approvedMode })
-      const stripped = stripEscalationFields(args)
-      if (policy.mode === 'danger-full-access') {
-        return {
-          args: stripped,
-          launch: approvedMode !== undefined || forceDedicated ? defaultLaunch(config) : undefined,
-          sandbox: { mode: policy.mode, denialSignatures: [], runnerFailureRules: [] },
-        }
-      }
-      let confined: ConfinedArgv
-      try {
-        confined = currentSandbox.confine(serverCommand(config), policy as SandboxPolicy)
-      } catch (error) {
-        throw error instanceof HarnessError
-          ? error
-          : new HarnessError(`sandbox confinement failed: ${String(error)}`, 'SANDBOX_UNAVAILABLE')
-      }
-      return {
-        args: stripped,
-        launch: confinedLaunch(config, confined),
-        sandbox: {
-          mode: policy.mode,
-          enforcement: confined.enforcement,
-          denialSignatures: confined.denialSignatures,
-          runnerFailureRules: confined.runnerFailureRules,
-        },
-      }
-    },
     async wrapArgv(name, argv, args, exec) {
       const permissions = stringField(args, ESCALATION_PERMISSION_FIELD)
       const justification = stringField(args, ESCALATION_JUSTIFICATION_FIELD)
@@ -197,10 +101,17 @@ export function createProcessPolicy(ctx: Context): ProcessPolicy {
       const currentSandbox = ctx.get('sandbox')
       const currentSandboxPolicy = ctx.get('sandboxPolicy')
       if (currentSandbox === undefined || currentSandboxPolicy === undefined) {
+        if ((currentSandbox === undefined) !== (currentSandboxPolicy === undefined)
+          || advertisesEscalation) {
+          throw new HarnessError('dsh-agentshim: sandbox capability changed after tool registration', 'AGENTSHIM_PROCESS_POLICY_CHANGED')
+        }
         if (permissions !== undefined) {
           throw new HarnessError('sandbox_permissions is unavailable without a composed DSH sandbox', 'AGENTSHIM_ESCALATION_UNAVAILABLE')
         }
         return { mode: 'danger-full-access', wrappedArgv: undefined, attribution: undefined }
+      }
+      if (!advertisesEscalation) {
+        throw new HarnessError('dsh-agentshim: sandbox capability changed after tool registration', 'AGENTSHIM_PROCESS_POLICY_CHANGED')
       }
       const session = exec.agent?.session
       const standing = currentSandboxPolicy.resolve(session === undefined ? {} : { session })
@@ -251,24 +162,4 @@ export function createProcessPolicy(ctx: Context): ProcessPolicy {
       }
     },
   }
-}
-
-function relevantLines(stderr: string, rule: RunnerFailureRule): string[] {
-  const informational = new Set((rule.informationalLines ?? []).map(line => line.toLowerCase()))
-  return stderr.split(/\r?\n/).filter(line => !informational.has(line.toLowerCase()))
-}
-
-export function classifyRunnerFailure(exitCode: string | null, stderr: string, rules: readonly RunnerFailureRule[]): boolean {
-  const numericExit = exitCode === null ? undefined : Number.parseInt(exitCode, 10)
-  if (exitCode === '0') return false
-  return rules.some(rule => {
-    if (rule.allowedExitCodes !== undefined && (numericExit === undefined || !rule.allowedExitCodes.includes(numericExit))) return false
-    return relevantLines(stderr, rule).some(line => rule.fatalSignatures.some(signature => line.toLowerCase().includes(signature.toLowerCase())))
-  })
-}
-
-export function classifyDenial(exitCode: string | null, stderr: string, signatures: readonly string[]): boolean {
-  if (exitCode === '0') return false
-  const lowered = stderr.toLowerCase()
-  return signatures.some(signature => lowered.includes(signature.toLowerCase()))
 }

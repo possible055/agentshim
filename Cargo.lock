@@ -95,10 +95,12 @@ name = "agentshim-napi"
 version = "0.1.4-alpha.1"
 dependencies = [
  "agentshim-core",
+ "base64",
  "napi",
  "napi-build",
  "napi-derive",
  "serde_json",
+ "tokio",
  "tokio-util",
  "uuid",
 ]

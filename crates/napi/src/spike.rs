@@ -2,7 +2,10 @@ use napi::{Error, Result, bindgen_prelude::spawn_blocking};
 use napi_derive::napi;
 
 /// Module API version; hosts must exact-match before using any Engine capability.
-pub const API_VERSION: u32 = 1;
+/// 3: the Engine takes the complete native host configuration, read returns
+/// image blocks and artifact byte pages, and background jobs use `JobHooks`
+/// directly without a TSFN preview callback.
+pub const API_VERSION: u32 = 3;
 
 #[napi]
 pub fn api_version() -> u32 {

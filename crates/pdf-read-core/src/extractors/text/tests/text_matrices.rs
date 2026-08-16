@@ -461,3 +461,22 @@ fn test_inline_image_ignored() {
     let text: String = chars.iter().map(|c| c.char).collect();
     assert!(text.contains("Before"));
 }
+
+// ========================================================================
+// COVERAGE TESTS: Tm continuation optimization
+// ========================================================================
+
+#[test]
+fn test_tm_continuation_different_transform() {
+    let mut extractor = TextExtractor::new();
+    extractor.merging_config = SpanMergingConfig::legacy();
+    let font = create_test_font();
+    extractor.add_font("F1".to_string(), font);
+
+    // Different transform params (a=2) should NOT be continuation
+    let stream = b"BT /F1 12 Tf 1 0 0 1 100 700 Tm (A) Tj 2 0 0 1 120 700 Tm (B) Tj ET";
+    let spans = extractor.extract_text_spans(stream).unwrap();
+
+    // Should produce separate spans due to different transform
+    assert!(!spans.is_empty());
+}

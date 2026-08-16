@@ -586,3 +586,124 @@ fn test_merge_whitespace_only_span() {
         "Should contain World"
     );
 }
+
+// ========================================================================
+// COVERAGE TESTS: TJ buffer with MCID
+// ========================================================================
+
+#[test]
+fn test_tj_buffer_with_mcid() {
+    let state = crate::content::graphics_state::GraphicsStateStack::new();
+    let buffer = TjBuffer::new(state.current(), Some(42), None);
+    assert!(buffer.is_empty());
+    assert_eq!(buffer.mcid, Some(42));
+}
+
+// ========================================================================
+// COVERAGE TESTS: Marked content with BDC
+// ========================================================================
+
+#[test]
+fn test_bdc_with_mcid() {
+    let mut extractor = TextExtractor::new();
+    let mut props = HashMap::new();
+    props.insert("MCID".to_string(), Object::Integer(5));
+
+    extractor
+        .execute_operator_public(Operator::BeginMarkedContentDict {
+            tag: "P".to_string(),
+            properties: Box::new(Object::Dictionary(props)),
+        })
+        .unwrap();
+
+    assert_eq!(extractor.current_mcid, Some(5));
+    assert!(!extractor.inside_artifact);
+}
+
+#[test]
+fn test_bdc_artifact_with_type() {
+    let mut extractor = TextExtractor::new();
+    let mut props = HashMap::new();
+    props.insert("Type".to_string(), Object::Name("Pagination".to_string()));
+    props.insert("Subtype".to_string(), Object::Name("Header".to_string()));
+
+    extractor
+        .execute_operator_public(Operator::BeginMarkedContentDict {
+            tag: "Artifact".to_string(),
+            properties: Box::new(Object::Dictionary(props)),
+        })
+        .unwrap();
+
+    assert!(extractor.inside_artifact);
+}
+
+#[test]
+fn test_emc_resets_mcid() {
+    let mut extractor = TextExtractor::new();
+    extractor.current_mcid = Some(10);
+    extractor.marked_content_stack.push(MarkedContentContext {
+        artifact_type: None,
+        tag: "P".to_string(),
+        is_artifact: false,
+        actual_text: None,
+        expansion: None,
+        is_excluded_layer: false,
+        is_placed_pdf: false,
+        actual_text_emitted: false,
+        own_mcid: None,
+    });
+
+    extractor
+        .execute_operator_public(Operator::EndMarkedContent)
+        .unwrap();
+
+    assert_eq!(extractor.current_mcid, None);
+    assert!(extractor.marked_content_stack.is_empty());
+}
+
+#[test]
+fn test_emc_with_empty_stack() {
+    let mut extractor = TextExtractor::new();
+    // Should not panic
+    extractor
+        .execute_operator_public(Operator::EndMarkedContent)
+        .unwrap();
+}
+
+// ========================================================================
+// COVERAGE TESTS: BDC with ActualText and Expansion
+// ========================================================================
+
+#[test]
+fn test_bdc_with_actual_text() {
+    let mut extractor = TextExtractor::new();
+    let mut props = HashMap::new();
+    props.insert("ActualText".to_string(), Object::String(b"fi".to_vec()));
+
+    extractor
+        .execute_operator_public(Operator::BeginMarkedContentDict {
+            tag: "Span".to_string(),
+            properties: Box::new(Object::Dictionary(props)),
+        })
+        .unwrap();
+
+    let actual = extractor.get_current_actual_text();
+    assert_eq!(actual, Some("fi".to_string()));
+}
+
+#[test]
+fn test_bdc_with_expansion() {
+    let mut extractor = TextExtractor::new();
+    let mut props = HashMap::new();
+    props.insert("E".to_string(), Object::String(b"PDF".to_vec()));
+
+    extractor
+        .execute_operator_public(Operator::BeginMarkedContentDict {
+            tag: "Span".to_string(),
+            properties: Box::new(Object::Dictionary(props)),
+        })
+        .unwrap();
+
+    let ctx = &extractor.marked_content_stack[0];
+    assert_eq!(ctx.expansion, Some("PDF".to_string()));
+}

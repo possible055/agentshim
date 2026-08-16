@@ -30,7 +30,7 @@ pub const PDF_GATE_WAIT: Duration = Duration::from_millis(300);
 /// so a time bound is required for the gate to mean anything.
 pub const PDF_TEXT_RUNTIME_LIMIT: Duration = Duration::from_secs(5);
 pub const PDF_IMAGE_RUNTIME_LIMIT: Duration = Duration::from_secs(10);
-const TRANSPORT_BLOCKING_THREADS: usize = 2;
+const HOST_BLOCKING_THREADS: usize = 2;
 const WORKER_ENV: &str = "AGENTSHIM_IO_WORKERS";
 const PROCESS_CALLS_ENV: &str = "AGENTSHIM_PROCESS_CALLS";
 const TOOL_TIMEOUT_SHELF_ENV: &str = "AGENTSHIM_TOOL_TIMEOUT_SHELF";
@@ -69,13 +69,39 @@ pub struct RuntimeConfig {
     pub pdf_image_memory_bytes: usize,
     pub memory_bytes: usize,
     pub tool_timeout_shelf: Duration,
-    /// Idle-watchdog deadline for the codex client profile; `None` disables the
-    /// watchdog. Validated in `from_env`, gated by client profile in `build`.
+    /// Optional host idle-watchdog deadline. `None` disables the watchdog.
     pub idle_timeout: Option<Duration>,
     pub respect_gitignore: bool,
 }
 
 impl RuntimeConfig {
+    /// Build production defaults for an embedded host without consulting the
+    /// process environment. Embedders may adjust the returned value from their
+    /// own typed configuration before constructing [`RuntimeResources`].
+    #[must_use]
+    pub fn for_host_defaults() -> Self {
+        let available = std::thread::available_parallelism().map_or(1, usize::from);
+        let worker_lanes = default_worker_lanes(available);
+        let process_calls = DEFAULT_PROCESS_CALLS;
+        let detached_calls = crate::tools::bash::detached::DEFAULT_DETACHED_CALLS;
+        Self {
+            worker_lanes,
+            scheduler_threads: default_scheduler_threads(available),
+            blocking_threads: blocking_threads(process_calls, detached_calls),
+            process_calls,
+            detached_calls,
+            output_bytes: crate::output::MODEL_BYTE_LIMIT,
+            grep_memory_bytes: DEFAULT_GREP_MEMORY_BYTES,
+            glob_memory_bytes: DEFAULT_GLOB_MEMORY_BYTES,
+            pdf_text_memory_bytes: DEFAULT_PDF_TEXT_MEMORY_BYTES,
+            pdf_image_memory_bytes: DEFAULT_PDF_IMAGE_MEMORY_BYTES,
+            memory_bytes: DEFAULT_MEMORY_BYTES,
+            tool_timeout_shelf: DEFAULT_TOOL_TIMEOUT_SHELF,
+            idle_timeout: None,
+            respect_gitignore: false,
+        }
+    }
+
     /// Resolve bounded runtime parallelism, including the optional worker override.
     ///
     /// # Errors
@@ -173,21 +199,7 @@ impl RuntimeConfig {
         Self {
             worker_lanes: worker_lanes.clamp(1, MAX_SEARCH_LANES),
             scheduler_threads: 1,
-            blocking_threads: blocking_threads(
-                DEFAULT_PROCESS_CALLS,
-                crate::tools::bash::detached::DEFAULT_DETACHED_CALLS,
-            ),
-            process_calls: DEFAULT_PROCESS_CALLS,
-            detached_calls: crate::tools::bash::detached::DEFAULT_DETACHED_CALLS,
-            output_bytes: crate::output::MODEL_BYTE_LIMIT,
-            grep_memory_bytes: DEFAULT_GREP_MEMORY_BYTES,
-            glob_memory_bytes: DEFAULT_GLOB_MEMORY_BYTES,
-            pdf_text_memory_bytes: DEFAULT_PDF_TEXT_MEMORY_BYTES,
-            pdf_image_memory_bytes: DEFAULT_PDF_IMAGE_MEMORY_BYTES,
-            memory_bytes: DEFAULT_MEMORY_BYTES,
-            tool_timeout_shelf: DEFAULT_TOOL_TIMEOUT_SHELF,
-            idle_timeout: None,
-            respect_gitignore: false,
+            ..Self::for_host_defaults()
         }
     }
 
@@ -333,7 +345,7 @@ pub fn parse_idle_timeout(value: Option<&OsStr>) -> io::Result<Option<Duration>>
 }
 
 pub fn blocking_threads(process_calls: usize, detached_calls: usize) -> usize {
-    process_calls + MAX_READ_ONLY_CALLS + detached_calls + TRANSPORT_BLOCKING_THREADS
+    process_calls + MAX_READ_ONLY_CALLS + detached_calls + HOST_BLOCKING_THREADS
 }
 
 #[cfg(windows)]

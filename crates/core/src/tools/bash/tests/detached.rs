@@ -10,7 +10,6 @@ pub fn detach_request(command: &str, log_path: &str) -> BashRequest {
         detach: true,
         log_path: Some(log_path.to_owned()),
         server_capture: false,
-        capture: None,
         msys_argument_conversion: MsysArgumentConversion::Default,
     }
 }

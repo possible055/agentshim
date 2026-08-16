@@ -2,9 +2,9 @@ use std::{
     collections::{BTreeMap, VecDeque},
     env,
     fs::{self, File},
-    io::{BufRead, BufReader, BufWriter, Write},
+    io::{BufWriter, Write},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    process::Command,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -14,6 +14,9 @@ use serde_json::{Map, Value, json};
 const DEFAULT_ITERATIONS: usize = 100;
 const EXTENDED_ITERATIONS: usize = 1_000;
 const BURST_QUIET_MS: u64 = 2_100;
+
+#[path = "common/mod.rs"]
+pub mod common;
 
 #[path = "resource_soak/aggregate.rs"]
 mod aggregate;

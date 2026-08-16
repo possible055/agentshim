@@ -55,7 +55,6 @@ fn request(command: &str) -> BashRequest {
         detach: false,
         log_path: None,
         server_capture: false,
-        capture: None,
         msys_argument_conversion: MsysArgumentConversion::Default,
     }
 }

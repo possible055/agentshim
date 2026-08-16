@@ -1,10 +1,6 @@
-use agentshim_core::output::{
-    CallBudget, DSH_NATIVE_PREVIEW_BYTES, DSH_WIRE_BYTE_LIMIT, ProjectedTokenCost,
-    ProjectionDecision,
-};
+use agentshim_core::output::{CallBudget, ProjectedTokenCost, ProjectionDecision};
 
-/// The `DSH` host's output budget: byte page limits with no model token gate, which
-/// is exactly the `CallOutputBudget::dsh()` behaviour the MCP bridge exposed.
+/// Native byte page limits with no model-token gate.
 pub(crate) struct NativeCallBudget {
     page: usize,
     wire: usize,
@@ -14,12 +10,14 @@ impl NativeCallBudget {
     pub(crate) fn new(page: usize) -> Self {
         Self {
             page: page.max(MIN_PAGE_BYTES),
-            wire: DSH_WIRE_BYTE_LIMIT,
+            wire: NATIVE_WIRE_BYTE_LIMIT,
         }
     }
 }
 
 const MIN_PAGE_BYTES: usize = 4_096;
+const NATIVE_WIRE_BYTE_LIMIT: usize = 1024 * 1024;
+pub(crate) const DEFAULT_PAGE_BUDGET_BYTES: usize = 50_000;
 
 impl CallBudget for NativeCallBudget {
     fn page_bytes(&self) -> usize {
@@ -61,5 +59,5 @@ impl CallBudget for NativeCallBudget {
 }
 
 pub(crate) fn default_page_budget() -> usize {
-    DSH_NATIVE_PREVIEW_BYTES
+    DEFAULT_PAGE_BUDGET_BYTES
 }

@@ -41,10 +41,11 @@ thread_local! {
 pub fn run(
     plan: &ExecPlan<'_>,
     cancellation: &CancellationToken,
-    capture_sink: Option<Arc<dyn CaptureSink>>,
+    capture_sink: Option<&Arc<dyn CaptureSink>>,
 ) -> Result<ExecOutcome, ExecFailure> {
     let started = Instant::now();
-    let mut lifecycle = spawn_lifecycle(plan, capture_sink)?;
+    // UnixIo keeps the sink alive across the poll loop, so it owns an Arc clone.
+    let mut lifecycle = spawn_lifecycle(plan, capture_sink.cloned())?;
 
     let mut primary_exit: Option<(String, Instant)> = None;
     let (exit, terminated_descendants) = loop {
@@ -742,10 +743,8 @@ impl DetachedTree {
             self.primary_exit = Some(exit_label(status));
         }
         let running = group_exists(self.process_group)?;
-        if !running {
-            if self.primary_exit.is_none() {
-                self.primary_exit = Some(exit_label(self.child.wait()?));
-            }
+        if !running && self.primary_exit.is_none() {
+            self.primary_exit = Some(exit_label(self.child.wait()?));
         }
         Ok(super::DetachedObservation {
             tree_running: running,
@@ -826,6 +825,7 @@ mod readiness_tests {
             vec![File::from(read)],
             1024,
             Vec::new(),
+            None,
         )
         .expect("unix I/O");
         let writer = std::thread::spawn(move || {

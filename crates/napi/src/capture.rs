@@ -190,7 +190,7 @@ pub(crate) fn should_publish(records: &[ArtifactRecord], complete: bool) -> bool
     if total == 0 {
         return false;
     }
-    if total > agentshim_core::output::DSH_NATIVE_PREVIEW_BYTES as u64 {
+    if total > crate::budget::DEFAULT_PAGE_BUDGET_BYTES as u64 {
         return true;
     }
     records

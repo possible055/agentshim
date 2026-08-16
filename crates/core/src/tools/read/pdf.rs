@@ -98,8 +98,7 @@ pub struct PdfRetryRequest {
 
 /// The internal shape of a successful PDF read.
 ///
-/// The plan calls for structured `details` on success, but the MCP success envelope has
-/// no extension point yet, so this is rendered through the existing text formatter
+/// This is rendered through the existing text formatter
 /// rather than introducing a parallel response type for PDFs alone.
 pub struct PdfReadOutcome {
     mode: PdfMode,

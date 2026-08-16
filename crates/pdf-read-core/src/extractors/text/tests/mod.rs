@@ -8,11 +8,10 @@ mod gap_models;
 mod glyph_positioning;
 mod marked_content;
 mod operators_and_state;
-mod regressions_a;
-mod regressions_b;
 mod spacing_boundaries;
 mod spacing_core;
 mod span_merging;
+mod span_ordering;
 mod text_matrices;
 mod word_boundaries;
 

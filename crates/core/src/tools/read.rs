@@ -33,3 +33,5 @@ use request::{MAX_LINE_COUNT, TEXT_READ_MEMORY_BYTES};
 #[cfg(test)]
 #[path = "read/tests/mod.rs"]
 mod test_suite;
+#[cfg(test)]
+mod test_support;

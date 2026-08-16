@@ -490,7 +490,7 @@ pub(super) fn blocking_response_for_profile<E: DiagnosticError>(
     output_token_gate: Option<&crate::output::OutputTokenGate>,
     cancellation: &CancellationToken,
     output_budget: &CallOutputBudget,
-    client_profile: crate::ClientProfile,
+    _client_profile: crate::ClientProfile,
 ) -> CallToolResponse {
     match result {
         Ok(Ok(output)) => {
@@ -506,14 +506,6 @@ pub(super) fn blocking_response_for_profile<E: DiagnosticError>(
             }
             let call_budget_verified = output.fits_call_budget(output_budget, cancellation);
             let projected_cost = output.projected_cost();
-            let structured = (client_profile == crate::ClientProfile::Dsh).then(|| {
-                output.structured.unwrap_or_else(|| {
-                    json!({
-                        "bridgeVersion": super::service::DSH_BRIDGE_VERSION,
-                        "tool": tool,
-                    })
-                })
-            });
             let mut content = Vec::with_capacity(output.images.len() + 1);
             content.push(ContentBlock::text(output.text));
             content.extend(
@@ -522,8 +514,7 @@ pub(super) fn blocking_response_for_profile<E: DiagnosticError>(
                     .into_iter()
                     .map(|image| ContentBlock::image(image.data, image.mime_type)),
             );
-            let mut result = CallToolResult::success(content);
-            result.structured_content = structured;
+            let result = CallToolResult::success(content);
             if call_budget_verified {
                 if let Some(cost) = projected_cost {
                     output_budget.cache_response_cost(cost);

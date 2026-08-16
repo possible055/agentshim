@@ -1,6 +1,6 @@
 use std::sync::{Arc, OnceLock};
 
-use rmcp::model::{JsonObject, MetaObject, Tool, ToolAnnotations};
+use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Value, json};
 
 use crate::path::ReadScope;
@@ -8,43 +8,23 @@ use crate::server::service::{default_timeout_ms, max_timeout_ms};
 
 pub(super) fn tool_catalog(
     read_scope: ReadScope,
-    client_profile: crate::ClientProfile,
+    _client_profile: crate::ClientProfile,
 ) -> &'static [Tool; 6] {
     static NORMAL_TOOLS: OnceLock<[Tool; 6]> = OnceLock::new();
     static UNRESTRICTED_TOOLS: OnceLock<[Tool; 6]> = OnceLock::new();
-    static DSH_NORMAL_TOOLS: OnceLock<[Tool; 6]> = OnceLock::new();
-    static DSH_UNRESTRICTED_TOOLS: OnceLock<[Tool; 6]> = OnceLock::new();
-    let dsh = client_profile == crate::ClientProfile::Dsh;
-    let tools = match (read_scope, dsh) {
-        (ReadScope::Normal, false) => &NORMAL_TOOLS,
-        (ReadScope::Unrestricted, false) => &UNRESTRICTED_TOOLS,
-        (ReadScope::Normal, true) => &DSH_NORMAL_TOOLS,
-        (ReadScope::Unrestricted, true) => &DSH_UNRESTRICTED_TOOLS,
+    let tools = match read_scope {
+        ReadScope::Normal => &NORMAL_TOOLS,
+        ReadScope::Unrestricted => &UNRESTRICTED_TOOLS,
     };
     tools.get_or_init(|| {
-        let mut catalog = [
+        [
             read_tool(read_scope),
             grep_tool(read_scope),
             glob_tool(read_scope),
             run_program_tool(),
-            if dsh { dsh_bash_tool() } else { bash_tool() },
-            if dsh {
-                dsh_bash_status_tool()
-            } else {
-                bash_status_tool()
-            },
-        ];
-        if dsh {
-            for tool in &mut catalog {
-                let mut meta = JsonObject::new();
-                meta.insert(
-                    "agentshim.dshBridge".to_owned(),
-                    json!({ "version": super::service::DSH_BRIDGE_VERSION }),
-                );
-                tool.meta = Some(MetaObject(meta));
-            }
-        }
-        catalog
+            bash_tool(),
+            bash_status_tool(),
+        ]
     })
 }
 
@@ -457,23 +437,6 @@ fn bash_status_tool() -> Tool {
     )
     .with_title("Bash Status")
     .with_annotations(read_only_annotations())
-}
-
-fn dsh_bash_tool() -> Tool {
-    bash_tool()
-}
-
-fn dsh_bash_status_tool() -> Tool {
-    let mut tool = bash_status_tool();
-    let mut schema = (*tool.input_schema).clone();
-    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
-        properties.insert(
-            "wait_ms".to_owned(),
-            json!({ "type": "integer", "minimum": 0, "maximum": 1000, "default": 0, "description": "Wait briefly for a lifecycle transition; output is delivered by the private capture stream." }),
-        );
-    }
-    tool.input_schema = Arc::new(schema);
-    tool
 }
 
 fn schema(value: Value) -> Arc<JsonObject> {

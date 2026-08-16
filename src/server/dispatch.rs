@@ -27,7 +27,6 @@ use crate::tools::{
 };
 
 use super::{
-    RemoteCaptureSink,
     response::{
         PdfAdmission, blocking_response_for_profile, cancellation_class, classified_tool_error,
         diagnostic_tool_error, duration_ms, parse_request, pdf_busy, pdf_timeout, queue_timeout,
@@ -45,22 +44,6 @@ pub(super) enum ToolAdmission {
     Detached(DetachedAdmission),
     DetachedControl,
     None,
-}
-
-fn finish_remote_capture(
-    capture: Option<&RemoteCaptureSink>,
-    result: &mut Result<crate::tools::ToolOutput, ProcessError>,
-) {
-    let Some(capture) = capture else {
-        return;
-    };
-    let complete = result.is_ok();
-    let error = result.as_ref().err().map(ToString::to_string);
-    if let Err(capture_error) = capture.complete(complete, error.as_deref())
-        && result.is_ok()
-    {
-        *result = Err(ProcessError::from(capture_error));
-    }
 }
 
 fn requests_bash_terminate(arguments: Option<&JsonObject>) -> bool {
@@ -122,31 +105,6 @@ pub(super) fn shell_delegate(request: &CallToolRequestParams) -> &'static str {
 }
 
 impl AgentShim {
-    #[allow(
-        clippy::result_large_err,
-        reason = "the MCP response is the natural rejection channel for capture setup"
-    )]
-    fn remote_capture(
-        &self,
-        request: Option<&crate::server::DshCaptureRequest>,
-        expected_streams: &[&str],
-        context: &RequestContext<RoleServer>,
-    ) -> Result<Option<RemoteCaptureSink>, CallToolResponse> {
-        let Some(request) = request else {
-            return Ok(None);
-        };
-        if self.client_profile() != crate::ClientProfile::Dsh {
-            return Err(classified_tool_error(
-                "validation",
-                "_agentshimCapture is available only to the DSH bridge",
-            ));
-        }
-        request
-            .validate(expected_streams)
-            .map_err(|error| classified_tool_error("validation", error))?;
-        Ok(Some(RemoteCaptureSink::new(context.peer.clone(), request)))
-    }
-
     // Read retries intentionally keep capability and reservation lifetimes in one scope.
     #[allow(clippy::too_many_lines)]
     pub(super) async fn call_read(
@@ -173,27 +131,7 @@ impl AgentShim {
             }
         };
         tracing::info!(target: "agentshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
-        let access = match read_request.read_grant.as_deref() {
-            Some(grant)
-                if self.client_profile() == crate::ClientProfile::Dsh
-                    && grant == read_request.path =>
-            {
-                match self
-                    .file_access
-                    .with_exact_grant(std::path::Path::new(grant))
-                {
-                    Ok(access) => Arc::new(access),
-                    Err(error) => return classified_tool_error("validation", error.to_string()),
-                }
-            }
-            Some(_) => {
-                return classified_tool_error(
-                    "validation",
-                    "artifact read grant must exactly match the DSH read path",
-                );
-            }
-            None => self.file_access.clone(),
-        };
+        let access = self.file_access.clone();
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
         let span = tracing::Span::current();
@@ -483,28 +421,7 @@ impl AgentShim {
             }
         };
         tracing::info!(target: "agentshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
-        let access = match grep_request.read_grant.as_deref() {
-            Some(grant)
-                if self.client_profile() == crate::ClientProfile::Dsh
-                    && grep_request.path.as_deref() == Some(grant)
-                    && grep_request.glob.is_none() =>
-            {
-                match self
-                    .file_access
-                    .with_exact_grant(std::path::Path::new(grant))
-                {
-                    Ok(access) => Arc::new(access),
-                    Err(error) => return classified_tool_error("validation", error.to_string()),
-                }
-            }
-            Some(_) => {
-                return classified_tool_error(
-                    "validation",
-                    "artifact grep grant requires one exact DSH file path and no glob",
-                );
-            }
-            None => self.file_access.clone(),
-        };
+        let access = self.file_access.clone();
         let resources = self.resources.clone();
         let reservation = crate::runtime::MemoryReservation::from_initial(
             resources.clone(),
@@ -561,14 +478,6 @@ impl AgentShim {
         if let Err(error) = process_request.validate(super::service::max_timeout_ms()) {
             return classified_tool_error("validation", error.to_string());
         }
-        let remote_capture = match self.remote_capture(
-            process_request.capture.as_ref(),
-            &["stdout", "stderr"],
-            context,
-        ) {
-            Ok(capture) => capture,
-            Err(response) => return response,
-        };
         let timeout =
             Duration::from_millis(process_request.timeout_ms(super::service::max_timeout_ms()));
         let memory_charge = process_request.memory_charge();
@@ -619,10 +528,7 @@ impl AgentShim {
                         timeout_ms: process_request.timeout_ms(super::service::max_timeout_ms()),
                     });
                 };
-                let capture_sink = remote_capture.as_ref().map(|capture| {
-                    Arc::new(capture.clone()) as Arc<dyn crate::tools::exec::spawn::CaptureSink>
-                });
-                let mut result = crate::tools::run_program::execute_output_with_capture(
+                let result = crate::tools::run_program::execute_output_with_capture(
                     &root,
                     &resolver,
                     &process_request,
@@ -630,9 +536,8 @@ impl AgentShim {
                     &cancellation,
                     super::service::max_timeout_ms(),
                     &execute_output_budget,
-                    capture_sink.as_ref(),
+                    None,
                 );
-                finish_remote_capture(remote_capture.as_ref(), &mut result);
                 drop(permits);
                 result
             })
@@ -665,19 +570,8 @@ impl AgentShim {
         };
         match request {
             BashToolRequest::Run(request) => {
-                let remote_capture =
-                    match self.remote_capture(request.capture.as_ref(), &["output"], context) {
-                        Ok(capture) => capture,
-                        Err(response) => return response,
-                    };
-                self.call_bash_run(
-                    request,
-                    request_cancellation,
-                    remote_capture,
-                    admission,
-                    output_budget,
-                )
-                .await
+                self.call_bash_run(request, request_cancellation, admission, output_budget)
+                    .await
             }
             BashToolRequest::Terminate(request) => {
                 if let Err(error) = request.validate() {
@@ -741,14 +635,8 @@ impl AgentShim {
         };
         match request {
             BashToolRequest::Run(request) => {
-                self.call_bash_run(
-                    request,
-                    request_cancellation,
-                    None,
-                    admission,
-                    output_budget,
-                )
-                .await
+                self.call_bash_run(request, request_cancellation, admission, output_budget)
+                    .await
             }
             BashToolRequest::Terminate(_) => {
                 classified_tool_error("validation", "test helper accepts bash run requests only")
@@ -762,7 +650,6 @@ impl AgentShim {
         &self,
         bash_request: BashRequest,
         request_cancellation: &CancellationToken,
-        remote_capture: Option<RemoteCaptureSink>,
         admission: ToolAdmission,
         output_budget: &crate::output::CallOutputBudget,
     ) -> CallToolResponse {
@@ -851,10 +738,7 @@ impl AgentShim {
                     };
                     remaining
                 };
-                let capture_sink = remote_capture.as_ref().map(|capture| {
-                    Arc::new(capture.clone()) as Arc<dyn crate::tools::exec::spawn::CaptureSink>
-                });
-                let mut result = crate::tools::bash::execute_output_with_capture(
+                let result = crate::tools::bash::execute_output_with_capture(
                     &root,
                     &locator,
                     detached_admission,
@@ -863,11 +747,8 @@ impl AgentShim {
                     &cancellation,
                     super::service::max_timeout_ms(),
                     &execute_output_budget,
-                    capture_sink.as_ref(),
+                    None,
                 );
-                if !bash_request.detach {
-                    finish_remote_capture(remote_capture.as_ref(), &mut result);
-                }
                 drop(permits);
                 result
             })

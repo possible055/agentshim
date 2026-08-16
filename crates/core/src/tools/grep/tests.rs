@@ -34,7 +34,6 @@ mod tests {
             include_ignored: None,
             encoding: None,
             fallback_encoding: None,
-            read_grant: None,
         }
     }
 

@@ -16,7 +16,6 @@ use rmcp::{
     },
     service::{NotificationContext, RequestContext},
 };
-use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use uuid::Uuid;
@@ -60,8 +59,6 @@ const TOOLSET: &str = "read,grep,glob,run_program,bash,bash_status";
 const TOOL_COUNT: u64 = 6;
 const TOOLS_CACHE_TTL_MS: u64 = 300_000;
 const TOOLS_CACHE_SCOPE: &str = "private";
-pub(crate) use agentshim_core::dsh_bridge::DSH_BRIDGE_VERSION;
-
 static MAX_TIMEOUT_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 
 /// Install the MCP shell's process-wide max execution time from the configured shelf.
@@ -186,18 +183,10 @@ impl AgentShimBuilder {
         runtime.idle_timeout =
             crate::profile::resolve_idle_timeout_from(runtime.idle_timeout, self.client_profile);
         install_max_timeout_ms(runtime.tool_timeout_shelf);
-        crate::output::install_output_profile(self.client_profile);
-        let (output_token_gate, burst_output_gate) =
-            if self.client_profile == crate::ClientProfile::Dsh {
-                (None, None)
-            } else {
-                (
-                    Some(OutputTokenGate::load_shared().map_err(io::Error::other)?),
-                    Some(BurstOutputGate::new(
-                        crate::output::configured_burst_tokens(self.client_profile)?,
-                    )),
-                )
-            };
+        let output_token_gate = Some(OutputTokenGate::load_shared().map_err(io::Error::other)?);
+        let burst_output_gate = Some(BurstOutputGate::new(
+            crate::output::configured_burst_tokens(self.client_profile)?,
+        ));
         Ok(AgentShim {
             file_access: Arc::new(FileAccess::new(Arc::clone(&root), self.read_scope)),
             root,
@@ -325,7 +314,6 @@ impl AgentShim {
             unset_env: Vec::new(),
             stdin: None,
             timeout_ms: Some(5_000),
-            capture: None,
         };
         let output = crate::tools::run_program::execute_output_with_capture(
             &self.root,
@@ -390,25 +378,16 @@ impl AgentShim {
 
     fn server_info(
         read_scope: ReadScope,
-        client_profile: Option<crate::ClientProfile>,
+        _client_profile: Option<crate::ClientProfile>,
     ) -> ServerInfo {
         let instructions = match read_scope {
             ReadScope::Normal => SERVER_INSTRUCTIONS,
             ReadScope::Unrestricted => UNRESTRICTED_SERVER_INSTRUCTIONS,
         };
-        let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("agentshim", env!("CARGO_PKG_VERSION")))
             .with_protocol_version(ProtocolVersion::V_2026_07_28)
-            .with_instructions(instructions);
-        if client_profile == Some(crate::ClientProfile::Dsh) {
-            let mut meta = serde_json::Map::new();
-            meta.insert(
-                "agentshim.dshBridge".to_owned(),
-                json!({ "version": DSH_BRIDGE_VERSION }),
-            );
-            info.meta = Some(rmcp::model::MetaObject(meta));
-        }
-        info
+            .with_instructions(instructions)
     }
 }
 
@@ -507,7 +486,6 @@ impl ServerHandler for AgentShim {
             (Some(token_gate), Some(burst_gate)) => {
                 CallOutputBudget::new(Arc::clone(token_gate), burst_gate.begin_call())
             }
-            (None, None) => CallOutputBudget::dsh(),
             _ => unreachable!("model token and burst gates are installed together"),
         };
         let result = self.call_tool_inner(request, &context, &budget).await;

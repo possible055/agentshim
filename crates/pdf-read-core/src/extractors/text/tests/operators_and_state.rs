@@ -609,3 +609,122 @@ fn test_deduplicate_spans_keeps_narrow_glyph_doublets() {
         }
     }
 }
+
+// ========================================================================
+// COVERAGE TESTS: Quote and DoubleQuote operators in span mode
+// ========================================================================
+
+#[test]
+fn test_quote_operator_span_mode() {
+    let mut extractor = TextExtractor::new();
+    extractor.merging_config = SpanMergingConfig::legacy();
+    let font = create_test_font();
+    extractor.add_font("F1".to_string(), font);
+
+    let stream = b"BT /F1 12 Tf 14 TL 100 700 Td (Line1) Tj (Line2) ' ET";
+    let spans = extractor.extract_text_spans(stream).unwrap();
+
+    let text: String = spans
+        .iter()
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(
+        text.contains("Line1"),
+        "Should contain Line1, got: {}",
+        text
+    );
+    assert!(
+        text.contains("Line2"),
+        "Should contain Line2, got: {}",
+        text
+    );
+}
+
+#[test]
+fn test_double_quote_operator_span_mode() {
+    let mut extractor = TextExtractor::new();
+    extractor.merging_config = SpanMergingConfig::legacy();
+    let font = create_test_font();
+    extractor.add_font("F1".to_string(), font);
+
+    let stream = b"BT /F1 12 Tf 14 TL 100 700 Td 1 2 (Text) \" ET";
+    let spans = extractor.extract_text_spans(stream).unwrap();
+
+    let text: String = spans
+        .iter()
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(text.contains("Text"), "Should extract text, got: {}", text);
+}
+
+// ========================================================================
+// COVERAGE TESTS: Color space resets (fill_color_cmyk cleared)
+// ========================================================================
+
+#[test]
+fn test_fill_cmyk_then_change_color_space() {
+    let mut extractor = TextExtractor::new();
+    extractor
+        .execute_operator_public(Operator::SetFillCmyk {
+            c: 0.5,
+            m: 0.5,
+            y: 0.5,
+            k: 0.5,
+        })
+        .unwrap();
+    assert!(extractor.state_stack.current().fill_color_cmyk.is_some());
+
+    // Changing color space should reset CMYK
+    extractor
+        .execute_operator_public(Operator::SetFillColorSpace {
+            name: "DeviceRGB".to_string(),
+        })
+        .unwrap();
+    assert!(extractor.state_stack.current().fill_color_cmyk.is_none());
+}
+
+// ========================================================================
+// COVERAGE TESTS: Do operator without document
+// ========================================================================
+
+#[test]
+fn test_do_operator_without_document() {
+    let mut extractor = TextExtractor::new();
+    // Do without document set should not panic
+    extractor
+        .execute_operator_public(Operator::Do {
+            name: "Im1".to_string(),
+        })
+        .unwrap();
+}
+
+// ========================================================================
+// COVERAGE TESTS: TJ array with adaptive threshold - full pipeline
+// ========================================================================
+
+#[test]
+fn test_tj_array_span_mode_with_space_insertion() {
+    let config = TextExtractionConfig {
+        use_adaptive_tj_threshold: false,
+        space_insertion_threshold: -120.0,
+        ..TextExtractionConfig::default()
+    };
+    let mut extractor = TextExtractor::with_config(config);
+    extractor.merging_config = SpanMergingConfig::legacy();
+    let font = create_test_font();
+    extractor.add_font("F1".to_string(), font);
+
+    // TJ array with large offset that triggers space
+    let stream = b"BT /F1 12 Tf 100 700 Td [(Word1) -500 (Word2)] TJ ET";
+    let spans = extractor.extract_text_spans(stream).unwrap();
+
+    let text: String = spans
+        .iter()
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(text.contains("Word1"), "Should contain Word1");
+    assert!(text.contains("Word2"), "Should contain Word2");
+}

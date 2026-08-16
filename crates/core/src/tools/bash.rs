@@ -81,8 +81,6 @@ pub struct BashRequest {
     pub server_capture: bool,
     #[serde(default)]
     pub msys_argument_conversion: MsysArgumentConversion,
-    #[serde(rename = "_agentshimCapture")]
-    pub capture: Option<crate::dsh_bridge::DshCaptureRequest>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -127,12 +125,11 @@ impl BashRequest {
             return Err(invalid("command and cwd must not contain NUL"));
         }
         if self.detach {
-            let capture_targets = usize::from(self.server_capture)
-                + usize::from(self.log_path.is_some())
-                + usize::from(self.capture.is_some());
+            let capture_targets =
+                usize::from(self.server_capture) + usize::from(self.log_path.is_some());
             if capture_targets != 1 {
                 return Err(invalid(
-                    "detach requires exactly one of log_path, server_capture=true, or DSH capture",
+                    "detach requires exactly one of log_path or server_capture=true",
                 ));
             }
             if self.timeout_ms.is_some() {
@@ -418,7 +415,7 @@ pub fn prepare_bash_foreground(
 }
 
 /// Spawn one prepared foreground bash launch, merged streams, with the same
-/// tree ownership, timeout, capture ceiling, and cancellation as the MCP path.
+/// tree ownership, timeout, capture ceiling, and cancellation as other hosts.
 pub fn execute_prepared_bash(
     prepared: PreparedBash,
     wrapped_argv: Option<&[String]>,
@@ -664,7 +661,6 @@ fn detached_response(job_id: &str, pid: u32, log_path: &Path) -> ToolOutput {
         crate::tools::exec::containment_scope()
     );
     ToolOutput::new(text.clone()).with_structured(json!({
-        "bridgeVersion": crate::dsh_bridge::DSH_BRIDGE_VERSION,
         "tool": "bash",
         "job": {
             "jobId": job_id,
@@ -804,7 +800,6 @@ fn completed_output(completed: &CompletedBash, output: &RenderedCapture) -> Tool
     }
     push_capture_diagnostics(&mut rendered, "Output", completed.output.bytes_read, output);
     ToolOutput::with_child_nonzero(rendered.clone(), child_nonzero).with_structured(json!({
-        "bridgeVersion": crate::dsh_bridge::DSH_BRIDGE_VERSION,
         "tool": "bash",
         "process": {
             "exitCode": completed.exit,

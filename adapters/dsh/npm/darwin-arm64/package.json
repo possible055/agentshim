@@ -1,0 +1,16 @@
+{
+  "name": "dsh-agentshim-darwin-arm64",
+  "version": "0.1.0",
+  "license": "MIT",
+  "main": "agentshim_napi.node",
+  "files": [
+    "agentshim_napi.node",
+    "LICENSE"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ]
+}

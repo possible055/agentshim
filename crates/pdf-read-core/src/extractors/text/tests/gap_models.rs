@@ -534,3 +534,103 @@ fn test_clear() {
     extractor.clear();
     assert_eq!(extractor.char_count(), 0);
 }
+
+// ========================================================================
+// COVERAGE TESTS: calculate_average_glyph_width
+// ========================================================================
+
+#[test]
+fn test_calculate_average_glyph_width_no_widths() {
+    let extractor = TextExtractor::new();
+    let font = create_test_font(); // No widths array
+    let avg = extractor.calculate_average_glyph_width(&font);
+    assert_eq!(avg, font.default_width);
+}
+
+#[test]
+fn test_calculate_average_glyph_width_with_widths() {
+    let extractor = TextExtractor::new();
+    let mut font = create_test_font();
+    font.first_char = Some(32);
+    font.last_char = Some(126);
+    font.widths = Some(vec![500.0; 95]); // 95 printable chars
+
+    let avg = extractor.calculate_average_glyph_width(&font);
+    assert!((avg - 500.0).abs() < 0.01);
+}
+
+#[test]
+fn test_calculate_average_glyph_width_no_first_char() {
+    let extractor = TextExtractor::new();
+    let mut font = create_test_font();
+    font.widths = Some(vec![500.0; 95]);
+    font.first_char = None;
+
+    let avg = extractor.calculate_average_glyph_width(&font);
+    assert_eq!(avg, font.default_width);
+}
+
+#[test]
+fn test_calculate_average_glyph_width_no_last_char() {
+    let extractor = TextExtractor::new();
+    let mut font = create_test_font();
+    font.widths = Some(vec![500.0; 95]);
+    font.first_char = Some(32);
+    font.last_char = None;
+
+    let avg = extractor.calculate_average_glyph_width(&font);
+    assert_eq!(avg, font.default_width);
+}
+
+// ========================================================================
+// COVERAGE TESTS: Adaptive TJ threshold with justified text
+// ========================================================================
+
+#[test]
+fn test_adaptive_threshold_with_justified_text() {
+    let config = TextExtractionConfig {
+        use_adaptive_tj_threshold: true,
+        word_margin_ratio: 0.1,
+        ..TextExtractionConfig::default()
+    };
+    let mut extractor = TextExtractor::with_config(config);
+    extractor.state_stack.current_mut().font_size = 12.0;
+
+    // Simulate justified text (high CV)
+    for i in 0..100 {
+        extractor
+            .tj_offset_history
+            .push(if i % 2 == 0 { -50.0 } else { -200.0 });
+    }
+
+    let threshold = extractor.calculate_adaptive_tj_threshold();
+    // Justified text uses 3x ratio, so threshold should be more negative
+    assert!(threshold < 0.0);
+}
+
+#[test]
+fn test_adaptive_threshold_with_font_name() {
+    let config = TextExtractionConfig {
+        use_adaptive_tj_threshold: true,
+        word_margin_ratio: 0.1,
+        ..TextExtractionConfig::default()
+    };
+    let mut extractor = TextExtractor::with_config(config);
+    let font = create_test_font();
+    extractor.add_font("F1".to_string(), font);
+    extractor.state_stack.current_mut().font_size = 12.0;
+    extractor.state_stack.current_mut().font_name = Some("F1".to_string());
+
+    let threshold = extractor.calculate_adaptive_tj_threshold();
+    assert!(threshold < 0.0);
+}
+
+#[test]
+fn test_analyze_tj_distribution_zero_mean() {
+    let mut extractor = TextExtractor::new();
+    // Push offsets that average to near zero
+    extractor.tj_offset_history = vec![100.0, -100.0, 100.0, -100.0];
+    let (is_justified, cv) = extractor.analyze_tj_distribution();
+    // Mean ~0, so CV should be 0 (avoid division by zero)
+    assert_eq!(cv, 0.0);
+}

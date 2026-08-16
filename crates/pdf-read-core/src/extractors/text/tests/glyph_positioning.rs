@@ -556,3 +556,28 @@ fn test_named_fill_color_space_fallback_rgb() {
     assert!((state.fill_color_rgb.1 - 0.2).abs() < 0.01);
     assert!((state.fill_color_rgb.2 - 0.3).abs() < 0.01);
 }
+
+#[test]
+fn test_advance_position_with_font() {
+    let mut extractor = TextExtractor::new();
+    let font = create_test_font();
+    extractor.add_font("F1".to_string(), font);
+    extractor.cached_current_font = extractor.fonts.get("F1").cloned();
+    extractor.state_stack.current_mut().font_size = 12.0;
+    extractor.state_stack.current_mut().font_name = Some("F1".to_string());
+    extractor.state_stack.current_mut().horizontal_scaling = 100.0;
+
+    let width = extractor.advance_position_for_string(b"Hi").unwrap();
+    assert!(width > 0.0, "Width should be positive with font");
+}
+
+#[test]
+fn test_advance_position_with_word_space() {
+    let mut extractor = TextExtractor::new();
+    extractor.state_stack.current_mut().font_size = 12.0;
+    extractor.state_stack.current_mut().horizontal_scaling = 100.0;
+    extractor.state_stack.current_mut().word_space = 5.0;
+
+    let width = extractor.advance_position_for_string(b"A B").unwrap();
+    assert!(width > 0.0);
+}

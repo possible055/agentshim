@@ -13,8 +13,7 @@ pub use diagnostics::{
     retention_days, status,
 };
 pub use output::{
-    DSH_NATIVE_PREVIEW_BYTES, DSH_WIRE_BYTE_LIMIT, NEXT_OFFSET_FIELD, NEXT_START_LINE_FIELD,
-    PARTIAL_MARKER, PDF_CURSOR_FIELD, bounded_diagnostic,
+    NEXT_OFFSET_FIELD, NEXT_START_LINE_FIELD, PARTIAL_MARKER, PDF_CURSOR_FIELD, bounded_diagnostic,
 };
 pub use path::ReadScope;
 pub use profile::ClientProfile;

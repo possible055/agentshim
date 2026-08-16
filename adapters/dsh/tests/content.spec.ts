@@ -1,8 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
-import { HarnessError } from '@deepseek-ai/dsh-llm'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { materializeContent, normalizeMcpResult, serverErrorCode } from '../src/content.ts'
+import { materializeContent } from '../src/content.ts'
 
 const signal = new AbortController().signal
 const PNG_1X1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
@@ -53,51 +52,6 @@ function stubAttachments(overrides: Record<string, unknown> = {}) {
 function stubLlm(modalities: readonly string[]) {
   return { resolveModelInfo: vi.fn(async () => ({ inputModalities: modalities })) }
 }
-
-describe('serverErrorCode', () => {
-  it('maps the structured error code and falls back on a missing payload', () => {
-    expect(serverErrorCode({ structuredContent: { error: { code: 'output_budget' } } })).toBe('AGENTSHIM_OUTPUT_BUDGET')
-    expect(serverErrorCode({ structuredContent: { error: { code: 'client_cancellation' } } })).toBe('AGENTSHIM_CLIENT_CANCELLATION')
-    expect(serverErrorCode({})).toBe('AGENTSHIM_TOOL_ERROR')
-    expect(serverErrorCode({ structuredContent: { error: {} } })).toBe('AGENTSHIM_TOOL_ERROR')
-  })
-})
-
-describe('normalizeMcpResult', () => {
-  it('passes text and image blocks through with optional structured content', () => {
-    const normalized = normalizeMcpResult({
-      content: [{ type: 'text', text: 'a' }, { type: 'image', data: 'AAAA', mimeType: 'image/png' }],
-      structuredContent: { ok: true },
-    }, 'read')
-    expect(normalized.content).toEqual([
-      { type: 'text', text: 'a' },
-      { type: 'image', data: 'AAAA', mimeType: 'image/png' },
-    ])
-    expect(normalized.structuredContent).toEqual({ ok: true })
-  })
-
-  it('maps isError results to a stable HarnessError code', () => {
-    let error: unknown
-    try {
-      normalizeMcpResult({
-        isError: true,
-        content: [{ type: 'text', text: 'fixture says no' }],
-        structuredContent: { error: { code: 'fixture_denied' } },
-      }, 'bash')
-    } catch (caught) {
-      error = caught
-    }
-    expect(error).toBeInstanceOf(HarnessError)
-    expect(error).toMatchObject({ code: 'AGENTSHIM_FIXTURE_DENIED', message: 'fixture says no' })
-  })
-
-  it('fails loud on malformed or unsupported blocks', () => {
-    expect(() => normalizeMcpResult({ content: 'nope' }, 'read')).toThrow(HarnessError)
-    expect(() => normalizeMcpResult({ content: [{ type: 'audio', data: 'AAAA', mimeType: 'audio/wav' }] }, 'read'))
-      .toThrow(/unsupported content block/)
-    expect(() => normalizeMcpResult({ content: [42] }, 'read')).toThrow(/non-object content block/)
-  })
-})
 
 describe('materializeContent', () => {
   it('passes text-only content through without needing any service', async () => {

@@ -11,7 +11,7 @@ pub use profile::{
 };
 #[cfg(test)]
 pub use request::GrepMemoryPolicy;
-#[cfg(any(test, feature = "bench-internals"))]
+#[cfg(test)]
 pub use request::execute_with_memory_budget;
 pub use request::{CaseMode, GrepMode};
 #[cfg(any(test, feature = "bench-internals"))]

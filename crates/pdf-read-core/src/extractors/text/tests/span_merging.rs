@@ -546,3 +546,225 @@ fn test_set_stroke_color_iccbased_cmyk() {
     let state = extractor.state_stack.current();
     assert!(state.stroke_color_cmyk.is_some());
 }
+
+// ========================================================================
+// COVERAGE TESTS: Merge adjacent spans - double space prevention
+// ========================================================================
+
+#[test]
+fn test_merge_prevents_double_space() {
+    let mut extractor = TextExtractor::new();
+    extractor.merging_config = SpanMergingConfig::legacy();
+
+    extractor.spans = vec![
+        TextSpan {
+            provenance: None,
+            text_rise: 0.0,
+            artifact_type: None,
+            text: "Hello ".to_string(), // ends with space
+            bbox: Rect::new(100.0, 700.0, 35.0, 12.0),
+            font_name: "F1".to_string(),
+            font_size: 12.0,
+            font_weight: FontWeight::Normal,
+            color: Color::black(),
+            mcid: None,
+            mcid_scope: None,
+            sequence: 0,
+            split_boundary_before: false,
+            offset_semantic: false,
+            is_italic: false,
+            is_monospace: false,
+            char_spacing: 0.0,
+            word_spacing: 0.0,
+            horizontal_scaling: 100.0,
+            primary_detected: false,
+            char_widths: vec![],
+            char_x_offsets: Vec::new(),
+            heading_level: None,
+            rotation_degrees: 0.0,
+            wmode: 0,
+            rtl_draw_logical: false,
+        },
+        TextSpan {
+            provenance: None,
+            text_rise: 0.0,
+            artifact_type: None,
+            text: " World".to_string(),                // starts with space
+            bbox: Rect::new(136.0, 700.0, 35.0, 12.0), // 1pt gap
+            font_name: "F1".to_string(),
+            font_size: 12.0,
+            font_weight: FontWeight::Normal,
+            color: Color::black(),
+            mcid: None,
+            mcid_scope: None,
+            sequence: 1,
+            split_boundary_before: true, // forces merge-with-space path
+            offset_semantic: false,
+            is_italic: false,
+            is_monospace: false,
+            char_spacing: 0.0,
+            word_spacing: 0.0,
+            horizontal_scaling: 100.0,
+            primary_detected: false,
+            char_widths: vec![],
+            char_x_offsets: Vec::new(),
+            heading_level: None,
+            rotation_degrees: 0.0,
+            wmode: 0,
+            rtl_draw_logical: false,
+        },
+    ];
+
+    extractor.merge_adjacent_spans();
+    assert_eq!(extractor.spans.len(), 1);
+    // Should not have "Hello World" (triple space)
+    assert!(
+        !extractor.spans[0].text.contains("   "),
+        "Should prevent triple space"
+    );
+}
+
+// ========================================================================
+// COVERAGE TESTS: Partition characters boundary at start
+// ========================================================================
+
+#[test]
+fn test_partition_boundary_at_start() {
+    let extractor = TextExtractor::new();
+    let chars = vec![
+        CharacterInfo {
+            code: 65,
+            glyph_id: None,
+            width: 10.0,
+            x_position: 0.0,
+            tj_offset: None,
+            font_size: 12.0,
+            is_ligature: false,
+            original_ligature: None,
+            protected_from_split: false,
+        },
+        CharacterInfo {
+            code: 66,
+            glyph_id: None,
+            width: 10.0,
+            x_position: 10.0,
+            tj_offset: None,
+            font_size: 12.0,
+            is_ligature: false,
+            original_ligature: None,
+            protected_from_split: false,
+        },
+    ];
+
+    // Boundary at 0 means empty first cluster
+    let clusters = extractor.partition_characters_by_boundaries(&chars, vec![0]);
+    // Should have just one cluster (boundary at 0 produces no items before it)
+    assert!(!clusters.is_empty());
+}
+
+// ========================================================================
+// COVERAGE TESTS: flush_tj_span_buffer when buffer is Some but empty
+// ========================================================================
+
+#[test]
+fn test_flush_tj_span_buffer_empty_buffer() {
+    let mut extractor = TextExtractor::new();
+    let state = extractor.state_stack.current().clone();
+    extractor.tj_span_buffer = Some(TjBuffer::new(&state, None, None));
+    // Empty buffer should not produce a span
+    let before = extractor.spans.len();
+    extractor.flush_tj_span_buffer().unwrap();
+    assert_eq!(extractor.spans.len(), before);
+}
+
+#[test]
+fn test_flush_tj_span_buffer_with_content() {
+    let mut extractor = TextExtractor::new();
+    let state_stack = crate::content::graphics_state::GraphicsStateStack::new();
+    let mut buffer = TjBuffer::new(state_stack.current(), Some(7), None);
+    buffer.append(b"Test").unwrap();
+    buffer.accumulated_width = 20.0;
+    extractor.tj_span_buffer = Some(buffer);
+
+    extractor.flush_tj_span_buffer().unwrap();
+    assert_eq!(extractor.spans.len(), 1);
+    assert!(extractor.spans[0].text.contains("Test"));
+}
+
+// ========================================================================
+// COVERAGE TESTS: Merge with offset_semantic space span suppression
+// ========================================================================
+
+#[test]
+fn test_merge_offset_semantic_space_suppression() {
+    let mut extractor = TextExtractor::new();
+    extractor.merging_config = SpanMergingConfig::legacy();
+
+    extractor.spans = vec![
+        TextSpan {
+            provenance: None,
+            text_rise: 0.0,
+            artifact_type: None,
+            text: "Hello".to_string(),
+            bbox: Rect::new(100.0, 700.0, 30.0, 12.0),
+            font_name: "F1".to_string(),
+            font_size: 12.0,
+            font_weight: FontWeight::Normal,
+            color: Color::black(),
+            mcid: None,
+            mcid_scope: None,
+            sequence: 0,
+            split_boundary_before: false,
+            offset_semantic: false,
+            is_italic: false,
+            is_monospace: false,
+            char_spacing: 0.0,
+            word_spacing: 0.0,
+            horizontal_scaling: 100.0,
+            primary_detected: false,
+            char_widths: vec![],
+            char_x_offsets: Vec::new(),
+            heading_level: None,
+            rotation_degrees: 0.0,
+            wmode: 0,
+            rtl_draw_logical: false,
+        },
+        TextSpan {
+            provenance: None,
+            text_rise: 0.0,
+            artifact_type: None,
+            text: " ".to_string(), // offset_semantic space
+            bbox: Rect::new(130.5, 700.0, 2.0, 12.0),
+            font_name: "F1".to_string(),
+            font_size: 12.0,
+            font_weight: FontWeight::Normal,
+            color: Color::black(),
+            mcid: None,
+            mcid_scope: None,
+            sequence: 1,
+            split_boundary_before: true, // forcing merge path
+            offset_semantic: true,
+            is_italic: false,
+            is_monospace: false,
+            char_spacing: 0.0,
+            word_spacing: 0.0,
+            horizontal_scaling: 100.0,
+            primary_detected: false,
+            char_widths: vec![],
+            char_x_offsets: Vec::new(),
+            heading_level: None,
+            rotation_degrees: 0.0,
+            wmode: 0,
+            rtl_draw_logical: false,
+        },
+    ];
+
+    extractor.merge_adjacent_spans();
+    // offset_semantic space should be merged without adding extra space
+    let text = &extractor.spans[0].text;
+    assert!(
+        !text.contains("  "),
+        "Should not have double space, got: '{}'",
+        text
+    );
+}

@@ -11,7 +11,7 @@ autotests = true
 [lib]
 name = "agentshim_pdf_read"
 # Retained upstream docs describe private APIs removed from this read-only derivative.
-# The supported facade is compile-checked by tests/public_surface.rs instead.
+# The supported facade is behavior-checked by tests/limits_suite/surface.rs instead.
 doctest = false
 
 [dependencies]
@@ -68,13 +68,6 @@ rendering = [
 ]
 test-support = []
 
-[[test]]
-name = "corpus_probe"
-test = false
-
-[[test]]
-name = "upstream_corpus"
-test = false
 
 [lints.clippy]
 # The retained upstream source predates this repository's lint profile.
