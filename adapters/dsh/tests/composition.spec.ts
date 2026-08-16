@@ -28,10 +28,7 @@ const builtNativeDll = fileURLToPath(new URL(
       : '../../../target/debug/libagentshim_napi.so',
   import.meta.url,
 ))
-const samplePdf = fileURLToPath(new URL(
-  '../../../repos/hermes-agent/docs/hermes-kanban-v1-spec.pdf',
-  import.meta.url,
-))
+const samplePdf = fileURLToPath(new URL('./fixtures/sample.pdf', import.meta.url))
 const callSignal = new AbortController().signal
 
 const stagedNativeAddon = await (async (): Promise<string | undefined> => {
@@ -285,6 +282,7 @@ describe('agent scope replacement', () => {
     pluginFibers.push(await ctx.plugin(agentshim, {
       root,
       readScope: 'normal',
+      captureRoot: join(root, '.dsh-test-captures'),
       env: { FIXTURE_REPORT: join(root, 'report.json'), FIXTURE_BOOT_FILE: join(root, 'boot.txt') },
       toolCallTimeoutMs: 600_000,
     }))
@@ -401,6 +399,7 @@ describe('agent scope replacement', () => {
     pluginFibers.push(await ctx.plugin(agentshim, {
       root,
       readScope: 'normal',
+      captureRoot: join(root, '.dsh-test-captures'),
       env: { FIXTURE_REPORT: join(root, 'report.json'), FIXTURE_BOOT_FILE: join(root, 'boot.txt') },
       toolCallTimeoutMs: 600_000,
     }))
@@ -434,6 +433,7 @@ describe('agent scope replacement', () => {
     await expect(ctx.plugin(agentshim, {
       root,
       readScope: 'normal',
+      captureRoot: join(root, '.dsh-test-captures'),
       env: {
         FIXTURE_REPORT: join(root, 'report.json'),
         FIXTURE_BOOT_FILE: join(root, 'boot.txt'),
@@ -467,6 +467,7 @@ describe('agent scope replacement', () => {
     pluginFibers.push(await ctx.plugin(agentshim, {
       root,
       readScope: 'normal',
+      captureRoot: join(root, '.dsh-test-captures'),
       env: {
         FIXTURE_REPORT: join(root, 'report.json'),
         FIXTURE_BOOT_FILE: join(root, 'boot.txt'),
@@ -521,6 +522,7 @@ describe('agent scope replacement', () => {
     await expect(ctx.plugin(agentshim, {
       root,
       readScope: 'normal',
+      captureRoot: join(root, '.dsh-test-captures'),
       env: {},
       toolCallTimeoutMs: 600_000,
     })).rejects.toThrow(/local filesystem provider/)
@@ -759,6 +761,7 @@ describe('DSH native contracts', () => {
     pluginFibers.push(await ctx.plugin(agentshim, {
       root,
       readScope: 'normal',
+      captureRoot: join(root, '.dsh-test-captures'),
       env: { FIXTURE_REPORT: '', FIXTURE_BOOT_FILE: '' },
       toolCallTimeoutMs: 600_000,
     }))
@@ -995,10 +998,10 @@ describe('DSH native contracts', () => {
 
   it('materializes caller cancellation through the DSH tool registry', async () => {
     const root = await makeRoot()
-    const ctx = await mountComposition(root, { env: { FIXTURE_REPORT: '', FIXTURE_BOOT_FILE: '', FIXTURE_CALL_DELAY_MS: '8000' } })
+    const ctx = await mountComposition(root, { env: { FIXTURE_REPORT: '', FIXTURE_BOOT_FILE: '' } })
     const { agent } = await mintStandardAgent(ctx, 'cancel', root)
     const controller = new AbortController()
-    const pending = executeTool(ctx, agent, 'bash', { command: 'slow', description: 'Run slow command' }, { signal: controller.signal })
+    const pending = executeTool(ctx, agent, 'bash', { command: 'sleep 8', description: 'Run slow command' }, { signal: controller.signal })
     setTimeout(() => controller.abort(), 100)
     const result = await pending
     expect(result.isError).toBe(true)
@@ -1012,11 +1015,10 @@ describe('DSH native contracts', () => {
         FIXTURE_REPORT: join(root, 'report.json'),
         FIXTURE_BOOT_FILE: join(root, 'boot.txt'),
         FIXTURE_EXIT_FILE: join(root, 'exit.txt'),
-        FIXTURE_CALL_DELAY_MS: '8000',
       },
     })
     const { agent } = await mintStandardAgent(ctx, 'unload-call', root)
-    const pending = executeTool(ctx, agent, 'bash', { command: 'slow', description: 'Run slow command' })
+    const pending = executeTool(ctx, agent, 'bash', { command: 'sleep 8', description: 'Run slow command' })
     await new Promise(resolve => setTimeout(resolve, 100))
     const fiber = pluginFibers.at(-1)
     expect(fiber).toBeDefined()

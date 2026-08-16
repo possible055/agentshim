@@ -81,6 +81,7 @@ async function startRealComposition(
   mode: ToolPresentationMode = 'native',
   beforeAdapter?: (ctx: Context) => Promise<void>,
 ) {
+  const captureRoot = await mkdtemp(join(tmpdir(), 'agentshim-real-captures-'))
   const ctx = new Context()
   await ctx.plugin(SystemPrompt, {})
   if (mode !== 'native') await ctx.plugin(WorkerThreadCodeRuntime, {})
@@ -96,6 +97,7 @@ async function startRealComposition(
   const adapter = await ctx.plugin(agentshim, {
     root: repoRoot,
     readScope: 'normal',
+    captureRoot,
     env: {},
     toolCallTimeoutMs: MIN_TOOL_CALL_TIMEOUT_MS,
   })
@@ -128,6 +130,7 @@ async function startRealComposition(
     async dispose() {
       unregisterAgent()
       await adapter.dispose()
+      await rm(captureRoot, { recursive: true, force: true })
     },
   }
 }

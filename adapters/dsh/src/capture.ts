@@ -37,30 +37,35 @@ export function resolveCaptureRoot(value: string): string {
 
 const execFileAsync = promisify(execFile)
 
+async function currentUserSid(): Promise<string> {
+  const result = await execFileAsync('whoami.exe', ['/user', '/fo', 'csv', '/nh'], { windowsHide: true })
+  const match = result.stdout.match(/S-1-5-[0-9-]+/)
+  if (!match) throw new Error('dsh-agentshim: could not resolve current user SID')
+  return match[0]
+}
+
 async function secureWindowsDirectory(path: string): Promise<void> {
-  const inspect = [
-    '$ErrorActionPreference = "Stop"',
-    '$path = $env:AGENTSHIM_CAPTURE_ROOT',
-    '$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()',
-    '$sid = $identity.User',
-    '$verified = Get-Acl -LiteralPath $path',
-    '$sids = @($verified.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } | Sort-Object -Unique)',
-    'Write-Output ($verified.AreAccessRulesProtected.ToString() + "|" + ($sids -join ",") + "|" + $sid.Value)',
-  ].join('; ')
-  const runInspect = async () => {
-    const result = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', inspect], {
-      windowsHide: true,
-      env: { ...process.env, AGENTSHIM_CAPTURE_ROOT: path },
-    })
-    const [protectedAcl, principals, owner] = result.stdout.trim().split('|')
-    return { owner, valid: protectedAcl === 'True' && principals === owner }
-  }
-  const initial = await runInspect()
-  if (initial.valid) return
+  const sid = await currentUserSid()
   await execFileAsync('icacls.exe', [path, '/reset'], { windowsHide: true })
   await execFileAsync('icacls.exe', [path, '/inheritance:r'], { windowsHide: true })
-  await execFileAsync('icacls.exe', [path, '/grant:r', `*${initial.owner}:(OI)(CI)F`], { windowsHide: true })
-  if (!(await runInspect()).valid) throw new Error(`dsh-agentshim: owner-only DACL verification failed for ${path}`)
+  await execFileAsync('icacls.exe', [path, '/grant:r', `*${sid}:(OI)(CI)F`], { windowsHide: true })
+  let sidPresent = false
+  try {
+    await execFileAsync('icacls.exe', [path, '/findsid', `*${sid}`], { windowsHide: true })
+    sidPresent = true
+  } catch {
+    sidPresent = false
+  }
+  if (!sidPresent) {
+    throw new Error(`dsh-agentshim: owner-only DACL verification failed for ${path}`)
+  }
+  const listing = await execFileAsync('icacls.exe', [path], { windowsHide: true })
+  const aceCount = (listing.stdout.match(/:\(/g) ?? []).length
+  const hasInherited = listing.stdout.includes('(I)')
+  const hasFullControl = listing.stdout.includes('(F)')
+  if (aceCount !== 1 || hasInherited || !hasFullControl) {
+    throw new Error(`dsh-agentshim: owner-only DACL verification failed for ${path}`)
+  }
 }
 
 export async function ensureCaptureRoot(path: string): Promise<void> {
