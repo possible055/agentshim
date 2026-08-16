@@ -10,12 +10,13 @@ import ShellExecutor from '@deepseek-ai/dsh-shell'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import * as TimeoutPolicy from '@deepseek-ai/dsh-tool-call-timeout-policy'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it } from 'vitest'
-import * as codexshim from '../src/index.ts'
+import * as agentshim from '../src/index.ts'
 import { MIN_TOOL_CALL_TIMEOUT_MS } from '../src/session.ts'
 
 const repoRoot = fileURLToPath(new URL('../../..', import.meta.url))
-const enabled = process.env.CODEXSHIM_REAL_E2E === '1'
+const enabled = process.env.AGENTSHIM_REAL_E2E === '1'
 
 class UnconfinedShell extends ShellExecutor {
   override resolve(): never {
@@ -41,15 +42,32 @@ function resolveCargo(): string {
   return first.trim()
 }
 
+function registerInheritedCatalog(ctx: Context): void {
+  for (const name of ['read', 'grep', 'glob', 'bash']) {
+    const definition: ToolDefinition = {
+      name,
+      description: `inherited ${name}`,
+      parameters: { type: 'object', properties: {} },
+      output: {
+        schema: { type: 'string' },
+        render: (_args, value) => [{ type: 'text', text: value as string }],
+      },
+      execute: () => Promise.resolve(`inherited:${name}`),
+    }
+    ctx.tools.register(definition)
+  }
+}
+
 async function startRealComposition() {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt, {})
   await ctx.plugin(ToolRuntime)
+  registerInheritedCatalog(ctx)
   await ctx.plugin(TimeoutPolicy)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(LocalFileSystem, { cwd: repoRoot })
   await ctx.plugin(UnconfinedShell)
-  const adapter = await ctx.plugin(codexshim, {
+  const adapter = await ctx.plugin(agentshim, {
     root: repoRoot,
     command: resolveCargo(),
     commandArgs: ['run', '--locked', '--'],
@@ -58,7 +76,7 @@ async function startRealComposition() {
     toolCallTimeoutMs: MIN_TOOL_CALL_TIMEOUT_MS,
   })
 
-  const id = 'dsh-codexshim-real-e2e'
+  const id = 'dsh-agentshim-real-e2e'
   let agent!: Agent
   await ctx.plugin(Object.assign((inner: Context) => {
     const draft = {
@@ -105,8 +123,8 @@ describe.runIf(enabled)('real DSH composition and cargo server', () => {
   it('executes all five tools through DSH, the adapter, MCP, and cargo run', async () => {
     const composition = await startRealComposition()
     try {
-      expect(await callText(composition.ctx, composition.agent, 'read', { path: 'adapters/dsh/package.json' })).toContain('dsh-codexshim')
-      expect(await callText(composition.ctx, composition.agent, 'grep', { pattern: 'dsh-codexshim', path: 'adapters/dsh/package.json' })).toContain('package.json')
+      expect(await callText(composition.ctx, composition.agent, 'read', { path: 'adapters/dsh/package.json' })).toContain('dsh-agentshim')
+      expect(await callText(composition.ctx, composition.agent, 'grep', { pattern: 'dsh-agentshim', path: 'adapters/dsh/package.json' })).toContain('package.json')
       expect(await callText(composition.ctx, composition.agent, 'glob', { pattern: 'adapters/dsh/package.json' })).toContain('adapters/dsh/package.json')
       expect(await callText(composition.ctx, composition.agent, 'run_program', { program: process.execPath, args: ['--version'] })).toMatch(/v\d+/)
       expect(await callText(composition.ctx, composition.agent, 'bash', { command: 'node --version' })).toMatch(/v\d+/)
@@ -115,7 +133,7 @@ describe.runIf(enabled)('real DSH composition and cargo server', () => {
     }
   }, 180_000)
 
-  it.runIf(process.env.CODEXSHIM_LONG_E2E === '1')('keeps a DSH bash call alive past the generic MCP 60-second default', async () => {
+  it.runIf(process.env.AGENTSHIM_LONG_E2E === '1')('keeps a DSH bash call alive past the generic MCP 60-second default', async () => {
     const composition = await startRealComposition()
     try {
       const output = await callText(composition.ctx, composition.agent, 'bash', {

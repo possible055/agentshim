@@ -12,7 +12,7 @@ use crate::{
     tools::exec::{ProcessError, spawn::CLEANUP_DEADLINE},
 };
 
-pub(crate) const DETACHED_CALLS_ENV: &str = "CODEXSHIM_DETACHED_CALLS";
+pub(crate) const DETACHED_CALLS_ENV: &str = "AGENTSHIM_DETACHED_CALLS";
 pub(crate) const DEFAULT_DETACHED_CALLS: usize = 16;
 pub(crate) const MAX_DETACHED_CALLS: usize = 16;
 const QUIESCE_SLICE: Duration = Duration::from_millis(20);
@@ -185,7 +185,7 @@ impl DetachedTrees {
                 Ok(running) => running,
                 Err(error) => {
                     tracing::warn!(
-                        target: "codexshim",
+                        target: "agentshim",
                         event = "detached_liveness_degraded",
                         phase = "execution",
                         outcome = "degraded",

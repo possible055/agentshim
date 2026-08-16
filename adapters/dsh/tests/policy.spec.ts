@@ -28,15 +28,18 @@ describe('createProcessPolicy', () => {
     const args = { command: 'true' }
     await expect(policy.prepareArguments('bash', args, stubExec())).resolves.toBe(args)
     await expect(policy.prepareArguments('bash', { command: 'true', sandbox_permissions: 'danger-full-access', justification: 'x' }, stubExec()))
-      .rejects.toMatchObject({ code: 'CODEXSHIM_ESCALATION_UNAVAILABLE' })
+      .rejects.toMatchObject({ code: 'AGENTSHIM_ESCALATION_UNAVAILABLE' })
   })
 
   it('fails plugin creation when an executor confines without a sandbox policy', () => {
     expect(() => createProcessPolicy(stubContext({ shell: { sandboxMode: 'workspace-write' } }))).toThrow(/sandboxPolicy is missing/)
   })
 
-  it('fails plugin creation when the required shell service is missing', () => {
-    expect(() => createProcessPolicy(stubContext({}))).toThrow(/ctx\.shell is missing/)
+  it('treats a missing shell executor as unconfined, matching the minimal preset', async () => {
+    const policy = createProcessPolicy(stubContext({}))
+    expect(policy.advertisesEscalation).toBe(false)
+    const args = { command: 'true' }
+    await expect(policy.prepareArguments('bash', args, stubExec())).resolves.toBe(args)
   })
 
   function confinedPolicy(mode: string, outcome: string = 'allowed-once') {
@@ -54,7 +57,7 @@ describe('createProcessPolicy', () => {
     const { policy } = confinedPolicy('read-only')
     const error = await policy.prepareArguments('bash', { command: 'cargo test' }, stubExec())
       .then(() => { throw new Error('expected rejection') }, reason => reason)
-    expect(error).toMatchObject({ code: 'CODEXSHIM_PROCESS_REQUIRES_FULL_ACCESS' })
+    expect(error).toMatchObject({ code: 'AGENTSHIM_PROCESS_REQUIRES_FULL_ACCESS' })
     expect(error.message).toContain('sandbox_permissions')
     expect(error.message).toContain('danger-full-access')
     expect(error.message).toContain('justification')
@@ -82,7 +85,7 @@ describe('createProcessPolicy', () => {
   it('rejects a narrower escalation target and unpaired fields', async () => {
     const { policy } = confinedPolicy('workspace-write')
     await expect(policy.prepareArguments('bash', { command: 'x', sandbox_permissions: 'workspace-write', justification: 'n/a' }, stubExec()))
-      .rejects.toMatchObject({ code: 'CODEXSHIM_ESCALATION_TARGET_REJECTED' })
+      .rejects.toMatchObject({ code: 'AGENTSHIM_ESCALATION_TARGET_REJECTED' })
     await expect(policy.prepareArguments('bash', { command: 'x', sandbox_permissions: 'danger-full-access' }, stubExec()))
       .rejects.toThrow(/justification/)
     await expect(policy.prepareArguments('bash', { command: 'x', justification: 'orphan' }, stubExec()))
@@ -103,7 +106,7 @@ describe('createProcessPolicy', () => {
     const policy = createProcessPolicy(stubContext(services))
     services.shell = {}
     await expect(policy.prepareArguments('bash', { command: 'true' }, stubExec()))
-      .rejects.toMatchObject({ code: 'CODEXSHIM_PROCESS_POLICY_CHANGED' })
+      .rejects.toMatchObject({ code: 'AGENTSHIM_PROCESS_POLICY_CHANGED' })
   })
 
   it('resolves the current sandbox policy for every call and fails if it disappears', async () => {
@@ -122,7 +125,7 @@ describe('createProcessPolicy', () => {
 
     delete services.sandboxPolicy
     await expect(policy.prepareArguments('bash', { command: 'three' }, stubExec()))
-      .rejects.toMatchObject({ code: 'CODEXSHIM_PROCESS_POLICY_CHANGED' })
+      .rejects.toMatchObject({ code: 'AGENTSHIM_PROCESS_POLICY_CHANGED' })
   })
 })
 
@@ -159,8 +162,8 @@ describe('completeReadObservation', () => {
 })
 
 describe('assertExecutionWorld', () => {
-  it('fails with CODEXSHIM_EXECUTION_WORLD_MISMATCH for a non-local provider', async () => {
+  it('fails with AGENTSHIM_EXECUTION_WORLD_MISMATCH for a non-local provider', async () => {
     const ctx = { fs: { processPath: () => 'x' } } as unknown as Context
-    await expect(assertExecutionWorld(ctx, '/root')).rejects.toMatchObject({ code: 'CODEXSHIM_EXECUTION_WORLD_MISMATCH' })
+    await expect(assertExecutionWorld(ctx, '/root')).rejects.toMatchObject({ code: 'AGENTSHIM_EXECUTION_WORLD_MISMATCH' })
   })
 })

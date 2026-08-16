@@ -1,6 +1,6 @@
-[mcp_servers.codexshim]
+[mcp_servers.agentshim]
 required = true
-command = "/absolute/path/to/codexshim"
+command = "/absolute/path/to/agentshim"
 args = ["serve", "--client-profile", "codex"]
 # Unrestricted mode (default) allows any absolute read/grep/glob path. To
 # restrict to repository and Codex skill/plugin paths, use:

@@ -111,7 +111,7 @@ pub enum GlobError {
     Pattern(String),
     #[error(
         "retained glob paths exceed the configured memory limit; narrow pattern or offset, or \
-         raise CODEXSHIM_GLOB_MEMORY_BYTES"
+         raise AGENTSHIM_GLOB_MEMORY_BYTES"
     )]
     Memory,
     #[error("glob could not grow within the shared memory capacity; retry later")]
@@ -363,7 +363,7 @@ fn execute_inner_with_traversal(
         collection.store.retained_memory_bytes(),
     );
     if summary.skipped() > 0 {
-        tracing::warn!(target: "codexshim", event = "traversal_skipped", phase = "execution", outcome = "degraded_success", counters = %format!("io_errors={},escaped_entries={},non_unicode_entries={}", summary.io_errors, summary.escaped_entries, summary.non_unicode_entries));
+        tracing::warn!(target: "agentshim", event = "traversal_skipped", phase = "execution", outcome = "degraded_success", counters = %format!("io_errors={},escaped_entries={},non_unicode_entries={}", summary.io_errors, summary.escaped_entries, summary.non_unicode_entries));
     }
     let sort_span = profiler.span(GlobStage::FinalSort);
     let retained = collection.store.into_sorted(cancellation)?;

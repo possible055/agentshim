@@ -33,9 +33,9 @@ function resultText(content: unknown): string {
 }
 
 /**
- * The server error code as `CODEXSHIM_<SERVER_CODE>`: codexshim tool errors
+ * The server error code as `AGENTSHIM_<SERVER_CODE>`: agentshim tool errors
  * carry `{ error: { code } }` in structuredContent; a missing or malformed
- * payload falls back to `CODEXSHIM_TOOL_ERROR`. Only name/code survive the
+ * payload falls back to `AGENTSHIM_TOOL_ERROR`. Only name/code survive the
  * DSH tool registry, so nothing else is relied upon.
  */
 export function serverErrorCode(raw: Record<string, unknown>): string {
@@ -44,16 +44,16 @@ export function serverErrorCode(raw: Record<string, unknown>): string {
       ? raw.structuredContent.error.code
       : undefined
     : undefined
-  if (code === undefined) return 'CODEXSHIM_TOOL_ERROR'
+  if (code === undefined) return 'AGENTSHIM_TOOL_ERROR'
   const sanitized = code.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
-  return sanitized === '' ? 'CODEXSHIM_TOOL_ERROR' : `CODEXSHIM_${sanitized}`
+  return sanitized === '' ? 'AGENTSHIM_TOOL_ERROR' : `AGENTSHIM_${sanitized}`
 }
 
 /** Map an `isError: true` MCP result to the stable HarnessError the adapter throws. */
 export function mcpToolError(raw: Record<string, unknown>, toolName: string): HarnessError {
   const message = resultText(raw.content)
   return new HarnessError(
-    message === '' ? `codexshim tool "${toolName}" failed without a message` : message,
+    message === '' ? `agentshim tool "${toolName}" failed without a message` : message,
     serverErrorCode(raw),
   )
 }
@@ -66,12 +66,12 @@ export function mcpToolError(raw: Record<string, unknown>, toolName: string): Ha
 export function normalizeMcpResult(raw: Record<string, unknown>, toolName: string): NormalizedResult {
   if (raw.isError === true) throw mcpToolError(raw, toolName)
   if (!Array.isArray(raw.content)) {
-    throw new HarnessError(`codexshim tool "${toolName}" returned no content array`, 'CODEXSHIM_MALFORMED_RESULT')
+    throw new HarnessError(`agentshim tool "${toolName}" returned no content array`, 'AGENTSHIM_MALFORMED_RESULT')
   }
   const content: RawContentBlock[] = []
   for (const value of raw.content) {
     if (!isRecord(value)) {
-      throw new HarnessError(`codexshim tool "${toolName}" returned a non-object content block`, 'CODEXSHIM_UNSUPPORTED_CONTENT_BLOCK')
+      throw new HarnessError(`agentshim tool "${toolName}" returned a non-object content block`, 'AGENTSHIM_UNSUPPORTED_CONTENT_BLOCK')
     }
     if (value.type === 'text' && typeof value.text === 'string') {
       content.push({ type: 'text', text: value.text })
@@ -79,8 +79,8 @@ export function normalizeMcpResult(raw: Record<string, unknown>, toolName: strin
       content.push({ type: 'image', data: value.data, mimeType: value.mimeType })
     } else {
       throw new HarnessError(
-        `codexshim tool "${toolName}" returned an unsupported content block (type ${JSON.stringify(value.type)})`,
-        'CODEXSHIM_UNSUPPORTED_CONTENT_BLOCK',
+        `agentshim tool "${toolName}" returned an unsupported content block (type ${JSON.stringify(value.type)})`,
+        'AGENTSHIM_UNSUPPORTED_CONTENT_BLOCK',
       )
     }
   }
@@ -95,21 +95,21 @@ async function assertImageCapableRoute(ctx: Context, exec: ToolRunContext): Prom
   const model = routed?.model ?? exec.agent?.options.model
   const llm = ctx.get('llm')
   if (provider === undefined || model === undefined || llm === undefined) {
-    throw new HarnessError(`cannot deliver an image from codexshim: the current model route could not be resolved${PDF_TEXT_RETRY_HINT}`, 'CODEXSHIM_IMAGE_ROUTE_UNRESOLVED')
+    throw new HarnessError(`cannot deliver an image from agentshim: the current model route could not be resolved${PDF_TEXT_RETRY_HINT}`, 'AGENTSHIM_IMAGE_ROUTE_UNRESOLVED')
   }
   const active = await llm.resolveModelInfo(provider, model, exec.signal)
   if (active.inputModalities === undefined || !active.inputModalities.includes('image')) {
-    throw new HarnessError(`cannot deliver an image from codexshim: model "${model}" does not declare image input${PDF_TEXT_RETRY_HINT}`, 'CODEXSHIM_IMAGE_ROUTE_UNSUPPORTED')
+    throw new HarnessError(`cannot deliver an image from agentshim: model "${model}" does not declare image input${PDF_TEXT_RETRY_HINT}`, 'AGENTSHIM_IMAGE_ROUTE_UNSUPPORTED')
   }
 }
 
 function strictBase64Decode(data: string): Uint8Array {
   if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length % 4 !== 0) {
-    throw new HarnessError('codexshim returned an image block whose data is not strict base64', 'CODEXSHIM_INVALID_IMAGE_DATA')
+    throw new HarnessError('agentshim returned an image block whose data is not strict base64', 'AGENTSHIM_INVALID_IMAGE_DATA')
   }
   const decoded = Buffer.from(data, 'base64')
   if (decoded.toString('base64') !== data) {
-    throw new HarnessError('codexshim returned an image block whose data is not strict base64', 'CODEXSHIM_INVALID_IMAGE_DATA')
+    throw new HarnessError('agentshim returned an image block whose data is not strict base64', 'AGENTSHIM_INVALID_IMAGE_DATA')
   }
   return new Uint8Array(decoded)
 }
@@ -134,26 +134,26 @@ export async function materializeContent(
   }
   const attachments = ctx.get('attachments')
   if (attachments === undefined) {
-    throw new HarnessError(`cannot deliver an image from codexshim: no attachment service is mounted${PDF_TEXT_RETRY_HINT}`, 'CODEXSHIM_IMAGE_STORAGE_UNAVAILABLE')
+    throw new HarnessError(`cannot deliver an image from agentshim: no attachment service is mounted${PDF_TEXT_RETRY_HINT}`, 'AGENTSHIM_IMAGE_STORAGE_UNAVAILABLE')
   }
   await assertImageCapableRoute(ctx, exec)
   const limits = attachments.imageLimits
   if (images.length > limits.maxImagesPerMessage) {
-    throw new HarnessError(`codexshim returned ${images.length} images but this deployment allows at most ${limits.maxImagesPerMessage} per message${PDF_TEXT_RETRY_HINT}`, 'CODEXSHIM_IMAGE_LIMIT_EXCEEDED')
+    throw new HarnessError(`agentshim returned ${images.length} images but this deployment allows at most ${limits.maxImagesPerMessage} per message${PDF_TEXT_RETRY_HINT}`, 'AGENTSHIM_IMAGE_LIMIT_EXCEEDED')
   }
   const decoded = images.map(block => {
     if (!limits.mediaTypes.includes(block.mimeType as never)) {
-      throw new HarnessError(`codexshim returned an image with media type ${block.mimeType}, which this deployment does not accept${PDF_TEXT_RETRY_HINT}`, 'CODEXSHIM_IMAGE_LIMIT_EXCEEDED')
+      throw new HarnessError(`agentshim returned an image with media type ${block.mimeType}, which this deployment does not accept${PDF_TEXT_RETRY_HINT}`, 'AGENTSHIM_IMAGE_LIMIT_EXCEEDED')
     }
     const bytes = strictBase64Decode(block.data)
     if (bytes.byteLength > limits.maxImageBytes) {
-      throw new HarnessError(`codexshim returned an image of ${bytes.byteLength} bytes, above this deployment's ${limits.maxImageBytes}-byte per-image limit${PDF_TEXT_RETRY_HINT}`, 'CODEXSHIM_IMAGE_LIMIT_EXCEEDED')
+      throw new HarnessError(`agentshim returned an image of ${bytes.byteLength} bytes, above this deployment's ${limits.maxImageBytes}-byte per-image limit${PDF_TEXT_RETRY_HINT}`, 'AGENTSHIM_IMAGE_LIMIT_EXCEEDED')
     }
     return bytes
   })
   const aggregate = decoded.reduce((total, bytes) => total + bytes.byteLength, 0)
   if (aggregate > limits.maxMessageImageBytes) {
-    throw new HarnessError(`codexshim returned images totalling ${aggregate} bytes, above this deployment's ${limits.maxMessageImageBytes}-byte per-message limit${PDF_TEXT_RETRY_HINT}`, 'CODEXSHIM_IMAGE_LIMIT_EXCEEDED')
+    throw new HarnessError(`agentshim returned images totalling ${aggregate} bytes, above this deployment's ${limits.maxMessageImageBytes}-byte per-message limit${PDF_TEXT_RETRY_HINT}`, 'AGENTSHIM_IMAGE_LIMIT_EXCEEDED')
   }
   const inputs = images.map((block, index) => ({
     data: decoded[index] as Uint8Array,
@@ -176,7 +176,7 @@ export async function materializeContent(
   if (exec.parent !== undefined) {
     exec.deferContext(createUserMessage({
       content: blocks,
-      source: { kind: 'plugin', plugin: 'codexshim' },
+      source: { kind: 'plugin', plugin: 'agentshim' },
     }))
   }
   return blocks

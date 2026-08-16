@@ -128,7 +128,7 @@ impl DetachedTree {
                 Ok(_) => {}
                 Err(error) => {
                     tracing::warn!(
-                        target: "codexshim",
+                        target: "agentshim",
                         event = "detached_liveness_degraded",
                         phase = "execution",
                         outcome = "degraded",

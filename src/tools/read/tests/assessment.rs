@@ -96,7 +96,7 @@ fn assessment_never_decodes_pixels_or_renders() {
         let mut probe = request(name);
         probe.pages = Some(pages.to_owned());
         let (result, metrics) =
-            codexshim_pdf_read::measure(|| execute(&access, &probe, &cancellation));
+            agentshim_pdf_read::measure(|| execute(&access, &probe, &cancellation));
         assert!(
             matches!(result, Ok(_) | Err(ReadError::PdfImageRequired { .. })),
             "{name} pages={pages} produced an unexpected outcome"
@@ -225,7 +225,7 @@ fn image_mode_does_not_change_text_mode_behaviour() {
 
     // A text read after a render must still touch no renderer state.
     let (result, metrics) =
-        codexshim_pdf_read::measure(|| execute(&access, &request("document.pdf"), &cancellation));
+        agentshim_pdf_read::measure(|| execute(&access, &request("document.pdf"), &cancellation));
     result.expect("text read");
     assert_eq!(metrics.render_pixels, 0);
     assert_eq!(metrics.png_bytes, 0);

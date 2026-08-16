@@ -10,7 +10,7 @@ fn default_log_directory_from(local_app_data: Option<std::ffi::OsString>) -> io:
     local_app_data
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
-        .map(|path| path.join("codexshim").join("logs"))
+        .map(|path| path.join("agentshim").join("logs"))
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -36,11 +36,11 @@ fn default_log_directory_from(
                 "XDG_STATE_HOME must be an absolute path",
             ));
         }
-        return Ok(path.join("codexshim").join("logs"));
+        return Ok(path.join("agentshim").join("logs"));
     }
     home.map(PathBuf::from)
         .filter(|path| path.is_absolute())
-        .map(|path| path.join(".local/state/codexshim/logs"))
+        .map(|path| path.join(".local/state/agentshim/logs"))
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -166,7 +166,7 @@ mod tests {
         let directory = default_log_directory_from(Some(root.clone().into_os_string()), None)
             .expect("Unix state directory");
 
-        assert_eq!(directory, root.join("codexshim").join("logs"));
+        assert_eq!(directory, root.join("agentshim").join("logs"));
     }
 
     #[test]

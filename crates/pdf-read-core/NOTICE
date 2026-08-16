@@ -1,5 +1,5 @@
-codexshim-pdf-read
-Copyright 2026 codexshim contributors
+agentshim-pdf-read
+Copyright 2026 agentshim contributors
 
 This crate contains a modified, read-only derivative of PDFOxide source code.
 

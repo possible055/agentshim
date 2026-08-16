@@ -16,7 +16,7 @@ import { HarnessError } from '@deepseek-ai/dsh-llm'
 /** The only tool names this adapter may ever serve, in the server's fixed order. */
 export const EXPECTED_TOOL_ORDER = ['read', 'grep', 'glob', 'run_program', 'bash'] as const
 
-export type CodexshimToolName = (typeof EXPECTED_TOOL_ORDER)[number]
+export type AgentshimToolName = (typeof EXPECTED_TOOL_ORDER)[number]
 
 /** Lower bound for the per-call timeout: the DSH 600-second tool shelf. */
 export const MIN_TOOL_CALL_TIMEOUT_MS = 600_000
@@ -30,7 +30,7 @@ export const MIN_TOOL_CALL_TIMEOUT_MS = 600_000
 const RawCallToolResultSchema = z.record(z.string(), z.unknown())
 
 /**
- * Standard JSON Schema vocabulary the codexshim catalog uses that falls
+ * Standard JSON Schema vocabulary the agentshim catalog uses that falls
  * outside the DSH-supported subset: the numeric/string constraint keywords,
  * and schema-form `additionalProperties` (DSH only supports the boolean
  * form). These are omitted from the schema copy the startup gate asserts on,
@@ -45,7 +45,7 @@ const GENERATION_CLOSE_TIMEOUT_MS = 5_000
 export interface SessionConfigInput {
   /** Plugin working root; empty string resolves to `process.cwd()`. */
   readonly root: string
-  /** codexshim executable; empty string resolves to the platform install path. */
+  /** agentshim executable; empty string resolves to the platform install path. */
   readonly command: string
   /** Arguments placed before the fixed server argv (development wrappers only). */
   readonly commandArgs: readonly string[]
@@ -62,7 +62,7 @@ export interface ResolvedSessionConfig extends SessionConfigInput {
 }
 
 export interface CatalogEntry {
-  readonly name: CodexshimToolName
+  readonly name: AgentshimToolName
   readonly title: string | undefined
   readonly description: string
   /** Runtime input schema after the deterministic type-array rewrite. */
@@ -86,7 +86,7 @@ export interface SessionOptions {
   readonly logger?: SessionLogger
 }
 
-export interface CodexshimSession {
+export interface AgentshimSession {
   /** Settles with the first validated catalog; rejects on startup failure. */
   readonly ready: Promise<CatalogSnapshot>
   call(name: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Record<string, unknown>>
@@ -142,7 +142,7 @@ export function rewriteTypeArrays(schema: unknown): unknown {
     if (!Array.isArray(node.type)) return node
     const variants: unknown[] = node.type
     if (variants.length < 2 || variants.some(variant => typeof variant !== 'string')) {
-      throw new Error(`dsh-codexshim: catalog validation failed: type array must list at least two string types, got ${JSON.stringify(variants)}`)
+      throw new Error(`dsh-agentshim: catalog validation failed: type array must list at least two string types, got ${JSON.stringify(variants)}`)
     }
     const replacement: Record<string, unknown> = {
       oneOf: (variants as string[]).map(variant => ({ type: variant })),
@@ -189,7 +189,7 @@ export interface FingerprintRecord {
  * Deterministic identity of the drained catalog over name, description,
  * rewritten schema, and execution metadata. Two generations of the same
  * server must produce the same digest or reconnects fail with
- * `CODEXSHIM_CATALOG_CHANGED`.
+ * `AGENTSHIM_CATALOG_CHANGED`.
  */
 export function catalogFingerprint(tools: readonly FingerprintRecord[]): string {
   return createHash('sha256').update(canonicalJson(tools)).digest('hex')
@@ -210,12 +210,12 @@ export function validateCatalog(tools: readonly Tool[]): CatalogSnapshot {
   const names = tools.map(tool => tool.name)
   const duplicates = names.filter((name, index) => names.indexOf(name) !== index)
   if (duplicates.length > 0) {
-    throw new Error(`dsh-codexshim: catalog validation failed: server listed tools more than once: ${[...new Set(duplicates)].join(', ')}`)
+    throw new Error(`dsh-agentshim: catalog validation failed: server listed tools more than once: ${[...new Set(duplicates)].join(', ')}`)
   }
   if (names.join('\0') !== EXPECTED_TOOL_ORDER.join('\0')) {
     const expected = EXPECTED_TOOL_ORDER.join(', ')
     throw new Error(
-      `dsh-codexshim: catalog validation failed: server must list exactly [${expected}] in this order, got [${names.join(', ') || 'no tools'}]`,
+      `dsh-agentshim: catalog validation failed: server must list exactly [${expected}] in this order, got [${names.join(', ') || 'no tools'}]`,
     )
   }
   const entries: CatalogEntry[] = []
@@ -223,21 +223,21 @@ export function validateCatalog(tools: readonly Tool[]): CatalogSnapshot {
   for (const tool of tools) {
     const execution = toolExecution(tool)
     if (execution?.['taskSupport'] === 'required') {
-      throw new Error(`dsh-codexshim: catalog validation failed: tool "${tool.name}" requires task-based execution, which this adapter does not support`)
+      throw new Error(`dsh-agentshim: catalog validation failed: tool "${tool.name}" requires task-based execution, which this adapter does not support`)
     }
     if (typeof tool.description !== 'string') {
-      throw new Error(`dsh-codexshim: catalog validation failed: tool "${tool.name}" has no string description`)
+      throw new Error(`dsh-agentshim: catalog validation failed: tool "${tool.name}" has no string description`)
     }
     if (!isRecord(tool.inputSchema)) {
-      throw new Error(`dsh-codexshim: catalog validation failed: tool "${tool.name}" inputSchema is not an object`)
+      throw new Error(`dsh-agentshim: catalog validation failed: tool "${tool.name}" inputSchema is not an object`)
     }
     const parameters = rewriteTypeArrays(tool.inputSchema) as Record<string, unknown>
     try {
       assertSupportedJsonSchema(projectSchemaForGate(parameters))
     } catch (error) {
-      throw new Error(`dsh-codexshim: catalog validation failed: tool "${tool.name}" inputSchema is outside the supported subset: ${String(error)}`)
+      throw new Error(`dsh-agentshim: catalog validation failed: tool "${tool.name}" inputSchema is outside the supported subset: ${String(error)}`)
     }
-    const name = tool.name as CodexshimToolName
+    const name = tool.name as AgentshimToolName
     const title = typeof tool.title === 'string' ? tool.title : undefined
     entries.push({ name, title, description: tool.description, parameters })
     records.push({
@@ -253,19 +253,19 @@ export function validateCatalog(tools: readonly Tool[]): CatalogSnapshot {
   return { tools: entries, fingerprint: catalogFingerprint(records) }
 }
 
-/** The platform's standard codexshim install path; fails loud when the base env is missing. */
+/** The platform's standard agentshim install path; fails loud when the base env is missing. */
 export function defaultInstallCommand(): string {
   if (process.platform === 'win32') {
     const localAppData = process.env.LOCALAPPDATA
     if (localAppData === undefined || localAppData === '') {
-      throw new Error("dsh-codexshim: cannot resolve the default codexshim path: LOCALAPPDATA is not set; set the plugin's `command` config to the codexshim executable")
+      throw new Error("dsh-agentshim: cannot resolve the default agentshim path: LOCALAPPDATA is not set; set the plugin's `command` config to the agentshim executable")
     }
-    return join(localAppData, 'codexshim', 'bin', 'codexshim.exe')
+    return join(localAppData, 'agentshim', 'bin', 'agentshim.exe')
   }
   const dataHome = process.env.XDG_DATA_HOME && process.env.XDG_DATA_HOME !== ''
     ? process.env.XDG_DATA_HOME
     : join(homedir(), '.local', 'share')
-  return join(dataHome, 'codexshim', 'bin', 'codexshim')
+  return join(dataHome, 'agentshim', 'bin', 'agentshim')
 }
 
 /**
@@ -277,33 +277,33 @@ export function defaultInstallCommand(): string {
 export async function resolveSessionConfig(input: SessionConfigInput): Promise<ResolvedSessionConfig> {
   const rawRoot = input.root === '' ? process.cwd() : input.root
   if (!isAbsolute(rawRoot)) {
-    throw new Error(`dsh-codexshim: root must be an absolute path, got ${JSON.stringify(input.root)}`)
+    throw new Error(`dsh-agentshim: root must be an absolute path, got ${JSON.stringify(input.root)}`)
   }
   let root: string
   try {
     root = await realpath(rawRoot)
   } catch (error) {
-    throw new Error(`dsh-codexshim: root ${JSON.stringify(rawRoot)} does not exist: ${String(error)}`)
+    throw new Error(`dsh-agentshim: root ${JSON.stringify(rawRoot)} does not exist: ${String(error)}`)
   }
   const rootStat = await stat(root)
   if (!rootStat.isDirectory()) {
-    throw new Error(`dsh-codexshim: root ${JSON.stringify(root)} is not a directory`)
+    throw new Error(`dsh-agentshim: root ${JSON.stringify(root)} is not a directory`)
   }
   const defaultCommand = defaultInstallCommand()
   const command = input.command === '' ? defaultCommand : input.command
   if (!isAbsolute(command)) {
-    throw new Error(`dsh-codexshim: command must be an absolute path, got ${JSON.stringify(input.command)} (platform default: ${defaultCommand})`)
+    throw new Error(`dsh-agentshim: command must be an absolute path, got ${JSON.stringify(input.command)} (platform default: ${defaultCommand})`)
   }
   try {
     const commandStat = await stat(command)
     if (!commandStat.isFile()) {
-      throw new Error(`dsh-codexshim: command ${JSON.stringify(command)} is not a file; set the plugin's \`command\` config to the codexshim executable`)
+      throw new Error(`dsh-agentshim: command ${JSON.stringify(command)} is not a file; set the plugin's \`command\` config to the agentshim executable`)
     }
   } catch (error) {
     throw new Error(
-      `dsh-codexshim: codexshim executable not found at ${JSON.stringify(command)}`
+      `dsh-agentshim: agentshim executable not found at ${JSON.stringify(command)}`
       + `${input.command === '' ? ' (resolved platform default)' : ''}: ${String(error)}`
-      + " — install codexshim or set the plugin's `command` config",
+      + " — install agentshim or set the plugin's `command` config",
       { cause: error instanceof Error ? error : undefined },
     )
   }
@@ -311,14 +311,14 @@ export async function resolveSessionConfig(input: SessionConfigInput): Promise<R
     try {
       await access(command, fsConstants.X_OK)
     } catch (error) {
-      throw new Error(`dsh-codexshim: command ${JSON.stringify(command)} is not executable: ${String(error)}`)
+      throw new Error(`dsh-agentshim: command ${JSON.stringify(command)} is not executable: ${String(error)}`)
     }
   }
   if (input.readScope !== 'normal' && input.readScope !== 'unrestricted') {
-    throw new Error(`dsh-codexshim: readScope must be "normal" or "unrestricted", got ${JSON.stringify(input.readScope)}`)
+    throw new Error(`dsh-agentshim: readScope must be "normal" or "unrestricted", got ${JSON.stringify(input.readScope)}`)
   }
   if (!Number.isFinite(input.toolCallTimeoutMs) || input.toolCallTimeoutMs < MIN_TOOL_CALL_TIMEOUT_MS) {
-    throw new Error(`dsh-codexshim: toolCallTimeoutMs must be a finite number >= ${MIN_TOOL_CALL_TIMEOUT_MS}, got ${String(input.toolCallTimeoutMs)}`)
+    throw new Error(`dsh-agentshim: toolCallTimeoutMs must be a finite number >= ${MIN_TOOL_CALL_TIMEOUT_MS}, got ${String(input.toolCallTimeoutMs)}`)
   }
   return { ...input, root, command }
 }
@@ -351,13 +351,13 @@ function abortError(): HarnessError {
 }
 
 /**
- * One private codexshim MCP session: spawns `codexshim serve` over stdio,
+ * One private agentshim MCP session: spawns `agentshim serve` over stdio,
  * validates the five-tool catalog before going live, serves raw tools/call
  * requests, and reconnects at most once per new call after an unexpected
  * close — never on a timer, never replaying in-flight calls.
  */
-export function createSession(config: ResolvedSessionConfig, options: SessionOptions = {}): CodexshimSession {
-  const createClient = options.createClient ?? (() => new Client({ name: 'dsh-codexshim', version: '0.0.1' }, { capabilities: {} }))
+export function createSession(config: ResolvedSessionConfig, options: SessionOptions = {}): AgentshimSession {
+  const createClient = options.createClient ?? (() => new Client({ name: 'dsh-agentshim', version: '0.0.1' }, { capabilities: {} }))
   const logger: SessionLogger = options.logger ?? console
   const args = serverArgs(config)
   const env = childEnv(config.env)
@@ -392,7 +392,7 @@ export function createSession(config: ResolvedSessionConfig, options: SessionOpt
 
   async function connectGeneration(): Promise<{ generation: Generation; snapshot: CatalogSnapshot }> {
     if (previousClosed !== undefined) await previousClosed
-    if (disposed) throw new Error('dsh-codexshim: session is disposed')
+    if (disposed) throw new Error('dsh-agentshim: session is disposed')
     const client = createClient()
     const closed = Promise.withResolvers<void>()
     const generation: Generation = { client, closed: closed.promise }
@@ -403,7 +403,7 @@ export function createSession(config: ResolvedSessionConfig, options: SessionOpt
       previousClosed = closed.promise
       if (attemptSettled && current === generation) {
         current = undefined
-        logger.warn('dsh-codexshim: codexshim server closed unexpectedly; the next tool call attempts one reconnect')
+        logger.warn('dsh-agentshim: agentshim server closed unexpectedly; the next tool call attempts one reconnect')
       }
     }
     let snapshot: CatalogSnapshot
@@ -412,8 +412,8 @@ export function createSession(config: ResolvedSessionConfig, options: SessionOpt
       snapshot = await drainCatalog(client)
       if (expectedFingerprint !== undefined && snapshot.fingerprint !== expectedFingerprint) {
         throw new HarnessError(
-          `dsh-codexshim: server catalog changed after reconnect (expected fingerprint ${expectedFingerprint}, got ${snapshot.fingerprint}); reload the plugin to re-register the tools`,
-          'CODEXSHIM_CATALOG_CHANGED',
+          `dsh-agentshim: server catalog changed after reconnect (expected fingerprint ${expectedFingerprint}, got ${snapshot.fingerprint}); reload the plugin to re-register the tools`,
+          'AGENTSHIM_CATALOG_CHANGED',
         )
       }
     } catch (error) {
@@ -423,7 +423,7 @@ export function createSession(config: ResolvedSessionConfig, options: SessionOpt
       try { await client.close() } catch { /* transport already gone */ }
       previousClosed = closed.promise
       if (!await awaitClosed(closed.promise)) {
-        logger.error(`dsh-codexshim: failed generation did not close within ${GENERATION_CLOSE_TIMEOUT_MS}ms; not starting an overlapping server process`)
+        logger.error(`dsh-agentshim: failed generation did not close within ${GENERATION_CLOSE_TIMEOUT_MS}ms; not starting an overlapping server process`)
       }
       throw error
     }
@@ -435,7 +435,7 @@ export function createSession(config: ResolvedSessionConfig, options: SessionOpt
   }
 
   async function ensureGeneration(): Promise<Generation> {
-    if (disposed) throw new Error('dsh-codexshim: session is disposed')
+    if (disposed) throw new Error('dsh-agentshim: session is disposed')
     if (current !== undefined) return current
     connecting ??= startConnecting()
     return (await connecting).generation
@@ -496,7 +496,7 @@ export function createSession(config: ResolvedSessionConfig, options: SessionOpt
       for (const generation of generations) {
         try { await generation.client.close() } catch { /* transport already gone */ }
         if (!await awaitClosed(generation.closed)) {
-          logger.error(`dsh-codexshim: server did not close within ${GENERATION_CLOSE_TIMEOUT_MS}ms during teardown; its detached process trees may not have been collected`)
+          logger.error(`dsh-agentshim: server did not close within ${GENERATION_CLOSE_TIMEOUT_MS}ms during teardown; its detached process trees may not have been collected`)
         }
       }
       if (connecting !== undefined) await connecting.catch(() => {})

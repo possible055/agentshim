@@ -20,6 +20,89 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentshim"
+version = "0.1.4-alpha.1"
+dependencies = [
+ "agentshim-gigatoken",
+ "agentshim-pdf-read",
+ "base64",
+ "cap-std",
+ "chardetng",
+ "chrono",
+ "encoding_rs",
+ "globset",
+ "grep-matcher",
+ "grep-regex",
+ "grep-searcher",
+ "ignore",
+ "libc",
+ "log",
+ "rayon",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "agentshim-gigatoken"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "rustc-hash",
+ "sha2 0.10.9",
+ "thiserror",
+ "unicode-general-category",
+]
+
+[[package]]
+name = "agentshim-pdf-read"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "brotli",
+ "byteorder",
+ "bytes",
+ "cbc",
+ "encoding_rs",
+ "fast_image_resize",
+ "fax",
+ "flate2",
+ "fontdb",
+ "harfrust",
+ "hayro-jbig2",
+ "hayro-jpeg2000",
+ "image",
+ "jpeg-decoder",
+ "log",
+ "md-5",
+ "memchr",
+ "nom",
+ "phf",
+ "qcms",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "smallvec",
+ "stringprep",
+ "tempfile",
+ "thiserror",
+ "tiny-skia",
+ "ttf-parser",
+ "unicode-bidi",
+ "unicode-normalization",
+ "weezl",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -288,89 +371,6 @@ checksum = "e8cf2a2c93cd704877c0858356ed03480ff301ee950b43f1cbe4573b088bfa6c"
 dependencies = [
  "crypto-common 0.2.2",
  "inout",
-]
-
-[[package]]
-name = "codexshim"
-version = "0.1.4-alpha.1"
-dependencies = [
- "base64",
- "cap-std",
- "chardetng",
- "chrono",
- "codexshim-gigatoken",
- "codexshim-pdf-read",
- "encoding_rs",
- "globset",
- "grep-matcher",
- "grep-regex",
- "grep-searcher",
- "ignore",
- "libc",
- "log",
- "rayon",
- "rmcp",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "codexshim-gigatoken"
-version = "0.1.0"
-dependencies = [
- "base64",
- "rustc-hash",
- "sha2 0.10.9",
- "thiserror",
- "unicode-general-category",
-]
-
-[[package]]
-name = "codexshim-pdf-read"
-version = "0.1.0"
-dependencies = [
- "aes",
- "brotli",
- "byteorder",
- "bytes",
- "cbc",
- "encoding_rs",
- "fast_image_resize",
- "fax",
- "flate2",
- "fontdb",
- "harfrust",
- "hayro-jbig2",
- "hayro-jpeg2000",
- "image",
- "jpeg-decoder",
- "log",
- "md-5",
- "memchr",
- "nom",
- "phf",
- "qcms",
- "regex",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "smallvec",
- "stringprep",
- "tempfile",
- "thiserror",
- "tiny-skia",
- "ttf-parser",
- "unicode-bidi",
- "unicode-normalization",
- "weezl",
 ]
 
 [[package]]

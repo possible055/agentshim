@@ -2,7 +2,7 @@ mod corpus;
 
 use std::io::{Seek, SeekFrom, Write};
 
-use codexshim_pdf_read::{MarkdownOptions, ParserLimits, PdfReadDocument, RenderLimits};
+use agentshim_pdf_read::{MarkdownOptions, ParserLimits, PdfReadDocument, RenderLimits};
 
 fn open(bytes: &[u8]) -> Result<PdfReadDocument, String> {
     let mut file = tempfile::tempfile().unwrap();

@@ -1,8 +1,8 @@
-# codexshim
+# AgentShim
 
 English | [简体中文](README.zh-CN.md)
 
-`codexshim` gives Codex and Cursor a small, focused set of tools for working with source code, with first-class Windows x86-64 support and compatibility releases for Linux and macOS. It runs as a local stdio MCP server and treats the directory you start it in as the repository root.
+AgentShim gives coding agents a small, focused set of tools for working with source code. Codex and Cursor connect to its local stdio MCP server; DSH uses the native adapter in this repository. The server treats the directory you start it in as the repository root and provides first-class Windows x86-64 support with compatibility releases for Linux and macOS.
 
 ## Why use it
 
@@ -26,13 +26,13 @@ English | [简体中文](README.zh-CN.md)
 **Windows (PowerShell):**
 
 ```powershell
-irm https://github.com/possible055/codexshim/releases/latest/download/install.ps1 | iex
+irm https://github.com/possible055/agentshim/releases/latest/download/install.ps1 | iex
 ```
 
 **Linux / macOS:**
 
 ```sh
-curl -fsSL https://github.com/possible055/codexshim/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/possible055/agentshim/releases/latest/download/install.sh | sh
 ```
 
 Re-run the same command to update. Install a specific version with `-Version` (PowerShell) or `--version` (sh).
@@ -43,19 +43,21 @@ Re-run the same command to update. Install a specific version with `-Version` (P
 cargo build --release --locked
 ```
 
-The binary is at `target/release/codexshim` (Linux and macOS) or `target/release/codexshim.exe` (Windows).
+The binary is at `target/release/agentshim` (Linux and macOS) or `target/release/agentshim.exe` (Windows).
+
+An existing `codexshim` installation is not removed or overwritten. After installing AgentShim, update each client to the new executable and MCP server name, verify the five tools, and then remove the old installation if it is no longer needed.
 
 ## Configure Codex
 
-Copy the matching example into `~/.codex/config.toml` (user-level) or a project's `.codex/config.toml`, then replace `command` with the absolute path to your `codexshim` binary:
+Copy the matching example into `~/.codex/config.toml` (user-level) or a project's `.codex/config.toml`, then replace `command` with the absolute path to your `agentshim` binary:
 
 - [Windows example](config/codex.windows.toml.example)
 - [Linux example](config/codex.linux.toml.example)
 - [macOS example](config/codex.macos.toml.example)
 
 ```toml
-[mcp_servers.codexshim]
-command = "/absolute/path/to/codexshim"
+[mcp_servers.agentshim]
+command = "/absolute/path/to/agentshim"
 args = ["serve", "--client-profile", "codex"]
 required = true
 supports_parallel_tool_calls = true
@@ -64,10 +66,10 @@ tool_timeout_sec = 600
 enabled_tools = ["read", "grep", "glob", "run_program", "bash"]
 default_tools_approval_mode = "writes"
 
-[mcp_servers.codexshim.tools.run_program]
+[mcp_servers.agentshim.tools.run_program]
 approval_mode = "on-request"
 
-[mcp_servers.codexshim.tools.bash]
+[mcp_servers.agentshim.tools.bash]
 approval_mode = "prompt"
 ```
 
@@ -78,9 +80,9 @@ Copy the [Cursor example](config/cursor.mcp.json.example) to `~/.cursor/mcp.json
 ```json
 {
   "mcpServers": {
-    "codexshim": {
+    "agentshim": {
       "type": "stdio",
-      "command": "/absolute/path/to/codexshim",
+      "command": "/absolute/path/to/agentshim",
       "args": ["serve", "--client-profile", "cursor"]
     }
   }
@@ -88,6 +90,20 @@ Copy the [Cursor example](config/cursor.mcp.json.example) to `~/.cursor/mcp.json
 ```
 
 On Windows, JSON paths must escape each backslash.
+
+## Configure DSH
+
+Install the AgentShim binary first, then build and install the native adapter into a DSH profile:
+
+```sh
+cd adapters/dsh
+pnpm install --frozen-lockfile
+pnpm pack
+dsh plugin --profile <profile> add /absolute/path/to/dsh-agentshim-0.1.0.tgz
+dsh --profile <profile> --dump-config
+```
+
+Publishing `dsh-agentshim` to npm is not required for tarball installation. Once the package is published, the shorter `dsh plugin --profile <profile> add dsh-agentshim` form can be used. See the [DSH adapter guide](adapters/dsh/README.md) for prerequisites, configuration, sandbox approval behavior, and removal.
 
 ## Options
 
@@ -107,7 +123,7 @@ Selects the aggregate burst policy. These layers are separate limits, not a sing
 | `codex` (default) | 8,192 | 16,384 |
 | `cursor` | 8,192 | 32,768 |
 
-`CODEXSHIM_IDLE_TIMEOUT` enables idle shutdown for the `codex` profile. The `cursor` profile always disables the watchdog, but setting an invalid value still fails startup.
+`AGENTSHIM_IDLE_TIMEOUT` enables idle shutdown for the `codex` profile. The `cursor` profile always disables the watchdog, but setting an invalid value still fails startup.
 
 ### `--read-scope`
 
@@ -166,20 +182,20 @@ The response tells you how far it got and how to continue. A document that mixes
 | Variable | Default | Description |
 | --- | --- | --- |
 | `CODEX_MCP_PROTOCOL_VERSION` | — | MCP protocol version advertised to Codex. |
-| `CODEXSHIM_PROCESS_CALLS` | `16` | Per-instance concurrent process-call limit; 1–32. |
-| `CODEXSHIM_DETACHED_CALLS` | `16` | Per-instance live detached `bash` trees; 1–16. |
-| `CODEXSHIM_OUTPUT_BYTES` | `32000` | Per-call output ceiling in bytes; 4096–262144. |
-| `CODEXSHIM_BURST_TOKENS` | profile default | Shared projected model-token budget; 2048–32768. |
-| `CODEXSHIM_TOOL_TIMEOUT_SHELF` | `600` | The shelf value the server stays below so the client's `tool_timeout_sec` fires after the server's own Timeout. Effective max execution time is shelf minus 10 seconds; 15–3600. |
-| `CODEXSHIM_IDLE_TIMEOUT` | off | Idle shutdown in seconds for the `codex` profile only; 1–86400. Inbound JSON-RPC messages reset the deadline, and active foreground calls or detached trees defer shutdown. |
-| `CODEXSHIM_GREP_MEMORY_BYTES` | `268435456` | Per-call hard limit for retained `grep` candidates. |
-| `CODEXSHIM_GLOB_MEMORY_BYTES` | `33554432` | Per-call hard limit for retained `glob` matches. |
-| `CODEXSHIM_PDF_TEXT_MEMORY_BYTES` | `67108864` | Per-call memory budget for `auto`/`text` PDF reads. |
-| `CODEXSHIM_PDF_IMAGE_MEMORY_BYTES` | `100663296` | Per-call memory budget for `image` PDF reads. |
-| `CODEXSHIM_BASH` | probed | Absolute path to a GNU bash. |
-| `CODEXSHIM_LOG_MODE` | `errors` | One of `off`, `errors`, `all`. |
-| `CODEXSHIM_LOG_DIR` | platform default | Override the log directory with an absolute path. |
-| `CODEXSHIM_RESPECT_GITIGNORE` | `false` | When `true`, `grep` and `glob` apply `.gitignore` / `.ignore` filters. Omitted `include_ignored` follows this default. Because the caller cannot read this setting, an empty result under active filtering ends with a line recommending `include_ignored=true`. `.git` and `node_modules`, `target`, `.venv`, `venv`, `dist`, `build`, `__pycache__` stay excluded either way. Binary, output-budget, and memory limits still apply. |
+| `AGENTSHIM_PROCESS_CALLS` | `16` | Per-instance concurrent process-call limit; 1–32. |
+| `AGENTSHIM_DETACHED_CALLS` | `16` | Per-instance live detached `bash` trees; 1–16. |
+| `AGENTSHIM_OUTPUT_BYTES` | `32000` | Per-call output ceiling in bytes; 4096–262144. |
+| `AGENTSHIM_BURST_TOKENS` | profile default | Shared projected model-token budget; 2048–32768. |
+| `AGENTSHIM_TOOL_TIMEOUT_SHELF` | `600` | The shelf value the server stays below so the client's `tool_timeout_sec` fires after the server's own Timeout. Effective max execution time is shelf minus 10 seconds; 15–3600. |
+| `AGENTSHIM_IDLE_TIMEOUT` | off | Idle shutdown in seconds for the `codex` profile only; 1–86400. Inbound JSON-RPC messages reset the deadline, and active foreground calls or detached trees defer shutdown. |
+| `AGENTSHIM_GREP_MEMORY_BYTES` | `268435456` | Per-call hard limit for retained `grep` candidates. |
+| `AGENTSHIM_GLOB_MEMORY_BYTES` | `33554432` | Per-call hard limit for retained `glob` matches. |
+| `AGENTSHIM_PDF_TEXT_MEMORY_BYTES` | `67108864` | Per-call memory budget for `auto`/`text` PDF reads. |
+| `AGENTSHIM_PDF_IMAGE_MEMORY_BYTES` | `100663296` | Per-call memory budget for `image` PDF reads. |
+| `AGENTSHIM_BASH` | probed | Absolute path to a GNU bash. |
+| `AGENTSHIM_LOG_MODE` | `errors` | One of `off`, `errors`, `all`. |
+| `AGENTSHIM_LOG_DIR` | platform default | Override the log directory with an absolute path. |
+| `AGENTSHIM_RESPECT_GITIGNORE` | `false` | When `true`, `grep` and `glob` apply `.gitignore` / `.ignore` filters. Omitted `include_ignored` follows this default. Because the caller cannot read this setting, an empty result under active filtering ends with a line recommending `include_ignored=true`. `.git` and `node_modules`, `target`, `.venv`, `venv`, `dist`, `build`, `__pycache__` stay excluded either way. Binary, output-budget, and memory limits still apply. |
 
 The idle watchdog rechecks the activity timestamp after confirming quiescence before it
 cancels the existing graceful-shutdown token. A request arriving in the final interval
@@ -190,17 +206,17 @@ accepts that narrow boundary condition.
 
 Logs are UTC-dated JSONL files:
 
-- Windows: `%LOCALAPPDATA%\codexshim\logs`
-- Linux: `${XDG_STATE_HOME:-$HOME/.local/state}/codexshim/logs`
+- Windows: `%LOCALAPPDATA%\agentshim\logs`
+- Linux: `${XDG_STATE_HOME:-$HOME/.local/state}/agentshim/logs`
 
 Retention: 512 MiB total, 30 days. Inspect or purge:
 
 ```console
-codexshim logs status
-codexshim logs purge
+agentshim logs status
+agentshim logs purge
 ```
 
-Records contain identifiers, phases, outcomes, timings, and error classes — never MCP arguments, grep patterns, process arguments, stdin, file contents, or stdout/stderr. Set `CODEXSHIM_LOG_MODE=all` while reproducing tool-loading failures.
+Records contain identifiers, phases, outcomes, timings, and error classes — never MCP arguments, grep patterns, process arguments, stdin, file contents, or stdout/stderr. Set `AGENTSHIM_LOG_MODE=all` while reproducing tool-loading failures.
 
 ## Acknowledgments
 

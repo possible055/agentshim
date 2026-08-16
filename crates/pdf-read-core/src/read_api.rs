@@ -224,7 +224,7 @@ pub struct RenderedPage {
     pub height_pixels: u32,
 }
 
-/// An immutable, file-backed PDF document for `codexshim` reads.
+/// An immutable, file-backed PDF document for `agentshim` reads.
 pub struct PdfReadDocument {
     document: PdfDocument,
 }

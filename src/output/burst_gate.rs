@@ -8,7 +8,7 @@ use std::{
 
 use crate::profile::CURSOR_BURST_TOKENS;
 
-pub(crate) const BURST_TOKENS_ENV: &str = "CODEXSHIM_BURST_TOKENS";
+pub(crate) const BURST_TOKENS_ENV: &str = "AGENTSHIM_BURST_TOKENS";
 pub(crate) const MIN_BURST_TOKENS: usize = 2_048;
 pub(crate) const MAX_BURST_TOKENS: usize = CURSOR_BURST_TOKENS;
 pub(crate) const BURST_QUIET_PERIOD: Duration = Duration::from_secs(2);
@@ -100,7 +100,7 @@ impl BurstOutputGate {
         let unclaimed_calls = state.unclaimed_calls;
         drop(state);
         tracing::trace!(
-            target: "codexshim",
+            target: "agentshim",
             event = "burst_begin",
             burst_id,
             active_calls,
@@ -163,7 +163,7 @@ impl BurstTicket {
         drop(burst);
         drop(ticket);
         tracing::trace!(
-            target: "codexshim",
+            target: "agentshim",
             event = "burst_claim",
             burst_id,
             active_calls,
@@ -212,7 +212,7 @@ impl BurstTicket {
         drop(burst);
         drop(ticket);
         tracing::trace!(
-            target: "codexshim",
+            target: "agentshim",
             event = "burst_finish",
             burst_id,
             active_calls,

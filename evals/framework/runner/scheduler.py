@@ -270,7 +270,7 @@ class BenchmarkRunner:
     def _eligible_targets(self, tool: str) -> list[str]:
         names = [name for name in self.target_names if name in self.adapters]
         if self.suite == "run-program":
-            return [name for name in names if name == "codexshim"]
+            return [name for name in names if name == "agentshim"]
         if self.suite == "pdf":
             return [name for name in names if self.adapters[name].supports_pdf_read()]
         return [name for name in names if self.adapters[name].supports_tool(tool)]
@@ -306,7 +306,7 @@ class BenchmarkRunner:
                         continue
                     if target_name not in eligible:
                         reason = (
-                            "run_program is measured only on codexshim"
+                            "run_program is measured only on agentshim"
                             if self.suite == "run-program"
                             else f"{target_name} does not implement PDF read"
                             if self.suite == "pdf"

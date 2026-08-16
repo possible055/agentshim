@@ -45,7 +45,7 @@ impl FileWorkPool {
     pub fn try_credit(&self) -> Option<FileWorkCredit> {
         if self.poisoned.load(Ordering::Acquire) {
             if !self.poison_warning_emitted.swap(true, Ordering::AcqRel) {
-                tracing::warn!(target: "codexshim", event = "file_work_pool_poisoned", outcome = "inline_fallback");
+                tracing::warn!(target: "agentshim", event = "file_work_pool_poisoned", outcome = "inline_fallback");
             }
             return None;
         }
@@ -121,7 +121,7 @@ impl FileWorkPool {
                 let panic_poisoned = Arc::clone(&self.poisoned);
                 let built = ThreadPoolBuilder::new()
                     .num_threads(self.extra_threads)
-                    .thread_name(|index| format!("codexshim-file-{index}"))
+                    .thread_name(|index| format!("agentshim-file-{index}"))
                     .panic_handler(move |_| {
                         panic_poisoned.store(true, Ordering::Release);
                     })

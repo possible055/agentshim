@@ -3,8 +3,8 @@ from typing import Any
 from .mcp import CargoMcpAdapter, ExternalToolMap
 
 
-class CodexshimAdapter(CargoMcpAdapter):
-    def __init__(self, name: str = "codexshim", config: dict[str, Any] | None = None):
+class AgentshimAdapter(CargoMcpAdapter):
+    def __init__(self, name: str = "agentshim", config: dict[str, Any] | None = None):
         super().__init__(name, config)
 
     def supports_pdf_read(self) -> bool:

@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 #[cfg(feature = "bench-internals")]
 use super::profile::ProfiledGrep;
 use super::{
-    candidates::{Candidate, collect_candidates},
+    candidates::collect_candidates,
     file_search::SearchPlan,
     ordered::{OrderedSearchContext, ordered_search},
     profile::{GrepProfiler, GrepStage},
@@ -30,20 +30,121 @@ pub(super) const MEMORY_SOURCE_BYTES: usize = 16 * 1024;
 pub(super) const SEARCH_HEAP_BYTES: usize = 8 * 1024 * 1024;
 pub(super) const CAPTURE_MEMORY_BYTES: usize = 8 * 1024 * 1024;
 pub(super) const PAGE_MEMORY_BYTES: usize = 48 * 1024;
+const CANDIDATE_HEADROOM_BYTES: usize = 1024 * 1024;
 pub(super) const PARALLEL_BATCH_SIZE: usize = 256;
 pub(super) const CONTENT_SEARCH_BATCH_SIZE: usize = 8;
 pub(super) const STREAM_SEARCH_BATCH_SIZE: usize = 16;
 pub(super) const UNSTABLE_SORT_MIN_CANDIDATES: usize = 10_000;
 pub(super) const GENERIC_OMISSION: &str = "[grep result omitted: exceeds output budget]";
 pub(super) const CONTENT_OMISSION: &str = "[line text omitted: exceeds output budget]";
+
+#[derive(Clone, Copy, Debug)]
+// Repeating the unit prevents memory-budget fields from being combined as unitless values.
+#[allow(clippy::struct_field_names)]
+pub(crate) struct GrepMemoryPolicy {
+    pub(super) request_bytes: usize,
+    pub(super) base_search_heap_bytes: usize,
+    pub(super) capture_bytes: usize,
+    pub(super) page_bytes: usize,
+    pub(super) memory_source_bytes: usize,
+    pub(super) decode_input_bytes: usize,
+    pub(super) decode_output_bytes: usize,
+}
+
+impl GrepMemoryPolicy {
+    pub(super) fn new(request_bytes: usize) -> Self {
+        let page_bytes = PAGE_MEMORY_BYTES.min(request_bytes);
+        let lane_budget = request_bytes
+            .saturating_sub(page_bytes)
+            .saturating_sub(CANDIDATE_HEADROOM_BYTES.min(request_bytes / 8));
+        let memory_source_bytes = MEMORY_SOURCE_BYTES.min(lane_budget / 8);
+        let decode_input_bytes = (64 * 1024).min(lane_budget / 16);
+        let decode_output_bytes = (64 * 1024).min(lane_budget / 16);
+        let search_and_capture = lane_budget
+            .saturating_sub(memory_source_bytes)
+            .saturating_sub(decode_input_bytes)
+            .saturating_sub(decode_output_bytes);
+        let base_search_heap_bytes = SEARCH_HEAP_BYTES.min(search_and_capture / 2);
+        let capture_bytes =
+            CAPTURE_MEMORY_BYTES.min(search_and_capture.saturating_sub(base_search_heap_bytes));
+        Self {
+            request_bytes,
+            base_search_heap_bytes,
+            capture_bytes,
+            page_bytes,
+            memory_source_bytes,
+            decode_input_bytes,
+            decode_output_bytes,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) const fn candidate_only(request_bytes: usize) -> Self {
+        Self {
+            request_bytes,
+            base_search_heap_bytes: 0,
+            capture_bytes: 0,
+            page_bytes: 0,
+            memory_source_bytes: 0,
+            decode_input_bytes: 0,
+            decode_output_bytes: 0,
+        }
+    }
+
+    pub(super) const fn base_lane_bytes(self) -> usize {
+        self.base_search_heap_bytes
+            .saturating_add(self.capture_bytes)
+            .saturating_add(self.memory_source_bytes)
+            .saturating_add(self.decode_input_bytes)
+            .saturating_add(self.decode_output_bytes)
+    }
+
+    pub(super) const fn base_reservation_bytes(self) -> usize {
+        self.base_lane_bytes().saturating_add(self.page_bytes)
+    }
+
+    pub(super) const fn candidate_limit_bytes(self) -> usize {
+        self.request_bytes
+            .saturating_sub(self.base_reservation_bytes())
+    }
+
+    pub(super) const fn speculative_batch_bytes(self, mode: GrepMode, batch_len: usize) -> usize {
+        match mode {
+            GrepMode::Content => self
+                .base_search_heap_bytes
+                .saturating_add(self.memory_source_bytes)
+                .saturating_add(self.decode_input_bytes)
+                .saturating_add(self.decode_output_bytes)
+                .saturating_add(self.capture_bytes.saturating_mul(batch_len)),
+            GrepMode::Files | GrepMode::Count => self
+                .base_search_heap_bytes
+                .saturating_add(self.memory_source_bytes)
+                .saturating_add(self.decode_input_bytes)
+                .saturating_add(self.decode_output_bytes),
+        }
+    }
+
+    pub(super) fn large_search_heap_ceiling(self, candidate_bytes: usize) -> usize {
+        const LARGE_SEARCH_CAP_BYTES: usize = 256 * 1024 * 1024;
+        self.request_bytes
+            .saturating_sub(candidate_bytes)
+            .saturating_sub(self.capture_bytes)
+            .saturating_sub(self.page_bytes)
+            .saturating_sub(self.memory_source_bytes)
+            .saturating_sub(self.decode_input_bytes)
+            .saturating_sub(self.decode_output_bytes)
+            .min(LARGE_SEARCH_CAP_BYTES)
+            .max(self.base_search_heap_bytes)
+    }
+}
 #[cfg(feature = "bench-internals")]
-const BENCH_SOURCE_ENV: &str = "CODEXSHIM_BENCH_GREP_SOURCE";
+const BENCH_SOURCE_ENV: &str = "AGENTSHIM_BENCH_GREP_SOURCE";
 #[cfg(feature = "bench-internals")]
-const BENCH_PATHNAME_REOPEN_ENV: &str = "CODEXSHIM_BENCH_GREP_PATHNAME_REOPEN";
+const BENCH_PATHNAME_REOPEN_ENV: &str = "AGENTSHIM_BENCH_GREP_PATHNAME_REOPEN";
 #[cfg(feature = "bench-internals")]
-const BENCH_CANDIDATE_POLICY_ENV: &str = "CODEXSHIM_BENCH_GREP_CANDIDATE_POLICY";
+const BENCH_CANDIDATE_POLICY_ENV: &str = "AGENTSHIM_BENCH_GREP_CANDIDATE_POLICY";
 #[cfg(feature = "bench-internals")]
-pub(super) const BENCH_SORT_ENV: &str = "CODEXSHIM_BENCH_GREP_SORT";
+pub(super) const BENCH_SORT_ENV: &str = "AGENTSHIM_BENCH_GREP_SORT";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GrepTraversal {
     Adaptive,
@@ -316,7 +417,7 @@ pub enum GrepError {
     Glob(String),
     #[error(
         "grep candidates exceed the configured memory limit; narrow path/glob or adjust \
-         CODEXSHIM_GREP_MEMORY_BYTES"
+         AGENTSHIM_GREP_MEMORY_BYTES"
     )]
     CandidateMemory,
     #[error("grep memory capacity is busy; retry the request later")]
@@ -367,9 +468,48 @@ pub fn execute(
     })
 }
 
+#[cfg(test)]
+pub fn execute_with_memory_budget(
+    access: &Arc<FileAccess>,
+    request: &GrepRequest,
+    lanes: usize,
+    memory_bytes: usize,
+    cancellation: &CancellationToken,
+) -> Result<String, GrepError> {
+    let mut config = crate::runtime::RuntimeConfig::for_tests(lanes);
+    config.grep_memory_bytes = memory_bytes;
+    config.memory_bytes = memory_bytes;
+    let resources = RuntimeResources::new(config);
+    let _worker = resources
+        .try_acquire_worker()
+        .ok_or_else(|| io::Error::other("test base worker permit unavailable"))?;
+    let _open_file = resources
+        .try_acquire_open_file()
+        .ok_or_else(|| io::Error::other("test base open-file permit unavailable"))?;
+    let initial_bytes = base_memory_charge(memory_bytes);
+    let initial = resources
+        .try_reserve_memory(initial_bytes)
+        .ok_or_else(|| io::Error::other("test base memory permit unavailable"))?;
+    let memory = MemoryReservation::from_initial(resources.clone(), initial, initial_bytes);
+    execute_inner(
+        access,
+        request,
+        &resources,
+        cancellation,
+        GrepExecution {
+            traversal: GrepTraversal::Adaptive,
+            variant: GrepBenchmarkVariant::default(),
+            profiler: &GrepProfiler::disabled(),
+            output_budget: None,
+            memory: Some(memory),
+        },
+    )
+    .map(|output| output.text)
+}
+
 #[must_use]
-pub(crate) const fn base_memory_charge() -> usize {
-    SEARCH_HEAP_BYTES
+pub(crate) fn base_memory_charge(request_bytes: usize) -> usize {
+    GrepMemoryPolicy::new(request_bytes).base_reservation_bytes()
 }
 
 #[cfg(any(test, feature = "bench-internals"))]
@@ -531,7 +671,7 @@ fn with_benchmark_resources<T>(
         .try_acquire_open_file()
         .ok_or_else(|| io::Error::other("benchmark base open-file permit unavailable"))?;
     let _memory = resources
-        .try_reserve_memory(base_memory_charge())
+        .try_reserve_memory(base_memory_charge(resources.config().grep_memory_bytes))
         .ok_or_else(|| io::Error::other("benchmark base memory permit unavailable"))?;
     execute(&resources)
 }
@@ -571,6 +711,8 @@ struct GrepExecution<'a> {
     output_budget: Option<&'a crate::output::CallOutputBudget>,
 }
 
+// The reservation must outlive candidate collection, search, and rendering as one operation.
+#[allow(clippy::too_many_lines)]
 fn execute_inner(
     access: &Arc<FileAccess>,
     request: &GrepRequest,
@@ -586,6 +728,7 @@ fn execute_inner(
         output_budget,
     } = execution;
     let candidate_policy = CandidatePolicy::from_environment()?;
+    let memory_policy = GrepMemoryPolicy::new(resources.config().grep_memory_bytes);
     let file_work_pool = resources.file_work_pool();
     let _file_work_request = file_work_pool.begin_request();
     let setup_span = profiler.span(GrepStage::Setup);
@@ -610,7 +753,7 @@ fn execute_inner(
         .and_then(crate::traversal::literal_path_prefix);
     drop(setup_span);
     let include_ignored = resources.config().include_ignored(request.include_ignored);
-    let (candidates, traversal_summary, single_file) = collect_candidates(
+    let mut candidate_set = collect_candidates(
         access,
         request.path.as_deref().unwrap_or("."),
         glob.as_ref(),
@@ -623,13 +766,14 @@ fn execute_inner(
         candidate_policy,
         profiler,
         memory,
+        memory_policy,
     )
     .map_err(normalize_cancellation)?;
-    let skipped = traversal_summary.io_errors
-        + traversal_summary.escaped_entries
-        + traversal_summary.non_unicode_entries;
+    let skipped = candidate_set.traversal.io_errors
+        + candidate_set.traversal.escaped_entries
+        + candidate_set.traversal.non_unicode_entries;
     if skipped > 0 {
-        tracing::warn!(target: "codexshim", event = "grep_skipped", phase = "execution", outcome = "degraded_success", counters = %format!("io_errors={},escaped_entries={},non_unicode_entries={}", traversal_summary.io_errors, traversal_summary.escaped_entries, traversal_summary.non_unicode_entries));
+        tracing::warn!(target: "agentshim", event = "grep_skipped", phase = "execution", outcome = "degraded_success", counters = %format!("io_errors={},escaped_entries={},non_unicode_entries={}", candidate_set.traversal.io_errors, candidate_set.traversal.escaped_entries, candidate_set.traversal.non_unicode_entries));
     }
     let probe = request
         .offset
@@ -637,35 +781,46 @@ fn execute_inner(
         .saturating_add(request.limit.unwrap_or(DEFAULT_LIMIT))
         .saturating_add(1);
     let mode = request.mode.unwrap_or_default();
-    let (encoding, fallback_encoding) = request.resolved_encodings_inner(single_file)?;
+    let (encoding, fallback_encoding) =
+        request.resolved_encodings_inner(candidate_set.single_file)?;
     let plan = SearchPlan {
         mode,
         context: request.context_lines.unwrap_or(0),
         probe,
-        allow_early_stop: !single_file && matches!(mode, GrepMode::Content | GrepMode::Files),
+        skip: 0,
+        allow_early_stop: !candidate_set.single_file
+            && matches!(mode, GrepMode::Content | GrepMode::Files),
         encoding,
         fallback_encoding,
+        memory: memory_policy,
     };
     let lanes = resources
         .file_work_pool()
         .extra_capacity()
         .saturating_add(1)
-        .clamp(1, candidates.len().max(1));
-    profiler.set_workload(candidates.len(), lanes);
-    let candidates: Arc<[Candidate]> = candidates.into();
+        .clamp(1, candidate_set.candidates.len().max(1));
+    profiler.set_workload(candidate_set.candidates.len(), lanes);
     let access = Arc::clone(access);
     let context = OrderedSearchContext {
         cancellation,
         access: &access,
         matcher: &matcher,
         plan,
-        single_file,
+        single_file: candidate_set.single_file,
         variant,
         profiler,
         resources,
+        memory: memory_policy,
+        candidate_bytes: candidate_set.retained_bytes,
     };
     let search_span = profiler.span(GrepStage::SearchWall);
-    let page = ordered_search(&candidates, lanes, request, traversal_summary, &context)?;
+    let page = ordered_search(
+        &candidate_set.candidates,
+        lanes,
+        request,
+        std::mem::take(&mut candidate_set.traversal),
+        &context,
+    )?;
     drop(search_span);
     let render_span = profiler.span(GrepStage::Render);
     let output = render_with_budget(request, &page, cancellation, output_budget);
@@ -673,6 +828,7 @@ fn execute_inner(
     if let Ok(output) = &output {
         profiler.add_render_copy_bytes(output.text.len());
     }
+    drop(candidate_set);
     output
 }
 

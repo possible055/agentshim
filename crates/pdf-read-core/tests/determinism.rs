@@ -8,7 +8,7 @@ mod corpus;
 use std::io::{Seek, SeekFrom, Write};
 use std::process::Command;
 
-use codexshim_pdf_read::{MarkdownOptions, ParserLimits, PdfReadDocument};
+use agentshim_pdf_read::{MarkdownOptions, ParserLimits, PdfReadDocument};
 
 const REPEATS: usize = 64;
 const DIGEST_MARKER: &str = "pdf-markdown-digest ";

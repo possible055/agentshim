@@ -20,13 +20,13 @@ import {
   serverArgs,
   validateCatalog,
 } from '../src/session.ts'
-import type { CodexshimSession, ResolvedSessionConfig, SessionConfigInput, SessionLogger } from '../src/session.ts'
+import type { AgentshimSession, ResolvedSessionConfig, SessionConfigInput, SessionLogger } from '../src/session.ts'
 
 const fixturePath = fileURLToPath(new URL('./fixture-server.mjs', import.meta.url))
 
 const noopLogger = { info: () => {}, warn: () => {}, error: () => {} }
 
-const sessions: CodexshimSession[] = []
+const sessions: AgentshimSession[] = []
 const roots: string[] = []
 
 afterEach(async () => {
@@ -71,7 +71,7 @@ async function setupFixture(
   fixtureEnv: Record<string, string> = {},
   overrides: Partial<SessionConfigInput> = {},
 ): Promise<Fixture> {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-codexshim-'))
+  const root = await mkdtemp(join(tmpdir(), 'dsh-agentshim-'))
   roots.push(root)
   const env = {
     FIXTURE_REPORT: join(root, 'report.json'),
@@ -106,7 +106,7 @@ function startSession(
   env: Record<string, string> = {},
   createClient?: () => Client,
   logger: SessionLogger = noopLogger,
-): CodexshimSession {
+): AgentshimSession {
   const session = createSession(
     { ...fixture.resolved, env: { ...fixture.resolved.env, ...env } },
     { logger, ...(createClient !== undefined ? { createClient } : {}) },
@@ -235,15 +235,15 @@ describe('config resolution', () => {
     try {
       if (process.platform === 'win32') {
         process.env.LOCALAPPDATA = 'C:\\FakeLocal'
-        expect(defaultInstallCommand()).toBe(join('C:\\FakeLocal', 'codexshim', 'bin', 'codexshim.exe'))
+        expect(defaultInstallCommand()).toBe(join('C:\\FakeLocal', 'agentshim', 'bin', 'agentshim.exe'))
         delete process.env.LOCALAPPDATA
         expect(() => defaultInstallCommand()).toThrow(/LOCALAPPDATA/)
       } else {
         process.env.XDG_DATA_HOME = '/xdg-data'
-        expect(defaultInstallCommand()).toBe('/xdg-data/codexshim/bin/codexshim')
+        expect(defaultInstallCommand()).toBe('/xdg-data/agentshim/bin/agentshim')
         delete process.env.XDG_DATA_HOME
         process.env.HOME = '/home/tester'
-        expect(defaultInstallCommand()).toBe('/home/tester/.local/share/codexshim/bin/codexshim')
+        expect(defaultInstallCommand()).toBe('/home/tester/.local/share/agentshim/bin/agentshim')
       }
     } finally {
       process.env = saved
@@ -251,7 +251,7 @@ describe('config resolution', () => {
   })
 
   it('fails loud on a missing root, a relative command, a missing executable, and a low timeout', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-codexshim-'))
+    const root = await mkdtemp(join(tmpdir(), 'dsh-agentshim-'))
     roots.push(root)
     const base = {
       root,
@@ -261,9 +261,9 @@ describe('config resolution', () => {
     }
     await expect(resolveSessionConfig({ ...base, root: join(root, 'missing'), command: process.execPath, toolCallTimeoutMs: MIN_TOOL_CALL_TIMEOUT_MS }))
       .rejects.toThrow(/does not exist/)
-    await expect(resolveSessionConfig({ ...base, command: 'codexshim', toolCallTimeoutMs: MIN_TOOL_CALL_TIMEOUT_MS }))
+    await expect(resolveSessionConfig({ ...base, command: 'agentshim', toolCallTimeoutMs: MIN_TOOL_CALL_TIMEOUT_MS }))
       .rejects.toThrow(/absolute/)
-    await expect(resolveSessionConfig({ ...base, command: join(root, 'codexshim-missing.exe'), toolCallTimeoutMs: MIN_TOOL_CALL_TIMEOUT_MS }))
+    await expect(resolveSessionConfig({ ...base, command: join(root, 'agentshim-missing.exe'), toolCallTimeoutMs: MIN_TOOL_CALL_TIMEOUT_MS }))
       .rejects.toThrow(/not found/)
     await expect(resolveSessionConfig({ ...base, command: process.execPath, toolCallTimeoutMs: MIN_TOOL_CALL_TIMEOUT_MS - 1 }))
       .rejects.toThrow(/toolCallTimeoutMs/)
@@ -402,7 +402,7 @@ describe('session against the fixture server', () => {
     expect(JSON.parse(stableText ?? '')).toMatchObject({ name: 'glob' })
   })
 
-  it('fails reconnects with CODEXSHIM_CATALOG_CHANGED when the fingerprint drifts', async () => {
+  it('fails reconnects with AGENTSHIM_CATALOG_CHANGED when the fingerprint drifts', async () => {
     const fixture = await setupFixture({ FIXTURE_MODE: 'drift' })
     const warnings: string[] = []
     const session = startSession(fixture, {}, undefined, { ...noopLogger, warn: (message: string): void => { warnings.push(message) } })
@@ -414,7 +414,7 @@ describe('session against the fixture server', () => {
       () => { throw new Error('expected the call to reject') },
       (reason: unknown) => reason,
     )
-    expect(error).toMatchObject({ code: 'CODEXSHIM_CATALOG_CHANGED' })
+    expect(error).toMatchObject({ code: 'AGENTSHIM_CATALOG_CHANGED' })
     expect(await readFile(fixture.files.boot, 'utf8')).toBe('2')
   })
 

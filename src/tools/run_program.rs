@@ -236,7 +236,7 @@ pub(crate) fn execute_output_with_budget(
     if cancellation.is_cancelled() {
         return Err(ProcessError::Cancelled);
     }
-    tracing::info!(target: "codexshim", event = "process_resolve", phase = "execution");
+    tracing::info!(target: "agentshim", event = "process_resolve", phase = "execution");
     let cwd = spawn::resolve_cwd(root, request.cwd.as_deref()).map_err(invalid)?;
     ensure_before_spawn(deadline, request.timeout_ms())?;
     let program = resolver.resolve(&request.program, &cwd)?;

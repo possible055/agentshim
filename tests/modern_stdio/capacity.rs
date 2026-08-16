@@ -3,9 +3,9 @@ use super::support::*;
 use super::*;
 
 fn projected_success_tokens(responses: &[Value]) -> usize {
-    let prototype = codexshim_gigatoken::O200kPrototype::load_embedded().expect("token ranks");
+    let prototype = agentshim_gigatoken::O200kPrototype::load_embedded().expect("token ranks");
     let mut counter = prototype
-        .fork_counter(codexshim_gigatoken::CounterLimits::default())
+        .fork_counter(agentshim_gigatoken::CounterLimits::default())
         .expect("counter");
     responses
         .iter()
@@ -13,7 +13,7 @@ fn projected_success_tokens(responses: &[Value]) -> usize {
         .map(|response| {
             let payload =
                 serde_json::to_string(&response["result"]["content"]).expect("content JSON");
-            let codexshim_gigatoken::CountUpTo::Exact(tokens) =
+            let agentshim_gigatoken::CountUpTo::Exact(tokens) =
                 counter.count_ordinary_up_to(&payload, usize::MAX, || false)
             else {
                 panic!("unbounded exact count")
@@ -46,7 +46,7 @@ fn parallel_large_reads_share_one_projected_burst_budget() {
         session.send(&modern_request(id, "tools/call", call));
     }
     let responses = (0..CALLS).map(|_| session.receive()).collect::<Vec<_>>();
-    let burst_limit = codexshim::ClientProfile::Codex.default_burst_tokens();
+    let burst_limit = agentshim::ClientProfile::Codex.default_burst_tokens();
     assert!(
         projected_success_tokens(&responses) <= burst_limit,
         "content-bearing responses exceeded the shared burst budget"
@@ -83,8 +83,8 @@ fn process_overload_is_fail_fast_and_preserves_resource_busy_contract() {
                 "args": ["--exact", "process::eof_process_child_fixture", "--nocapture"],
                 "cwd": env!("CARGO_MANIFEST_DIR"),
                 "env": {
-                    "CODEXSHIM_EOF_FIXTURE": "child",
-                    "CODEXSHIM_EOF_PID_FILE": pid_file,
+                    "AGENTSHIM_EOF_FIXTURE": "child",
+                    "AGENTSHIM_EOF_PID_FILE": pid_file,
                 },
                 "timeout_ms": 30_000,
             }),
@@ -166,8 +166,8 @@ fn default_process_and_read_only_capacity_can_progress_together() {
                 "args": ["--exact", "process::eof_process_child_fixture", "--nocapture"],
                 "cwd": env!("CARGO_MANIFEST_DIR"),
                 "env": {
-                    "CODEXSHIM_EOF_FIXTURE": "child",
-                    "CODEXSHIM_EOF_PID_FILE": pid_file,
+                    "AGENTSHIM_EOF_FIXTURE": "child",
+                    "AGENTSHIM_EOF_PID_FILE": pid_file,
                 },
                 "timeout_ms": 30_000,
             }),

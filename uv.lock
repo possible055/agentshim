@@ -80,7 +80,7 @@ wheels = [
 ]
 
 [[package]]
-name = "codexshim"
+name = "agentshim"
 version = "0"
 source = { virtual = "." }
 

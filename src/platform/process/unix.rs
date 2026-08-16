@@ -98,12 +98,17 @@ fn exit_label(status: std::process::ExitStatus) -> String {
 }
 
 fn spawn_lifecycle(plan: &ExecPlan<'_>) -> Result<Lifecycle, ProcessError> {
+    let input = plan.stdin.filter(|input| !input.is_empty());
     let mut command = Command::new(&plan.resolved.executable);
     command
         .arg0(&plan.resolved.absolute)
         .args(plan.args)
         .current_dir(plan.cwd)
-        .stdin(Stdio::piped());
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
     let merged_reader = configure_output(&mut command, plan.streams)?;
     apply_environment(&mut command, plan.environment);
     unsafe {
@@ -121,13 +126,18 @@ fn spawn_lifecycle(plan: &ExecPlan<'_>) -> Result<Lifecycle, ProcessError> {
     record_spawn_for_tests(lifecycle.process_group);
     #[cfg(test)]
     fail_setup_for_tests(SetupFailurePoint::Spawn)?;
-    let stdin = lifecycle
-        .child_mut()
-        .stdin
-        .take()
-        .ok_or_else(|| io::Error::other("child stdin pipe was not created"))?;
-    #[cfg(test)]
-    fail_setup_for_tests(SetupFailurePoint::Stdin)?;
+    let stdin = if input.is_some() {
+        let stdin = lifecycle
+            .child_mut()
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("child stdin pipe was not created"))?;
+        #[cfg(test)]
+        fail_setup_for_tests(SetupFailurePoint::Stdin)?;
+        Some(File::from(OwnedFd::from(stdin)))
+    } else {
+        None
+    };
     let readers = if let Some(reader) = merged_reader {
         vec![reader]
     } else {
@@ -151,10 +161,10 @@ fn spawn_lifecycle(plan: &ExecPlan<'_>) -> Result<Lifecycle, ProcessError> {
         ]
     };
     let io = UnixIo::new(
-        File::from(OwnedFd::from(stdin)),
+        stdin,
         readers,
         capture_bytes_per_stream(plan.streams.count()),
-        plan.stdin.unwrap_or_default().as_bytes().to_vec(),
+        input.unwrap_or_default().as_bytes().to_vec(),
     )?;
     #[cfg(test)]
     fail_setup_for_tests(SetupFailurePoint::Io)?;
@@ -351,12 +361,14 @@ struct UnixIo {
 
 impl UnixIo {
     fn new(
-        stdin: File,
+        stdin: Option<File>,
         readers: Vec<File>,
         capture_bytes: usize,
         input: Vec<u8>,
     ) -> io::Result<Self> {
-        set_nonblocking(stdin.as_raw_fd())?;
+        if let Some(stdin) = &stdin {
+            set_nonblocking(stdin.as_raw_fd())?;
+        }
         for reader in &readers {
             set_nonblocking(reader.as_raw_fd())?;
         }
@@ -367,7 +379,7 @@ impl UnixIo {
             .map(|_| vec![0_u8; DRAIN_CHUNK_BYTES].into_boxed_slice())
             .collect();
         Ok(Self {
-            stdin: Some(stdin),
+            stdin,
             readers: readers.into_iter().map(Some).collect(),
             captures,
             buffers,
@@ -756,7 +768,7 @@ mod readiness_tests {
     fn pipe_readiness_wakes_a_long_poll_immediately() {
         let (read, write) = merged_pipe().expect("pipe");
         let mut io = UnixIo::new(
-            File::open("/dev/null").expect("null input"),
+            Some(File::open("/dev/null").expect("null input")),
             vec![File::from(read)],
             1024,
             Vec::new(),

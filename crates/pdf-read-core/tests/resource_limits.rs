@@ -10,7 +10,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use codexshim_pdf_read::{
+use agentshim_pdf_read::{
     enter_budget, MarkdownOptions, ParserLimits, PdfReadDocument, PdfReadError, PdfReadErrorKind,
     PdfResourceLimits, RenderLimits,
 };
@@ -84,7 +84,7 @@ fn flate_bombs_are_refused_by_the_per_stream_ceiling() {
     // omission rather than by a size check before allocation. Pinned as a measurement so
     // the image path hardening has a baseline, and so a change that starts decoding it
     // fails here instead of silently allocating 48 MiB.
-    let (_, metrics) = codexshim_pdf_read::measure(|| {
+    let (_, metrics) = agentshim_pdf_read::measure(|| {
         let _scope = enter_budget(PdfResourceLimits::image(), None);
         let document = open(&corpus::flate_bomb_image());
         let _ = document.render_page_fit(0, RenderLimits::default());
@@ -311,7 +311,7 @@ fn recovery_scans_never_buffer_the_whole_source() {
 /// before anything is allocated from it — not after a 30 GB request fails.
 #[test]
 fn malicious_image_dimensions_never_reach_an_allocation() {
-    let ((), metrics) = codexshim_pdf_read::measure(|| {
+    let ((), metrics) = agentshim_pdf_read::measure(|| {
         let _scope = enter_budget(PdfResourceLimits::image(), None);
         let document = open(&corpus::oversized_image_dimensions());
         // The page still renders: the offending image is refused, not the whole page.
@@ -332,7 +332,7 @@ fn malicious_image_dimensions_never_reach_an_allocation() {
 /// pixel cap while still overflowing a row-stride computation.
 #[test]
 fn image_pixel_and_edge_ceilings_are_both_enforced() {
-    use codexshim_pdf_read::{MAX_IMAGE_EDGE_PIXELS, MAX_IMAGE_PIXELS};
+    use agentshim_pdf_read::{MAX_IMAGE_EDGE_PIXELS, MAX_IMAGE_PIXELS};
 
     assert!(u64::from(MAX_IMAGE_EDGE_PIXELS) * u64::from(MAX_IMAGE_EDGE_PIXELS) > MAX_IMAGE_PIXELS);
     // A strip well inside the pixel budget but past the edge budget.
@@ -346,7 +346,7 @@ fn cancellation_stops_work_at_a_checkpoint() {
     let cancelled = Arc::new(AtomicBool::new(true));
     let signal = {
         let cancelled = Arc::clone(&cancelled);
-        Arc::new(move || cancelled.load(Ordering::SeqCst)) as codexshim_pdf_read::CancelSignal
+        Arc::new(move || cancelled.load(Ordering::SeqCst)) as agentshim_pdf_read::CancelSignal
     };
     let _scope = enter_budget(PdfResourceLimits::image(), Some(signal));
 
@@ -389,11 +389,11 @@ fn a_dense_page_is_refused_by_the_page_budget_not_by_a_byte_ceiling() {
 
     // The refusal has to be attributable to the page, not to the call: a caller reading
     // twenty pages must not lose nineteen of them to one dense one.
-    assert_eq!(limit.scope, codexshim_pdf_read::LimitScope::Page);
+    assert_eq!(limit.scope, agentshim_pdf_read::LimitScope::Page);
 
     // And it must not have been a byte ceiling that caught it, or this fixture would be
     // testing the decompression path again rather than the accumulation path.
-    let (_, metrics) = codexshim_pdf_read::measure(|| {
+    let (_, metrics) = agentshim_pdf_read::measure(|| {
         let _ = read_under(limits, &bytes);
     });
     let decoded = metrics.decoded_stream_bytes;
@@ -494,7 +494,7 @@ fn cancellation_stops_inside_a_single_page() {
     let cancelled = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&cancelled);
     // Trip on the first check the operator loop makes.
-    let signal: codexshim_pdf_read::CancelSignal = Arc::new(move || {
+    let signal: agentshim_pdf_read::CancelSignal = Arc::new(move || {
         flag.store(true, Ordering::SeqCst);
         true
     });

@@ -14,13 +14,15 @@ use crate::tools::exec::{
     spawn::{self, EnvironmentPlan, ExecFailure, ExecPlan, Streams},
 };
 
-pub(crate) const BASH_OVERRIDE_ENV: &str = "CODEXSHIM_BASH";
+pub(crate) const BASH_OVERRIDE_ENV: &str = "AGENTSHIM_BASH";
 const FALLBACK_LOCALE: &str = "en_US.UTF-8";
 const PREFERRED_LOCALE: &str = "C.UTF-8";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const PROBE_BUDGET: Duration = Duration::from_secs(15);
 const PROBE_OUTPUT_BYTES: usize = 64 * 1024;
 const WAIT_SLICE: Duration = Duration::from_millis(10);
+const PROBE_MARKER: &str = "AGENTSHIM_BASH_PROBE_V1:";
+const PROBE_SCRIPT: &str = "printf 'AGENTSHIM_BASH_PROBE_V1:%s\\n' \"$BASH_VERSION\"\ncommand locale -a 2>/dev/null || true";
 
 #[derive(Clone, Debug)]
 pub(crate) struct BashRuntime {
@@ -55,6 +57,8 @@ struct BashInputs {
     inherited_path: OsString,
     #[cfg(test)]
     probe_gate: Option<Arc<TestProbeGate>>,
+    #[cfg(test)]
+    probe_calls: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 #[derive(Debug)]
@@ -74,6 +78,8 @@ impl BashLocator {
             inherited_path,
             #[cfg(test)]
             probe_gate: None,
+            #[cfg(test)]
+            probe_calls: None,
         })
     }
 
@@ -211,6 +217,7 @@ impl BashLocator {
             candidates,
             inherited_path,
             probe_gate: None,
+            probe_calls: None,
         })
     }
 
@@ -220,6 +227,15 @@ impl BashLocator {
             .expect("test locator has not been cloned")
             .inputs
             .probe_gate = Some(gate);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_probe_counter(mut self, calls: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("test locator has not been cloned")
+            .inputs
+            .probe_calls = Some(calls);
         self
     }
 }
@@ -272,23 +288,16 @@ fn probe(
         gate.wait(cancellation, &budget)?;
         return Ok((*gate.runtime).clone());
     }
-    let executable = locate(inputs, &budget, cancellation)?;
-    let path = toolchain_path(&executable, &inputs.inherited_path);
-    let locale = detect_locale(&executable, path.as_deref(), &budget, cancellation)?;
-    Ok(BashRuntime {
-        executable,
-        locale,
-        path,
-    })
+    locate(inputs, &budget, cancellation)
 }
 
 fn locate(
     inputs: &BashInputs,
     budget: &Budget,
     cancellation: &CancellationToken,
-) -> Result<PathBuf, ProbeError> {
+) -> Result<BashRuntime, ProbeError> {
     if let Some(override_path) = &inputs.override_path {
-        return validate_override(Path::new(override_path), budget, cancellation);
+        return validate_override(Path::new(override_path), inputs, budget, cancellation);
     }
     for candidate in &inputs.candidates {
         if cancellation.is_cancelled() {
@@ -298,19 +307,30 @@ fn locate(
             continue;
         }
         if let Ok(canonical) = std::fs::canonicalize(candidate)
-            && reports_gnu_bash(&canonical, budget, cancellation)?
+            && let Some(runtime) = probe_candidate(canonical, inputs, budget, cancellation)?
         {
-            return Ok(canonical);
+            return Ok(runtime);
         }
     }
     Err(ProbeError::Unavailable(missing_bash_message()))
 }
 
+#[cfg(test)]
+fn record_probe_for_tests(inputs: &BashInputs) {
+    if let Some(calls) = &inputs.probe_calls {
+        calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(not(test))]
+fn record_probe_for_tests(_inputs: &BashInputs) {}
+
 fn validate_override(
     path: &Path,
+    inputs: &BashInputs,
     budget: &Budget,
     cancellation: &CancellationToken,
-) -> Result<PathBuf, ProbeError> {
+) -> Result<BashRuntime, ProbeError> {
     if !path.is_absolute() {
         return Err(ProbeError::Unavailable(format!(
             "{BASH_OVERRIDE_ENV} must be an absolute path to a bash executable, got {}",
@@ -330,13 +350,13 @@ fn validate_override(
             &canonical,
         )));
     }
-    if !reports_gnu_bash(&canonical, budget, cancellation)? {
+    let Some(runtime) = probe_candidate(canonical.clone(), inputs, budget, cancellation)? else {
         return Err(ProbeError::Unavailable(format!(
-            "{BASH_OVERRIDE_ENV} points at {}, which did not report GNU bash from `--version`",
+            "{BASH_OVERRIDE_ENV} points at {}, which did not complete the Bash probe",
             canonical.display()
         )));
-    }
-    Ok(canonical)
+    };
+    Ok(runtime)
 }
 
 fn excluded_override_message(path: &Path) -> String {
@@ -484,34 +504,40 @@ fn is_excluded(_candidate: &Path) -> bool {
     false
 }
 
-fn reports_gnu_bash(
-    candidate: &Path,
+fn probe_candidate(
+    executable: PathBuf,
+    inputs: &BashInputs,
     budget: &Budget,
     cancellation: &CancellationToken,
-) -> Result<bool, ProbeError> {
-    probe_output(candidate, &["--version"], None, budget, cancellation)
-        .map(|output| output.is_some_and(|output| output.contains("GNU bash")))
-}
-
-fn detect_locale(
-    executable: &Path,
-    path: Option<&str>,
-    budget: &Budget,
-    cancellation: &CancellationToken,
-) -> Result<String, ProbeError> {
-    let available = probe_output(
-        executable,
-        &["--noprofile", "--norc", "-c", "locale -a"],
-        path,
+) -> Result<Option<BashRuntime>, ProbeError> {
+    record_probe_for_tests(inputs);
+    let path = toolchain_path(&executable, &inputs.inherited_path);
+    let output = probe_output(
+        &executable,
+        &["--noprofile", "--norc", "-c", PROBE_SCRIPT],
+        path.as_deref(),
         budget,
         cancellation,
     )?;
-    let matched = available.is_some_and(|listing| {
-        listing.lines().any(|line| {
-            line.trim().eq_ignore_ascii_case(PREFERRED_LOCALE) || line.trim() == "C.utf8"
-        })
-    });
-    Ok(if matched {
+    Ok(output
+        .as_deref()
+        .and_then(parse_probe_output)
+        .map(|locale| BashRuntime {
+            executable,
+            locale,
+            path,
+        }))
+}
+
+fn parse_probe_output(output: &str) -> Option<String> {
+    let mut lines = output.lines();
+    let version = lines.next()?.strip_prefix(PROBE_MARKER)?.trim();
+    if version.is_empty() {
+        return None;
+    }
+    let preferred = lines
+        .any(|line| line.trim().eq_ignore_ascii_case(PREFERRED_LOCALE) || line.trim() == "C.utf8");
+    Some(if preferred {
         PREFERRED_LOCALE.to_owned()
     } else {
         FALLBACK_LOCALE.to_owned()

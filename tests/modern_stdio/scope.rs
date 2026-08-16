@@ -18,7 +18,7 @@ fn normal_tools_reject_unmanaged_paths_outside_the_startup_root() {
     assert_eq!(session.receive()["id"], 1);
     let requests = [
         ("read", json!({ "path": outside })),
-        ("grep", json!({ "path": outside, "pattern": "codexshim" })),
+        ("grep", json!({ "path": outside, "pattern": "agentshim" })),
         ("glob", json!({ "path": outside, "pattern": "**/*" })),
     ];
 

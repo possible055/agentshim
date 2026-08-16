@@ -14,7 +14,7 @@ import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import * as ObservationPolicy from '@deepseek-ai/dsh-fs-observation-policy'
 import LocalAttachmentStore from '@deepseek-ai/dsh-attachment-local'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import * as codexshim from '../src/index.ts'
+import * as agentshim from '../src/index.ts'
 import type { Config } from '../src/index.ts'
 
 const fixturePath = fileURLToPath(new URL('./fixture-server.mjs', import.meta.url))
@@ -67,7 +67,7 @@ function registerInheritedTools(ctx: Context, names: readonly string[]): void {
 }
 
 async function makeRoot(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-codexshim-comp-'))
+  const root = await mkdtemp(join(tmpdir(), 'dsh-agentshim-comp-'))
   roots.push(root)
   return root
 }
@@ -97,7 +97,7 @@ async function mountComposition(
     toolCallTimeoutMs: 600_000,
     ...configOverrides,
   }
-  pluginFibers.push(await ctx.plugin(codexshim, config))
+  pluginFibers.push(await ctx.plugin(agentshim, config))
   return ctx
 }
 
@@ -118,6 +118,13 @@ async function mintAgent(ctx: Context, name: string, cwd: string): Promise<Minte
   }, { inject: ['tools', 'systemPrompt'] }))
   ;(agent as { ctx?: unknown }).ctx = scope.ctx
   return { agent, scope }
+}
+
+async function mintStandardAgent(ctx: Context, name: string, cwd: string): Promise<MintedAgent> {
+  registerInheritedTools(ctx, ['read', 'grep', 'glob', 'bash'])
+  const minted = await mintAgent(ctx, name, cwd)
+  ctx.emit('agent/created', { agent: minted.agent })
+  return minted
 }
 
 function visibleNames(ctx: Context, agent: Agent): string[] {
@@ -178,6 +185,43 @@ describe('agent scope replacement', () => {
     expect(prompt).toContain('next_offset')
     expect(prompt).not.toContain('INHERITED-READ-GUIDANCE')
     expect(prompt).not.toContain('INHERITED-PWSH-GUIDANCE')
+    expect(prompt).toContain('do not persist')
+  })
+
+  it('replaces only bash on a minimal two-tool catalog and leaves the editor', async () => {
+    const root = await makeRoot()
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(SystemPrompt, {})
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(LocalFileSystem, { cwd: root })
+    registerInheritedTools(ctx, ['bash', 'str_replace_editor'])
+    pluginFibers.push(await ctx.plugin(agentshim, {
+      root,
+      command: process.execPath,
+      commandArgs: [fixturePath],
+      readScope: 'normal',
+      env: { FIXTURE_REPORT: join(root, 'report.json'), FIXTURE_BOOT_FILE: join(root, 'boot.txt') },
+      toolCallTimeoutMs: 600_000,
+    }))
+    const { agent } = await mintAgent(ctx, 'minimal', root)
+    ctx.emit('agent/created', { agent })
+
+    expect(visibleNames(ctx, agent)).toEqual(['bash', 'str_replace_editor'])
+    const bash = ctx.tools.get('bash', agent)
+    expect(bash?.description).toContain('POSIX')
+    const properties = (bash!.parameters as { properties?: Record<string, unknown> }).properties
+    expect(properties).not.toHaveProperty('sandbox_permissions')
+    expect(JSON.parse(await runTool(ctx, agent, 'bash', { command: 'true' })))
+      .toEqual({ name: 'bash', arguments: { command: 'true' } })
+    expect(await runTool(ctx, agent, 'str_replace_editor', { command: 'view', path: 'notes.txt' }))
+      .toBe('inherited:str_replace_editor')
+
+    const assembly = await ctx.systemPrompt.assemble({ scope: agent })
+    const prompt = JSON.stringify(assembly)
+    expect(prompt).toContain('do not persist')
+    expect(prompt).not.toContain('next_start_line')
+    expect(prompt).not.toContain('Prefer run_program')
   })
 
   it('leaves an agent whose cwd is not the plugin root completely untouched', async () => {
@@ -256,7 +300,7 @@ describe('agent scope replacement', () => {
     }
     await ctx.plugin(StubAgentRegistry)
 
-    pluginFibers.push(await ctx.plugin(codexshim, {
+    pluginFibers.push(await ctx.plugin(agentshim, {
       root,
       command: process.execPath,
       commandArgs: [fixturePath],
@@ -291,7 +335,7 @@ describe('agent scope replacement', () => {
     }
     await ctx.plugin(StubAgentRegistry)
 
-    await expect(ctx.plugin(codexshim, {
+    await expect(ctx.plugin(agentshim, {
       root,
       command: process.execPath,
       commandArgs: [fixturePath],
@@ -309,7 +353,7 @@ describe('agent scope replacement', () => {
     expect(await exists(join(root, 'exit.txt'))).toBe(true)
   })
 
-  it('waits for shell and rebuilds process schemas across executor HMR', async () => {
+  it('activates without a shell executor and fails closed if confinement appears later', async () => {
     const root = await makeRoot()
     const ctx = new Context()
     contexts.push(ctx)
@@ -327,7 +371,7 @@ describe('agent scope replacement', () => {
       }
     }
     await ctx.plugin(StubAgentRegistry)
-    const config: Config = {
+    pluginFibers.push(await ctx.plugin(agentshim, {
       root,
       command: process.execPath,
       commandArgs: [fixturePath],
@@ -338,20 +382,15 @@ describe('agent scope replacement', () => {
         FIXTURE_EXIT_FILE: join(root, 'exit.txt'),
       },
       toolCallTimeoutMs: 600_000,
-    }
-    const adapterFiber = ctx.plugin(codexshim, config)
-    pluginFibers.push(adapterFiber)
-    expect(visibleNames(ctx, existing.agent)).not.toContain('run_program')
-    expect(await exists(join(root, 'boot.txt'))).toBe(false)
-
-    const unconfined = await ctx.plugin(UnconfinedShell)
-    await adapterFiber
+    }))
+    expect(await exists(join(root, 'boot.txt'))).toBe(true)
     const unconfinedBash = ctx.tools.get('bash', existing.agent)
     expect(unconfinedBash).toBeDefined()
     const unconfinedProperties = (unconfinedBash!.parameters as { properties?: Record<string, unknown> }).properties
     expect(unconfinedProperties).not.toHaveProperty('sandbox_permissions')
+    expect(JSON.parse(await runTool(ctx, existing.agent, 'bash', { command: 'true' })))
+      .toEqual({ name: 'bash', arguments: { command: 'true' } })
 
-    await unconfined.dispose()
     await ctx.plugin(class extends Service {
       constructor(inner: Context) {
         super(inner, 'sandboxPolicy')
@@ -360,17 +399,12 @@ describe('agent scope replacement', () => {
         return { mode: 'workspace-write' }
       }
     })
-    const confined = await ctx.plugin(class extends Service {
+    await ctx.plugin(class extends Service {
       readonly sandboxMode = 'workspace-write'
       constructor(inner: Context) {
         super(inner, 'shell')
       }
     })
-    await adapterFiber
-    const confinedBash = ctx.tools.get('bash', existing.agent)
-    expect(confinedBash).toBeDefined()
-    const confinedProperties = (confinedBash!.parameters as { properties?: Record<string, unknown> }).properties
-    expect(confinedProperties).toHaveProperty('sandbox_permissions')
     const denied = await ctx.tools.execute({
       signal: callSignal,
       callId: CallId('hmr-denied'),
@@ -378,17 +412,7 @@ describe('agent scope replacement', () => {
       arguments: { command: 'true' },
       agent: existing.agent,
     })
-    expect(denied.error?.info).toMatchObject({ code: 'CODEXSHIM_PROCESS_REQUIRES_FULL_ACCESS' })
-
-    await confined.dispose()
-    await ctx.plugin(UnconfinedShell)
-    await adapterFiber
-    const restoredBash = ctx.tools.get('bash', existing.agent)
-    expect(restoredBash).toBeDefined()
-    const restoredProperties = (restoredBash!.parameters as { properties?: Record<string, unknown> }).properties
-    expect(restoredProperties).not.toHaveProperty('sandbox_permissions')
-    expect(JSON.parse(await runTool(ctx, existing.agent, 'bash', { command: 'true' })))
-      .toEqual({ name: 'bash', arguments: { command: 'true' } })
+    expect(denied.error?.info).toMatchObject({ code: 'AGENTSHIM_PROCESS_POLICY_CHANGED' })
   })
 
   it('fails loud at load when ctx.fs is not a local filesystem provider', async () => {
@@ -404,7 +428,7 @@ describe('agent scope replacement', () => {
       }
     }
     await ctx.plugin(RemoteFs)
-    await expect(ctx.plugin(codexshim, {
+    await expect(ctx.plugin(agentshim, {
       root,
       command: process.execPath,
       commandArgs: [fixturePath],
@@ -433,24 +457,22 @@ describe('DSH contract bridges', () => {
     })
   }
 
-  it('maps codexshim tool errors to stable codes through the registry', async () => {
+  it('maps agentshim tool errors to stable codes through the registry', async () => {
     const root = await makeRoot()
     const ctx = await mountComposition(root, { env: { FIXTURE_REPORT: '', FIXTURE_BOOT_FILE: '', FIXTURE_CALL_ERROR: '1' } })
-    const { agent } = await mintAgent(ctx, 'e1', root)
-    ctx.emit('agent/created', { agent })
+    const { agent } = await mintStandardAgent(ctx, 'e1', root)
     const result = await executeTool(ctx, agent, 'bash', { command: 'explode' })
     expect(result.isError).toBe(true)
-    expect(result.error?.info).toMatchObject({ code: 'CODEXSHIM_FIXTURE_DENIED' })
+    expect(result.error?.info).toMatchObject({ code: 'AGENTSHIM_FIXTURE_DENIED' })
   })
 
-  it('bridges the DSH fs observation policy across a codexshim read', async () => {
+  it('bridges the DSH fs observation policy across a agentshim read', async () => {
     const root = await makeRoot()
     const ctx = await mountComposition(root)
     await ctx.plugin(ObservationPolicy)
     const file = join(root, 'notes.txt')
     await writeFile(file, 'content\n')
-    const { agent } = await mintAgent(ctx, 'o1', root)
-    ctx.emit('agent/created', { agent })
+    const { agent } = await mintStandardAgent(ctx, 'o1', root)
 
     const observed = vi.fn()
     ctx.on('fs/observed', (target, observation) => {
@@ -470,7 +492,7 @@ describe('DSH contract bridges', () => {
     expect(observed).toHaveBeenCalledWith(expect.stringContaining('missing.txt'), { kind: 'absent' })
   })
 
-  it('refuses reads with CODEXSHIM_EXECUTION_WORLD_MISMATCH when the provider mapping changes', async () => {
+  it('refuses reads with AGENTSHIM_EXECUTION_WORLD_MISMATCH when the provider mapping changes', async () => {
     const root = await makeRoot()
     const ctx = new Context()
     contexts.push(ctx)
@@ -478,7 +500,7 @@ describe('DSH contract bridges', () => {
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(LocalFileSystem, { cwd: root })
     await ctx.plugin(UnconfinedShell)
-    pluginFibers.push(await ctx.plugin(codexshim, {
+    pluginFibers.push(await ctx.plugin(agentshim, {
       root,
       command: process.execPath,
       commandArgs: [fixturePath],
@@ -486,12 +508,11 @@ describe('DSH contract bridges', () => {
       env: { FIXTURE_REPORT: '', FIXTURE_BOOT_FILE: '' },
       toolCallTimeoutMs: 600_000,
     }))
-    const { agent } = await mintAgent(ctx, 'w1', root)
-    ctx.emit('agent/created', { agent })
+    const { agent } = await mintStandardAgent(ctx, 'w1', root)
     vi.spyOn(ctx.fs, 'processPath').mockReturnValue(join(root, 'other-world'))
     const result = await executeTool(ctx, agent, 'read', { path: 'notes.txt' })
     expect(result.isError).toBe(true)
-    expect(result.error?.info).toMatchObject({ code: 'CODEXSHIM_EXECUTION_WORLD_MISMATCH' })
+    expect(result.error?.info).toMatchObject({ code: 'AGENTSHIM_EXECUTION_WORLD_MISMATCH' })
   })
 
   it('delivers PDF images as durable attachments without raw base64', async () => {
@@ -507,8 +528,7 @@ describe('DSH contract bridges', () => {
       }
     }
     await ctx.plugin(StubLlm)
-    const { agent } = await mintAgent(ctx, 'i1', root)
-    ctx.emit('agent/created', { agent })
+    const { agent } = await mintStandardAgent(ctx, 'i1', root)
 
     const result = await executeTool(ctx, agent, 'read', { path: 'doc.pdf', pdf_mode: 'image' })
     expect(result.isError).toBe(false)
@@ -533,8 +553,7 @@ describe('DSH contract bridges', () => {
       }
     }
     await ctx.plugin(StubLlm)
-    const { agent } = await mintAgent(ctx, 'i-code', root)
-    ctx.emit('agent/created', { agent })
+    const { agent } = await mintStandardAgent(ctx, 'i-code', root)
 
     const result = await executeTool(
       ctx,
@@ -546,7 +565,7 @@ describe('DSH contract bridges', () => {
     expect(result.isError).toBe(false)
     expect(result.additionalContexts).toHaveLength(1)
     expect(JSON.stringify(result.additionalContexts)).not.toContain('iVBORw0KGgo')
-    expect(result.additionalContexts?.[0]?.source).toEqual({ kind: 'plugin', plugin: 'codexshim' })
+    expect(result.additionalContexts?.[0]?.source).toEqual({ kind: 'plugin', plugin: 'agentshim' })
   })
 
   it('denies confined process calls before execution and strips fields after one-time approval', async () => {
@@ -577,17 +596,16 @@ describe('DSH contract bridges', () => {
         }
       })
     })
-    const { agent } = await mintAgent(ctx, 'p1', root)
-    ctx.emit('agent/created', { agent })
+    const { agent } = await mintStandardAgent(ctx, 'p1', root)
 
     const denied = await executeTool(ctx, agent, 'bash', { command: 'true' })
     expect(denied.isError).toBe(true)
-    expect(denied.error?.info).toMatchObject({ code: 'CODEXSHIM_PROCESS_REQUIRES_FULL_ACCESS' })
+    expect(denied.error?.info).toMatchObject({ code: 'AGENTSHIM_PROCESS_REQUIRES_FULL_ACCESS' })
 
     const approved = await executeTool(ctx, agent, 'bash', {
       command: 'true',
       sandbox_permissions: 'danger-full-access',
-      justification: 'the command must run through the private local codexshim process',
+      justification: 'the command must run through the private local agentshim process',
     })
     expect(approved.isError).toBe(false)
     expect(approvalRequests).toHaveLength(1)
@@ -599,8 +617,7 @@ describe('DSH contract bridges', () => {
   it('materializes caller cancellation through the DSH tool registry', async () => {
     const root = await makeRoot()
     const ctx = await mountComposition(root, { env: { FIXTURE_REPORT: '', FIXTURE_BOOT_FILE: '', FIXTURE_CALL_DELAY_MS: '8000' } })
-    const { agent } = await mintAgent(ctx, 'cancel', root)
-    ctx.emit('agent/created', { agent })
+    const { agent } = await mintStandardAgent(ctx, 'cancel', root)
     const controller = new AbortController()
     const pending = executeTool(ctx, agent, 'bash', { command: 'slow' }, { signal: controller.signal })
     setTimeout(() => controller.abort(), 100)
@@ -619,8 +636,7 @@ describe('DSH contract bridges', () => {
         FIXTURE_CALL_DELAY_MS: '8000',
       },
     })
-    const { agent } = await mintAgent(ctx, 'unload-call', root)
-    ctx.emit('agent/created', { agent })
+    const { agent } = await mintStandardAgent(ctx, 'unload-call', root)
     const pending = executeTool(ctx, agent, 'bash', { command: 'slow' })
     await new Promise(resolve => setTimeout(resolve, 100))
     const fiber = pluginFibers.at(-1)
@@ -644,12 +660,11 @@ describe('DSH contract bridges', () => {
       }
     }
     await ctx.plugin(TextOnlyLlm)
-    const { agent } = await mintAgent(ctx, 'i2', root)
-    ctx.emit('agent/created', { agent })
+    const { agent } = await mintStandardAgent(ctx, 'i2', root)
 
     const result = await executeTool(ctx, agent, 'read', { path: 'doc.pdf', pdf_mode: 'image' })
     expect(result.isError).toBe(true)
-    expect(result.error?.info).toMatchObject({ code: 'CODEXSHIM_IMAGE_ROUTE_UNSUPPORTED' })
+    expect(result.error?.info).toMatchObject({ code: 'AGENTSHIM_IMAGE_ROUTE_UNSUPPORTED' })
     expect(result.error?.message).toContain('pdf_mode: "text"')
   })
 })

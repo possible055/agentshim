@@ -280,7 +280,7 @@ fn validate_windows_version() -> std::io::Result<()> {
     if version.dwMajorVersion != 10 || version.dwBuildNumber < 22_621 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "codexshim requires Windows 11 build 22621 or newer",
+            "agentshim requires Windows 11 build 22621 or newer",
         ));
     }
     Ok(())

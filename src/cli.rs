@@ -8,8 +8,8 @@ use std::{
     time::Duration,
 };
 
-use codexshim::{
-    ClientProfile, CodexShim, MAX_READ_ONLY_CALLS, ReadScope, RuntimeLimits, bash_report,
+use agentshim::{
+    AgentShim, ClientProfile, MAX_READ_ONLY_CALLS, ReadScope, RuntimeLimits, bash_report,
 };
 use rmcp::{
     ServiceExt,
@@ -26,7 +26,7 @@ mod tests;
 
 pub(super) fn usage() {
     eprintln!(
-        "Usage: codexshim <serve|doctor> [--read-scope <normal|unrestricted>] \
+        "Usage: agentshim <serve|doctor> [--read-scope <normal|unrestricted>] \
          [--client-profile <codex|cursor>] | logs <status|purge> | --version"
     );
 }
@@ -137,11 +137,11 @@ fn print_memory_limits(limits: RuntimeLimits) {
     println!("pdf image memory bytes: {}", limits.pdf_image_memory_bytes);
     println!(
         "pdf text page spans: {}",
-        codexshim_pdf_read::PdfResourceLimits::text_within(limits.pdf_text_memory_bytes).page_spans
+        agentshim_pdf_read::PdfResourceLimits::text_within(limits.pdf_text_memory_bytes).page_spans
     );
     println!(
         "pdf image page spans: {}",
-        codexshim_pdf_read::PdfResourceLimits::image_within(limits.pdf_image_memory_bytes)
+        agentshim_pdf_read::PdfResourceLimits::image_within(limits.pdf_image_memory_bytes)
             .page_spans
     );
     println!("global memory bytes: {}", limits.memory_bytes);
@@ -170,7 +170,7 @@ pub(super) async fn run(config: RuntimeLimits, command: CliCommand) -> Result<()
         CliCommand::Serve(options) => {
             let read_scope = options.read_scope;
             let client_profile = options.client_profile;
-            let service = CodexShim::builder(std::env::current_dir()?)?
+            let service = AgentShim::builder(std::env::current_dir()?)?
                 .runtime_limits(config)
                 .read_scope(read_scope)
                 .client_profile(client_profile)
@@ -181,7 +181,7 @@ pub(super) async fn run(config: RuntimeLimits, command: CliCommand) -> Result<()
                 shutdown: service.shutdown_token(),
                 termination_reported: false,
             };
-            tracing::info!(target: "codexshim", event = "server_start", phase = "lifecycle", read_scope = %read_scope, client_profile = %service.client_profile(), tool_output_tokens = service.tool_output_token_limit(), burst_tokens = service.burst_token_limit(), idle_timeout_secs = service.runtime_limits().idle_timeout.map(|timeout| timeout.as_secs()));
+            tracing::info!(target: "agentshim", event = "server_start", phase = "lifecycle", read_scope = %read_scope, client_profile = %service.client_profile(), tool_output_tokens = service.tool_output_token_limit(), burst_tokens = service.burst_token_limit(), idle_timeout_secs = service.runtime_limits().idle_timeout.map(|timeout| timeout.as_secs()));
             let shutdown_token = service.shutdown_token();
             let transport = (reader, stdout).into_transport();
             // Seed before transport polling starts so an instance whose client never
@@ -215,43 +215,43 @@ pub(super) async fn run(config: RuntimeLimits, command: CliCommand) -> Result<()
                     drain_service.shutdown_processes().await;
                     let _ = shutdown_watcher.await;
                     let _ = idle_watchdog.await;
-                    tracing::error!(target: "codexshim", event = "server_stop", phase = "lifecycle", outcome = "error", error_class = initialize_error_class(&error));
+                    tracing::error!(target: "agentshim", event = "server_stop", phase = "lifecycle", outcome = "error", error_class = initialize_error_class(&error));
                     return Err(error.into());
                 }
             };
-            tracing::info!(target: "codexshim", event = "server_ready", phase = "lifecycle");
+            tracing::info!(target: "agentshim", event = "server_ready", phase = "lifecycle");
             let outcome = running.waiting().await;
             drain_service.shutdown_processes().await;
             let _ = shutdown_watcher.await;
             let _ = idle_watchdog.await;
             match outcome {
                 Ok(QuitReason::Closed) if transport_failure.failed() => {
-                    tracing::error!(target: "codexshim", event = "server_stop", phase = "lifecycle", outcome = "error", error_class = "transport");
+                    tracing::error!(target: "agentshim", event = "server_stop", phase = "lifecycle", outcome = "error", error_class = "transport");
                     return Err("MCP transport failed".into());
                 }
                 Ok(QuitReason::Closed) => {
-                    tracing::info!(target: "codexshim", event = "server_stop", phase = "lifecycle", outcome = "success", reason = "transport_closed");
+                    tracing::info!(target: "agentshim", event = "server_stop", phase = "lifecycle", outcome = "success", reason = "transport_closed");
                 }
                 Ok(QuitReason::Cancelled) if transport_failure.failed() => {
-                    tracing::error!(target: "codexshim", event = "server_stop", phase = "lifecycle", outcome = "error", error_class = "transport");
+                    tracing::error!(target: "agentshim", event = "server_stop", phase = "lifecycle", outcome = "error", error_class = "transport");
                     return Err("MCP transport failed".into());
                 }
                 Ok(QuitReason::Cancelled) => {
-                    tracing::info!(target: "codexshim", event = "server_stop", phase = "lifecycle", outcome = "success", reason = "shutdown");
+                    tracing::info!(target: "agentshim", event = "server_stop", phase = "lifecycle", outcome = "success", reason = "shutdown");
                 }
                 Ok(QuitReason::JoinError(error)) | Err(error) => {
-                    tracing::error!(target: "codexshim", event = "server_stop", phase = "lifecycle", outcome = "error", error_class = "framework");
+                    tracing::error!(target: "agentshim", event = "server_stop", phase = "lifecycle", outcome = "error", error_class = "framework");
                     return Err(error.into());
                 }
                 Ok(_) => {
-                    tracing::error!(target: "codexshim", event = "server_stop", phase = "lifecycle", outcome = "error", error_class = "framework");
+                    tracing::error!(target: "agentshim", event = "server_stop", phase = "lifecycle", outcome = "error", error_class = "framework");
                     return Err("MCP server stopped for an unknown reason".into());
                 }
             }
         }
         CliCommand::Doctor(options) => run_doctor(config, &options)?,
         CliCommand::Version => {
-            println!("codexshim {}", env!("CARGO_PKG_VERSION"));
+            println!("agentshim {}", env!("CARGO_PKG_VERSION"));
         }
         CliCommand::LogsStatus | CliCommand::LogsPurge => {
             unreachable!("log management commands do not require a Tokio runtime")
@@ -261,7 +261,7 @@ pub(super) async fn run(config: RuntimeLimits, command: CliCommand) -> Result<()
 }
 
 fn spawn_idle_watchdog(
-    service: CodexShim,
+    service: AgentShim,
     last_activity: Arc<AtomicU64>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
@@ -287,7 +287,7 @@ fn spawn_idle_watchdog(
                 if last != last_activity.load(Ordering::Acquire) {
                     continue;
                 }
-                tracing::info!(target: "codexshim", event = "idle_shutdown", phase = "lifecycle", idle_secs = timeout.as_secs());
+                tracing::info!(target: "agentshim", event = "idle_shutdown", phase = "lifecycle", idle_secs = timeout.as_secs());
                 shutdown.cancel();
                 return;
             };
@@ -300,14 +300,14 @@ fn spawn_idle_watchdog(
 }
 
 fn run_doctor(config: RuntimeLimits, options: &ServeOptions) -> Result<(), Box<dyn Error>> {
-    let service = CodexShim::builder(std::env::current_dir()?)?
+    let service = AgentShim::builder(std::env::current_dir()?)?
         .runtime_limits(config)
         .read_scope(options.read_scope)
         .client_profile(options.client_profile)
         .build()?;
     service.verify_root()?;
     service.verify_process_runtime()?;
-    println!("codexshim doctor: ok");
+    println!("agentshim doctor: ok");
     println!("root: {}", service.root_path().display());
     println!("protocol: 2026-07-28");
     println!("read scope: {}", service.read_scope());

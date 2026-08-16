@@ -13,15 +13,15 @@ from evals.datasets.codebase.generator import generate_codebase  # noqa: E402
 from evals.datasets.pdf.download import ensure_dataset  # noqa: E402
 from evals.framework import BenchmarkRunner, ReportGenerator, SampleResult  # noqa: E402
 
-COMPARE_TARGETS = ["codexshim", "fastctx", "pi", "opencode"]
+COMPARE_TARGETS = ["agentshim", "fastctx", "pi", "opencode"]
 SCALE_COUNTS = {"1k": 1000, "10k": 10000, "100k": 100000}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Codexshim evals: rank read/grep/glob against fastctx/pi/opencode, "
-            "plus extra PDF read and a codexshim-only run_program suite. "
+            "Agentshim evals: rank read/grep/glob against fastctx/pi/opencode, "
+            "plus extra PDF read and a agentshim-only run_program suite. "
             "bash is available but not part of the ranking compare default."
         )
     )
@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
         "--targets",
         nargs="+",
         default=COMPARE_TARGETS,
-        help="Targets to evaluate (default: codexshim fastctx pi opencode)",
+        help="Targets to evaluate (default: agentshim fastctx pi opencode)",
     )
     parser.add_argument(
         "--scales",
@@ -73,7 +73,7 @@ def parse_args() -> argparse.Namespace:
         "--binary-path",
         type=str,
         default=None,
-        help="Path to a prebuilt codexshim binary",
+        help="Path to a prebuilt agentshim binary",
     )
     parser.add_argument(
         "--fastctx-root",
@@ -104,7 +104,7 @@ def parse_args() -> argparse.Namespace:
 
 def _target_configs(args: argparse.Namespace) -> dict[str, dict[str, Any]]:
     configs: dict[str, dict[str, Any]] = {
-        "codexshim": {
+        "agentshim": {
             "root_dir": str(PROJECT_ROOT),
             "binary_path": args.binary_path,
         },

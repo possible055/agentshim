@@ -36,15 +36,15 @@ pub const PDF_GATE_WAIT: Duration = Duration::from_millis(300);
 pub const PDF_TEXT_RUNTIME_LIMIT: Duration = Duration::from_secs(5);
 pub const PDF_IMAGE_RUNTIME_LIMIT: Duration = Duration::from_secs(10);
 const TRANSPORT_BLOCKING_THREADS: usize = 2;
-const WORKER_ENV: &str = "CODEXSHIM_IO_WORKERS";
-const PROCESS_CALLS_ENV: &str = "CODEXSHIM_PROCESS_CALLS";
-const TOOL_TIMEOUT_SHELF_ENV: &str = "CODEXSHIM_TOOL_TIMEOUT_SHELF";
-const IDLE_TIMEOUT_ENV: &str = "CODEXSHIM_IDLE_TIMEOUT";
-pub const GREP_MEMORY_BYTES_ENV: &str = "CODEXSHIM_GREP_MEMORY_BYTES";
-pub const GLOB_MEMORY_BYTES_ENV: &str = "CODEXSHIM_GLOB_MEMORY_BYTES";
-pub const PDF_TEXT_MEMORY_BYTES_ENV: &str = "CODEXSHIM_PDF_TEXT_MEMORY_BYTES";
-pub const PDF_IMAGE_MEMORY_BYTES_ENV: &str = "CODEXSHIM_PDF_IMAGE_MEMORY_BYTES";
-pub const RESPECT_GITIGNORE_ENV: &str = "CODEXSHIM_RESPECT_GITIGNORE";
+const WORKER_ENV: &str = "AGENTSHIM_IO_WORKERS";
+const PROCESS_CALLS_ENV: &str = "AGENTSHIM_PROCESS_CALLS";
+const TOOL_TIMEOUT_SHELF_ENV: &str = "AGENTSHIM_TOOL_TIMEOUT_SHELF";
+const IDLE_TIMEOUT_ENV: &str = "AGENTSHIM_IDLE_TIMEOUT";
+pub const GREP_MEMORY_BYTES_ENV: &str = "AGENTSHIM_GREP_MEMORY_BYTES";
+pub const GLOB_MEMORY_BYTES_ENV: &str = "AGENTSHIM_GLOB_MEMORY_BYTES";
+pub const PDF_TEXT_MEMORY_BYTES_ENV: &str = "AGENTSHIM_PDF_TEXT_MEMORY_BYTES";
+pub const PDF_IMAGE_MEMORY_BYTES_ENV: &str = "AGENTSHIM_PDF_IMAGE_MEMORY_BYTES";
+pub const RESPECT_GITIGNORE_ENV: &str = "AGENTSHIM_RESPECT_GITIGNORE";
 
 /// Default shelf matching the `tool_timeout_sec = 600` documented in every example. The
 /// server's own execution ceiling stays below this by the cleanup deadline plus protocol

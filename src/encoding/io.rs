@@ -1,11 +1,125 @@
 use std::io::{self, Read};
 
-use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE};
+use encoding_rs::{Decoder, DecoderResult, Encoding, UTF_8, UTF_16BE, UTF_16LE};
 use tokio_util::sync::CancellationToken;
 
 use super::decoder::{StrictDecoder, detect_encoding};
 
 const DECODE_CHUNK_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TranscodeFailure {
+    Cancelled,
+    Io,
+    Malformed,
+    Binary,
+}
+
+pub(crate) struct StrictTranscodingReader<'a, R> {
+    reader: R,
+    decoder: Decoder,
+    cancellation: &'a CancellationToken,
+    input: Box<[u8]>,
+    input_start: usize,
+    input_end: usize,
+    output: Box<[u8]>,
+    output_start: usize,
+    output_end: usize,
+    eof: bool,
+    finished: bool,
+    failure: Option<TranscodeFailure>,
+}
+
+impl<'a, R> StrictTranscodingReader<'a, R> {
+    pub(crate) fn new(
+        reader: R,
+        encoding: &'static Encoding,
+        cancellation: &'a CancellationToken,
+        input_bytes: usize,
+        output_bytes: usize,
+    ) -> Self {
+        Self {
+            reader,
+            decoder: encoding.new_decoder(),
+            cancellation,
+            input: vec![0; input_bytes.max(4)].into_boxed_slice(),
+            input_start: 0,
+            input_end: 0,
+            output: vec![0; output_bytes.max(4)].into_boxed_slice(),
+            output_start: 0,
+            output_end: 0,
+            eof: false,
+            finished: false,
+            failure: None,
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (R, Option<TranscodeFailure>) {
+        (self.reader, self.failure)
+    }
+
+    fn fail(&mut self, failure: TranscodeFailure) -> io::Error {
+        self.failure = Some(failure);
+        io::Error::other("strict transcoding failed")
+    }
+}
+
+impl<R: Read> Read for StrictTranscodingReader<'_, R> {
+    fn read(&mut self, destination: &mut [u8]) -> io::Result<usize> {
+        if destination.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            if self.output_start < self.output_end {
+                let count = destination
+                    .len()
+                    .min(self.output_end.saturating_sub(self.output_start));
+                destination[..count].copy_from_slice(
+                    &self.output[self.output_start..self.output_start.saturating_add(count)],
+                );
+                self.output_start += count;
+                return Ok(count);
+            }
+            if self.finished {
+                return Ok(0);
+            }
+            if self.cancellation.is_cancelled() {
+                return Err(self.fail(TranscodeFailure::Cancelled));
+            }
+            if self.input_start == self.input_end && !self.eof {
+                match self.reader.read(&mut self.input) {
+                    Ok(0) => self.eof = true,
+                    Ok(count) => {
+                        self.input_start = 0;
+                        self.input_end = count;
+                    }
+                    Err(error) => {
+                        self.failure = Some(TranscodeFailure::Io);
+                        return Err(error);
+                    }
+                }
+            }
+            let (result, read, written) = self.decoder.decode_to_utf8_without_replacement(
+                &self.input[self.input_start..self.input_end],
+                &mut self.output,
+                self.eof,
+            );
+            self.input_start = self.input_start.saturating_add(read);
+            self.output_start = 0;
+            self.output_end = written;
+            if self.output[..written].contains(&0) {
+                return Err(self.fail(TranscodeFailure::Binary));
+            }
+            match result {
+                DecoderResult::InputEmpty if self.eof => self.finished = true,
+                DecoderResult::InputEmpty | DecoderResult::OutputFull => {}
+                DecoderResult::Malformed(_, _) => {
+                    return Err(self.fail(TranscodeFailure::Malformed));
+                }
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SourceEncoding {

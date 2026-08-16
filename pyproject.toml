@@ -1,7 +1,7 @@
 [project]
-name = "codexshim"
+name = "agentshim"
 version = "0"
-description = "Local Python tooling for codexshim (pre-commit hooks)"
+description = "Local Python tooling for agentshim (pre-commit hooks)"
 requires-python = ">=3.13"
 
 [dependency-groups]

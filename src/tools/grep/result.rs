@@ -66,8 +66,12 @@ impl Page {
             matched,
             skip,
             retired,
+            leading_skipped,
+            retry,
         } = outcome;
         debug_assert!(!retired, "retired outcomes must not reach the reducer");
+        debug_assert!(retry.is_none(), "retry outcomes must not reach the reducer");
+        self.seen_entries = self.seen_entries.saturating_add(leading_skipped);
         if let Some(reason) = skip {
             if single_file {
                 return Err(GrepError::Unsearchable(reason));
@@ -118,9 +122,11 @@ impl Page {
                         return Ok(ReduceControl::PageFull);
                     }
                 }
-                self.seen_entries = self
-                    .seen_entries
-                    .saturating_add(entries.saturating_sub(captured));
+                self.seen_entries = self.seen_entries.saturating_add(
+                    entries
+                        .saturating_sub(captured)
+                        .saturating_sub(leading_skipped),
+                );
             }
             GrepMode::Files | GrepMode::Count => {}
         }
@@ -166,6 +172,13 @@ impl Page {
 
     fn page_full(&self) -> bool {
         self.allow_early_retirement && self.seen_entries >= self.probe
+    }
+
+    pub(super) fn exact_search_window(&self) -> (usize, usize) {
+        (
+            self.offset.saturating_sub(self.seen_entries),
+            self.probe.saturating_sub(self.seen_entries),
+        )
     }
 
     fn can_retain(&self, text: &str, fallback: Option<&str>) -> bool {

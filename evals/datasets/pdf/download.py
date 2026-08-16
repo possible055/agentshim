@@ -26,7 +26,7 @@ def download(url: str, destination: Path) -> None:
     part_path = destination.with_suffix(destination.suffix + ".part")
     request = urllib.request.Request(
         url,
-        headers={"User-Agent": "codexshim-evals-pdf/1.0"},
+        headers={"User-Agent": "agentshim-evals-pdf/1.0"},
     )
     try:
         with urllib.request.urlopen(request, timeout=120) as response:

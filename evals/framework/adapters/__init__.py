@@ -1,14 +1,14 @@
 from typing import Any
 
+from .agentshim import AgentshimAdapter
 from .base import SkipTargetError, TargetAdapter, UnsupportedError
 from .baseline_cli import BaselineCliAdapter
-from .codexshim import CodexshimAdapter
 from .fastctx import FastctxAdapter
 from .opencode import OpencodeAdapter
 from .pi import PiAdapter
 
 _ADAPTER_REGISTRY: dict[str, type[TargetAdapter]] = {
-    "codexshim": CodexshimAdapter,
+    "agentshim": AgentshimAdapter,
     "fastctx": FastctxAdapter,
     "pi": PiAdapter,
     "opencode": OpencodeAdapter,
@@ -27,7 +27,7 @@ __all__ = [
     "TargetAdapter",
     "UnsupportedError",
     "SkipTargetError",
-    "CodexshimAdapter",
+    "AgentshimAdapter",
     "FastctxAdapter",
     "PiAdapter",
     "OpencodeAdapter",

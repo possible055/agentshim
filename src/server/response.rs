@@ -232,16 +232,16 @@ impl DiagnosticError for crate::tools::read::ReadError {
             ReadError::PdfImageRequired { .. } => "pdf_image_required",
             ReadError::PdfProcessing(_) => "pdf_processing",
             ReadError::Pdf(error) => match error.kind() {
-                codexshim_pdf_read::PdfReadErrorKind::Invalid => "pdf_invalid",
-                codexshim_pdf_read::PdfReadErrorKind::Unsupported => "pdf_unsupported",
-                codexshim_pdf_read::PdfReadErrorKind::Encrypted => "pdf_encrypted",
-                codexshim_pdf_read::PdfReadErrorKind::ResourceLimit => "resource_limit",
-                codexshim_pdf_read::PdfReadErrorKind::Processing => "pdf_processing",
-                codexshim_pdf_read::PdfReadErrorKind::Io => "io",
+                agentshim_pdf_read::PdfReadErrorKind::Invalid => "pdf_invalid",
+                agentshim_pdf_read::PdfReadErrorKind::Unsupported => "pdf_unsupported",
+                agentshim_pdf_read::PdfReadErrorKind::Encrypted => "pdf_encrypted",
+                agentshim_pdf_read::PdfReadErrorKind::ResourceLimit => "resource_limit",
+                agentshim_pdf_read::PdfReadErrorKind::Processing => "pdf_processing",
+                agentshim_pdf_read::PdfReadErrorKind::Io => "io",
                 // The mode runtime ceiling cancels the same token the client uses, so
                 // the service decides which of the two it was; a core cancellation on
                 // its own is the client's.
-                codexshim_pdf_read::PdfReadErrorKind::Cancelled => "client_cancellation",
+                agentshim_pdf_read::PdfReadErrorKind::Cancelled => "client_cancellation",
             },
             ReadError::Io(_) | ReadError::Decode(_) | ReadError::Binary | ReadError::Changed => {
                 "io"
@@ -441,7 +441,7 @@ pub(super) fn classified_tool_error(
     error_class: &'static str,
     message: impl Into<String>,
 ) -> CallToolResponse {
-    tracing::error!(target: "codexshim", event = "tool_error", phase = "response", outcome = "error", error_class);
+    tracing::error!(target: "agentshim", event = "tool_error", phase = "response", outcome = "error", error_class);
     let retryable = matches!(error_class, "io" | "resource_timeout" | "resource_busy");
     tool_error(error_class, retryable, message, None)
 }
@@ -449,7 +449,7 @@ pub(super) fn classified_tool_error(
 pub(super) fn diagnostic_tool_error<E: DiagnosticError + ?Sized>(error: &E) -> CallToolResponse {
     let error_class = error.error_class();
     let details = error.details();
-    tracing::error!(target: "codexshim", event = "tool_error", phase = "response", outcome = "error", error_class);
+    tracing::error!(target: "agentshim", event = "tool_error", phase = "response", outcome = "error", error_class);
     tool_error(
         error_class,
         error.retryable(),
@@ -474,9 +474,9 @@ pub(super) fn blocking_response<E: DiagnosticError>(
                 "success"
             };
             if outcome == "child_nonzero" {
-                tracing::warn!(target: "codexshim", event = "tool_complete", phase = "response", outcome, error_class = "child_nonzero", run_ms);
+                tracing::warn!(target: "agentshim", event = "tool_complete", phase = "response", outcome, error_class = "child_nonzero", run_ms);
             } else {
-                tracing::info!(target: "codexshim", event = "tool_complete", phase = "response", outcome, run_ms);
+                tracing::info!(target: "agentshim", event = "tool_complete", phase = "response", outcome, run_ms);
             }
             let call_budget_verified = output.fits_call_budget(output_budget, cancellation);
             let projected_cost = output.projected_cost();
@@ -493,7 +493,7 @@ pub(super) fn blocking_response<E: DiagnosticError>(
                 if let Some(cost) = projected_cost {
                     output_budget.cache_response_cost(cost);
                 }
-                tracing::trace!(target: "codexshim", token_gate_path = "verified_renderer");
+                tracing::trace!(target: "agentshim", token_gate_path = "verified_renderer");
                 return result.into();
             }
             match output_token_gate.evaluate_result(&result, cancellation) {
@@ -532,7 +532,7 @@ pub(super) struct PdfAdmission {
 /// `resource_busy` without a delay hint invites an immediate retry, which is just a spin.
 pub(super) fn pdf_busy(permit: &'static str) -> CallToolResponse {
     let retry_after_ms = u64::try_from(crate::runtime::PDF_GATE_WAIT.as_millis()).unwrap_or(300);
-    tracing::warn!(target: "codexshim", event = "tool_error", phase = "admission", outcome = "error", error_class = "resource_busy", permit);
+    tracing::warn!(target: "agentshim", event = "tool_error", phase = "admission", outcome = "error", error_class = "resource_busy", permit);
     tool_error(
         "resource_busy",
         true,
@@ -545,7 +545,7 @@ pub(super) fn pdf_busy(permit: &'static str) -> CallToolResponse {
 }
 
 pub(super) fn pdf_timeout(limit: Duration, elapsed: Duration) -> CallToolResponse {
-    tracing::warn!(target: "codexshim", event = "tool_error", phase = "execution", outcome = "error", error_class = "resource_timeout");
+    tracing::warn!(target: "agentshim", event = "tool_error", phase = "execution", outcome = "error", error_class = "resource_timeout");
     tool_error(
         "resource_timeout",
         true,
@@ -582,7 +582,7 @@ pub(super) fn resource_busy_with_message(
     admission: &'static str,
     message: impl Into<String>,
 ) -> CallToolResponse {
-    tracing::error!(target: "codexshim", event = "tool_error", phase = "request", outcome = "error", error_class = "resource_busy", tool, admission);
+    tracing::error!(target: "agentshim", event = "tool_error", phase = "request", outcome = "error", error_class = "resource_busy", tool, admission);
     let retryable = true;
     tool_error("resource_busy", retryable, message, None)
 }
@@ -618,10 +618,10 @@ pub(super) fn relayed_cancellation(
     let relay = tokio::spawn(async move {
         tokio::select! {
             () = request.cancelled() => {
-                tracing::warn!(target: "codexshim", event = "tool_cancelled", phase = "execution", error_class = "client_cancellation");
+                tracing::warn!(target: "agentshim", event = "tool_cancelled", phase = "execution", error_class = "client_cancellation");
             }
             () = shutdown.cancelled() => {
-                tracing::warn!(target: "codexshim", event = "tool_cancelled", phase = "execution", error_class = "shutdown");
+                tracing::warn!(target: "agentshim", event = "tool_cancelled", phase = "execution", error_class = "shutdown");
             }
         }
         signal.cancel();

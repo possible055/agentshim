@@ -1,6 +1,6 @@
 {
-  "name": "dsh-codexshim",
-  "description": "DSH native tool plugin backed by a private codexshim MCP session",
+  "name": "dsh-agentshim",
+  "description": "DSH native tool plugin backed by a private agentshim MCP session",
   "version": "0.1.0",
   "license": "MIT",
   "type": "module",

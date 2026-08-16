@@ -1,5 +1,5 @@
-use codexshim::{
-    CodexShim, NEXT_OFFSET_FIELD, NEXT_START_LINE_FIELD, PARTIAL_MARKER, PDF_CURSOR_FIELD,
+use agentshim::{
+    AgentShim, NEXT_OFFSET_FIELD, NEXT_START_LINE_FIELD, PARTIAL_MARKER, PDF_CURSOR_FIELD,
     ReadScope,
 };
 use serde_json::{Value, json};
@@ -12,7 +12,7 @@ fn descriptions_never_reference_server_environment() {
     for scope in [ReadScope::Normal, ReadScope::Unrestricted] {
         let catalog = serialized_catalog(scope);
         assert!(
-            !catalog.contains("CODEXSHIM_"),
+            !catalog.contains("AGENTSHIM_"),
             "descriptions must not name server environment variables: {catalog}"
         );
     }
@@ -27,7 +27,7 @@ fn descriptions_never_reference_server_environment() {
 fn descriptions_quote_real_continuation_markers() {
     for scope in [ReadScope::Normal, ReadScope::Unrestricted] {
         let result =
-            serde_json::to_value(CodexShim::tools_result_for(scope)).expect("serialize tools");
+            serde_json::to_value(AgentShim::tools_result_for(scope)).expect("serialize tools");
         let tools = result["tools"].as_array().expect("tools array");
 
         for (name, field) in [
@@ -57,12 +57,12 @@ fn descriptions_quote_real_continuation_markers() {
 /// whole catalog rather than walking it field by field keeps the check total: a leak into
 /// a field nobody thought to visit still fails.
 fn serialized_catalog(scope: ReadScope) -> String {
-    serde_json::to_string(&CodexShim::tools_result_for(scope)).expect("serialize tools")
+    serde_json::to_string(&AgentShim::tools_result_for(scope)).expect("serialize tools")
 }
 
 #[test]
 fn server_discover_advertises_supported_versions_and_tool_capability() {
-    let discover = serde_json::to_value(CodexShim::discovery_result()).expect("serialize discover");
+    let discover = serde_json::to_value(AgentShim::discovery_result()).expect("serialize discover");
     assert_eq!(
         discover["supportedVersions"],
         json!([
@@ -78,7 +78,7 @@ fn server_discover_advertises_supported_versions_and_tool_capability() {
 
 #[test]
 fn successful_tools_do_not_advertise_output_schemas() {
-    let result = serde_json::to_value(CodexShim::tools_result()).expect("serialize tools");
+    let result = serde_json::to_value(AgentShim::tools_result()).expect("serialize tools");
     let tools = result["tools"].as_array().expect("tools array");
     for name in ["read", "grep", "glob", "run_program", "bash"] {
         assert!(
@@ -90,7 +90,7 @@ fn successful_tools_do_not_advertise_output_schemas() {
 
 #[test]
 fn tool_annotations_match_codex_approval_contract() {
-    let result = serde_json::to_value(CodexShim::tools_result()).expect("serialize tools");
+    let result = serde_json::to_value(AgentShim::tools_result()).expect("serialize tools");
     let tools = result["tools"].as_array().expect("tools array");
 
     for name in ["read", "grep", "glob"] {
@@ -119,8 +119,8 @@ fn tool_annotations_match_codex_approval_contract() {
 
 #[test]
 fn unrestricted_catalog_keeps_approval_annotations() {
-    let normal = serde_json::to_value(CodexShim::tools_result()).expect("normal tools");
-    let unrestricted = serde_json::to_value(CodexShim::tools_result_for(ReadScope::Unrestricted))
+    let normal = serde_json::to_value(AgentShim::tools_result()).expect("normal tools");
+    let unrestricted = serde_json::to_value(AgentShim::tools_result_for(ReadScope::Unrestricted))
         .expect("unrestricted tools");
     let normal_tools = normal["tools"].as_array().expect("normal tools array");
     let unrestricted_tools = unrestricted["tools"]

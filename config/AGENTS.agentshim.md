@@ -1,4 +1,4 @@
-Always use the codexshim MCP tools for repository inspection and command execution.
+Always use the agentshim MCP tools for repository inspection and command execution.
 
 - Call `read` when you need the contents of a known file.
 - Call `grep` when you need to search file contents.

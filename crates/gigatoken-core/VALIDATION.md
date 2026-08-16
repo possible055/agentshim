@@ -36,7 +36,7 @@ while compiling and scanning new release artifacts. The canonical warm target
 passed the release gates; absolute Windows timings remain environment-sensitive.
 
 The resource-soak test defaults to 30 minutes and accepts
-`CODEXSHIM_TOKEN_SOAK_SECONDS` for shorter development probes. Native Linux
+`AGENTSHIM_TOKEN_SOAK_SECONDS` for shorter development probes. Native Linux
 x86_64 measurements and a full 30-minute process working-set run require their
 respective validation environments; this Windows session does not claim those
 external measurements.

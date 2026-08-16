@@ -19,8 +19,8 @@ use uuid::Uuid;
 
 use super::storage::{prepare_directory, writer_loop};
 
-pub const LOG_MODE_ENV: &str = "CODEXSHIM_LOG_MODE";
-pub const LOG_DIR_ENV: &str = "CODEXSHIM_LOG_DIR";
+pub const LOG_MODE_ENV: &str = "AGENTSHIM_LOG_MODE";
+pub const LOG_DIR_ENV: &str = "AGENTSHIM_LOG_DIR";
 const SCHEMA_VERSION: u64 = 1;
 const FLIGHT_RECORDS: usize = 64;
 const CHANNEL_BATCHES: usize = 1_024;
@@ -432,7 +432,7 @@ impl LazyWriter {
         let queued_bytes = Arc::clone(&self.queued_bytes);
         let shutdown = Arc::clone(&self.shutdown);
         let writer = thread::Builder::new()
-            .name("codexshim-log-writer".to_owned())
+            .name("agentshim-log-writer".to_owned())
             .spawn(move || {
                 let mut warned = false;
                 writer_loop(
@@ -455,7 +455,7 @@ impl LazyWriter {
             eprintln!(
                 "{}",
                 crate::output::bounded_diagnostic(&format!(
-                    "codexshim diagnostics writer disabled output: {error}"
+                    "agentshim diagnostics writer disabled output: {error}"
                 ))
             );
         }
@@ -525,7 +525,7 @@ where
 
     fn on_event(&self, event: &Event<'_>, context: Context<'_, S>) {
         let metadata = event.metadata();
-        if metadata.target() != "codexshim" && !metadata.target().starts_with("codexshim::") {
+        if metadata.target() != "agentshim" && !metadata.target().starts_with("agentshim::") {
             if metadata.target().starts_with("rmcp")
                 && matches!(
                     *metadata.level(),

@@ -1,4 +1,4 @@
-use codexshim_pdf_read::{MarkdownOptions, PageTextStatus, PdfReadDocument};
+use agentshim_pdf_read::{MarkdownOptions, PageTextStatus, PdfReadDocument};
 use tokio_util::sync::CancellationToken;
 
 use crate::tools::ToolOutput;
@@ -224,12 +224,12 @@ fn is_fatal(error: &ReadError) -> bool {
     match error {
         ReadError::Cancelled | ReadError::ResourceLimit { .. } => true,
         ReadError::Pdf(inner) => match inner.kind() {
-            codexshim_pdf_read::PdfReadErrorKind::ResourceLimit => !matches!(
+            agentshim_pdf_read::PdfReadErrorKind::ResourceLimit => !matches!(
                 inner.limit().map(|limit| limit.scope),
-                Some(codexshim_pdf_read::LimitScope::Page)
+                Some(agentshim_pdf_read::LimitScope::Page)
             ),
-            codexshim_pdf_read::PdfReadErrorKind::Cancelled
-            | codexshim_pdf_read::PdfReadErrorKind::Encrypted => true,
+            agentshim_pdf_read::PdfReadErrorKind::Cancelled
+            | agentshim_pdf_read::PdfReadErrorKind::Encrypted => true,
             _ => false,
         },
         _ => false,

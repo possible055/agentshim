@@ -378,7 +378,7 @@ class CargoMcpAdapter(McpStdioAdapter):
         if "RUST_LOG" not in env:
             env["RUST_LOG"] = "warn"
         # Ranking measures tool work, not a tight client burst window.
-        env.setdefault("CODEXSHIM_BURST_TOKENS", "8192")
+        env.setdefault("AGENTSHIM_BURST_TOKENS", "8192")
         return env
 
     def initialize_timeout_s(self) -> float:
@@ -400,7 +400,7 @@ class CargoMcpAdapter(McpStdioAdapter):
         if resolved is not None:
             self._uses_cargo_fallback = False
             return [str(resolved), "serve"]
-        if self.name != "codexshim":
+        if self.name != "agentshim":
             raise SkipTargetError(
                 f"{self.name} binary not found under {self.root_dir / 'target' / 'release'}"
             )

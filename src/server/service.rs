@@ -61,7 +61,7 @@ const TOOLS_CACHE_TTL_MS: u64 = 300_000;
 const TOOLS_CACHE_SCOPE: &str = "private";
 
 #[derive(Clone)]
-pub struct CodexShim {
+pub struct AgentShim {
     pub(super) root: Arc<RepositoryRoot>,
     pub(super) file_access: Arc<FileAccess>,
     pub(super) resources: RuntimeResources,
@@ -106,14 +106,14 @@ impl Drop for CompleteOnDrop {
     }
 }
 
-pub struct CodexShimBuilder {
+pub struct AgentShimBuilder {
     root: PathBuf,
     read_scope: ReadScope,
     runtime: RuntimeConfig,
     client_profile: crate::ClientProfile,
 }
 
-impl CodexShimBuilder {
+impl AgentShimBuilder {
     /// Resolve server defaults from the environment for an explicit repository root.
     ///
     /// # Errors
@@ -152,7 +152,7 @@ impl CodexShimBuilder {
     /// # Errors
     ///
     /// Returns the repository root validation or capability-open error.
-    pub fn build(self) -> io::Result<CodexShim> {
+    pub fn build(self) -> io::Result<AgentShim> {
         let root = Arc::new(RepositoryRoot::open(self.root)?);
         let mut runtime = self.runtime;
         runtime.tool_timeout_shelf =
@@ -163,7 +163,7 @@ impl CodexShimBuilder {
         let output_token_gate = OutputTokenGate::load_shared().map_err(io::Error::other)?;
         let burst_output_gate =
             BurstOutputGate::new(crate::output::configured_burst_tokens(self.client_profile)?);
-        Ok(CodexShim {
+        Ok(AgentShim {
             file_access: Arc::new(FileAccess::new(Arc::clone(&root), self.read_scope)),
             root,
             detached: DetachedTrees::new(runtime.detached_calls),
@@ -178,14 +178,14 @@ impl CodexShimBuilder {
     }
 }
 
-impl CodexShim {
+impl AgentShim {
     /// Create a builder using environment-derived runtime defaults.
     ///
     /// # Errors
     ///
     /// Returns an invalid-input error when runtime environment settings are invalid.
-    pub fn builder(root: impl Into<PathBuf>) -> io::Result<CodexShimBuilder> {
-        CodexShimBuilder::from_env(root)
+    pub fn builder(root: impl Into<PathBuf>) -> io::Result<AgentShimBuilder> {
+        AgentShimBuilder::from_env(root)
     }
     /// Open and retain a capability for an absolute repository root.
     ///
@@ -297,7 +297,7 @@ impl CodexShim {
             &CancellationToken::new(),
         )
         .map_err(io::Error::other)?;
-        if output.contains("Exit code: 0") && output.contains("codexshim ") {
+        if output.contains("Exit code: 0") && output.contains("agentshim ") {
             Ok(())
         } else {
             Err(io::Error::other(
@@ -346,13 +346,13 @@ impl CodexShim {
             ReadScope::Unrestricted => UNRESTRICTED_SERVER_INSTRUCTIONS,
         };
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("codexshim", env!("CARGO_PKG_VERSION")))
+            .with_server_info(Implementation::new("agentshim", env!("CARGO_PKG_VERSION")))
             .with_protocol_version(ProtocolVersion::V_2026_07_28)
             .with_instructions(instructions)
     }
 }
 
-impl ServerHandler for CodexShim {
+impl ServerHandler for AgentShim {
     fn get_info(&self) -> ServerInfo {
         Self::server_info(self.read_scope())
     }
@@ -366,7 +366,7 @@ impl ServerHandler for CodexShim {
         request: InitializeRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
-        tracing::info!(target: "codexshim", event = "initialize", phase = "protocol", protocol = %request.protocol_version, client_name = %request.client_info.name, client_version = %request.client_info.version);
+        tracing::info!(target: "agentshim", event = "initialize", phase = "protocol", protocol = %request.protocol_version, client_name = %request.client_info.name, client_version = %request.client_info.version);
         context.peer.set_peer_info(request);
         Ok(Self::server_info(self.read_scope()))
     }
@@ -376,7 +376,7 @@ impl ServerHandler for CodexShim {
         context: RequestContext<RoleServer>,
     ) -> Result<DiscoverResult, McpError> {
         let (protocol, client_name, client_version) = Self::request_identity(&context);
-        tracing::info!(target: "codexshim", event = "discover", phase = "protocol", protocol, client_name, client_version);
+        tracing::info!(target: "agentshim", event = "discover", phase = "protocol", protocol, client_name, client_version);
         Ok(Self::discovery_result_for(self.read_scope()))
     }
 
@@ -390,7 +390,7 @@ impl ServerHandler for CodexShim {
         let result = Self::tools_result_for(self.read_scope());
         if let Some(correlation) = context.extensions.get::<ToolsListCorrelation>() {
             tracing::info!(
-                target: "codexshim",
+                target: "agentshim",
                 event = "tools_list",
                 phase = "protocol",
                 outcome = "success",
@@ -406,7 +406,7 @@ impl ServerHandler for CodexShim {
             );
         } else {
             tracing::info!(
-                target: "codexshim",
+                target: "agentshim",
                 event = "tools_list",
                 phase = "protocol",
                 outcome = "success",
@@ -424,7 +424,7 @@ impl ServerHandler for CodexShim {
     }
 
     async fn on_initialized(&self, _context: NotificationContext<RoleServer>) {
-        tracing::info!(target: "codexshim", event = "initialized", phase = "protocol");
+        tracing::info!(target: "agentshim", event = "initialized", phase = "protocol");
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
@@ -449,7 +449,7 @@ impl ServerHandler for CodexShim {
     }
 }
 
-impl CodexShim {
+impl AgentShim {
     async fn call_tool_inner(
         &self,
         request: CallToolRequestParams,
@@ -470,7 +470,7 @@ impl CodexShim {
                 });
             }
         };
-        if !tracing::enabled!(target: "codexshim", tracing::Level::INFO) {
+        if !tracing::enabled!(target: "agentshim", tracing::Level::INFO) {
             return self
                 .dispatch_tool(request, context, admission, budget)
                 .await;
@@ -480,7 +480,7 @@ impl CodexShim {
         let span = if request.name.as_ref() == "bash" {
             let shell_delegate = shell_delegate(&request);
             tracing::info_span!(
-                target: "codexshim",
+                target: "agentshim",
                 "tool_call",
                 call_id = %call_id,
                 tool = %tool,
@@ -488,14 +488,14 @@ impl CodexShim {
             )
         } else {
             tracing::info_span!(
-                target: "codexshim",
+                target: "agentshim",
                 "tool_call",
                 call_id = %call_id,
                 tool = %tool
             )
         };
         async move {
-            tracing::info!(target: "codexshim", event = "tool_start", phase = "request");
+            tracing::info!(target: "agentshim", event = "tool_start", phase = "request");
             let response = self
                 .dispatch_tool(request, context, admission, budget)
                 .await?;
@@ -541,7 +541,7 @@ fn shutdown_transaction(resources: &RuntimeResources, detached: &DetachedTrees) 
         "outcome_uncertain"
     };
     tracing::info!(
-        target: "codexshim",
+        target: "agentshim",
         event = "server_process_shutdown",
         phase = "lifecycle",
         outcome,

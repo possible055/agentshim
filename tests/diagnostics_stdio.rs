@@ -23,16 +23,16 @@ impl Session {
     }
 
     fn start_with_mode(log_directory: &Path, mode: &str) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_codexshim"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_agentshim"))
             .arg("serve")
             .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .env("CODEXSHIM_LOG_MODE", mode)
-            .env("CODEXSHIM_LOG_DIR", log_directory)
+            .env("AGENTSHIM_LOG_MODE", mode)
+            .env("AGENTSHIM_LOG_DIR", log_directory)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .expect("start codexshim");
+            .expect("start agentshim");
         let stdin = child.stdin.take().expect("stdin");
         let stdout = BufReader::new(child.stdout.take().expect("stdout"));
         Self {
@@ -596,15 +596,15 @@ fn status_and_purge_report_storage_and_preserve_the_active_log() {
     let old = today.checked_sub_days(Days::new(31)).expect("old date");
     let active = directory
         .path()
-        .join(format!("codexshim-{today}.0001.jsonl"));
-    let expired = directory.path().join(format!("codexshim-{old}.0001.jsonl"));
+        .join(format!("agentshim-{today}.0001.jsonl"));
+    let expired = directory.path().join(format!("agentshim-{old}.0001.jsonl"));
     fs::write(&active, b"{}\n").expect("active log");
     fs::write(&expired, b"{}\n").expect("expired log");
 
-    let status = Command::new(env!("CARGO_BIN_EXE_codexshim"))
+    let status = Command::new(env!("CARGO_BIN_EXE_agentshim"))
         .args(["logs", "status"])
-        .env("CODEXSHIM_LOG_MODE", "errors")
-        .env("CODEXSHIM_LOG_DIR", directory.path())
+        .env("AGENTSHIM_LOG_MODE", "errors")
+        .env("AGENTSHIM_LOG_DIR", directory.path())
         .output()
         .expect("status");
     assert!(status.status.success());
@@ -613,10 +613,10 @@ fn status_and_purge_report_storage_and_preserve_the_active_log() {
     assert!(status_output.contains("retention days: 30"));
     assert!(status_output.contains("recorded dropped records: 0"));
 
-    let purge = Command::new(env!("CARGO_BIN_EXE_codexshim"))
+    let purge = Command::new(env!("CARGO_BIN_EXE_agentshim"))
         .args(["logs", "purge"])
-        .env("CODEXSHIM_LOG_MODE", "errors")
-        .env("CODEXSHIM_LOG_DIR", directory.path())
+        .env("AGENTSHIM_LOG_MODE", "errors")
+        .env("AGENTSHIM_LOG_DIR", directory.path())
         .output()
         .expect("purge");
     assert!(purge.status.success());

@@ -1,7 +1,7 @@
-# The dsh-codexshim bundle patch: inserts the codexshim native-tools plugin as
+# The dsh-agentshim bundle patch: inserts the agentshim native-tools plugin as
 # ONE row over the profile root. A later layer (a mode bundle, the user's
 # profile cordis.patch.yml, or a --patch overlay) can replace this row's whole
 # config; the plugin's Schemastery defaults apply when no config is stated.
 - insert:
-    - id: codexshim
-      name: dsh-codexshim
+    - id: agentshim
+      name: dsh-agentshim

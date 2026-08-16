@@ -4,7 +4,7 @@ use rmcp::model::{CallToolRequestParams, CallToolResponse, CallToolResult, Conte
 use serde_json::json;
 
 use super::{
-    CodexShim, ToolAdmission, ToolAdmissionFailure, blocking_response, diagnostic_tool_error,
+    AgentShim, ToolAdmission, ToolAdmissionFailure, blocking_response, diagnostic_tool_error,
     pdf_busy, pdf_timeout, queue_timeout_message, shell_delegate, tool_error,
 };
 use crate::output::MODEL_BYTE_LIMIT;
@@ -71,7 +71,7 @@ fn occupied_pdf_gate_rejects_pdf_without_blocking_text_reads() {
     let fixture = tempfile::tempdir().expect("fixture");
     fs::write(fixture.path().join("document.pdf"), pdf_fixture()).expect("pdf");
     fs::write(fixture.path().join("notes.txt"), "alpha\nbeta\n").expect("text");
-    let server = CodexShim::from_path(fixture.path()).expect("server");
+    let server = AgentShim::from_path(fixture.path()).expect("server");
     let _occupied = server
         .resources
         .try_acquire_pdf_gate()
@@ -101,7 +101,7 @@ fn pdf_timeout_reports_the_limit_and_that_nothing_was_produced() {
     assert_eq!(details["details"]["partial_output"], false);
 }
 
-fn read_path_call(server: &CodexShim, path: &str) -> CallToolResponse {
+fn read_path_call(server: &AgentShim, path: &str) -> CallToolResponse {
     let admission = server
         .resources
         .try_admit_read_only()
@@ -131,7 +131,7 @@ fn a_file_changed_retry_holds_the_pdf_gate_instead_of_re_taking_it() {
     let _serialised = crate::tools::read::global_read_state_guard();
     let fixture = tempfile::tempdir().expect("fixture");
     fs::write(fixture.path().join("document.pdf"), pdf_fixture()).expect("pdf");
-    let server = CodexShim::from_path(fixture.path()).expect("server");
+    let server = AgentShim::from_path(fixture.path()).expect("server");
 
     let before = server.resources.pdf_gate_acquisitions();
     crate::tools::read::FORCED_CHANGES.store(1, std::sync::atomic::Ordering::SeqCst);
@@ -163,7 +163,7 @@ fn a_mode_runtime_ceiling_reports_resource_timeout_and_frees_the_gate() {
     let _serialised = crate::tools::read::global_read_state_guard();
     let fixture = tempfile::tempdir().expect("fixture");
     fs::write(fixture.path().join("document.pdf"), pdf_fixture()).expect("pdf");
-    let server = CodexShim::from_path(fixture.path()).expect("server");
+    let server = AgentShim::from_path(fixture.path()).expect("server");
 
     crate::tools::read::FORCED_PDF_RUNTIME_LIMIT.store(1, std::sync::atomic::Ordering::SeqCst);
     let response = read_path_call(&server, "document.pdf");
@@ -194,7 +194,7 @@ fn every_pdf_read_path_returns_the_gate_and_its_reservation() {
     let fixture = tempfile::tempdir().expect("fixture");
     fs::write(fixture.path().join("document.pdf"), pdf_fixture()).expect("pdf");
     fs::write(fixture.path().join("broken.pdf"), b"%PDF-1.7\nnot a pdf\n").expect("broken");
-    let server = CodexShim::from_path(fixture.path()).expect("server");
+    let server = AgentShim::from_path(fixture.path()).expect("server");
     let free_memory = || {
         server
             .resources
@@ -320,7 +320,7 @@ fn successful_tool_responses_omit_structured_content() {
 #[test]
 fn final_verifier_replaces_an_unbounded_model_payload() {
     let fixture = tempfile::tempdir().expect("fixture");
-    let server = CodexShim::from_path(fixture.path()).expect("server");
+    let server = AgentShim::from_path(fixture.path()).expect("server");
     let budget = crate::output::CallOutputBudget::standalone();
     let verified = blocking_response::<crate::tools::exec::ProcessError>(
         "run_program",
@@ -469,7 +469,7 @@ fn detached_admission_reserves_before_blocking_scheduling_and_fails_fast() {
     let fixture = tempfile::tempdir().expect("fixture");
     let mut runtime = crate::runtime::RuntimeConfig::for_tests(1);
     runtime.detached_calls = 1;
-    let server = CodexShim::builder(fixture.path())
+    let server = AgentShim::builder(fixture.path())
         .expect("builder")
         .runtime_limits(runtime)
         .build()
@@ -496,7 +496,7 @@ fn foreground_saturation_does_not_consume_detached_capacity() {
     let mut runtime = crate::runtime::RuntimeConfig::for_tests(1);
     runtime.process_calls = 1;
     runtime.detached_calls = 1;
-    let server = CodexShim::builder(fixture.path())
+    let server = AgentShim::builder(fixture.path())
         .expect("builder")
         .runtime_limits(runtime)
         .build()
@@ -520,7 +520,7 @@ fn root_capability_blocks_parent_escape() {
     let root = fixture.path().join("root");
     fs::create_dir(&root).expect("create root");
     fs::write(fixture.path().join("outside.txt"), "outside").expect("write outside");
-    let server = CodexShim::from_path(&root).expect("open root");
+    let server = AgentShim::from_path(&root).expect("open root");
 
     let error = server
         .root
@@ -544,7 +544,7 @@ fn root_capability_blocks_symlink_escape() {
     let outside = fixture.path().join("outside.txt");
     fs::write(&outside, "outside").expect("write outside");
     symlink(&outside, root.join("escape")).expect("create symlink");
-    let server = CodexShim::from_path(&root).expect("open root");
+    let server = AgentShim::from_path(&root).expect("open root");
 
     server
         .root
@@ -561,7 +561,7 @@ fn root_handle_preserves_repository_identity() {
     let moved = fixture.path().join("moved");
     fs::create_dir(&root).expect("create root");
     fs::write(root.join("identity.txt"), "original").expect("write original");
-    let server = CodexShim::from_path(&root).expect("open root");
+    let server = AgentShim::from_path(&root).expect("open root");
 
     #[cfg(unix)]
     {
@@ -593,7 +593,7 @@ fn root_handle_preserves_repository_identity() {
 #[tokio::test]
 async fn shutdown_processes_is_idempotent_and_closes_admission() {
     let fixture = tempfile::tempdir().expect("fixture");
-    let server = CodexShim::from_path(fixture.path()).expect("server");
+    let server = AgentShim::from_path(fixture.path()).expect("server");
     let first = server.clone();
     let second = server.clone();
     let started = std::time::Instant::now();
@@ -614,7 +614,7 @@ async fn shutdown_processes_is_idempotent_and_closes_admission() {
 #[tokio::test]
 async fn shutdown_waits_for_foreground_owners_to_release() {
     let fixture = tempfile::tempdir().expect("fixture");
-    let server = CodexShim::from_path(fixture.path()).expect("server");
+    let server = AgentShim::from_path(fixture.path()).expect("server");
     let permit = server
         .resources
         .try_admit_process()

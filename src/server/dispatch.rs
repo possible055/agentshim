@@ -28,7 +28,7 @@ use super::{
         diagnostic_tool_error, duration_ms, parse_request, pdf_busy, pdf_timeout, queue_timeout,
         relayed_cancellation, requests_detach, resource_busy, resource_busy_with_message,
     },
-    service::CodexShim,
+    service::AgentShim,
 };
 
 pub(super) enum ToolAdmission {
@@ -92,7 +92,7 @@ pub(super) fn shell_delegate(request: &CallToolRequestParams) -> &'static str {
     }
 }
 
-impl CodexShim {
+impl AgentShim {
     // Read retries intentionally keep capability and reservation lifetimes in one scope.
     #[allow(clippy::too_many_lines)]
     pub(super) async fn call_read(
@@ -118,7 +118,7 @@ impl CodexShim {
                 );
             }
         };
-        tracing::info!(target: "codexshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
+        tracing::info!(target: "agentshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
         let access = self.file_access.clone();
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
@@ -248,7 +248,7 @@ impl CodexShim {
                     break;
                 }
                 Ok(Ok(crate::tools::read::Attempt::Changed)) if attempt_index == 0 => {
-                    tracing::warn!(target: "codexshim", event = "read_retry", phase = "execution", outcome = "degraded_success", reason = "file_changed");
+                    tracing::warn!(target: "agentshim", event = "read_retry", phase = "execution", outcome = "degraded_success", reason = "file_changed");
                 }
                 Ok(Ok(crate::tools::read::Attempt::Changed)) => {
                     result = Some(Ok(Err(crate::tools::read::ReadError::Changed)));
@@ -334,7 +334,7 @@ impl CodexShim {
                 );
             }
         };
-        tracing::info!(target: "codexshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
+        tracing::info!(target: "agentshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
         let access = self.file_access.clone();
         let resources = self.resources.clone();
         let reservation = crate::runtime::MemoryReservation::from_initial(
@@ -393,7 +393,7 @@ impl CodexShim {
         let memory = self
             .resources
             .reserve_memory(
-                crate::tools::grep::base_memory_charge(),
+                crate::tools::grep::base_memory_charge(self.resources.config().grep_memory_bytes),
                 request_cancellation,
             )
             .await;
@@ -406,13 +406,13 @@ impl CodexShim {
                 );
             }
         };
-        tracing::info!(target: "codexshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
+        tracing::info!(target: "agentshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
         let access = self.file_access.clone();
         let resources = self.resources.clone();
         let reservation = crate::runtime::MemoryReservation::from_initial(
             resources.clone(),
             permits.3,
-            crate::tools::grep::base_memory_charge(),
+            crate::tools::grep::base_memory_charge(resources.config().grep_memory_bytes),
         );
         let permits = (permits.0, permits.1, permits.2);
         let (cancellation, cancellation_relay) =
@@ -483,7 +483,7 @@ impl CodexShim {
             }
             Err(_) => return queue_timeout("run_program", process_request.timeout_ms()),
         };
-        tracing::info!(target: "codexshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
+        tracing::info!(target: "agentshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
         let Some(remaining) = timeout.checked_sub(queued.elapsed()) else {
             return queue_timeout("run_program", process_request.timeout_ms());
         };
@@ -593,7 +593,7 @@ impl CodexShim {
         let Some(permits) = permits else {
             return queue_timeout("bash", bash_request.timeout_ms());
         };
-        tracing::info!(target: "codexshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
+        tracing::info!(target: "agentshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
         let Some(remaining) = timeout.checked_sub(queued.elapsed()) else {
             return queue_timeout("bash", bash_request.timeout_ms());
         };
@@ -669,7 +669,7 @@ impl CodexShim {
                     .await)
             }
             (_, ToolAdmission::None) => {
-                tracing::error!(target: "codexshim", event = "tool_unknown", phase = "request", error_class = "validation");
+                tracing::error!(target: "agentshim", event = "tool_unknown", phase = "request", error_class = "validation");
                 Err(McpError::new(
                     ErrorCode::METHOD_NOT_FOUND,
                     format!("unknown tool: {}", request.name),

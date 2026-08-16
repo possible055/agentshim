@@ -1,26 +1,28 @@
-# dsh-codexshim
+# dsh-agentshim
 
-`dsh-codexshim` exposes the five codexshim tools — `read`, `grep`, `glob`,
+`dsh-agentshim` exposes the five agentshim tools — `read`, `grep`, `glob`,
 `run_program`, and `bash` — as native DSH tools. It replaces only those
-overlapping tools (plus `pwsh`, when present) in agents whose canonical working
-directory matches the configured root. Other DSH tools, including `write`,
-`edit`, and `read_image`, remain available.
+overlapping names the agent already has (plus `pwsh`, when present) in agents
+whose canonical working directory matches the configured root. A two-tool
+minimal catalog therefore stays `bash` plus `str_replace_editor`; standard
+presets keep `write`, `edit`, and `read_image`.
 
-The plugin runs a private codexshim MCP session over stdio. MCP is transport
+The plugin runs a private agentshim MCP session over stdio. MCP is transport
 only; no `mcp__*` tool name is exposed to the agent.
 
 ## Prerequisites
 
 - Node.js `^22.19.0 || >=24.0.0` and pnpm.
 - A DSH profile compatible with the `0.1.0-rc.5` package family.
-- A mounted DSH `shell` service. The adapter activates only once both the local
-  filesystem and shell services are available.
-- codexshim installed at its standard platform path, or an absolute `command`
+- A mounted local filesystem service. A `shell` executor is optional: the
+  minimal preset has none, and process tools then run unconfined. A sandboxing
+  executor still requires `sandboxPolicy` and fail-closed escalation.
+- agentshim installed at its standard platform path, or an absolute `command`
   override:
-  - Windows: `%LOCALAPPDATA%\codexshim\bin\codexshim.exe`
-  - Unix: `${XDG_DATA_HOME:-$HOME/.local/share}/codexshim/bin/codexshim`
+  - Windows: `%LOCALAPPDATA%\agentshim\bin\agentshim.exe`
+  - Unix: `${XDG_DATA_HOME:-$HOME/.local/share}/agentshim/bin/agentshim`
 
-The plugin never searches `PATH`, downloads codexshim, or replaces an existing
+The plugin never searches `PATH`, downloads agentshim, or replaces an existing
 installation. The configured root must be served by DSH's local filesystem
 provider; remote or E2B filesystems are not supported.
 
@@ -29,9 +31,9 @@ provider; remote or E2B filesystems are not supported.
 Install the published package or a tarball into one profile:
 
 ```sh
-dsh plugin --profile <profile> add dsh-codexshim
+dsh plugin --profile <profile> add dsh-agentshim
 # or
-dsh plugin --profile <profile> add /absolute/path/to/dsh-codexshim-0.1.0.tgz
+dsh plugin --profile <profile> add /absolute/path/to/dsh-agentshim-0.1.0.tgz
 ```
 
 Confirm the plugin layer is present:
@@ -45,7 +47,7 @@ profile can override the configuration in
 `$DSH_HOME/profiles/<profile>/cordis.patch.yml`:
 
 ```yaml
-- id: codexshim
+- id: agentshim
   config:
     root: /absolute/path/to/repo
     readScope: normal
@@ -54,7 +56,7 @@ profile can override the configuration in
 ```
 
 Every filesystem path in the configuration must be absolute. A development
-checkout can run codexshim through Cargo without installing it by setting
+checkout can run agentshim through Cargo without installing it by setting
 `command` to the absolute `cargo` executable and `commandArgs` to
 `["run", "--locked", "--"]`. The spawned command is always:
 
@@ -67,17 +69,18 @@ checkout can run codexshim through Cargo without installing it by setting
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `root` | `process.cwd()` | Canonical local root, child cwd, and the exact agent-cwd match target. |
-| `command` | Standard install path above | Absolute codexshim executable path. |
+| `command` | Standard install path above | Absolute agentshim executable path. |
 | `commandArgs` | `[]` | Arguments before the fixed `serve` arguments; intended for development wrappers. |
-| `readScope` | `normal` | `normal` or `unrestricted`, always passed explicitly to codexshim. |
+| `readScope` | `normal` | `normal` or `unrestricted`, always passed explicitly to agentshim. |
 | `env` | `{}` | Extra child variables layered over DSH's credential-scrubbed parent environment. |
 | `toolCallTimeoutMs` | `600000` | DSH tool-call deadline and every private MCP request timeout, including initialize and catalog listing; values below 600000 are rejected. |
 
 A missing or mismatched root, an incompatible filesystem provider, an
 unresolvable executable, server startup failure, or catalog drift fails plugin
 activation. The plugin never falls back silently to DSH's inherited tools.
-Changing the mounted shell provider requires reloading the plugin so process
-schemas follow the current executor capability.
+Changing the mounted shell executor's confinement capability after activation
+fails later process calls with `AGENTSHIM_PROCESS_POLICY_CHANGED` until the
+plugin is reloaded.
 
 ## Timeouts and detached commands
 
@@ -89,7 +92,7 @@ request timeout always applies, including during initialize and paginated
 catalog requests, so development wrappers get the full configured startup
 budget.
 
-codexshim's runtime catalog is authoritative for `bash.timeout_ms`, including
+agentshim's runtime catalog is authoritative for `bash.timeout_ms`, including
 its default and maximum. Long-running work that exceeds that cap must use
 `detach: true` with a repository-local `log_path`, then poll the log with this
 plugin's `read` tool. The returned pid and log path are not DSH jobs:
@@ -99,7 +102,7 @@ owns.
 
 ## Process security
 
-The private codexshim child does not run inside DSH's per-call sandbox
+The private agentshim child does not run inside DSH's per-call sandbox
 executor. When the composition has a sandboxing executor, `run_program` and
 `bash` fail closed unless the standing policy is already `danger-full-access`.
 Under `read-only` or `workspace-write`, retry the identical call with both:
@@ -110,13 +113,13 @@ justification: "one sentence explaining why this exact command needs full access
 ```
 
 Only `danger-full-access` is accepted. A user must grant the one-time approval
-before the command is sent to codexshim, and the two adapter-only fields are
+before the command is sent to agentshim, and the two adapter-only fields are
 removed before transport. Rejection, cancellation, an unavailable approval
 channel, or an unpaired field prevents execution. If the mounted shell executor
-is unsandboxed, these fields are not advertised and process calls run without
-DSH confinement. A missing shell, a changed confinement capability, or a
-missing sandbox policy under a confining executor fails with
-`CODEXSHIM_PROCESS_POLICY_CHANGED`.
+is unsandboxed, or no shell executor is mounted, these fields are not
+advertised and process calls run without DSH confinement. A changed
+confinement capability or a missing sandbox policy under a confining
+executor fails with `AGENTSHIM_PROCESS_POLICY_CHANGED`.
 
 ## Images and filesystem observations
 
@@ -131,13 +134,13 @@ during the read, no stale observation is recorded.
 
 ## Troubleshooting
 
-- **Executable not found:** install codexshim at the standard path or configure
+- **Executable not found:** install agentshim at the standard path or configure
   an absolute `command`; the plugin intentionally does not search `PATH`.
 - **Root or execution-world mismatch:** start DSH from the configured root and
   use the local filesystem provider. Remote/E2B filesystems are not supported.
-- **Catalog validation or `CODEXSHIM_CATALOG_CHANGED`:** the running codexshim
+- **Catalog validation or `AGENTSHIM_CATALOG_CHANGED`:** the running agentshim
   contract differs from the one registered with DSH. Reload the plugin after
-  installing a compatible codexshim build.
+  installing a compatible agentshim build.
 - **Process requires full access:** retry the exact call with the two escalation
   fields shown above and approve it, or use a profile whose standing policy is
   already `danger-full-access`.
@@ -149,7 +152,7 @@ during the read, no stale observation is recorded.
 ## Remove
 
 ```sh
-dsh plugin --profile <profile> remove dsh-codexshim
+dsh plugin --profile <profile> remove dsh-agentshim
 ```
 
 Removal drops the plugin layer from that profile.

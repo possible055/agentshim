@@ -1,19 +1,19 @@
 use std::process::Command;
 
 fn doctor(process_calls: Option<&str>) -> std::process::Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_codexshim"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_agentshim"));
     command
         .arg("doctor")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env_remove("CODEXSHIM_PROCESS_CALLS")
-        .env_remove("CODEXSHIM_DETACHED_CALLS")
-        .env_remove("CODEXSHIM_GREP_MEMORY_BYTES")
-        .env_remove("CODEXSHIM_GLOB_MEMORY_BYTES")
-        .env_remove("CODEXSHIM_BURST_TOKENS")
-        .env_remove("CODEXSHIM_IDLE_TIMEOUT")
-        .env("CODEXSHIM_LOG_MODE", "off");
+        .env_remove("AGENTSHIM_PROCESS_CALLS")
+        .env_remove("AGENTSHIM_DETACHED_CALLS")
+        .env_remove("AGENTSHIM_GREP_MEMORY_BYTES")
+        .env_remove("AGENTSHIM_GLOB_MEMORY_BYTES")
+        .env_remove("AGENTSHIM_BURST_TOKENS")
+        .env_remove("AGENTSHIM_IDLE_TIMEOUT")
+        .env("AGENTSHIM_LOG_MODE", "off");
     if let Some(process_calls) = process_calls {
-        command.env("CODEXSHIM_PROCESS_CALLS", process_calls);
+        command.env("AGENTSHIM_PROCESS_CALLS", process_calls);
     }
     command.output().expect("run doctor")
 }
@@ -21,29 +21,29 @@ fn doctor(process_calls: Option<&str>) -> std::process::Output {
 #[test]
 fn burst_budget_override_rejects_values_outside_the_safe_range() {
     for value in ["0", "2047", "32769", "many", "-1"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_codexshim"))
+        let output = Command::new(env!("CARGO_BIN_EXE_agentshim"))
             .arg("doctor")
             .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .env("CODEXSHIM_BURST_TOKENS", value)
-            .env("CODEXSHIM_LOG_MODE", "off")
+            .env("AGENTSHIM_BURST_TOKENS", value)
+            .env("AGENTSHIM_LOG_MODE", "off")
             .output()
             .expect("run doctor");
         assert!(!output.status.success(), "{value} must be rejected");
         assert!(
             String::from_utf8(output.stderr)
                 .expect("doctor stderr")
-                .contains("CODEXSHIM_BURST_TOKENS")
+                .contains("AGENTSHIM_BURST_TOKENS")
         );
     }
 }
 
 #[test]
 fn cursor_profile_uses_a_larger_default_burst_budget_than_codex() {
-    let cursor = Command::new(env!("CARGO_BIN_EXE_codexshim"))
+    let cursor = Command::new(env!("CARGO_BIN_EXE_agentshim"))
         .args(["doctor", "--client-profile", "cursor"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env_remove("CODEXSHIM_BURST_TOKENS")
-        .env("CODEXSHIM_LOG_MODE", "off")
+        .env_remove("AGENTSHIM_BURST_TOKENS")
+        .env("AGENTSHIM_LOG_MODE", "off")
         .output()
         .expect("run cursor doctor");
     let codex = doctor(None);
@@ -66,45 +66,45 @@ fn cursor_profile_uses_a_larger_default_burst_budget_than_codex() {
     assert!(cursor_stdout.contains("client profile: cursor"));
     assert_eq!(
         burst(&cursor_stdout),
-        codexshim::ClientProfile::Cursor.default_burst_tokens()
+        agentshim::ClientProfile::Cursor.default_burst_tokens()
     );
     assert_eq!(
         burst(&codex_stdout),
-        codexshim::ClientProfile::Codex.default_burst_tokens()
+        agentshim::ClientProfile::Codex.default_burst_tokens()
     );
 }
 
 #[test]
 fn invalid_search_memory_configuration_fails_before_runtime_startup() {
-    let output = Command::new(env!("CARGO_BIN_EXE_codexshim"))
+    let output = Command::new(env!("CARGO_BIN_EXE_agentshim"))
         .arg("doctor")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env("CODEXSHIM_GREP_MEMORY_BYTES", "many")
-        .env("CODEXSHIM_LOG_MODE", "off")
+        .env("AGENTSHIM_GREP_MEMORY_BYTES", "many")
+        .env("AGENTSHIM_LOG_MODE", "off")
         .output()
         .expect("run doctor");
     assert!(!output.status.success());
     assert!(
         String::from_utf8(output.stderr)
             .expect("doctor stderr")
-            .contains("CODEXSHIM_GREP_MEMORY_BYTES")
+            .contains("AGENTSHIM_GREP_MEMORY_BYTES")
     );
 }
 
 #[test]
 fn invalid_pdf_memory_configuration_fails_before_runtime_startup() {
-    let output = Command::new(env!("CARGO_BIN_EXE_codexshim"))
+    let output = Command::new(env!("CARGO_BIN_EXE_agentshim"))
         .arg("doctor")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env("CODEXSHIM_PDF_TEXT_MEMORY_BYTES", "1")
-        .env("CODEXSHIM_LOG_MODE", "off")
+        .env("AGENTSHIM_PDF_TEXT_MEMORY_BYTES", "1")
+        .env("AGENTSHIM_LOG_MODE", "off")
         .output()
         .expect("run doctor");
     assert!(!output.status.success());
     assert!(
         String::from_utf8(output.stderr)
             .expect("doctor stderr")
-            .contains("CODEXSHIM_PDF_TEXT_MEMORY_BYTES")
+            .contains("AGENTSHIM_PDF_TEXT_MEMORY_BYTES")
     );
 }
 
@@ -115,6 +115,6 @@ fn invalid_process_capacity_fails_before_runtime_startup() {
     assert!(
         String::from_utf8(output.stderr)
             .expect("doctor stderr")
-            .contains("CODEXSHIM_PROCESS_CALLS")
+            .contains("AGENTSHIM_PROCESS_CALLS")
     );
 }

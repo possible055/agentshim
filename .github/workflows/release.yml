@@ -84,9 +84,9 @@ jobs:
 
           metadata="$(cargo metadata --locked --no-deps --format-version 1)"
           version="$(jq -er '
-            [.packages[] | select(.name == "codexshim")] |
+            [.packages[] | select(.name == "agentshim")] |
             if length == 1 then .[0].version
-            else error("expected exactly one codexshim package")
+            else error("expected exactly one agentshim package")
             end
           ' <<<"$metadata")"
           tag="v$version"
@@ -137,7 +137,7 @@ jobs:
             machine: x86_64
             runner_arch: X64
             target: x86_64-unknown-linux-gnu
-            binary: codexshim
+            binary: agentshim
             config: config/codex.linux.toml.example
             format: tar.gz
           - os: ubuntu-24.04-arm
@@ -146,7 +146,7 @@ jobs:
             machine: aarch64
             runner_arch: ARM64
             target: aarch64-unknown-linux-gnu
-            binary: codexshim
+            binary: agentshim
             config: config/codex.linux.toml.example
             format: tar.gz
           - os: macos-26
@@ -155,7 +155,7 @@ jobs:
             machine: arm64
             runner_arch: ARM64
             target: aarch64-apple-darwin
-            binary: codexshim
+            binary: agentshim
             config: config/codex.macos.toml.example
             format: tar.gz
           - os: windows-2025
@@ -163,7 +163,7 @@ jobs:
             os_architecture: X64
             runner_arch: X64
             target: x86_64-pc-windows-msvc
-            binary: codexshim.exe
+            binary: agentshim.exe
             config: config/codex.windows.toml.example
             format: zip
     runs-on: ${{ matrix.os }}
@@ -208,7 +208,7 @@ jobs:
         if: matrix.platform != 'windows'
         shell: bash
         run: |
-          expected="codexshim ${{ needs.preflight.outputs.version }}"
+          expected="agentshim ${{ needs.preflight.outputs.version }}"
           actual="$(./target/${{ matrix.target }}/release/${{ matrix.binary }} --version)"
           if [[ "$actual" != "$expected" ]]; then
             echo "release binary reported '$actual'; expected '$expected'" >&2
@@ -218,7 +218,7 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
-          $expected = "codexshim ${{ needs.preflight.outputs.version }}"
+          $expected = "agentshim ${{ needs.preflight.outputs.version }}"
           $binary = (Resolve-Path "target/${{ matrix.target }}/release/${{ matrix.binary }}").Path
           $actual = (& $binary --version | Out-String).Trim()
           if ($actual -cne $expected) {
@@ -229,12 +229,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          name="codexshim-${{ needs.preflight.outputs.version }}-${{ matrix.target }}"
+          name="agentshim-${{ needs.preflight.outputs.version }}-${{ matrix.target }}"
           stage="dist/$name"
           mkdir -p "$stage/config"
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "$stage/"
           cp README.md LICENSE "$stage/"
-          cp config/AGENTS.codexshim.md config/codex.linux.toml.example config/codex.windows.toml.example "$stage/config/"
+          cp config/AGENTS.agentshim.md config/codex.linux.toml.example config/codex.windows.toml.example "$stage/config/"
           if [[ "${{ matrix.platform }}" == macos ]]; then
             cp config/codex.macos.toml.example "$stage/config/"
           fi
@@ -244,7 +244,7 @@ jobs:
             README.md \
             codex.toml.example \
             "${{ matrix.binary }}" \
-            config/AGENTS.codexshim.md \
+            config/AGENTS.agentshim.md \
             config/codex.linux.toml.example \
             config/codex.windows.toml.example
           )"
@@ -261,13 +261,13 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
-          $name = "codexshim-${{ needs.preflight.outputs.version }}-${{ matrix.target }}"
+          $name = "agentshim-${{ needs.preflight.outputs.version }}-${{ matrix.target }}"
           $stage = Join-Path "dist" $name
           $configStage = Join-Path $stage "config"
           New-Item -ItemType Directory -Force $configStage | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" $stage
           Copy-Item README.md, LICENSE $stage
-          Copy-Item config/AGENTS.codexshim.md, config/codex.linux.toml.example, config/codex.windows.toml.example $configStage
+          Copy-Item config/AGENTS.agentshim.md, config/codex.linux.toml.example, config/codex.windows.toml.example $configStage
           Copy-Item "${{ matrix.config }}" (Join-Path $stage "codex.toml.example")
           $stagePath = (Resolve-Path $stage).Path
           $expected = @(
@@ -275,7 +275,7 @@ jobs:
               "README.md",
               "codex.toml.example",
               "${{ matrix.binary }}",
-              "config/AGENTS.codexshim.md",
+              "config/AGENTS.agentshim.md",
               "config/codex.linux.toml.example",
               "config/codex.windows.toml.example"
           ) | Sort-Object
@@ -289,7 +289,7 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
-          $name = "codexshim-${{ needs.preflight.outputs.version }}-${{ matrix.target }}"
+          $name = "agentshim-${{ needs.preflight.outputs.version }}-${{ matrix.target }}"
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
           $archive = "dist/$name.zip"
           Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -306,7 +306,7 @@ jobs:
               "README.md",
               "codex.toml.example",
               "${{ matrix.binary }}",
-              "config/AGENTS.codexshim.md",
+              "config/AGENTS.agentshim.md",
               "config/codex.linux.toml.example",
               "config/codex.windows.toml.example"
           ) | Sort-Object
@@ -320,7 +320,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          name="codexshim-${{ needs.preflight.outputs.version }}-${{ matrix.target }}"
+          name="agentshim-${{ needs.preflight.outputs.version }}-${{ matrix.target }}"
           tar -czf "dist/$name.tar.gz" -C dist "$name"
           expected_manifest="$(tar -tzf "dist/$name.tar.gz" | sed '/\/$/d' | sed "s#^$name/##" | LC_ALL=C sort)"
           stage_manifest="$(LC_ALL=C find "dist/$name" -type f -print | sed "s#^dist/$name/##" | LC_ALL=C sort)"
@@ -343,7 +343,7 @@ jobs:
         run: sh scripts/test-install-linux.sh "$PWD/dist" "${{ needs.preflight.outputs.version }}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: codexshim-${{ matrix.target }}
+          name: agentshim-${{ matrix.target }}
           path: |
             dist/*.${{ matrix.format }}
             dist/*.${{ matrix.format }}.sha256
@@ -363,7 +363,7 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
-          pattern: codexshim-*
+          pattern: agentshim-*
           merge-multiple: true
       - name: Validate packaged assets
         shell: bash
@@ -372,14 +372,14 @@ jobs:
         run: |
           set -euo pipefail
           expected="$(printf '%s\n' \
-            "codexshim-$VERSION-aarch64-apple-darwin.tar.gz" \
-            "codexshim-$VERSION-aarch64-apple-darwin.tar.gz.sha256" \
-            "codexshim-$VERSION-aarch64-unknown-linux-gnu.tar.gz" \
-            "codexshim-$VERSION-aarch64-unknown-linux-gnu.tar.gz.sha256" \
-            "codexshim-$VERSION-x86_64-pc-windows-msvc.zip" \
-            "codexshim-$VERSION-x86_64-pc-windows-msvc.zip.sha256" \
-            "codexshim-$VERSION-x86_64-unknown-linux-gnu.tar.gz" \
-            "codexshim-$VERSION-x86_64-unknown-linux-gnu.tar.gz.sha256" |
+            "agentshim-$VERSION-aarch64-apple-darwin.tar.gz" \
+            "agentshim-$VERSION-aarch64-apple-darwin.tar.gz.sha256" \
+            "agentshim-$VERSION-aarch64-unknown-linux-gnu.tar.gz" \
+            "agentshim-$VERSION-aarch64-unknown-linux-gnu.tar.gz.sha256" \
+            "agentshim-$VERSION-x86_64-pc-windows-msvc.zip" \
+            "agentshim-$VERSION-x86_64-pc-windows-msvc.zip.sha256" \
+            "agentshim-$VERSION-x86_64-unknown-linux-gnu.tar.gz" \
+            "agentshim-$VERSION-x86_64-unknown-linux-gnu.tar.gz.sha256" |
             LC_ALL=C sort
           )"
           actual="$(find dist -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)"
@@ -396,19 +396,19 @@ jobs:
           (
             cd dist
             sha256sum \
-              "codexshim-$VERSION-aarch64-apple-darwin.tar.gz" \
-              "codexshim-$VERSION-aarch64-unknown-linux-gnu.tar.gz" \
-              "codexshim-$VERSION-x86_64-pc-windows-msvc.zip" \
-              "codexshim-$VERSION-x86_64-unknown-linux-gnu.tar.gz" \
+              "agentshim-$VERSION-aarch64-apple-darwin.tar.gz" \
+              "agentshim-$VERSION-aarch64-unknown-linux-gnu.tar.gz" \
+              "agentshim-$VERSION-x86_64-pc-windows-msvc.zip" \
+              "agentshim-$VERSION-x86_64-unknown-linux-gnu.tar.gz" \
               > SHA256SUMS
           )
           sh -n scripts/install.sh
-          sed "s|^default_version=\"\" # @codexshim:default-version|default_version=\"$VERSION\" # @codexshim:default-version|" scripts/install.sh > dist/install.sh
-          sed "s|^\$DefaultVersion = \"\" # @codexshim:default-version|\$DefaultVersion = \"$VERSION\" # @codexshim:default-version|" scripts/install.ps1 > dist/install.ps1
+          sed "s|^default_version=\"\" # @agentshim:default-version|default_version=\"$VERSION\" # @agentshim:default-version|" scripts/install.sh > dist/install.sh
+          sed "s|^\$DefaultVersion = \"\" # @agentshim:default-version|\$DefaultVersion = \"$VERSION\" # @agentshim:default-version|" scripts/install.ps1 > dist/install.ps1
           chmod 755 dist/install.sh
           sh -n dist/install.sh
-          grep -q "^default_version=\"$VERSION\" # @codexshim:default-version" dist/install.sh
-          grep -q "^\$DefaultVersion = \"$VERSION\" # @codexshim:default-version" dist/install.ps1
+          grep -q "^default_version=\"$VERSION\" # @agentshim:default-version" dist/install.sh
+          grep -q "^\$DefaultVersion = \"$VERSION\" # @agentshim:default-version" dist/install.ps1
       - name: Validate final release assets
         shell: bash
         env:
@@ -417,14 +417,14 @@ jobs:
           set -euo pipefail
           expected="$(printf '%s\n' \
             SHA256SUMS \
-            "codexshim-$VERSION-aarch64-apple-darwin.tar.gz" \
-            "codexshim-$VERSION-aarch64-apple-darwin.tar.gz.sha256" \
-            "codexshim-$VERSION-aarch64-unknown-linux-gnu.tar.gz" \
-            "codexshim-$VERSION-aarch64-unknown-linux-gnu.tar.gz.sha256" \
-            "codexshim-$VERSION-x86_64-pc-windows-msvc.zip" \
-            "codexshim-$VERSION-x86_64-pc-windows-msvc.zip.sha256" \
-            "codexshim-$VERSION-x86_64-unknown-linux-gnu.tar.gz" \
-            "codexshim-$VERSION-x86_64-unknown-linux-gnu.tar.gz.sha256" \
+            "agentshim-$VERSION-aarch64-apple-darwin.tar.gz" \
+            "agentshim-$VERSION-aarch64-apple-darwin.tar.gz.sha256" \
+            "agentshim-$VERSION-aarch64-unknown-linux-gnu.tar.gz" \
+            "agentshim-$VERSION-aarch64-unknown-linux-gnu.tar.gz.sha256" \
+            "agentshim-$VERSION-x86_64-pc-windows-msvc.zip" \
+            "agentshim-$VERSION-x86_64-pc-windows-msvc.zip.sha256" \
+            "agentshim-$VERSION-x86_64-unknown-linux-gnu.tar.gz" \
+            "agentshim-$VERSION-x86_64-unknown-linux-gnu.tar.gz.sha256" \
             install.ps1 \
             install.sh |
             LC_ALL=C sort
@@ -511,14 +511,14 @@ jobs:
           ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$TAG")"
           expected_assets="$(printf '%s\n' \
             SHA256SUMS \
-            "codexshim-$VERSION-aarch64-apple-darwin.tar.gz" \
-            "codexshim-$VERSION-aarch64-apple-darwin.tar.gz.sha256" \
-            "codexshim-$VERSION-aarch64-unknown-linux-gnu.tar.gz" \
-            "codexshim-$VERSION-aarch64-unknown-linux-gnu.tar.gz.sha256" \
-            "codexshim-$VERSION-x86_64-pc-windows-msvc.zip" \
-            "codexshim-$VERSION-x86_64-pc-windows-msvc.zip.sha256" \
-            "codexshim-$VERSION-x86_64-unknown-linux-gnu.tar.gz" \
-            "codexshim-$VERSION-x86_64-unknown-linux-gnu.tar.gz.sha256" \
+            "agentshim-$VERSION-aarch64-apple-darwin.tar.gz" \
+            "agentshim-$VERSION-aarch64-apple-darwin.tar.gz.sha256" \
+            "agentshim-$VERSION-aarch64-unknown-linux-gnu.tar.gz" \
+            "agentshim-$VERSION-aarch64-unknown-linux-gnu.tar.gz.sha256" \
+            "agentshim-$VERSION-x86_64-pc-windows-msvc.zip" \
+            "agentshim-$VERSION-x86_64-pc-windows-msvc.zip.sha256" \
+            "agentshim-$VERSION-x86_64-unknown-linux-gnu.tar.gz" \
+            "agentshim-$VERSION-x86_64-unknown-linux-gnu.tar.gz.sha256" \
             install.ps1 \
             install.sh |
             LC_ALL=C sort

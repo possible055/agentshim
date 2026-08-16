@@ -3,7 +3,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 
-// Stand-in for `codexshim serve` over stdio. Catalog and behavior variants are
+// Stand-in for `agentshim serve` over stdio. Catalog and behavior variants are
 // selected with FIXTURE_MODE so session.spec.ts can exercise every startup
 // failure and lifecycle path against a real child process.
 
@@ -162,7 +162,7 @@ if (mode === 'unsupported') {
 const paginate = process.env.FIXTURE_PAGINATE === '1'
 const pageSize = paginate ? 3 : tools.length
 
-const server = new Server({ name: 'codexshim-fixture', version: '0.0.1' }, { capabilities: { tools: { listChanged: false } } })
+const server = new Server({ name: 'agentshim-fixture', version: '0.0.1' }, { capabilities: { tools: { listChanged: false } } })
 
 server.setRequestHandler(ListToolsRequestSchema, request => {
   const cursor = request.params?.cursor === undefined ? 0 : Number.parseInt(request.params.cursor, 10)

@@ -15,11 +15,11 @@ impl Session {
     }
 
     pub(super) fn start_in(mode: &str, logs: &Path, root: &Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_codexshim"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_agentshim"))
             .arg("serve")
             .current_dir(root)
-            .env("CODEXSHIM_LOG_MODE", mode)
-            .env("CODEXSHIM_LOG_DIR", logs)
+            .env("AGENTSHIM_LOG_MODE", mode)
+            .env("AGENTSHIM_LOG_DIR", logs)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -169,7 +169,7 @@ impl Session {
             "params": {
                 "name": "run_program",
                 "arguments": {
-                    "program": env!("CARGO_BIN_EXE_codexshim"),
+                    "program": env!("CARGO_BIN_EXE_agentshim"),
                     "args": ["--version"],
                     "timeout_ms": 30000
                 },

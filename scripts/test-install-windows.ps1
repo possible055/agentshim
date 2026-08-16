@@ -7,7 +7,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$testDirectory = Join-Path ([IO.Path]::GetTempPath()) ("codexshim-installer-test-" + [guid]::NewGuid().ToString("N"))
+$testDirectory = Join-Path ([IO.Path]::GetTempPath()) ("agentshim-installer-test-" + [guid]::NewGuid().ToString("N"))
 $fixtureDirectory = $null
 
 try {
@@ -19,11 +19,11 @@ try {
         if (-not $BinaryPath) {
             throw "ReleaseDirectory or BinaryPath is required."
         }
-        $fixtureDirectory = Join-Path ([IO.Path]::GetTempPath()) ("codexshim-installer-fixture-" + [guid]::NewGuid().ToString("N"))
-        $stage = Join-Path $fixtureDirectory "codexshim-$ExpectedVersion-$target"
+        $fixtureDirectory = Join-Path ([IO.Path]::GetTempPath()) ("agentshim-installer-fixture-" + [guid]::NewGuid().ToString("N"))
+        $stage = Join-Path $fixtureDirectory "agentshim-$ExpectedVersion-$target"
         New-Item -ItemType Directory -Path $stage -Force | Out-Null
-        Copy-Item -LiteralPath $BinaryPath -Destination (Join-Path $stage "codexshim.exe")
-        $archive = Join-Path $fixtureDirectory "codexshim-$ExpectedVersion-$target.zip"
+        Copy-Item -LiteralPath $BinaryPath -Destination (Join-Path $stage "agentshim.exe")
+        $archive = Join-Path $fixtureDirectory "agentshim-$ExpectedVersion-$target.zip"
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         [IO.Compression.ZipFile]::CreateFromDirectory($stage, $archive)
         $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -31,13 +31,13 @@ try {
         $ReleaseDirectory = $fixtureDirectory
     }
 
-    $binary = Join-Path $testDirectory "codexshim.exe"
-    $expectedBinaryVersion = "codexshim $ExpectedVersion"
+    $binary = Join-Path $testDirectory "agentshim.exe"
+    $expectedBinaryVersion = "agentshim $ExpectedVersion"
     $expectedPath = [IO.Path]::GetFullPath($binary).Replace('/', '\')
 
     for ($attempt = 1; $attempt -le 2; $attempt++) {
         $installerOutput = (& "$PSScriptRoot\install.ps1" -ReleaseDirectory $ReleaseDirectory -InstallDir $testDirectory 6>&1 | Out-String).Trim()
-        if (-not $installerOutput.Contains("Installed codexshim at $expectedPath")) {
+        if (-not $installerOutput.Contains("Installed agentshim at $expectedPath")) {
             throw "Installer did not report the expected Windows path on attempt $attempt."
         }
         if (-not $installerOutput.Contains("Installed version: $expectedBinaryVersion")) {

@@ -270,6 +270,14 @@ impl RuntimeResources {
         let permits = u32::try_from(permits).ok()?;
         self.memory.clone().try_acquire_many_owned(permits).ok()
     }
+
+    #[must_use]
+    #[cfg(test)]
+    pub fn available_memory_bytes(&self) -> usize {
+        self.memory
+            .available_permits()
+            .saturating_mul(MEMORY_PERMIT_BYTES)
+    }
 }
 
 fn rounded_memory_bytes(bytes: usize) -> usize {

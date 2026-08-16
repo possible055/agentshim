@@ -1,7 +1,7 @@
 {"id":"cat-file","legacy":"cat src/main.rs","category":"read-only","tool":"read","replacement":{"path":"src/main.rs"}}
 {"id":"sed-lines","legacy":"sed -n '40,100p' src/server.rs","category":"read-only","tool":"read","replacement":{"path":"src/server.rs","start_line":40,"line_count":61}}
 {"id":"type-file","legacy":"type src\\main.rs","category":"read-only","tool":"read","replacement":{"path":"src/main.rs"}}
-{"id":"rg-literal","legacy":"rg -n CodexShim src","category":"read-only","tool":"grep","replacement":{"pattern":"CodexShim","path":"src","fixed_strings":true}}
+{"id":"rg-literal","legacy":"rg -n AgentShim src","category":"read-only","tool":"grep","replacement":{"pattern":"AgentShim","path":"src","fixed_strings":true}}
 {"id":"rg-regex","legacy":"rg 'fn validate_[A-Za-z_]+' src","category":"read-only","tool":"grep","replacement":{"pattern":"fn validate_[A-Za-z_]+","path":"src"}}
 {"id":"rg-files","legacy":"rg -l CancellationToken src","category":"read-only","tool":"grep","replacement":{"pattern":"CancellationToken","path":"src","mode":"files","fixed_strings":true}}
 {"id":"rg-count","legacy":"rg -c TODO src","category":"read-only","tool":"grep","replacement":{"pattern":"TODO","path":"src","mode":"count","fixed_strings":true}}

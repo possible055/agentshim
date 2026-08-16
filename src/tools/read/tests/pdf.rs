@@ -129,7 +129,7 @@ fn prepare_charges_image_and_text_modes_differently() {
 /// spent — would throw away every page the caller could still read.
 #[test]
 fn a_page_past_the_span_ceiling_does_not_cost_the_pages_around_it() {
-    let ceiling = codexshim_pdf_read::PdfResourceLimits::text().page_spans;
+    let ceiling = agentshim_pdf_read::PdfResourceLimits::text().page_spans;
     let fixture = tempfile::tempdir().expect("fixture");
     fs::write(
         fixture.path().join("mixed.pdf"),
@@ -154,7 +154,7 @@ fn a_page_past_the_span_ceiling_does_not_cost_the_pages_around_it() {
 
 #[test]
 fn a_selection_of_only_dense_pages_fails() {
-    let ceiling = codexshim_pdf_read::PdfResourceLimits::text().page_spans;
+    let ceiling = agentshim_pdf_read::PdfResourceLimits::text().page_spans;
     let fixture = tempfile::tempdir().expect("fixture");
     fs::write(
         fixture.path().join("dense.pdf"),

@@ -27,7 +27,6 @@ pub enum SkipReason {
     CaptureBudget,
     Escaped,
     NonUnicodePath,
-    TranscodeMemory,
 }
 
 impl SkipReason {
@@ -42,7 +41,6 @@ impl SkipReason {
             Self::CaptureBudget => "matching content exceeds capture budget",
             Self::Escaped => "escaped",
             Self::NonUnicodePath => "non-unicode path",
-            Self::TranscodeMemory => "legacy encoding too large to decode for search",
         }
     }
 
@@ -59,9 +57,6 @@ impl SkipReason {
             Self::CaptureBudget => "single grep target matching content exceeds the capture budget",
             Self::Escaped => "single grep target escaped the search root",
             Self::NonUnicodePath => "single grep target path is not valid Unicode",
-            Self::TranscodeMemory => {
-                "single grep target is too large to decode from its legacy encoding"
-            }
         }
     }
 

@@ -4,15 +4,15 @@ use super::*;
 
 #[test]
 fn pending_process_child_fixture() {
-    if env::var("CODEXSHIM_PENDING_FIXTURE").as_deref() != Ok("child") {
+    if env::var("AGENTSHIM_PENDING_FIXTURE").as_deref() != Ok("child") {
         return;
     }
     let duration =
-        env::var("CODEXSHIM_PENDING_FIXTURE_MS").map_or(Duration::from_secs(30), |value| {
+        env::var("AGENTSHIM_PENDING_FIXTURE_MS").map_or(Duration::from_secs(30), |value| {
             Duration::from_millis(
                 value
                     .parse()
-                    .expect("CODEXSHIM_PENDING_FIXTURE_MS must be an integer"),
+                    .expect("AGENTSHIM_PENDING_FIXTURE_MS must be an integer"),
             )
         });
     thread::sleep(duration);
@@ -25,13 +25,13 @@ fn four_instance_aggregate_process_soak() {
     const INSTANCE_COUNT: usize = 4;
     const CALLS_PER_INSTANCE: usize = 16;
 
-    let iterations = env::var("CODEXSHIM_AGGREGATE_SOAK_ITERATIONS").map_or(5, |value| {
+    let iterations = env::var("AGENTSHIM_AGGREGATE_SOAK_ITERATIONS").map_or(5, |value| {
         value
             .parse::<usize>()
-            .expect("CODEXSHIM_AGGREGATE_SOAK_ITERATIONS must be a positive integer")
+            .expect("AGENTSHIM_AGGREGATE_SOAK_ITERATIONS must be a positive integer")
     });
     assert!(iterations > 0, "aggregate soak requires an iteration");
-    let output = env::var_os("CODEXSHIM_AGGREGATE_SOAK_OUTPUT").map_or_else(
+    let output = env::var_os("AGENTSHIM_AGGREGATE_SOAK_OUTPUT").map_or_else(
         || {
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("target")
@@ -96,8 +96,8 @@ fn four_instance_aggregate_process_soak() {
                         "args": ["--exact", "aggregate::pending_process_child_fixture", "--nocapture"],
                         "cwd": env!("CARGO_MANIFEST_DIR"),
                         "env": {
-                            "CODEXSHIM_PENDING_FIXTURE": "child",
-                            "CODEXSHIM_PENDING_FIXTURE_MS": "750",
+                            "AGENTSHIM_PENDING_FIXTURE": "child",
+                            "AGENTSHIM_PENDING_FIXTURE_MS": "750",
                         },
                         "timeout_ms": 30_000,
                     }),

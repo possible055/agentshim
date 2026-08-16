@@ -16,7 +16,7 @@
 #![cfg_attr(test, allow(dead_code, unused_variables))]
 
 //! Read-only PDF parsing, Markdown extraction, page classification, and raster rendering for
-//! `codexshim`.
+//! `agentshim`.
 //!
 //! The supported interface is [`PdfReadDocument`]. The implementation is a selective derivative
 //! of `pdf_oxide`; provenance and the local patch policy are recorded in `UPSTREAM.md`.
@@ -764,6 +764,6 @@ mod tests {
 
     #[test]
     fn test_name() {
-        assert_eq!(NAME, "codexshim-pdf-read");
+        assert_eq!(NAME, "agentshim-pdf-read");
     }
 }

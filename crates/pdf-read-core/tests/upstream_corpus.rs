@@ -1,6 +1,6 @@
 use std::{fs::File, path::PathBuf};
 
-use codexshim_pdf_read::{MarkdownOptions, ParserLimits, PdfReadDocument};
+use agentshim_pdf_read::{MarkdownOptions, ParserLimits, PdfReadDocument};
 
 const CASES: [(&str, &str); 2] = [
     ("hello_structure.pdf", "# Hello World\n"),

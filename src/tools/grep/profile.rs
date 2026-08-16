@@ -85,6 +85,13 @@ pub struct GrepStageTimings {
     pub candidate_slash_path_bytes: usize,
     pub candidate_slash_path_capacity: usize,
     pub lanes: usize,
+    pub speculative_lease_requested_bytes: usize,
+    pub speculative_lease_granted_bytes: usize,
+    pub capture_exact_retries: usize,
+    pub heap_limit_retries: usize,
+    pub retry_successes: usize,
+    pub retry_ceiling_bytes: usize,
+    pub legacy_stream_files: usize,
 }
 
 #[cfg(feature = "bench-internals")]
@@ -151,6 +158,13 @@ pub(super) struct GrepProfileCounters {
     candidate_slash_path_bytes: std::sync::atomic::AtomicUsize,
     candidate_slash_path_capacity: std::sync::atomic::AtomicUsize,
     lanes: std::sync::atomic::AtomicUsize,
+    speculative_lease_requested_bytes: std::sync::atomic::AtomicUsize,
+    speculative_lease_granted_bytes: std::sync::atomic::AtomicUsize,
+    capture_exact_retries: std::sync::atomic::AtomicUsize,
+    heap_limit_retries: std::sync::atomic::AtomicUsize,
+    retry_successes: std::sync::atomic::AtomicUsize,
+    retry_ceiling_bytes: std::sync::atomic::AtomicUsize,
+    legacy_stream_files: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(feature = "bench-internals")]
@@ -204,6 +218,13 @@ impl Default for GrepProfileCounters {
             candidate_slash_path_bytes: std::sync::atomic::AtomicUsize::new(0),
             candidate_slash_path_capacity: std::sync::atomic::AtomicUsize::new(0),
             lanes: std::sync::atomic::AtomicUsize::new(0),
+            speculative_lease_requested_bytes: std::sync::atomic::AtomicUsize::new(0),
+            speculative_lease_granted_bytes: std::sync::atomic::AtomicUsize::new(0),
+            capture_exact_retries: std::sync::atomic::AtomicUsize::new(0),
+            heap_limit_retries: std::sync::atomic::AtomicUsize::new(0),
+            retry_successes: std::sync::atomic::AtomicUsize::new(0),
+            retry_ceiling_bytes: std::sync::atomic::AtomicUsize::new(0),
+            legacy_stream_files: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -306,6 +327,52 @@ impl GrepProfiler {
         if let Self::Enabled(counters) = self {
             counters
                 .search_reader_files
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    pub(super) fn record_legacy_stream(&self) {
+        if let Self::Enabled(counters) = self {
+            counters
+                .legacy_stream_files
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    pub(super) fn record_speculative_lease(&self, requested: usize, granted: bool) {
+        let Self::Enabled(counters) = self else {
+            return;
+        };
+        let _ = counters.speculative_lease_requested_bytes.fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |current| Some(current.saturating_add(requested)),
+        );
+        if granted {
+            let _ = counters.speculative_lease_granted_bytes.fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |current| Some(current.saturating_add(requested)),
+            );
+        }
+    }
+
+    pub(super) fn record_retry(&self, capture: bool, ceiling: usize, success: bool) {
+        let Self::Enabled(counters) = self else {
+            return;
+        };
+        let retries = if capture {
+            &counters.capture_exact_retries
+        } else {
+            &counters.heap_limit_retries
+        };
+        retries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        counters
+            .retry_ceiling_bytes
+            .fetch_max(ceiling, std::sync::atomic::Ordering::Relaxed);
+        if success {
+            counters
+                .retry_successes
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
@@ -457,6 +524,15 @@ impl GrepProfiler {
             candidate_slash_path_bytes: load_usize(&counters.candidate_slash_path_bytes),
             candidate_slash_path_capacity: load_usize(&counters.candidate_slash_path_capacity),
             lanes: load_usize(&counters.lanes),
+            speculative_lease_requested_bytes: load_usize(
+                &counters.speculative_lease_requested_bytes,
+            ),
+            speculative_lease_granted_bytes: load_usize(&counters.speculative_lease_granted_bytes),
+            capture_exact_retries: load_usize(&counters.capture_exact_retries),
+            heap_limit_retries: load_usize(&counters.heap_limit_retries),
+            retry_successes: load_usize(&counters.retry_successes),
+            retry_ceiling_bytes: load_usize(&counters.retry_ceiling_bytes),
+            legacy_stream_files: load_usize(&counters.legacy_stream_files),
         }
     }
 }
@@ -590,6 +666,18 @@ impl GrepProfiler {
     }
 
     pub(super) fn record_search_reader(&self) {
+        let _ = self;
+    }
+
+    pub(super) fn record_legacy_stream(&self) {
+        let _ = self;
+    }
+
+    pub(super) fn record_speculative_lease(&self, _requested: usize, _granted: bool) {
+        let _ = self;
+    }
+
+    pub(super) fn record_retry(&self, _capture: bool, _ceiling: usize, _success: bool) {
         let _ = self;
     }
 

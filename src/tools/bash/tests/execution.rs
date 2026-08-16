@@ -181,6 +181,18 @@ fn empty_success_is_only_the_exit_code() {
 }
 
 #[test]
+fn omitted_stdin_is_immediate_eof() {
+    if !bash_is_available() {
+        return;
+    }
+
+    let output = run("read value; printf '%s\\n' \"$?\"").expect("bash result");
+
+    assert!(output.contains("1\n"), "{output}");
+    assert!(output.contains("Exit code: 0"), "{output}");
+}
+
+#[test]
 fn a_missing_bash_reports_an_actionable_non_retryable_unavailable_error() {
     let fixture = tempfile::tempdir().expect("fixture");
     let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
@@ -202,7 +214,7 @@ fn a_missing_bash_reports_an_actionable_non_retryable_unavailable_error() {
 
     assert!(matches!(error, ProcessError::Unavailable(_)));
     let message = error.to_string();
-    assert!(message.contains("CODEXSHIM_BASH"), "{message}");
+    assert!(message.contains("AGENTSHIM_BASH"), "{message}");
 }
 
 #[test]

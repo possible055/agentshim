@@ -10,7 +10,7 @@ use std::{
     time::SystemTime,
 };
 
-use codexshim::ToolsListCorrelation;
+use agentshim::ToolsListCorrelation;
 use rmcp::{
     RoleServer,
     model::{ClientNotification, ClientRequest, GetExtensions, JsonRpcMessage, RequestId},
@@ -62,7 +62,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for ReceiveFrameReader<R> {
                     frame_bytes += 1;
                     if frame_bytes > MAX_RECEIVE_FRAME_BYTES {
                         tracing::warn!(
-                            target: "codexshim",
+                            target: "agentshim",
                             event = "mcp_frame_rejected",
                             phase = "transport",
                             outcome = "rejected",
@@ -109,14 +109,14 @@ impl<R: AsyncRead + Unpin> AsyncRead for ShutdownReader<R> {
         match &result {
             Poll::Ready(Err(error)) => {
                 if !self.termination_reported {
-                    tracing::error!(target: "codexshim", event = "stdin_read_error", phase = "transport", error_class = "io", io_kind = ?error.kind());
+                    tracing::error!(target: "agentshim", event = "stdin_read_error", phase = "transport", error_class = "io", io_kind = ?error.kind());
                     self.termination_reported = true;
                 }
                 self.shutdown.cancel();
             }
             Poll::Ready(Ok(())) if buffer.filled().len() == before => {
                 if !self.termination_reported {
-                    tracing::info!(target: "codexshim", event = "stdin_eof", phase = "transport", outcome = "shutdown");
+                    tracing::info!(target: "agentshim", event = "stdin_eof", phase = "transport", outcome = "shutdown");
                     self.termination_reported = true;
                 }
                 self.shutdown.cancel();
@@ -166,7 +166,7 @@ impl CorrelationTracker {
         if matches!(&id, RequestId::String(id) if id.len() > MAX_CORRELATION_REQUEST_ID_BYTES) {
             if !self.request_id_warning_emitted {
                 tracing::warn!(
-                    target: "codexshim",
+                    target: "agentshim",
                     event = "tools_list_correlation_skipped",
                     phase = "transport",
                     outcome = "degraded",
@@ -180,7 +180,7 @@ impl CorrelationTracker {
         if !self.entries.contains_key(&id) && self.entries.len() >= MAX_TOOLS_LIST_CORRELATIONS {
             if !self.capacity_warning_emitted {
                 tracing::warn!(
-                    target: "codexshim",
+                    target: "agentshim",
                     event = "tools_list_correlation_skipped",
                     phase = "transport",
                     outcome = "degraded",
@@ -252,17 +252,17 @@ where
             let result = send.await;
             match (&result, correlation) {
                 (Ok(()), Some(request_id)) if successful_response => {
-                    tracing::info!(target: "codexshim", event = "tools_list_sent", phase = "transport", outcome = "success", request_id);
+                    tracing::info!(target: "agentshim", event = "tools_list_sent", phase = "transport", outcome = "success", request_id);
                 }
                 (Err(error), Some(request_id)) => {
                     failure.0.store(true, Ordering::Release);
                     shutdown.cancel();
-                    tracing::error!(target: "codexshim", event = "stdout_write_error", phase = "transport", outcome = "error", error_class = "io", io_kind = ?error.kind(), request_id);
+                    tracing::error!(target: "agentshim", event = "stdout_write_error", phase = "transport", outcome = "error", error_class = "io", io_kind = ?error.kind(), request_id);
                 }
                 (Err(error), None) => {
                     failure.0.store(true, Ordering::Release);
                     shutdown.cancel();
-                    tracing::error!(target: "codexshim", event = "stdout_write_error", phase = "transport", outcome = "error", error_class = "io", io_kind = ?error.kind());
+                    tracing::error!(target: "agentshim", event = "stdout_write_error", phase = "transport", outcome = "error", error_class = "io", io_kind = ?error.kind());
                 }
                 (Ok(()), _) => {}
             }
@@ -536,7 +536,7 @@ mod tests {
         assert!(
             list_tools
                 .extensions
-                .get::<codexshim::ToolsListCorrelation>()
+                .get::<agentshim::ToolsListCorrelation>()
                 .is_some()
         );
         assert!(

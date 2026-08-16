@@ -1,15 +1,15 @@
 [package]
-name = "codexshim-pdf-read"
+name = "agentshim-pdf-read"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"
 license = "Apache-2.0"
 publish = false
-description = "Internal read-only PDF core for codexshim"
+description = "Internal read-only PDF core for agentshim"
 autotests = true
 
 [lib]
-name = "codexshim_pdf_read"
+name = "agentshim_pdf_read"
 # Retained upstream docs describe private APIs removed from this read-only derivative.
 # The supported facade is compile-checked by tests/public_surface.rs instead.
 doctest = false

@@ -39,7 +39,7 @@ impl Session {
             command.args(["--read-scope", read_scope]);
         }
         if let Some(process_calls) = process_calls {
-            command.env("CODEXSHIM_PROCESS_CALLS", process_calls.to_string());
+            command.env("AGENTSHIM_PROCESS_CALLS", process_calls.to_string());
         }
         Self::spawn(command)
     }
@@ -50,23 +50,23 @@ impl Session {
         bash_override: Option<&std::path::Path>,
     ) -> Self {
         let mut command = Self::base_command(root);
-        command.env("CODEXSHIM_DETACHED_CALLS", detached_calls.to_string());
+        command.env("AGENTSHIM_DETACHED_CALLS", detached_calls.to_string());
         if let Some(bash_override) = bash_override {
-            command.env("CODEXSHIM_BASH", bash_override);
+            command.env("AGENTSHIM_BASH", bash_override);
         }
         Self::spawn(command)
     }
 
     pub(super) fn base_command(root: &std::path::Path) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_codexshim"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_agentshim"));
         command
             .arg("serve")
             .current_dir(root)
-            .env_remove("CODEXSHIM_PROCESS_CALLS")
-            .env_remove("CODEXSHIM_DETACHED_CALLS")
-            .env_remove("CODEXSHIM_BASH")
-            .env_remove("CODEXSHIM_BURST_TOKENS")
-            .env_remove("CODEXSHIM_IDLE_TIMEOUT")
+            .env_remove("AGENTSHIM_PROCESS_CALLS")
+            .env_remove("AGENTSHIM_DETACHED_CALLS")
+            .env_remove("AGENTSHIM_BASH")
+            .env_remove("AGENTSHIM_BURST_TOKENS")
+            .env_remove("AGENTSHIM_IDLE_TIMEOUT")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -74,7 +74,7 @@ impl Session {
     }
 
     pub(super) fn spawn(mut command: Command) -> Self {
-        let mut child = command.spawn().expect("start codexshim");
+        let mut child = command.spawn().expect("start agentshim");
         let stdin = child.stdin.take().expect("child stdin");
         let stdout = BufReader::new(child.stdout.take().expect("child stdout"));
         Self {
@@ -135,7 +135,7 @@ pub(super) fn modern_meta() -> Value {
     json!({
         "io.modelcontextprotocol/protocolVersion": "2026-07-28",
         "io.modelcontextprotocol/clientInfo": {
-            "name": "codexshim-wire-test",
+            "name": "agentshim-wire-test",
             "version": "1.0.0"
         },
         "io.modelcontextprotocol/clientCapabilities": {}

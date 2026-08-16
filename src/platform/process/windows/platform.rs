@@ -111,7 +111,7 @@ type ThreadResults = (io::Result<()>, Vec<Capture>);
 
 pub(super) fn settle_threads(
     completion: &ThreadCompletion,
-    stdin: thread::JoinHandle<io::Result<()>>,
+    stdin: Option<thread::JoinHandle<io::Result<()>>>,
     drains: Vec<thread::JoinHandle<io::Result<Capture>>>,
 ) -> Result<ThreadResults, ProcessError> {
     settle_threads_with_deadlines(
@@ -125,23 +125,28 @@ pub(super) fn settle_threads(
 
 pub(super) fn settle_threads_with_deadlines(
     completion: &ThreadCompletion,
-    stdin: thread::JoinHandle<io::Result<()>>,
+    stdin: Option<thread::JoinHandle<io::Result<()>>>,
     drains: Vec<thread::JoinHandle<io::Result<Capture>>>,
     settlement_deadline: Duration,
     cancellation_deadline: Duration,
 ) -> Result<ThreadResults, ProcessError> {
-    if !completion.wait_for(drains.len() + 1, settlement_deadline) {
-        cancel_thread_io(&stdin);
+    let completion_target = drains.len() + usize::from(stdin.is_some());
+    if !completion.wait_for(completion_target, settlement_deadline) {
+        if let Some(stdin) = &stdin {
+            cancel_thread_io(stdin);
+        }
         for drain in &drains {
             cancel_thread_io(drain);
         }
-        if !completion.wait_for(drains.len() + 1, cancellation_deadline) {
+        if !completion.wait_for(completion_target, cancellation_deadline) {
             return Err(ProcessError::OutcomeUncertain);
         }
     }
-    let stdin = stdin
-        .join()
-        .map_err(|_| io::Error::other("stdin writer panicked"))?;
+    let stdin = stdin.map_or(Ok(()), |stdin| {
+        stdin
+            .join()
+            .map_err(|_| io::Error::other("stdin writer panicked"))?
+    });
     let mut captures = Vec::with_capacity(drains.len());
     for handle in drains {
         captures.push(
@@ -436,7 +441,7 @@ pub(super) struct Pipe {
 }
 
 impl Pipe {
-    fn stdin() -> io::Result<Self> {
+    pub(super) fn stdin() -> io::Result<Self> {
         Self::create(true)
     }
 

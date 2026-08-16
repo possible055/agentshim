@@ -20,7 +20,7 @@ pub use output::{
 pub use path::ReadScope;
 pub use profile::ClientProfile;
 
-/// Report the probed bash for `codexshim doctor`, so a missing installation surfaces at
+/// Report the probed bash for `agentshim doctor`, so a missing installation surfaces at
 /// deployment time instead of mid-task.
 ///
 /// # Errors
@@ -42,7 +42,7 @@ pub use runtime::{
     DEFAULT_PROCESS_CALLS, MAX_CONFIGURED_PROCESS_CALLS, MAX_READ_ONLY_CALLS,
     RuntimeConfig as RuntimeLimits,
 };
-pub use server::{CodexShim, CodexShimBuilder, ToolsListCorrelation};
+pub use server::{AgentShim, AgentShimBuilder, ToolsListCorrelation};
 
 #[cfg(feature = "bench-internals")]
 #[doc(hidden)]

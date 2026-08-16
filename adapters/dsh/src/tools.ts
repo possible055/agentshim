@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { JsonSchemaNode, ToolCallView, ToolDefinition, ToolResultView } from '@deepseek-ai/dsh-tools'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { CatalogSnapshot, CodexshimSession, CodexshimToolName, ResolvedSessionConfig } from './session.ts'
+import type { CatalogSnapshot, AgentshimSession, AgentshimToolName, ResolvedSessionConfig } from './session.ts'
 import { EXPECTED_TOOL_ORDER } from './session.ts'
 import { materializeContent, normalizeMcpResult } from './content.ts'
 import { augmentProcessParameters, beginReadObservation, completeReadObservation, createProcessPolicy } from './policy.ts'
@@ -79,12 +79,12 @@ function presentTerminalResult(_args: unknown, result: { content: ContentBlock[]
 
 export interface ToolDependencies {
   readonly ctx: Context
-  readonly session: CodexshimSession
+  readonly session: AgentshimSession
   readonly snapshot: CatalogSnapshot
   readonly config: ResolvedSessionConfig
 }
 
-const PROCESS_DESCRIPTION_SUFFIX = ' This tool runs outside the DSH sandbox: a call refused with CODEXSHIM_PROCESS_REQUIRES_FULL_ACCESS must be retried with the exact same arguments plus sandbox_permissions: "danger-full-access" and a justification for the user to approve.'
+const PROCESS_DESCRIPTION_SUFFIX = ' This tool runs outside the DSH sandbox: a call refused with AGENTSHIM_PROCESS_REQUIRES_FULL_ACCESS must be retried with the exact same arguments plus sandbox_permissions: "danger-full-access" and a justification for the user to approve.'
 
 async function callAndMaterialize(deps: ToolDependencies, name: string, args: Record<string, unknown>, exec: ToolRunContext): Promise<{ content: ContentBlock[]; structuredContent?: unknown }> {
   const raw = await deps.session.call(name, args, exec.signal)
@@ -106,9 +106,9 @@ async function callAndMaterialize(deps: ToolDependencies, name: string, args: Re
  * objects are shared across agents; each agent registers them into its own
  * scope.
  */
-export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<CodexshimToolName, ToolDefinition> {
+export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<AgentshimToolName, ToolDefinition> {
   const processPolicy = createProcessPolicy(deps.ctx)
-  const definitions = new Map<CodexshimToolName, ToolDefinition>()
+  const definitions = new Map<AgentshimToolName, ToolDefinition>()
   for (const entry of deps.snapshot.tools) {
     const isProcessTool = entry.name === 'run_program' || entry.name === 'bash'
     const parameters = isProcessTool
@@ -183,7 +183,7 @@ export function promptSections(): ReadonlyArray<{ readonly name: string; readonl
     {
       name: 'tool:bash',
       order: 105,
-      text: 'A non-zero exit code is a normal result, not a tool error. For work that needs longer than the timeout, set detach with a log_path and poll that file with read; a detached process belongs to the codexshim server instance, not to DSH jobs (job_output/job_kill cannot see it).',
+      text: 'Each call is a fresh non-interactive bash: cwd, exports, and functions do not persist — pass cwd instead of using cd. A non-zero exit code is a normal result, not a tool error. For work that needs longer than the timeout, set detach with a log_path and poll that file with read; a detached process belongs to the agentshim server instance, not to DSH jobs (job_output/job_kill cannot see it).',
     },
   ]
 }

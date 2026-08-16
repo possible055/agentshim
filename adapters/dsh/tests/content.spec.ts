@@ -56,10 +56,10 @@ function stubLlm(modalities: readonly string[]) {
 
 describe('serverErrorCode', () => {
   it('maps the structured error code and falls back on a missing payload', () => {
-    expect(serverErrorCode({ structuredContent: { error: { code: 'output_budget' } } })).toBe('CODEXSHIM_OUTPUT_BUDGET')
-    expect(serverErrorCode({ structuredContent: { error: { code: 'client_cancellation' } } })).toBe('CODEXSHIM_CLIENT_CANCELLATION')
-    expect(serverErrorCode({})).toBe('CODEXSHIM_TOOL_ERROR')
-    expect(serverErrorCode({ structuredContent: { error: {} } })).toBe('CODEXSHIM_TOOL_ERROR')
+    expect(serverErrorCode({ structuredContent: { error: { code: 'output_budget' } } })).toBe('AGENTSHIM_OUTPUT_BUDGET')
+    expect(serverErrorCode({ structuredContent: { error: { code: 'client_cancellation' } } })).toBe('AGENTSHIM_CLIENT_CANCELLATION')
+    expect(serverErrorCode({})).toBe('AGENTSHIM_TOOL_ERROR')
+    expect(serverErrorCode({ structuredContent: { error: {} } })).toBe('AGENTSHIM_TOOL_ERROR')
   })
 })
 
@@ -88,7 +88,7 @@ describe('normalizeMcpResult', () => {
       error = caught
     }
     expect(error).toBeInstanceOf(HarnessError)
-    expect(error).toMatchObject({ code: 'CODEXSHIM_FIXTURE_DENIED', message: 'fixture says no' })
+    expect(error).toMatchObject({ code: 'AGENTSHIM_FIXTURE_DENIED', message: 'fixture says no' })
   })
 
   it('fails loud on malformed or unsupported blocks', () => {
@@ -110,7 +110,7 @@ describe('materializeContent', () => {
       { type: 'text', text: 'page 1' },
       { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
     ]).then(() => { throw new Error('expected rejection') }, reason => reason)
-    expect(error).toMatchObject({ code: 'CODEXSHIM_IMAGE_STORAGE_UNAVAILABLE' })
+    expect(error).toMatchObject({ code: 'AGENTSHIM_IMAGE_STORAGE_UNAVAILABLE' })
     expect(String(error.message)).toContain('pdf_mode: "text"')
   })
 
@@ -118,7 +118,7 @@ describe('materializeContent', () => {
     const error = await materializeContent(stubContext({ attachments: stubAttachments() }), stubExec(), [
       { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
     ]).then(() => { throw new Error('expected rejection') }, reason => reason)
-    expect(error).toMatchObject({ code: 'CODEXSHIM_IMAGE_ROUTE_UNRESOLVED' })
+    expect(error).toMatchObject({ code: 'AGENTSHIM_IMAGE_ROUTE_UNRESOLVED' })
   })
 
   it('refuses images on a text-only model route', async () => {
@@ -126,7 +126,7 @@ describe('materializeContent', () => {
     const error = await materializeContent(stubContext({ attachments: stubAttachments(), llm: stubLlm(['text']) }), exec, [
       { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
     ]).then(() => { throw new Error('expected rejection') }, reason => reason)
-    expect(error).toMatchObject({ code: 'CODEXSHIM_IMAGE_ROUTE_UNSUPPORTED' })
+    expect(error).toMatchObject({ code: 'AGENTSHIM_IMAGE_ROUTE_UNSUPPORTED' })
   })
 
   it('persists validated images as attachment references and defers nested context', async () => {
@@ -170,10 +170,10 @@ describe('materializeContent', () => {
     const exec = stubExec({ agent: routedAgent() })
     await expect(materializeContent(stubContext(services), exec, [
       { type: 'image', data: 'not*base64!', mimeType: 'image/png' },
-    ])).rejects.toMatchObject({ code: 'CODEXSHIM_INVALID_IMAGE_DATA' })
+    ])).rejects.toMatchObject({ code: 'AGENTSHIM_INVALID_IMAGE_DATA' })
     await expect(materializeContent(stubContext(services), exec, [
       { type: 'image', data: PNG_1X1, mimeType: 'image/bmp' },
-    ])).rejects.toMatchObject({ code: 'CODEXSHIM_IMAGE_LIMIT_EXCEEDED' })
+    ])).rejects.toMatchObject({ code: 'AGENTSHIM_IMAGE_LIMIT_EXCEEDED' })
   })
 
   it('enforces the per-image, aggregate, and count limits', async () => {
@@ -181,16 +181,16 @@ describe('materializeContent', () => {
     const small = stubAttachments({ imageLimits: { ...stubAttachments().imageLimits, maxImageBytes: 8 } })
     await expect(materializeContent(stubContext({ attachments: small, llm: stubLlm(['image']) }), exec, [
       { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
-    ])).rejects.toMatchObject({ code: 'CODEXSHIM_IMAGE_LIMIT_EXCEEDED' })
+    ])).rejects.toMatchObject({ code: 'AGENTSHIM_IMAGE_LIMIT_EXCEEDED' })
     const tightAggregate = stubAttachments({ imageLimits: { ...stubAttachments().imageLimits, maxMessageImageBytes: 8 } })
     await expect(materializeContent(stubContext({ attachments: tightAggregate, llm: stubLlm(['image']) }), exec, [
       { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
       { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
-    ])).rejects.toMatchObject({ code: 'CODEXSHIM_IMAGE_LIMIT_EXCEEDED' })
+    ])).rejects.toMatchObject({ code: 'AGENTSHIM_IMAGE_LIMIT_EXCEEDED' })
     const oneOnly = stubAttachments({ imageLimits: { ...stubAttachments().imageLimits, maxImagesPerMessage: 1 } })
     await expect(materializeContent(stubContext({ attachments: oneOnly, llm: stubLlm(['image']) }), exec, [
       { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
       { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
-    ])).rejects.toMatchObject({ code: 'CODEXSHIM_IMAGE_LIMIT_EXCEEDED' })
+    ])).rejects.toMatchObject({ code: 'AGENTSHIM_IMAGE_LIMIT_EXCEEDED' })
   })
 })

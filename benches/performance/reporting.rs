@@ -47,7 +47,7 @@ pub(super) fn emit_grep_profile(emission: &GrepProfileEmission<'_>) {
                 "source": emission.source,
                 "pathname_reopen": emission.pathname_reopen,
                 "open_strategy": "default",
-                "sort": std::env::var("CODEXSHIM_BENCH_GREP_SORT")
+                "sort": std::env::var("AGENTSHIM_BENCH_GREP_SORT")
                     .unwrap_or_else(|_| "heapsort".to_owned()),
                 "lanes": stages.lanes,
                 "candidate_count": stages.candidate_count,
@@ -58,6 +58,13 @@ pub(super) fn emit_grep_profile(emission: &GrepProfileEmission<'_>) {
                 "candidate_retained_memory_bytes": stages.candidate_retained_memory_bytes,
                 "candidate_vec_capacity": stages.candidate_vec_capacity,
                 "candidate_soft_target_crossings": stages.candidate_soft_target_crossings,
+                "speculative_lease_requested_bytes": stages.speculative_lease_requested_bytes,
+                "speculative_lease_granted_bytes": stages.speculative_lease_granted_bytes,
+                "capture_exact_retries": stages.capture_exact_retries,
+                "heap_limit_retries": stages.heap_limit_retries,
+                "retry_successes": stages.retry_successes,
+                "retry_ceiling_bytes": stages.retry_ceiling_bytes,
+                "legacy_stream_files": stages.legacy_stream_files,
                 "candidate_path_bytes": {
                     "key": stages.candidate_key_bytes,
                     "capability_key": stages.candidate_capability_key_bytes,
@@ -72,7 +79,7 @@ pub(super) fn emit_grep_profile(emission: &GrepProfileEmission<'_>) {
                     "sort_key": stages.candidate_sort_key_capacity,
                     "slash_path": stages.candidate_slash_path_capacity,
                 },
-                "candidate_policy": std::env::var("CODEXSHIM_BENCH_GREP_CANDIDATE_POLICY")
+                "candidate_policy": std::env::var("AGENTSHIM_BENCH_GREP_CANDIDATE_POLICY")
                     .unwrap_or_else(|_| "soft".to_owned()),
                 "total_ms": nanos_to_ms(stages.total_ns),
                 "traversal_ms": nanos_to_ms(stages.candidate_traversal_ns),
@@ -85,16 +92,21 @@ pub(super) fn emit_grep_profile(emission: &GrepProfileEmission<'_>) {
     println!("{}", full_grep_profile_json(emission));
 }
 
+// Keeping the complete benchmark schema together makes emitted fields auditable as one contract.
+#[allow(clippy::too_many_lines)]
 pub(super) fn full_grep_profile_json(emission: &GrepProfileEmission<'_>) -> serde_json::Value {
     let stages = &emission.profile.timings;
     let fingerprint = emission.fingerprint;
     let mmap = emission.mmap;
+    let limits = agentshim::RuntimeLimits::for_tests(stages.lanes);
     let mut profile = json!({
         "benchmark": "grep_profile",
         "binary_commit": benchmark_identity().0,
         "binary_worktree": benchmark_identity().1,
-        "memory_policy": "soft_gate_128_mib",
-        "candidate_policy": std::env::var("CODEXSHIM_BENCH_GREP_CANDIDATE_POLICY")
+        "memory_policy": "soft_gate",
+        "grep_memory_bytes": limits.grep_memory_bytes,
+        "shared_memory_bytes": limits.memory_bytes,
+        "candidate_policy": std::env::var("AGENTSHIM_BENCH_GREP_CANDIDATE_POLICY")
             .unwrap_or_else(|_| "soft".to_owned()),
         "process_rss_hard_limit_bytes": 1024_u64 * 1024 * 1024,
         "scope": emission.scope,
@@ -105,7 +117,7 @@ pub(super) fn full_grep_profile_json(emission: &GrepProfileEmission<'_>) -> serd
         "source": emission.source,
         "pathname_reopen": emission.pathname_reopen,
         "open_strategy": "default",
-        "sort": std::env::var("CODEXSHIM_BENCH_GREP_SORT")
+        "sort": std::env::var("AGENTSHIM_BENCH_GREP_SORT")
             .unwrap_or_else(|_| "heapsort".to_owned()),
         "lanes": stages.lanes,
         "candidate_count": stages.candidate_count,
@@ -158,6 +170,7 @@ pub(super) fn full_grep_profile_json(emission: &GrepProfileEmission<'_>) -> serd
             "search_reader": stages.search_reader_files,
             "search_file": stages.search_file_files,
             "search_slice": stages.search_slice_files,
+            "legacy_stream": stages.legacy_stream_files,
             "mmap_requested": stages.mmap_requested_files,
             "mmap_selected": mmap.0,
             "mmap_fallback": mmap.1,
@@ -165,6 +178,14 @@ pub(super) fn full_grep_profile_json(emission: &GrepProfileEmission<'_>) -> serd
         },
         "bytes": {
             "render_copy": stages.render_copy_bytes,
+            "speculative_lease_requested": stages.speculative_lease_requested_bytes,
+            "speculative_lease_granted": stages.speculative_lease_granted_bytes,
+        },
+        "retries": {
+            "capture_exact": stages.capture_exact_retries,
+            "heap_limit": stages.heap_limit_retries,
+            "successes": stages.retry_successes,
+            "ceiling_bytes": stages.retry_ceiling_bytes,
         },
         "fingerprint": {
             "file_id_calls": fingerprint.file_id_calls,

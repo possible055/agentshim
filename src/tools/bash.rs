@@ -239,7 +239,7 @@ pub(crate) fn execute_output_with_budget(
         }
     };
     ensure_before_spawn(deadline, request.timeout_ms())?;
-    tracing::info!(target: "codexshim", event = "process_resolve", phase = "execution");
+    tracing::info!(target: "agentshim", event = "process_resolve", phase = "execution");
     let cwd = spawn::resolve_cwd(root, request.cwd.as_deref()).map_err(invalid)?;
     ensure_before_spawn(deadline, request.timeout_ms())?;
     let resolved = ResolvedProgram {
@@ -377,7 +377,7 @@ fn run_detached(
         streams: Streams::Merged,
         timeout: Duration::ZERO,
     };
-    tracing::info!(target: "codexshim", event = "process_spawn", phase = "execution", detached = true);
+    tracing::info!(target: "agentshim", event = "process_spawn", phase = "execution", detached = true);
     #[cfg(test)]
     if let Some(error) = admission.injected_spawn_error() {
         return Err(error);

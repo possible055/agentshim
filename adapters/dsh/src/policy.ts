@@ -12,7 +12,7 @@ export const ESCALATION_JUSTIFICATION_FIELD = 'justification'
 
 /**
  * The only escalation target this adapter accepts. DSH's own ladder also
- * offers `workspace-write`, but the codexshim child runs outside the DSH
+ * offers `workspace-write`, but the agentshim child runs outside the DSH
  * sandbox executor, so a narrower grant would be a false safety claim.
  */
 export const ESCALATION_TARGET: SandboxMode = 'danger-full-access'
@@ -25,17 +25,17 @@ export function sameExecutionPath(left: string, right: string): boolean {
 /**
  * Per-call re-check of the startup execution-world condition: the provider
  * must still be the local one and must map the root to the same canonical
- * path, or a local codexshim read could be mistaken for a provider
+ * path, or a local agentshim read could be mistaken for a provider
  * observation.
  */
 export async function assertExecutionWorld(ctx: Context, root: string): Promise<void> {
   const fs = ctx.fs
   if (!(fs instanceof LocalFileSystem)) {
-    throw new HarnessError('dsh-codexshim: ctx.fs is no longer the local filesystem provider; refusing to attribute codexshim reads to it', 'CODEXSHIM_EXECUTION_WORLD_MISMATCH')
+    throw new HarnessError('dsh-agentshim: ctx.fs is no longer the local filesystem provider; refusing to attribute agentshim reads to it', 'AGENTSHIM_EXECUTION_WORLD_MISMATCH')
   }
   const processed = fs.processPath(await fs.resolve(root))
   if (!sameExecutionPath(processed, root)) {
-    throw new HarnessError(`dsh-codexshim: ctx.fs maps the root ${JSON.stringify(root)} to ${JSON.stringify(processed)}; execution world mismatch`, 'CODEXSHIM_EXECUTION_WORLD_MISMATCH')
+    throw new HarnessError(`dsh-agentshim: ctx.fs maps the root ${JSON.stringify(root)} to ${JSON.stringify(processed)}; execution world mismatch`, 'AGENTSHIM_EXECUTION_WORLD_MISMATCH')
   }
 }
 
@@ -49,7 +49,7 @@ export interface ReadObservation {
  * pre-stat. A confirmed-absent target records `{ kind: 'absent' }` immediately
  * (a later create re-validates atomically); a regular file defers its
  * observation until the read completes; directories and special files record
- * nothing and let codexshim produce the user-facing error.
+ * nothing and let agentshim produce the user-facing error.
  */
 export async function beginReadObservation(ctx: Context, exec: ToolExecution, root: string, path: string): Promise<ReadObservation> {
   await assertExecutionWorld(ctx, root)
@@ -98,26 +98,27 @@ export interface ProcessPolicy {
   /**
    * Enforce the standing sandbox policy for one process call and return the
    * arguments to send: a confined first attempt is refused with
-   * `CODEXSHIM_PROCESS_REQUIRES_FULL_ACCESS`; an approved retry loses the
+   * `AGENTSHIM_PROCESS_REQUIRES_FULL_ACCESS`; an approved retry loses the
    * adapter-only fields before the MCP request.
    */
   prepareArguments(name: string, args: Record<string, unknown>, exec: ToolExecution): Promise<Record<string, unknown>>
 }
 
 /**
- * The codexshim child runs outside the DSH per-call sandbox executor, so
+ * The agentshim child runs outside the DSH per-call sandbox executor, so
  * process tools may only run under a standing `danger-full-access` policy or
  * after a one-shot full-access escalation through the DSH approval channel —
  * never silently under a confined mode.
+ *
+ * A missing `ctx.shell` is treated as unconfined: the minimal preset has no
+ * one-shot executor, only a PTY realm, and already stands on
+ * `danger-full-access`. Call time still re-checks the live capability.
  */
 export function createProcessPolicy(ctx: Context): ProcessPolicy {
   const shell = ctx.get('shell')
-  if (shell === undefined) {
-    throw new Error('dsh-codexshim: ctx.shell is missing; the adapter requires a mounted shell executor')
-  }
-  const advertisesEscalation = shell.sandboxMode !== undefined
+  const advertisesEscalation = shell?.sandboxMode !== undefined
   if (advertisesEscalation && ctx.get('sandboxPolicy') === undefined) {
-    throw new Error('dsh-codexshim: the mounted shell executor confines but ctx.sandboxPolicy is missing; refusing to advertise escalation')
+    throw new Error('dsh-agentshim: the mounted shell executor confines but ctx.sandboxPolicy is missing; refusing to advertise escalation')
   }
   return {
     advertisesEscalation,
@@ -127,23 +128,23 @@ export function createProcessPolicy(ctx: Context): ProcessPolicy {
       validateEscalationArgs(permissions, justification)
       const currentShell = ctx.get('shell')
       const currentlyConfines = currentShell?.sandboxMode !== undefined
-      if (currentShell === undefined || currentlyConfines !== advertisesEscalation) {
+      if (currentlyConfines !== advertisesEscalation) {
         throw new HarnessError(
-          'dsh-codexshim: the mounted shell executor capability changed after the process tools were registered; retry after the composition settles or reload the plugin',
-          'CODEXSHIM_PROCESS_POLICY_CHANGED',
+          'dsh-agentshim: the mounted shell executor capability changed after the process tools were registered; retry after the composition settles or reload the plugin',
+          'AGENTSHIM_PROCESS_POLICY_CHANGED',
         )
       }
       if (!currentlyConfines) {
         if (permissions !== undefined) {
-          throw new HarnessError('sandbox_permissions is not available in this composition (no sandboxing executor to escalate from)', 'CODEXSHIM_ESCALATION_UNAVAILABLE')
+          throw new HarnessError('sandbox_permissions is not available in this composition (no sandboxing executor to escalate from)', 'AGENTSHIM_ESCALATION_UNAVAILABLE')
         }
         return args
       }
       const sandboxPolicy = ctx.get('sandboxPolicy')
       if (sandboxPolicy === undefined) {
         throw new HarnessError(
-          'dsh-codexshim: ctx.sandboxPolicy disappeared while a sandboxing executor is mounted; refusing to run the private process',
-          'CODEXSHIM_PROCESS_POLICY_CHANGED',
+          'dsh-agentshim: ctx.sandboxPolicy disappeared while a sandboxing executor is mounted; refusing to run the private process',
+          'AGENTSHIM_PROCESS_POLICY_CHANGED',
         )
       }
       const standing = await sandboxPolicy.resolve(exec.agent === undefined ? {} : { session: exec.agent.session })
@@ -151,14 +152,14 @@ export function createProcessPolicy(ctx: Context): ProcessPolicy {
       if (permissions === undefined) {
         if (standingMode === 'danger-full-access') return args
         throw new HarnessError(
-          `codexshim "${name}" runs outside the DSH sandbox and needs full access; the session policy is "${standingMode ?? 'unknown'}". Retry this exact call with the same arguments plus ${ESCALATION_PERMISSION_FIELD}: "${ESCALATION_TARGET}" and a one-sentence ${ESCALATION_JUSTIFICATION_FIELD} for the user to approve.`,
-          'CODEXSHIM_PROCESS_REQUIRES_FULL_ACCESS',
+          `agentshim "${name}" runs outside the DSH sandbox and needs full access; the session policy is "${standingMode ?? 'unknown'}". Retry this exact call with the same arguments plus ${ESCALATION_PERMISSION_FIELD}: "${ESCALATION_TARGET}" and a one-sentence ${ESCALATION_JUSTIFICATION_FIELD} for the user to approve.`,
+          'AGENTSHIM_PROCESS_REQUIRES_FULL_ACCESS',
         )
       }
       if (permissions !== ESCALATION_TARGET) {
         throw new HarnessError(
-          `codexshim "${name}" only accepts ${ESCALATION_PERMISSION_FIELD}: "${ESCALATION_TARGET}"; narrower modes cannot confine the codexshim child process`,
-          'CODEXSHIM_ESCALATION_TARGET_REJECTED',
+          `agentshim "${name}" only accepts ${ESCALATION_PERMISSION_FIELD}: "${ESCALATION_TARGET}"; narrower modes cannot confine the agentshim child process`,
+          'AGENTSHIM_ESCALATION_TARGET_REJECTED',
         )
       }
       await approveEscalation(
@@ -189,7 +190,7 @@ export function augmentProcessParameters(parameters: Record<string, unknown>, po
   properties[ESCALATION_PERMISSION_FIELD] = {
     type: 'string',
     enum: [ESCALATION_TARGET],
-    description: `The wider access this command needs. Only valid as a one-shot retry of a call refused with CODEXSHIM_PROCESS_REQUIRES_FULL_ACCESS; requires a justification and user approval.`,
+    description: `The wider access this command needs. Only valid as a one-shot retry of a call refused with AGENTSHIM_PROCESS_REQUIRES_FULL_ACCESS; requires a justification and user approval.`,
   }
   properties[ESCALATION_JUSTIFICATION_FIELD] = {
     type: 'string',

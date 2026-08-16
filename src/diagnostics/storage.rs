@@ -70,7 +70,7 @@ pub(super) fn writer_loop(
             Err(_) => {
                 restore_batch_loss(dropped, &records);
                 if maintenance.take_warning() {
-                    eprintln!("codexshim diagnostics maintenance unavailable; retrying");
+                    eprintln!("agentshim diagnostics maintenance unavailable; retrying");
                 }
                 continue;
             }
@@ -81,7 +81,7 @@ pub(super) fn writer_loop(
                 eprintln!(
                     "{}",
                     crate::output::bounded_diagnostic(&format!(
-                        "codexshim diagnostics writer disabled output: {error}"
+                        "agentshim diagnostics writer disabled output: {error}"
                     ))
                 );
                 *warned = true;
@@ -163,7 +163,7 @@ pub(super) fn write_shutdown_summary(
     let date = Utc::now().date_naive();
     if automatic_maintenance(directory, date).is_err() {
         dropped.fetch_add(count, Ordering::Relaxed);
-        eprintln!("codexshim diagnostics shutdown summary unavailable");
+        eprintln!("agentshim diagnostics shutdown summary unavailable");
         return;
     }
     let mut records = Vec::with_capacity(2);
@@ -177,7 +177,7 @@ pub(super) fn write_shutdown_summary(
     records.push(summary);
     if write_summary_at(directory, &records, date).is_err() {
         dropped.fetch_add(count, Ordering::Relaxed);
-        eprintln!("codexshim diagnostics shutdown summary unavailable");
+        eprintln!("agentshim diagnostics shutdown summary unavailable");
     }
 }
 
@@ -243,7 +243,7 @@ fn write_batch_with_limit(
         return Ok(());
     }
     let bytes = serialize_batch(batch)?;
-    let lock_path = directory.join(format!("codexshim-{date}.lock"));
+    let lock_path = directory.join(format!("agentshim-{date}.lock"));
     let lock = open_private_append(&lock_path)?;
     acquire_lock(&lock, LOCK_WAIT)?;
     let result = append_rotated_with_limit(directory, date, &bytes, daily_limit);
@@ -282,7 +282,7 @@ fn append_rotated_with_limit(
 }
 
 pub(super) fn log_path(directory: &Path, date: NaiveDate, part: u8) -> PathBuf {
-    directory.join(format!("codexshim-{date}.{part:04}.jsonl"))
+    directory.join(format!("agentshim-{date}.{part:04}.jsonl"))
 }
 
 fn open_private_append(path: &Path) -> io::Result<File> {
@@ -348,7 +348,7 @@ pub(super) fn list_logs(directory: &Path) -> io::Result<Vec<LogFile>> {
 }
 
 pub(super) fn parse_log_date(name: &str) -> Option<NaiveDate> {
-    let remainder = name.strip_prefix("codexshim-")?;
+    let remainder = name.strip_prefix("agentshim-")?;
     let (date, suffix) = remainder.split_at_checked(10)?;
     let part = suffix.strip_prefix('.')?.strip_suffix(".jsonl")?;
     if part.len() != 4 || !part.bytes().all(|byte| byte.is_ascii_digit()) {

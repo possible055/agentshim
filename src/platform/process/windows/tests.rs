@@ -18,7 +18,7 @@ mod tests {
                 append_native_argv0, finish_batch_command_line, finish_native_command_line,
                 settle_threads_with_deadlines,
             },
-            runner::{FAILURE_POINT, FailurePoint, run},
+            runner::{FAILURE_POINT, FailurePoint, run, spawn_io_threads},
         },
         tools::exec::{
             capture::drain,
@@ -53,7 +53,11 @@ mod tests {
         let _writer = pipe.child.into_file();
         let completion = ThreadCompletion::new();
         let failed = Arc::new(AtomicBool::new(false));
-        let stdin = spawn_monitored(Arc::clone(&failed), completion.clone(), || Ok(()));
+        let stdin = Some(spawn_monitored(
+            Arc::clone(&failed),
+            completion.clone(),
+            || Ok(()),
+        ));
         let entered = Arc::new(Barrier::new(2));
         let drain_entered = Arc::clone(&entered);
         let drain = spawn_monitored(failed, completion.clone(), move || {
@@ -74,6 +78,27 @@ mod tests {
 
         assert_eq!(captures.len(), 1);
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn omitted_stdin_spawns_no_writer_thread() {
+        let pipe = Pipe::stdin().expect("stdin pipe");
+        let _reader = pipe.child.into_file();
+
+        let (_, completion, stdin, drains) =
+            spawn_io_threads(pipe.parent.into_file(), Vec::new(), None, Launcher::Native);
+
+        assert!(stdin.is_none());
+        let (stdin_result, captures) = settle_threads_with_deadlines(
+            &completion,
+            stdin,
+            drains,
+            Duration::from_millis(100),
+            Duration::from_millis(100),
+        )
+        .expect("no stdin writer needs no completion signal");
+        assert!(stdin_result.is_ok());
+        assert!(captures.is_empty());
     }
 
     #[test]
@@ -179,9 +204,9 @@ mod tests {
             let mut environment = EnvironmentPlan::default();
             environment
                 .overrides
-                .push(("CODEXSHIM_PROCESS_FIXTURE".to_owned(), "child".to_owned()));
+                .push(("AGENTSHIM_PROCESS_FIXTURE".to_owned(), "child".to_owned()));
             environment.overrides.push((
-                "CODEXSHIM_PROCESS_PID_FILE".to_owned(),
+                "AGENTSHIM_PROCESS_PID_FILE".to_owned(),
                 pid_file.to_string_lossy().into_owned(),
             ));
             let plan = ExecPlan {

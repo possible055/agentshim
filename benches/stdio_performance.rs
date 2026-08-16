@@ -11,23 +11,23 @@ use std::{
     time::{Duration, Instant},
 };
 
-use codexshim::RuntimeLimits;
+use agentshim::RuntimeLimits;
 use serde_json::{Value, json};
 
 const WARM_SAMPLES: usize = 7;
-const MCP_GREP_ENV: &str = "CODEXSHIM_BENCH_MCP_GREP";
-const MCP_GREP_FILES_ENV: &str = "CODEXSHIM_BENCH_MCP_GREP_FILES";
-const MCP_GREP_GLOB_ENV: &str = "CODEXSHIM_BENCH_MCP_GREP_GLOB";
-const MCP_GREP_FILE_BYTES_ENV: &str = "CODEXSHIM_BENCH_MCP_GREP_FILE_BYTES";
-const MCP_GREP_DENSITY_ENV: &str = "CODEXSHIM_BENCH_MCP_GREP_DENSITY";
-const MCP_GREP_MODE_ENV: &str = "CODEXSHIM_BENCH_MCP_GREP_MODE";
-const MCP_GREP_STORAGE_ENV: &str = "CODEXSHIM_BENCH_MCP_GREP_STORAGE";
-const MCP_GREP_WARM_SAMPLES_ENV: &str = "CODEXSHIM_BENCH_MCP_GREP_WARM_SAMPLES";
-const BENCH_COMMIT_ENV: &str = "CODEXSHIM_BENCH_COMMIT";
-const BENCH_WORKTREE_ENV: &str = "CODEXSHIM_BENCH_WORKTREE";
-const COLD_LIMIT_ENV: &str = "CODEXSHIM_BENCH_MAX_STDIO_COLD_MS";
-const P95_LIMIT_ENV: &str = "CODEXSHIM_BENCH_MAX_STDIO_P95_MS";
-const PROCESS_LIMIT_ENV: &str = "CODEXSHIM_BENCH_MAX_PROCESS_MS";
+const MCP_GREP_ENV: &str = "AGENTSHIM_BENCH_MCP_GREP";
+const MCP_GREP_FILES_ENV: &str = "AGENTSHIM_BENCH_MCP_GREP_FILES";
+const MCP_GREP_GLOB_ENV: &str = "AGENTSHIM_BENCH_MCP_GREP_GLOB";
+const MCP_GREP_FILE_BYTES_ENV: &str = "AGENTSHIM_BENCH_MCP_GREP_FILE_BYTES";
+const MCP_GREP_DENSITY_ENV: &str = "AGENTSHIM_BENCH_MCP_GREP_DENSITY";
+const MCP_GREP_MODE_ENV: &str = "AGENTSHIM_BENCH_MCP_GREP_MODE";
+const MCP_GREP_STORAGE_ENV: &str = "AGENTSHIM_BENCH_MCP_GREP_STORAGE";
+const MCP_GREP_WARM_SAMPLES_ENV: &str = "AGENTSHIM_BENCH_MCP_GREP_WARM_SAMPLES";
+const BENCH_COMMIT_ENV: &str = "AGENTSHIM_BENCH_COMMIT";
+const BENCH_WORKTREE_ENV: &str = "AGENTSHIM_BENCH_WORKTREE";
+const COLD_LIMIT_ENV: &str = "AGENTSHIM_BENCH_MAX_STDIO_COLD_MS";
+const P95_LIMIT_ENV: &str = "AGENTSHIM_BENCH_MAX_STDIO_P95_MS";
+const PROCESS_LIMIT_ENV: &str = "AGENTSHIM_BENCH_MAX_PROCESS_MS";
 
 #[path = "stdio_performance/harness.rs"]
 mod harness;
@@ -121,7 +121,9 @@ fn benchmark_mcp_grep() {
             "benchmark": "mcp_grep_full_scan",
             "binary_commit": std::env::var(BENCH_COMMIT_ENV).unwrap_or_else(|_| "unrecorded".to_owned()),
             "binary_worktree": std::env::var(BENCH_WORKTREE_ENV).unwrap_or_else(|_| "unrecorded".to_owned()),
-            "memory_policy": "soft_gate_128_mib",
+            "memory_policy": "soft_gate",
+            "grep_memory_bytes": limits.grep_memory_bytes,
+            "shared_memory_bytes": limits.memory_bytes,
             "process_rss_hard_limit_bytes": 1024_u64 * 1024 * 1024,
             "fixture_files": files,
             "file_bytes": file_bytes,
@@ -129,8 +131,8 @@ fn benchmark_mcp_grep() {
             "mode": mode,
             "storage": storage,
             "warm_samples": warm_samples,
-            "source_policy": std::env::var("CODEXSHIM_BENCH_GREP_SOURCE").unwrap_or_else(|_| "reader".to_owned()),
-            "pathname_reopen": std::env::var("CODEXSHIM_BENCH_GREP_PATHNAME_REOPEN").unwrap_or_else(|_| "off".to_owned()),
+            "source_policy": std::env::var("AGENTSHIM_BENCH_GREP_SOURCE").unwrap_or_else(|_| "reader".to_owned()),
+            "pathname_reopen": std::env::var("AGENTSHIM_BENCH_GREP_PATHNAME_REOPEN").unwrap_or_else(|_| "off".to_owned()),
             "glob": glob,
             "worker_lanes": limits.worker_lanes,
             "scheduler_threads": limits.scheduler_threads,

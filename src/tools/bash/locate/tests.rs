@@ -16,7 +16,7 @@ fn locator_instances_keep_captured_inputs_independent() {
         Vec::new(),
         std::env::var_os("PATH").unwrap_or_default(),
     );
-    let missing_path = std::env::temp_dir().join("codexshim-definitely-missing-bash");
+    let missing_path = std::env::temp_dir().join("agentshim-definitely-missing-bash");
     let invalid = BashLocator::for_tests(
         Some(missing_path.clone().into_os_string()),
         Vec::new(),
@@ -159,6 +159,53 @@ fn probe_rejects_output_over_sixty_four_kibibytes() {
     .expect("probe execution");
 
     assert!(output.is_none());
+}
+
+#[test]
+fn successful_candidate_uses_one_probe_and_warm_resolves_use_none() {
+    let Some(runtime) = available_bash() else {
+        return;
+    };
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let locator = BashLocator::for_tests(
+        Some(runtime.executable.clone().into_os_string()),
+        Vec::new(),
+        std::env::var_os("PATH").unwrap_or_default(),
+    )
+    .with_probe_counter(Arc::clone(&calls));
+
+    assert!(locator.resolve(&CancellationToken::new()).is_ok());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert!(locator.resolve(&CancellationToken::new()).is_ok());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+#[test]
+fn probe_parser_requires_the_version_marker_on_the_first_line() {
+    for output in [
+        "GNU bash, version 5.2.37\nC.UTF-8\n",
+        "C.UTF-8\nAGENTSHIM_BASH_PROBE_V1:5.2.37\n",
+        "AGENTSHIM_BASH_PROBE_V1:\nC.UTF-8\n",
+    ] {
+        assert!(parse_probe_output(output).is_none(), "accepted {output:?}");
+    }
+}
+
+#[test]
+fn probe_parser_selects_preferred_locale_or_fallback() {
+    assert_eq!(
+        parse_probe_output("AGENTSHIM_BASH_PROBE_V1:5.2.37\nC.utf8\n"),
+        Some(PREFERRED_LOCALE.to_owned())
+    );
+    assert_eq!(
+        parse_probe_output("AGENTSHIM_BASH_PROBE_V1:5.2.37\nC\nPOSIX\n"),
+        Some(FALLBACK_LOCALE.to_owned())
+    );
+    assert_eq!(
+        parse_probe_output("AGENTSHIM_BASH_PROBE_V1:5.2.37\n"),
+        Some(FALLBACK_LOCALE.to_owned()),
+        "a missing locale command must not reject a valid Bash"
+    );
 }
 
 #[test]

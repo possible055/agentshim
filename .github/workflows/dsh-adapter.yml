@@ -54,13 +54,13 @@ jobs:
       - run: pnpm --dir adapters/dsh install --frozen-lockfile
       - run: pnpm --dir adapters/dsh typecheck
       - run: pnpm --dir adapters/dsh lint
-      - run: cargo build --locked -p codexshim
+      - run: cargo build --locked -p agentshim
       - run: pnpm --dir adapters/dsh test
         env:
-          CODEXSHIM_REAL_E2E: '1'
-          CODEXSHIM_LONG_E2E: ${{ runner.os == 'Linux' && '1' || '0' }}
+          AGENTSHIM_REAL_E2E: '1'
+          AGENTSHIM_LONG_E2E: ${{ runner.os == 'Linux' && '1' || '0' }}
       - run: pnpm --dir adapters/dsh build
       - run: pnpm --dir adapters/dsh pack
       - run: pnpm --dir adapters/dsh test:package-smoke
         env:
-          CODEXSHIM_PACKAGE_E2E: '1'
+          AGENTSHIM_PACKAGE_E2E: '1'

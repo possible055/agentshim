@@ -29,7 +29,7 @@ impl ClientProfile {
     }
 
     /// Return the default tool-timeout shelf for this client when
-    /// `CODEXSHIM_TOOL_TIMEOUT_SHELF` is not set in the environment.
+    /// `AGENTSHIM_TOOL_TIMEOUT_SHELF` is not set in the environment.
     #[must_use]
     pub const fn default_tool_timeout_shelf(self) -> Duration {
         match self {

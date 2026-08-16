@@ -3,7 +3,7 @@ mod dispatch;
 mod response;
 mod service;
 
-pub use service::{CodexShim, CodexShimBuilder};
+pub use service::{AgentShim, AgentShimBuilder};
 
 #[doc(hidden)]
 #[derive(Clone, Debug)]

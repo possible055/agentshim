@@ -2,8 +2,8 @@ mod format;
 mod image;
 mod text;
 
+use agentshim_pdf_read::{CancelSignal, ParserLimits, PdfReadDocument, PdfResourceLimits};
 use cap_std::fs::File;
-use codexshim_pdf_read::{CancelSignal, ParserLimits, PdfReadDocument, PdfResourceLimits};
 use tokio_util::sync::CancellationToken;
 
 use crate::tools::ToolOutput;
@@ -143,7 +143,7 @@ pub(super) fn read_pdf(
     // Installed before the document is opened, because cross-reference parsing and
     // reconstruction both happen there — a budget entered afterwards would leave the one
     // path that can allocate a second copy of the source unbounded.
-    let _budget = codexshim_pdf_read::enter_budget(
+    let _budget = agentshim_pdf_read::enter_budget(
         match mode {
             PdfMode::Image => PdfResourceLimits::image_within(call_bytes),
             PdfMode::Auto | PdfMode::Text => PdfResourceLimits::text_within(call_bytes),

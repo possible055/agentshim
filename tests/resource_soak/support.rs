@@ -9,15 +9,15 @@ pub(super) struct Session {
 
 impl Session {
     pub(super) fn start() -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_codexshim"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_agentshim"))
             .arg("serve")
             .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .env_remove("CODEXSHIM_PROCESS_CALLS")
+            .env_remove("AGENTSHIM_PROCESS_CALLS")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .expect("start codexshim");
+            .expect("start agentshim");
         let stdin = child.stdin.take().expect("server stdin");
         let stdout = BufReader::new(child.stdout.take().expect("server stdout"));
         Self {
@@ -203,7 +203,7 @@ pub(super) fn modern_meta() -> Value {
     json!({
         "io.modelcontextprotocol/protocolVersion": "2026-07-28",
         "io.modelcontextprotocol/clientInfo": {
-            "name": "codexshim-resource-soak",
+            "name": "agentshim-resource-soak",
             "version": "1.0.0",
         },
         "io.modelcontextprotocol/clientCapabilities": {},
@@ -211,7 +211,7 @@ pub(super) fn modern_meta() -> Value {
 }
 
 pub(super) fn output_path() -> PathBuf {
-    if let Some(path) = env::var_os("CODEXSHIM_SOAK_OUTPUT") {
+    if let Some(path) = env::var_os("AGENTSHIM_SOAK_OUTPUT") {
         return PathBuf::from(path);
     }
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -228,7 +228,7 @@ pub(super) fn command_output(program: &str, args: &[&str]) -> String {
 }
 
 pub(super) fn runner_image() -> String {
-    if let Ok(image) = env::var("CODEXSHIM_SOAK_RUNNER_IMAGE") {
+    if let Ok(image) = env::var("AGENTSHIM_SOAK_RUNNER_IMAGE") {
         return image;
     }
     match (env::var("ImageOS"), env::var("ImageVersion")) {
@@ -256,20 +256,20 @@ pub(super) fn local_runner_image() -> String {
 }
 
 pub(super) fn iteration_count() -> usize {
-    match env::var("CODEXSHIM_SOAK_ITERATIONS") {
+    match env::var("AGENTSHIM_SOAK_ITERATIONS") {
         Ok(value) => value
             .parse::<usize>()
-            .expect("CODEXSHIM_SOAK_ITERATIONS must be a positive integer"),
-        Err(_) if env::var_os("CODEXSHIM_SOAK_EXTENDED").is_some() => EXTENDED_ITERATIONS,
+            .expect("AGENTSHIM_SOAK_ITERATIONS must be a positive integer"),
+        Err(_) if env::var_os("AGENTSHIM_SOAK_EXTENDED").is_some() => EXTENDED_ITERATIONS,
         Err(_) => DEFAULT_ITERATIONS,
     }
 }
 
 pub(super) fn warm_up_count(iterations: usize) -> usize {
-    match env::var("CODEXSHIM_SOAK_WARM_UP") {
+    match env::var("AGENTSHIM_SOAK_WARM_UP") {
         Ok(value) => value
             .parse::<usize>()
-            .expect("CODEXSHIM_SOAK_WARM_UP must be an integer"),
+            .expect("AGENTSHIM_SOAK_WARM_UP must be an integer"),
         Err(_) => (iterations / 5).clamp(1, 100),
     }
 }
@@ -290,7 +290,7 @@ pub(super) fn run_mixed_cycle(session: &mut Session) -> Result<Value, ToolCallFa
         "grep",
         json!({
             "path": "src",
-            "pattern": "codexshim",
+            "pattern": "agentshim",
             "glob": "*.rs",
             "limit": 20,
         }),

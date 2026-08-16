@@ -190,10 +190,10 @@ metadata=$(cargo metadata --locked --no-deps --format-version 1) || {
     echo "cargo metadata --locked failed" >&2
     exit 1
 }
-metadata_version=$(printf '%s\n' "$metadata" | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"codexshim"[[:space:]]*,[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')
+metadata_version=$(printf '%s\n' "$metadata" | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"agentshim"[[:space:]]*,[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')
 if [ "$metadata_version" != "$version" ]; then
     echo "Cargo metadata reports version $metadata_version; expected $version" >&2
     exit 1
 fi
 
-echo "Prepared codexshim version $version."
+echo "Prepared agentshim version $version."

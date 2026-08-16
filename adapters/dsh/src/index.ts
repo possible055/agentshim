@@ -9,19 +9,19 @@ import { assertExecutionWorld, sameExecutionPath } from './policy.ts'
 import { buildToolDefinitions, promptSections, RESTRICT_CANDIDATES } from './tools.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
-export const name = 'codexshim'
+export const name = 'agentshim'
 
-export const inject: readonly string[] = ['fs', 'shell']
+export const inject: readonly string[] = ['fs']
 
 export interface Config {
   /** Plugin working root; defaults to the host's `process.cwd()`. */
   root: string
-  /** codexshim executable; defaults to the platform install path. Must be absolute when set. */
+  /** agentshim executable; defaults to the platform install path. Must be absolute when set. */
   command: string
   /** Arguments placed before the fixed server argv, e.g. `run --locked --` behind a `cargo` command. */
   commandArgs: string[]
   readScope: 'normal' | 'unrestricted'
-  /** Extra environment merged on top of the scrubbed parent environment, e.g. `CODEXSHIM_*` settings. */
+  /** Extra environment merged on top of the scrubbed parent environment, e.g. `AGENTSHIM_*` settings. */
   env: Record<string, string>
   /** Applied to both the DSH tool deadline and the private MCP request timeout. */
   toolCallTimeoutMs: number
@@ -35,6 +35,24 @@ export const Config = z.object({
   env: z.dict(String).default({}),
   toolCallTimeoutMs: z.number().min(MIN_TOOL_CALL_TIMEOUT_MS).default(MIN_TOOL_CALL_TIMEOUT_MS),
 }) as unknown as z<Config>
+
+/**
+ * Publish only names the agent already had, plus the shell/filesystem
+ * companions those names imply: hiding `pwsh` still yields `bash`, and a
+ * filesystem agent still gets `run_program`. A bash-only catalog (the
+ * minimal preset) therefore stays two tools after replacement.
+ */
+function replacementNames(present: readonly string[]): Array<(typeof EXPECTED_TOOL_ORDER)[number]> {
+  const selected = new Set<string>()
+  for (const name of present) {
+    if ((EXPECTED_TOOL_ORDER as readonly string[]).includes(name)) selected.add(name)
+  }
+  if (present.includes('pwsh')) selected.add('bash')
+  if (selected.has('read') || selected.has('grep') || selected.has('glob')) {
+    selected.add('run_program')
+  }
+  return EXPECTED_TOOL_ORDER.filter(name => selected.has(name))
+}
 
 function canonicalOrUndefined(path: string): string | undefined {
   try {
@@ -50,10 +68,13 @@ interface AgentInstallation {
 
 /**
  * Install this adapter's contributions on every root-matched agent: restrict
- * the inherited tools it replaces, register the five agent-local definitions,
- * and shadow the matching prompt sections. Every step is one transaction — a
- * failure rolls back and (for new agents) vetoes publication. Agents whose
- * canonical cwd is not exactly the plugin root are left completely untouched.
+ * only the inherited names that already exist, register the matching
+ * agent-local definitions, and shadow those prompt sections. The five-tool
+ * catalog stays available; a composition that only mounted `bash` (the
+ * minimal preset) therefore stays a two-tool catalog after replacement.
+ * Every step is one transaction — a failure rolls back and (for new agents)
+ * vetoes publication. Agents whose canonical cwd is not exactly the plugin
+ * root are left completely untouched.
  */
 function installAgentTools(
   ctx: Context,
@@ -61,7 +82,7 @@ function installAgentTools(
   definitions: ReadonlyMap<string, ToolDefinition>,
 ): void {
   const installed = new Map<Agent, AgentInstallation>()
-  const prompt = promptSections()
+  const promptByName = new Map(promptSections().map(section => [section.name, section]))
 
   function uninstall(agent: Agent): void {
     const installation = installed.get(agent)
@@ -79,17 +100,22 @@ function installAgentTools(
     if (canonicalCwd === undefined || !sameExecutionPath(canonicalCwd, resolved.root)) return
     const disposers: Array<() => void> = []
     try {
-      const deny = RESTRICT_CANDIDATES.filter(name => agent.ctx.tools.get(name) !== undefined)
-      if (deny.length > 0) disposers.push(agent.ctx.tools.restrict({ deny }))
-      for (const name of EXPECTED_TOOL_ORDER) {
+      const present = RESTRICT_CANDIDATES.filter(name => agent.ctx.tools.get(name) !== undefined)
+      const replacements = replacementNames(present)
+      if (replacements.length === 0 && !present.includes('pwsh')) return
+      if (present.length > 0) disposers.push(agent.ctx.tools.restrict({ deny: [...present] }))
+      for (const name of replacements) {
         const definition = definitions.get(name)
-        if (definition === undefined) throw new Error(`dsh-codexshim: internal error: no definition for "${name}"`)
+        if (definition === undefined) throw new Error(`dsh-agentshim: internal error: no definition for "${name}"`)
         disposers.push(agent.ctx.tools.register(definition))
       }
-      for (const section of prompt) {
-        disposers.push(agent.ctx.systemPrompt.section({ name: section.name, order: section.order, text: section.text }))
+      for (const name of replacements) {
+        const section = promptByName.get(`tool:${name}`)
+        if (section !== undefined) {
+          disposers.push(agent.ctx.systemPrompt.section({ name: section.name, order: section.order, text: section.text }))
+        }
       }
-      if (deny.includes('pwsh')) {
+      if (present.includes('pwsh')) {
         disposers.push(agent.ctx.systemPrompt.section({ name: 'tool:pwsh', order: 105, text: '' }))
       }
     } catch (error) {
@@ -109,11 +135,11 @@ function installAgentTools(
   })
   ctx.effect(() => () => {
     for (const agent of installed.keys()) uninstall(agent)
-  }, 'codexshim.agentInstallations')
+  }, 'agentshim.agentInstallations')
 
   const agents = ctx.get('agents')
   if (agents === undefined) {
-    ctx.logger.info('dsh-codexshim: no agents service at load; installing on agent/created events only')
+    ctx.logger.info('dsh-agentshim: no agents service at load; installing on agent/created events only')
     return
   }
   for (const agent of agents.list()) {
@@ -122,17 +148,18 @@ function installAgentTools(
 }
 
 /**
- * Start the private codexshim MCP session, block activation on a validated
- * five-tool catalog, then replace the five tool names in every root-matched
- * agent scope. Any resolution, spawn, validation, or execution-world failure
- * rejects the fiber (Cordis rolls the plugin back) — the adapter never
- * silently falls back to the DSH built-in tools.
+ * Start the private agentshim MCP session, block activation on a validated
+ * five-tool catalog, then replace overlapping tool names in every
+ * root-matched agent scope. The catalog is still five tools; only names the
+ * agent already had are published. Any resolution, spawn, validation, or
+ * execution-world failure rejects the fiber (Cordis rolls the plugin back)
+ * — the adapter never silently falls back to the DSH built-in tools.
  */
 export async function apply(ctx: Context, config: Config): Promise<void> {
   const resolved = await resolveSessionConfig(config)
   await assertExecutionWorld(ctx, resolved.root)
   const session = createSession(resolved, { logger: ctx.logger })
-  ctx.effect(() => () => session.dispose(), 'codexshim.session')
+  ctx.effect(() => () => session.dispose(), 'agentshim.session')
   const snapshot: CatalogSnapshot = await session.ready
   const definitions = buildToolDefinitions({ ctx, session, snapshot, config: resolved })
   installAgentTools(ctx, resolved, definitions)

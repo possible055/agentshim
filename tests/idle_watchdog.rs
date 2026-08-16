@@ -15,17 +15,17 @@ struct Session {
 
 impl Session {
     fn start(root: &std::path::Path, profile: &str, timeout_secs: u64) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_codexshim"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_agentshim"));
         command
             .args(["serve", "--client-profile", profile])
             .current_dir(root)
-            .env_remove("CODEXSHIM_IDLE_TIMEOUT")
-            .env("CODEXSHIM_IDLE_TIMEOUT", timeout_secs.to_string())
-            .env("CODEXSHIM_LOG_MODE", "off")
+            .env_remove("AGENTSHIM_IDLE_TIMEOUT")
+            .env("AGENTSHIM_IDLE_TIMEOUT", timeout_secs.to_string())
+            .env("AGENTSHIM_LOG_MODE", "off")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        let mut child = command.spawn().expect("start codexshim");
+        let mut child = command.spawn().expect("start agentshim");
         let stdin = child.stdin.take().expect("child stdin");
         let stdout = BufReader::new(child.stdout.take().expect("child stdout"));
         Self {
@@ -112,14 +112,14 @@ fn request(id: u64, method: &str, mut params: Value) -> Value {
 }
 
 fn doctor(profile: &str, timeout: Option<&str>) -> std::process::Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_codexshim"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_agentshim"));
     command
         .args(["doctor", "--client-profile", profile])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env_remove("CODEXSHIM_IDLE_TIMEOUT")
-        .env("CODEXSHIM_LOG_MODE", "off");
+        .env_remove("AGENTSHIM_IDLE_TIMEOUT")
+        .env("AGENTSHIM_LOG_MODE", "off");
     if let Some(timeout) = timeout {
-        command.env("CODEXSHIM_IDLE_TIMEOUT", timeout);
+        command.env("AGENTSHIM_IDLE_TIMEOUT", timeout);
     }
     command.output().expect("run doctor")
 }
@@ -129,7 +129,7 @@ fn invalid_values_fail_startup_and_doctor_reports_profile_gating() {
     for value in ["0", "86401", "many", "-1"] {
         let output = doctor("codex", Some(value));
         assert!(!output.status.success(), "{value} must be rejected");
-        assert!(String::from_utf8_lossy(&output.stderr).contains("CODEXSHIM_IDLE_TIMEOUT"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("AGENTSHIM_IDLE_TIMEOUT"));
     }
 
     let codex = doctor("codex", Some("7"));
@@ -185,7 +185,7 @@ fn inbound_pings_keep_the_server_alive_until_they_stop() {
 
 #[test]
 fn a_live_detached_tree_defers_idle_shutdown() {
-    if codexshim::bash_report().is_err() {
+    if agentshim::bash_report().is_err() {
         return;
     }
     let fixture = tempfile::tempdir().expect("fixture");

@@ -17,12 +17,12 @@ concurrency:
 
 jobs:
   windows-11-ntfs:
-    runs-on: [self-hosted, Windows, X64, codexshim-windows11-ntfs]
+    runs-on: [self-hosted, Windows, X64, agentshim-windows11-ntfs]
     timeout-minutes: 40
     env:
       CARGO_TARGET_DIR: target/performance
-      CODEXSHIM_BENCH_COMMIT: ${{ github.sha }}
-      CODEXSHIM_BENCH_WORKTREE: github-actions
+      AGENTSHIM_BENCH_COMMIT: ${{ github.sha }}
+      AGENTSHIM_BENCH_WORKTREE: github-actions
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -31,26 +31,26 @@ jobs:
           cache-bin: "false"
       - name: Benchmark repository tools
         env:
-          CODEXSHIM_BENCH_SCALES: ${{ inputs.scales }}
-          CODEXSHIM_BENCH_MAX_GLOB_P95_MS_PER_1K: "250"
-          CODEXSHIM_BENCH_MAX_GREP_P95_MS_PER_1K: "2000"
-          CODEXSHIM_BENCH_MAX_READ_P95_MS: "10"
+          AGENTSHIM_BENCH_SCALES: ${{ inputs.scales }}
+          AGENTSHIM_BENCH_MAX_GLOB_P95_MS_PER_1K: "250"
+          AGENTSHIM_BENCH_MAX_GREP_P95_MS_PER_1K: "2000"
+          AGENTSHIM_BENCH_MAX_READ_P95_MS: "10"
         run: cargo bench --locked --features bench-internals --bench performance
       - name: Benchmark diagnostics through stdio
         env:
-          CODEXSHIM_BENCH_MAX_STDIO_COLD_MS: "750"
-          CODEXSHIM_BENCH_MAX_STDIO_P95_MS: "10"
-          CODEXSHIM_BENCH_MAX_PROCESS_MS: "300"
+          AGENTSHIM_BENCH_MAX_STDIO_COLD_MS: "750"
+          AGENTSHIM_BENCH_MAX_STDIO_P95_MS: "10"
+          AGENTSHIM_BENCH_MAX_PROCESS_MS: "300"
         run: cargo bench --locked --bench stdio_performance
       - name: Mixed workload resource soak
         env:
-          CODEXSHIM_SOAK_ITERATIONS: "100"
-          CODEXSHIM_SOAK_OUTPUT: ${{ github.workspace }}\target\resource-soak\windows-mixed.jsonl
+          AGENTSHIM_SOAK_ITERATIONS: "100"
+          AGENTSHIM_SOAK_OUTPUT: ${{ github.workspace }}\target\resource-soak\windows-mixed.jsonl
         run: cargo test --locked --test resource_soak mixed_workload_resource_soak -- --ignored --nocapture
       - name: Four-instance aggregate process soak
         env:
-          CODEXSHIM_AGGREGATE_SOAK_ITERATIONS: "60"
-          CODEXSHIM_AGGREGATE_SOAK_OUTPUT: ${{ github.workspace }}\target\resource-soak\windows-four-instance.jsonl
+          AGENTSHIM_AGGREGATE_SOAK_ITERATIONS: "60"
+          AGENTSHIM_AGGREGATE_SOAK_OUTPUT: ${{ github.workspace }}\target\resource-soak\windows-four-instance.jsonl
         run: cargo test --locked --test resource_soak four_instance_aggregate_process_soak -- --ignored --nocapture
       - name: Upload resource soak evidence
         if: always()
@@ -70,13 +70,13 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Mixed workload resource soak
         env:
-          CODEXSHIM_SOAK_ITERATIONS: "100"
-          CODEXSHIM_SOAK_OUTPUT: ${{ github.workspace }}/target/resource-soak/linux-mixed.jsonl
+          AGENTSHIM_SOAK_ITERATIONS: "100"
+          AGENTSHIM_SOAK_OUTPUT: ${{ github.workspace }}/target/resource-soak/linux-mixed.jsonl
         run: cargo test --locked --test resource_soak mixed_workload_resource_soak -- --ignored --nocapture
       - name: Four-instance aggregate process soak
         env:
-          CODEXSHIM_AGGREGATE_SOAK_ITERATIONS: "60"
-          CODEXSHIM_AGGREGATE_SOAK_OUTPUT: ${{ github.workspace }}/target/resource-soak/linux-four-instance.jsonl
+          AGENTSHIM_AGGREGATE_SOAK_ITERATIONS: "60"
+          AGENTSHIM_AGGREGATE_SOAK_OUTPUT: ${{ github.workspace }}/target/resource-soak/linux-four-instance.jsonl
         run: cargo test --locked --test resource_soak four_instance_aggregate_process_soak -- --ignored --nocapture
       - name: Upload resource soak evidence
         if: always()

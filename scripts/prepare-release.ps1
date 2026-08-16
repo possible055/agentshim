@@ -168,9 +168,9 @@ try {
     Pop-Location
 }
 $metadata = ($metadataJson -join "`n") | ConvertFrom-Json
-$package = @($metadata.packages | Where-Object { $_.name -eq "codexshim" })
+$package = @($metadata.packages | Where-Object { $_.name -eq "agentshim" })
 if ($package.Count -ne 1 -or $package[0].version -cne $Version) {
-    throw "Cargo metadata reports an unexpected codexshim version. Expected $Version."
+    throw "Cargo metadata reports an unexpected agentshim version. Expected $Version."
 }
 
-Write-Host "Prepared codexshim version $Version."
+Write-Host "Prepared agentshim version $Version."

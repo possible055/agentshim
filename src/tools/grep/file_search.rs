@@ -22,8 +22,8 @@ use crate::{
 use super::{
     profile::{GrepProfiler, GrepStage},
     request::{
-        CAPTURE_MEMORY_BYTES, GrepBenchmarkVariant, GrepError, GrepMode, GrepSourcePolicy,
-        MEMORY_SOURCE_BYTES, PathnameReopenPolicy, SEARCH_HEAP_BYTES,
+        CONTENT_OMISSION, GrepBenchmarkVariant, GrepError, GrepMode, GrepSourcePolicy,
+        PathnameReopenPolicy, SEARCH_HEAP_BYTES,
     },
 };
 
@@ -33,6 +33,7 @@ pub(super) struct SearchPlan {
     pub(super) mode: GrepMode,
     pub(super) context: usize,
     pub(super) probe: usize,
+    pub(super) skip: usize,
     pub(super) allow_early_stop: bool,
     /// Forces the decoding of a single-file target. Validated to a canonical label before
     /// the search starts, so no candidate pays for label resolution.
@@ -41,6 +42,7 @@ pub(super) struct SearchPlan {
     /// a BOM, valid UTF-8, or a detected legacy encoding, because forcing one label across
     /// a whole directory would corrupt the files that were already readable.
     pub(super) fallback_encoding: Option<&'static str>,
+    pub(super) memory: super::request::GrepMemoryPolicy,
 }
 
 /// How one candidate's bytes must be treated before the matcher sees them.
@@ -88,6 +90,14 @@ pub(super) struct FileOutcome {
     pub(super) matched: bool,
     pub(super) skip: Option<SkipReason>,
     pub(super) retired: bool,
+    pub(super) leading_skipped: usize,
+    pub(super) retry: Option<RetryReason>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RetryReason {
+    Capture,
+    HeapLimit,
 }
 
 #[cfg(test)]
@@ -187,7 +197,7 @@ pub(super) fn build_searcher(plan: SearchPlan, source: GrepSourcePolicy) -> Sear
         .line_terminator(LineTerminator::crlf())
         .before_context(plan.context)
         .after_context(plan.context)
-        .heap_limit(Some(SEARCH_HEAP_BYTES))
+        .heap_limit(Some(plan.memory.base_search_heap_bytes))
         .memory_map(mmap)
         .bom_sniffing(true)
         .binary_detection(BinaryDetection::quit(0));
@@ -328,7 +338,7 @@ fn search_source(
     searcher: &mut Searcher,
     sink: &mut PlanSink<'_>,
 ) -> (Result<(), SearchError>, File) {
-    let memory_source_limit = memory_source_limit(context.variant.source);
+    let memory_source_limit = memory_source_limit(context.variant.source, context.plan.memory);
     let use_memory_source = context.plan.mode == GrepMode::Content
         && memory_source_limit > 0
         && before.length() <= memory_source_limit;
@@ -436,17 +446,14 @@ fn search_source(
 fn outcome_for_search_error(
     error: SearchError,
     candidate: &Candidate,
-    sink: PlanSink<'_>,
+    _sink: PlanSink<'_>,
 ) -> Result<FileOutcome, GrepError> {
     let path = || Some(Arc::clone(&candidate.path));
     match error {
         SearchError::Cancelled => Err(GrepError::Cancelled),
         SearchError::Retired => Ok(FileOutcome::retired()),
-        SearchError::CaptureMemory => Ok(sink.finish_capture_overflow(Arc::clone(&candidate.path))),
-        SearchError::HeapLimit => Ok(FileOutcome::skipped(
-            path(),
-            SkipReason::LineExceedsSearchHeap,
-        )),
+        SearchError::CaptureMemory => Ok(FileOutcome::retry(path(), RetryReason::Capture)),
+        SearchError::HeapLimit => Ok(FileOutcome::retry(path(), RetryReason::HeapLimit)),
         SearchError::Io => Ok(FileOutcome::skipped(path(), SkipReason::Io)),
         SearchError::Undecodable => Ok(FileOutcome::skipped(path(), SkipReason::Undecodable)),
         SearchError::Transcode(reason) => Ok(FileOutcome::skipped(path(), reason)),
@@ -497,6 +504,28 @@ fn classify_source(
     }
     Ok(
         match crate::encoding::detect_legacy_encoding(&prefix, None, whole_file) {
+            Ok(None) if !whole_file && plan.fallback_encoding.is_some() => {
+                let valid_utf8 = crate::encoding::decode_stream(
+                    &mut *file,
+                    None,
+                    usize::MAX,
+                    cancellation,
+                    |_| Ok(crate::encoding::DecodeControl::Continue),
+                );
+                if file.seek(SeekFrom::Start(0)).is_err() {
+                    return Err(SearchError::Io);
+                }
+                match valid_utf8 {
+                    Ok(_) => SourceHandling::Native,
+                    Err(crate::encoding::DecodeError::Cancelled) => {
+                        return Err(SearchError::Cancelled);
+                    }
+                    Err(crate::encoding::DecodeError::Io(_)) => return Err(SearchError::Io),
+                    Err(_) => SourceHandling::Transcode(
+                        plan.fallback_encoding.expect("checked fallback encoding"),
+                    ),
+                }
+            }
             Ok(None) => SourceHandling::Native,
             Ok(Some(label)) => SourceHandling::Transcode(label),
             Err(_) => plan.fallback_encoding.map_or(
@@ -509,9 +538,8 @@ fn classify_source(
 
 /// Search a legacy-encoded candidate by decoding it to UTF-8 first.
 ///
-/// Line structure survives decoding, so the line numbers the sink reports still address
-/// the source file. The decoded copy is bounded by the same heap limit the searcher uses,
-/// and a file that will not fit is skipped with a reason rather than searched partially.
+/// Line structure survives decoding, so sink line numbers still address the source file.
+/// Validation and search use fixed buffers and never retain the decoded whole file.
 fn search_transcoded(
     file: File,
     label: &'static str,
@@ -519,43 +547,45 @@ fn search_transcoded(
     searcher: &mut Searcher,
     sink: &mut PlanSink<'_>,
 ) -> (Result<(), SearchError>, File) {
-    let mut file = file;
-    let mut decoded = String::new();
-    let outcome = crate::encoding::decode_stream(
-        &mut file,
-        Some(label),
-        SEARCH_HEAP_BYTES,
-        context.cancellation,
-        |chunk| {
-            decoded.push_str(chunk);
-            Ok(crate::encoding::DecodeControl::Continue)
-        },
-    );
-    if let Err(error) = outcome {
-        let failure = match error {
-            crate::encoding::DecodeError::Cancelled => SearchError::Cancelled,
-            crate::encoding::DecodeError::Io(_) => SearchError::Io,
-            crate::encoding::DecodeError::TooLarge => {
-                SearchError::Transcode(SkipReason::TranscodeMemory)
-            }
-            _ => SearchError::Transcode(SkipReason::Undecodable),
-        };
-        return (Err(failure), file);
-    }
-    context.profiler.record_search_slice();
-    let source_span = context.profiler.span(GrepStage::SearchSliceWorker);
-    // Decoded UTF-8 from a candidate that carried no NUL cannot be binary, and leaving the
-    // detector armed would quit on any replacement byte the decode produced.
+    let Some(encoding) = encoding_rs::Encoding::for_label_no_replacement(label.as_bytes()) else {
+        return (Err(SearchError::Transcode(SkipReason::Undecodable)), file);
+    };
+    context.profiler.record_search_reader();
+    context.profiler.record_legacy_stream();
+    let source_span = context.profiler.span(GrepStage::SearchReaderWorker);
     searcher.set_binary_detection(BinaryDetection::none());
-    let result = searcher.search_slice(context.matcher, decoded.as_bytes(), sink);
+    let mut reader = crate::encoding::StrictTranscodingReader::new(
+        file,
+        encoding,
+        context.cancellation,
+        context.plan.memory.decode_input_bytes,
+        context.plan.memory.decode_output_bytes,
+    );
+    let result = searcher.search_reader(context.matcher, &mut reader, sink);
+    let validation = if result.is_ok() {
+        io::copy(&mut reader, &mut io::sink()).map(|_| ())
+    } else {
+        Ok(())
+    };
+    let (file, failure) = reader.into_parts();
     searcher.set_binary_detection(BinaryDetection::quit(0));
     drop(source_span);
+    let result = match failure {
+        Some(crate::encoding::TranscodeFailure::Cancelled) => Err(SearchError::Cancelled),
+        Some(crate::encoding::TranscodeFailure::Io) => Err(SearchError::Io),
+        Some(
+            crate::encoding::TranscodeFailure::Malformed
+            | crate::encoding::TranscodeFailure::Binary,
+        ) => Err(SearchError::Transcode(SkipReason::Undecodable)),
+        None if validation.is_err() => Err(SearchError::Io),
+        None => result,
+    };
     (result, file)
 }
 
-fn memory_source_limit(source: GrepSourcePolicy) -> u64 {
+fn memory_source_limit(source: GrepSourcePolicy, memory: super::request::GrepMemoryPolicy) -> u64 {
     match source {
-        GrepSourcePolicy::Hybrid => MEMORY_SOURCE_BYTES as u64,
+        GrepSourcePolicy::Hybrid => memory.memory_source_bytes as u64,
         #[cfg(any(test, feature = "bench-internals"))]
         GrepSourcePolicy::CaptureLimit(bytes) => bytes,
         #[cfg(any(test, feature = "bench-internals"))]
@@ -669,6 +699,8 @@ impl FileOutcome {
             matched: false,
             skip: Some(reason),
             retired: false,
+            leading_skipped: 0,
+            retry: None,
         }
     }
 
@@ -681,6 +713,22 @@ impl FileOutcome {
             matched: false,
             skip: None,
             retired: true,
+            leading_skipped: 0,
+            retry: None,
+        }
+    }
+
+    pub(super) fn retry(path: Option<Arc<ResolvedPath>>, reason: RetryReason) -> Self {
+        Self {
+            path,
+            records: Vec::new(),
+            entries: 0,
+            occurrences: 0,
+            matched: false,
+            skip: None,
+            retired: false,
+            leading_skipped: 0,
+            retry: Some(reason),
         }
     }
 }
@@ -714,7 +762,10 @@ pub(super) struct ContentSink<'a> {
     matched: bool,
     binary: bool,
     charged: usize,
+    memory_limit: usize,
     same_line_order: BTreeMap<u64, usize>,
+    skip_remaining: usize,
+    leading_skipped: usize,
 }
 
 pub(super) enum PlanSink<'a> {
@@ -786,7 +837,10 @@ impl<'a> PlanSink<'a> {
                 matched: false,
                 binary: false,
                 charged: 0,
+                memory_limit: plan.memory.capture_bytes,
                 same_line_order: BTreeMap::new(),
+                skip_remaining: plan.skip,
+                leading_skipped: 0,
             }),
         }
     }
@@ -796,15 +850,6 @@ impl<'a> PlanSink<'a> {
             Self::Files(sink) => sink.finish(path),
             Self::Count(sink) => sink.finish(path),
             Self::Content(sink) => sink.finish(path),
-        }
-    }
-
-    fn finish_capture_overflow(self, path: Arc<ResolvedPath>) -> FileOutcome {
-        match self {
-            Self::Content(sink) => sink.finish_capture_overflow(path),
-            Self::Files(_) | Self::Count(_) => {
-                FileOutcome::skipped(Some(path), SkipReason::CaptureBudget)
-            }
         }
     }
 
@@ -826,25 +871,54 @@ impl ContentSink<'_> {
         bytes: &[u8],
     ) -> Result<bool, SearchError> {
         self.entries = self.entries.saturating_add(1);
+        if self.skip_remaining > 0 {
+            self.skip_remaining -= 1;
+            self.leading_skipped = self.leading_skipped.saturating_add(1);
+            return Ok(true);
+        }
         if self.records.len() >= self.probe {
             return Ok(!self.allow_early_stop || self.entries < self.probe);
         }
-        let text = std::str::from_utf8(trim_line(bytes))
-            .map_err(|_| SearchError::Undecodable)?
-            .to_owned();
-        self.charged = self
-            .charged
-            .saturating_add(text.len())
-            .saturating_add(std::mem::size_of::<Record>());
-        if self.charged > CAPTURE_MEMORY_BYTES {
+        let text = std::str::from_utf8(trim_line(bytes)).map_err(|_| SearchError::Undecodable)?;
+        let charge = text.len().saturating_add(std::mem::size_of::<Record>());
+        if charge > self.memory_limit {
+            return self.capture_omission(line, kind, order);
+        }
+        let charged = self.charged.saturating_add(charge);
+        if charged > self.memory_limit {
             return Err(SearchError::CaptureMemory);
         }
+        let text = text.to_owned();
+        self.charged = charged;
         self.records.push(Record {
             line,
             order,
             kind,
             text,
         });
+        Ok(!self.allow_early_stop || self.entries < self.probe)
+    }
+
+    fn capture_omission(
+        &mut self,
+        line: u64,
+        kind: RecordKind,
+        order: usize,
+    ) -> Result<bool, SearchError> {
+        let charge = CONTENT_OMISSION
+            .len()
+            .saturating_add(std::mem::size_of::<Record>());
+        let charged = self.charged.saturating_add(charge);
+        if charged > self.memory_limit {
+            return Err(SearchError::CaptureMemory);
+        }
+        self.records.push(Record {
+            line,
+            order,
+            kind,
+            text: CONTENT_OMISSION.to_owned(),
+        });
+        self.charged = charged;
         Ok(!self.allow_early_stop || self.entries < self.probe)
     }
 
@@ -864,20 +938,9 @@ impl ContentSink<'_> {
             matched: self.matched,
             skip: None,
             retired: false,
+            leading_skipped: self.leading_skipped,
+            retry: None,
         })
-    }
-
-    fn finish_capture_overflow(mut self, path: Arc<ResolvedPath>) -> FileOutcome {
-        self.sort_records();
-        FileOutcome {
-            path: Some(path),
-            records: self.records,
-            entries: self.entries,
-            occurrences: self.occurrences,
-            matched: self.matched,
-            skip: Some(SkipReason::CaptureBudget),
-            retired: false,
-        }
     }
 
     fn sort_records(&mut self) {
@@ -906,6 +969,8 @@ impl FilesSink<'_> {
             matched: self.matched,
             skip: None,
             retired: false,
+            leading_skipped: 0,
+            retry: None,
         })
     }
 }
@@ -926,6 +991,8 @@ impl CountSink<'_> {
             matched: self.matched,
             skip: None,
             retired: false,
+            leading_skipped: 0,
+            retry: None,
         })
     }
 }

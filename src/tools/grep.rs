@@ -10,7 +10,9 @@ pub use profile::{
     GrepStageTimings, GrepWorkerMetrics, ProfiledGrep, reset_worker_metrics, worker_metrics,
 };
 #[cfg(test)]
-pub use request::CaseMode;
+pub(crate) use request::GrepMemoryPolicy;
+#[cfg(test)]
+pub use request::{CaseMode, execute_with_memory_budget};
 #[cfg(any(test, feature = "bench-internals"))]
 pub use request::{
     GrepBenchmarkVariant, GrepMode, GrepSourcePolicy, GrepTraversal, PathnameReopenPolicy, execute,

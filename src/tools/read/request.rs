@@ -156,7 +156,7 @@ pub enum ReadError {
     #[error(transparent)]
     Output(#[from] crate::output::OutputError),
     #[error(transparent)]
-    Pdf(#[from] codexshim_pdf_read::PdfReadError),
+    Pdf(#[from] agentshim_pdf_read::PdfReadError),
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -195,7 +195,7 @@ fn execute_inner(
     match execute_prepared(access, request, prepared, cancellation)? {
         Attempt::Stable(output) => return Ok(output),
         Attempt::Changed => {
-            tracing::warn!(target: "codexshim", event = "read_retry", phase = "execution", outcome = "degraded_success", reason = "file_changed");
+            tracing::warn!(target: "agentshim", event = "read_retry", phase = "execution", outcome = "degraded_success", reason = "file_changed");
         }
     }
     let prepared = match prepare(access, request, cancellation, PdfMemoryBudgets::defaults()) {

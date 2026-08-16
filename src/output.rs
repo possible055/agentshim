@@ -40,7 +40,7 @@ pub(crate) const CALL_OUTPUT_TOKEN_LIMIT: usize = 8_192;
 pub const MODEL_BYTE_LIMIT: usize = 32_000;
 pub const MIN_OUTPUT_BYTES: usize = 4_096;
 pub const MAX_OUTPUT_BYTES: usize = 262_144;
-pub const OUTPUT_BYTES_ENV: &str = "CODEXSHIM_OUTPUT_BYTES";
+pub const OUTPUT_BYTES_ENV: &str = "AGENTSHIM_OUTPUT_BYTES";
 const DIAGNOSTIC_TRUNCATION_MARKER: &str = "\n...[diagnostic truncated]";
 
 /// Codex CLI's default `tool_output_token_limit`. Output larger than this is discarded by the
@@ -107,7 +107,7 @@ impl CallOutputBudget {
 ///
 /// # Errors
 ///
-/// Returns invalid input when `CODEXSHIM_OUTPUT_BYTES` is not an integer inside the
+/// Returns invalid input when `AGENTSHIM_OUTPUT_BYTES` is not an integer inside the
 /// documented range, so startup fails before any tool call renders output.
 pub fn configured_byte_limit() -> io::Result<usize> {
     parse_configured_byte_limit(env::var_os(OUTPUT_BYTES_ENV).as_deref())

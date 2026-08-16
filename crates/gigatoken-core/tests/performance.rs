@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use codexshim_gigatoken::{CountUpTo, CounterLimits, O200kPrototype};
+use agentshim_gigatoken::{CountUpTo, CounterLimits, O200kPrototype};
 
 fn replacement_corpus_seed() -> Vec<u8> {
     let source = include_bytes!("fixtures/replacement_large_corpus_seed.txt");
@@ -132,7 +132,7 @@ fn release_load_and_partial_overlap_targets() {
 #[test]
 #[ignore = "30-minute unique-content resource soak"]
 fn unique_content_soak_keeps_counter_resident_bytes_bounded() {
-    let duration = std::env::var("CODEXSHIM_TOKEN_SOAK_SECONDS")
+    let duration = std::env::var("AGENTSHIM_TOKEN_SOAK_SECONDS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .map_or(

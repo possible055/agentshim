@@ -8,15 +8,15 @@ fi
 
 release_directory=$1
 expected_version=$2
-test_directory=$(mktemp -d "${TMPDIR:-/tmp}/codexshim-installer-test.XXXXXX")
+test_directory=$(mktemp -d "${TMPDIR:-/tmp}/agentshim-installer-test.XXXXXX")
 trap 'rm -rf "$test_directory"' EXIT HUP INT TERM
 
-expected_binary_version="codexshim $expected_version"
+expected_binary_version="agentshim $expected_version"
 for attempt in 1 2; do
     installer_output=$(sh "$(dirname "$0")/install.sh" --release-dir "$release_directory" --install-dir "$test_directory")
-    expected_path="$test_directory/codexshim"
+    expected_path="$test_directory/agentshim"
     case "$installer_output" in
-        *"Installed codexshim at $expected_path"*) ;;
+        *"Installed agentshim at $expected_path"*) ;;
         *)
             echo "installer did not report the expected Unix path on attempt $attempt" >&2
             exit 1

@@ -378,7 +378,7 @@ fn pages_past_the_output_budget_are_never_extracted() {
 
     let mut probe = request("bulky.pdf");
     probe.pages = Some("1-20".to_owned());
-    let (result, metrics) = codexshim_pdf_read::measure(|| execute(&access, &probe, &cancellation));
+    let (result, metrics) = agentshim_pdf_read::measure(|| execute(&access, &probe, &cancellation));
     let text = result.expect("bulky read");
 
     let shown = delivered_pages(&text);
@@ -397,15 +397,15 @@ fn pages_past_the_output_budget_are_never_extracted() {
     // budget was full — so the ceiling is (delivered + 1) pages' worth. Anything at
     // or near the all-20 figure means the tail was parsed and then discarded.
     let path = fixture.path().join("bulky.pdf");
-    let ((), whole) = codexshim_pdf_read::measure(|| {
-        let document = codexshim_pdf_read::PdfReadDocument::from_file(
+    let ((), whole) = agentshim_pdf_read::measure(|| {
+        let document = agentshim_pdf_read::PdfReadDocument::from_file(
             std::fs::File::open(&path).expect("open fixture"),
-            codexshim_pdf_read::ParserLimits::default(),
+            agentshim_pdf_read::ParserLimits::default(),
         )
         .expect("open document");
         for page in 0..20 {
             let _ =
-                document.page_to_markdown(page, &codexshim_pdf_read::MarkdownOptions::default());
+                document.page_to_markdown(page, &agentshim_pdf_read::MarkdownOptions::default());
         }
     });
     let per_page = whole.content_operators / 20;
@@ -466,13 +466,13 @@ fn a_single_page_reassembles_losslessly_across_rounds() {
 
 fn whole_page_markdown(path: &std::path::Path) -> String {
     let file = std::fs::File::open(path).expect("open fixture");
-    let document = codexshim_pdf_read::PdfReadDocument::from_file(
+    let document = agentshim_pdf_read::PdfReadDocument::from_file(
         file,
-        codexshim_pdf_read::ParserLimits::default(),
+        agentshim_pdf_read::ParserLimits::default(),
     )
     .expect("open document");
     document
-        .page_to_markdown(0, &codexshim_pdf_read::MarkdownOptions::default())
+        .page_to_markdown(0, &agentshim_pdf_read::MarkdownOptions::default())
         .expect("page markdown")
 }
 

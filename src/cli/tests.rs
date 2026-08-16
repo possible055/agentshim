@@ -4,7 +4,7 @@ use super::{
     CliCommand, ReceiveFrameReader, ServeOptions, ShutdownReader, parse_command,
     transport::MAX_RECEIVE_FRAME_BYTES,
 };
-use codexshim::{ClientProfile, ReadScope};
+use agentshim::{ClientProfile, ReadScope};
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 

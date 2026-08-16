@@ -22,6 +22,9 @@ fn unix_setup_failures_drop_the_owned_process_group() {
     for point in [Spawn, Stdin, Stdout, Stderr, Io] {
         process::set_setup_failure_for_tests(point);
         let mut failing = request("/bin/sh".to_owned());
+        if point == Stdin {
+            failing.stdin = Some("input".to_owned());
+        }
         failing.args = vec!["-c".to_owned(), "exec sleep 30".to_owned()];
         let error = execute_unix(&failing).expect_err("setup failure must be returned");
         assert!(matches!(error, ProcessError::Io(_)));
@@ -51,10 +54,10 @@ fn unix_native_argv_nonzero_exit_and_environment_are_reported() {
     let mut environment = request("/usr/bin/env".to_owned());
     environment
         .env
-        .insert("CODEXSHIM_PROBE".to_owned(), "set".to_owned());
+        .insert("AGENTSHIM_PROBE".to_owned(), "set".to_owned());
     let output = execute_unix(&environment).expect("environment");
     assert!(output.contains("NO_COLOR=1"));
-    assert!(output.contains("CODEXSHIM_PROBE=set"));
+    assert!(output.contains("AGENTSHIM_PROBE=set"));
 }
 
 #[cfg(unix)]
@@ -227,10 +230,10 @@ fn unix_cancellation_terminates_running_process() {
 #[cfg(unix)]
 #[test]
 fn unix_session_escape_parent_fixture() {
-    if std::env::var("CODEXSHIM_SESSION_ESCAPE_FIXTURE").as_deref() != Ok("parent") {
+    if std::env::var("AGENTSHIM_SESSION_ESCAPE_FIXTURE").as_deref() != Ok("parent") {
         return;
     }
-    let pid_file = std::env::var_os("CODEXSHIM_SESSION_ESCAPE_PID_FILE").expect("helper PID file");
+    let pid_file = std::env::var_os("AGENTSHIM_SESSION_ESCAPE_PID_FILE").expect("helper PID file");
     let mut command = std::process::Command::new(std::env::current_exe().expect("test executable"));
     command
         .args([
@@ -238,8 +241,8 @@ fn unix_session_escape_parent_fixture() {
             "tools::run_program::tests::unix::unix_session_escape_helper_fixture",
             "--nocapture",
         ])
-        .env("CODEXSHIM_SESSION_ESCAPE_FIXTURE", "helper")
-        .env("CODEXSHIM_SESSION_ESCAPE_PID_FILE", &pid_file);
+        .env("AGENTSHIM_SESSION_ESCAPE_FIXTURE", "helper")
+        .env("AGENTSHIM_SESSION_ESCAPE_PID_FILE", &pid_file);
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() == -1 {
@@ -261,10 +264,10 @@ fn unix_session_escape_parent_fixture() {
 #[cfg(unix)]
 #[test]
 fn unix_session_escape_helper_fixture() {
-    if std::env::var("CODEXSHIM_SESSION_ESCAPE_FIXTURE").as_deref() != Ok("helper") {
+    if std::env::var("AGENTSHIM_SESSION_ESCAPE_FIXTURE").as_deref() != Ok("helper") {
         return;
     }
-    let pid_file = std::env::var_os("CODEXSHIM_SESSION_ESCAPE_PID_FILE").expect("helper PID file");
+    let pid_file = std::env::var_os("AGENTSHIM_SESSION_ESCAPE_PID_FILE").expect("helper PID file");
     std::fs::write(pid_file, std::process::id().to_string()).expect("write helper PID");
     std::thread::sleep(Duration::from_secs(30));
 }
@@ -283,11 +286,11 @@ fn unix_session_escape_does_not_detach_pipe_workers() {
         "--nocapture".to_owned(),
     ];
     request.env.insert(
-        "CODEXSHIM_SESSION_ESCAPE_FIXTURE".to_owned(),
+        "AGENTSHIM_SESSION_ESCAPE_FIXTURE".to_owned(),
         "parent".to_owned(),
     );
     request.env.insert(
-        "CODEXSHIM_SESSION_ESCAPE_PID_FILE".to_owned(),
+        "AGENTSHIM_SESSION_ESCAPE_PID_FILE".to_owned(),
         pid_file.to_string_lossy().into_owned(),
     );
     request.timeout_ms = Some(10_000);

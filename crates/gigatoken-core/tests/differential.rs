@@ -1,6 +1,6 @@
 use std::sync::OnceLock;
 
-use codexshim_gigatoken::{CountUpTo, CounterLimits, O200kCounter, O200kPrototype};
+use agentshim_gigatoken::{CountUpTo, CounterLimits, O200kCounter, O200kPrototype};
 
 fn counter() -> O200kCounter {
     static PROTOTYPE: OnceLock<O200kPrototype> = OnceLock::new();
@@ -38,8 +38,8 @@ fn pinned_tiktoken_ordinary_counts_match() {
         ),
         ("繁體中文與简体中文、日本語、한국어", 12),
         ("👨‍👩‍👧‍👦👍🏽e\u{301}️", 17),
-        (r"C:\Projects\codexshim\src\main.rs", 12),
-        ("/usr/local/bin/codexshim", 7),
+        (r"C:\Projects\agentshim\src\main.rs", 11),
+        ("/usr/local/bin/agentshim", 6),
         ("Error: stack\n  at foo.rs:42:7", 12),
         ("Wall time: 18446744073709551615.9999 seconds\nOutput:", 18),
     ];

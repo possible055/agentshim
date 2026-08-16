@@ -3,10 +3,10 @@ use super::*;
 
 #[test]
 fn eof_process_child_fixture() {
-    if std::env::var("CODEXSHIM_EOF_FIXTURE").as_deref() != Ok("child") {
+    if std::env::var("AGENTSHIM_EOF_FIXTURE").as_deref() != Ok("child") {
         return;
     }
-    let pid_file = std::env::var_os("CODEXSHIM_EOF_PID_FILE").expect("fixture PID file");
+    let pid_file = std::env::var_os("AGENTSHIM_EOF_PID_FILE").expect("fixture PID file");
     std::fs::write(pid_file, std::process::id().to_string()).expect("write fixture PID");
     thread::sleep(Duration::from_secs(30));
 }
@@ -29,8 +29,8 @@ fn stdin_eof_cancels_in_flight_process_and_exits_server() {
             "args": ["--exact", "process::eof_process_child_fixture", "--nocapture"],
             "cwd": env!("CARGO_MANIFEST_DIR"),
             "env": {
-                "CODEXSHIM_EOF_FIXTURE": "child",
-                "CODEXSHIM_EOF_PID_FILE": pid_file,
+                "AGENTSHIM_EOF_FIXTURE": "child",
+                "AGENTSHIM_EOF_PID_FILE": pid_file,
             },
             "timeout_ms": 30_000,
         }),
@@ -76,11 +76,11 @@ fn stdin_eof_cancels_in_flight_process_and_exits_server() {
 #[test]
 #[allow(clippy::zombie_processes)] // The fixture must exit without waiting so the helper escapes its session.
 fn unix_outcome_uncertain_parent_fixture() {
-    if std::env::var("CODEXSHIM_OUTCOME_UNCERTAIN_FIXTURE").as_deref() != Ok("parent") {
+    if std::env::var("AGENTSHIM_OUTCOME_UNCERTAIN_FIXTURE").as_deref() != Ok("parent") {
         return;
     }
     let pid_file =
-        std::env::var_os("CODEXSHIM_OUTCOME_UNCERTAIN_PID_FILE").expect("fixture PID file");
+        std::env::var_os("AGENTSHIM_OUTCOME_UNCERTAIN_PID_FILE").expect("fixture PID file");
     let mut command =
         std::process::Command::new(std::env::current_exe().expect("integration test executable"));
     command
@@ -89,8 +89,8 @@ fn unix_outcome_uncertain_parent_fixture() {
             "process::unix_outcome_uncertain_helper_fixture",
             "--nocapture",
         ])
-        .env("CODEXSHIM_OUTCOME_UNCERTAIN_FIXTURE", "helper")
-        .env("CODEXSHIM_OUTCOME_UNCERTAIN_PID_FILE", &pid_file)
+        .env("AGENTSHIM_OUTCOME_UNCERTAIN_FIXTURE", "helper")
+        .env("AGENTSHIM_OUTCOME_UNCERTAIN_PID_FILE", &pid_file)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
@@ -116,11 +116,11 @@ fn unix_outcome_uncertain_parent_fixture() {
 #[cfg(unix)]
 #[test]
 fn unix_outcome_uncertain_helper_fixture() {
-    if std::env::var("CODEXSHIM_OUTCOME_UNCERTAIN_FIXTURE").as_deref() != Ok("helper") {
+    if std::env::var("AGENTSHIM_OUTCOME_UNCERTAIN_FIXTURE").as_deref() != Ok("helper") {
         return;
     }
     let pid_file =
-        std::env::var_os("CODEXSHIM_OUTCOME_UNCERTAIN_PID_FILE").expect("fixture PID file");
+        std::env::var_os("AGENTSHIM_OUTCOME_UNCERTAIN_PID_FILE").expect("fixture PID file");
     std::fs::write(pid_file, std::process::id().to_string()).expect("write helper PID");
     thread::sleep(Duration::from_secs(30));
 }
@@ -144,8 +144,8 @@ fn session_escaped_descendant_preserves_outcome_uncertain_wire_contract() {
             "args": ["--exact", "process::unix_outcome_uncertain_parent_fixture", "--nocapture"],
             "cwd": env!("CARGO_MANIFEST_DIR"),
             "env": {
-                "CODEXSHIM_OUTCOME_UNCERTAIN_FIXTURE": "parent",
-                "CODEXSHIM_OUTCOME_UNCERTAIN_PID_FILE": pid_file,
+                "AGENTSHIM_OUTCOME_UNCERTAIN_FIXTURE": "parent",
+                "AGENTSHIM_OUTCOME_UNCERTAIN_PID_FILE": pid_file,
             },
             "timeout_ms": 10_000,
         }),

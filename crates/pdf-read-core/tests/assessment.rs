@@ -7,7 +7,7 @@ mod corpus;
 
 use std::io::{Seek, SeekFrom, Write};
 
-use codexshim_pdf_read::{
+use agentshim_pdf_read::{
     enter_budget, measure, PageTextStatus, ParserLimits, PdfReadDocument, PdfResourceLimits,
 };
 

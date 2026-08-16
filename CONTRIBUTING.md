@@ -6,11 +6,11 @@ Run the smallest relevant check while developing. For ordinary changes to the ro
 
 ```console
 cargo fmt --all -- --check
-cargo clippy --locked -p codexshim --all-targets --all-features -- -D warnings
-cargo test --locked -p codexshim --tests
-cargo check --locked -p codexshim --all-features --tests
-cargo test --locked -p codexshim --features bench-internals --lib -- profiled
-cargo doc --locked -p codexshim --all-features --no-deps
+cargo clippy --locked -p agentshim --all-targets --all-features -- -D warnings
+cargo test --locked -p agentshim --tests
+cargo check --locked -p agentshim --all-features --tests
+cargo test --locked -p agentshim --features bench-internals --lib -- profiled
+cargo doc --locked -p agentshim --all-features --no-deps
 ```
 
 Run the documentation command with `RUSTDOCFLAGS=-Dwarnings`, using the assignment syntax for the current shell.
@@ -31,7 +31,7 @@ Probe, soak, and other `#[ignore]` integration binaries stay out of the default 
 Changes to feature-gated PDF code must also compile the rendering-only profile:
 
 ```console
-cargo check --locked -p codexshim-pdf-read --all-targets --no-default-features --features rendering
+cargo check --locked -p agentshim-pdf-read --all-targets --no-default-features --features rendering
 ```
 
 ## Test isolation

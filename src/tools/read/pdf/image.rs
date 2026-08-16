@@ -1,5 +1,5 @@
+use agentshim_pdf_read::{PdfReadDocument, RenderLimits};
 use base64::Engine as _;
-use codexshim_pdf_read::{PdfReadDocument, RenderLimits};
 use tokio_util::sync::CancellationToken;
 
 use crate::tools::{ToolImage, ToolOutput};

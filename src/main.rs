@@ -2,11 +2,11 @@ mod cli;
 
 use std::{env, process::ExitCode, time::Duration};
 
-use cli::{CliCommand, parse_command, run, usage};
-use codexshim::{
+use agentshim::{
     DiagnosticsConfig, DiagnosticsGuard, LogMode, MAX_READ_ONLY_CALLS, RuntimeLimits,
     bounded_diagnostic, capacity_bytes, purge, retention_days, status,
 };
+use cli::{CliCommand, parse_command, run, usage};
 use tracing_subscriber::prelude::*;
 
 fn main() -> ExitCode {
@@ -14,7 +14,7 @@ fn main() -> ExitCode {
         Ok(command) => command,
         Err(error) => {
             usage();
-            eprintln!("codexshim: {error}");
+            eprintln!("agentshim: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -26,11 +26,11 @@ fn main() -> ExitCode {
     let config = match RuntimeLimits::from_env() {
         Ok(config) => config,
         Err(error) => {
-            eprintln!("codexshim: {error}");
+            eprintln!("agentshim: {error}");
             return ExitCode::FAILURE;
         }
     };
-    tracing::info!(target: "codexshim", event = "runtime_config", phase = "startup", counters = %format!("process_calls={},detached_calls={},read_only_calls={},worker_lanes={},blocking_threads={},grep_memory_bytes={},glob_memory_bytes={},memory_bytes={}", config.process_calls, config.detached_calls, MAX_READ_ONLY_CALLS, config.worker_lanes, config.blocking_threads, config.grep_memory_bytes, config.glob_memory_bytes, config.memory_bytes));
+    tracing::info!(target: "agentshim", event = "runtime_config", phase = "startup", counters = %format!("process_calls={},detached_calls={},read_only_calls={},worker_lanes={},blocking_threads={},grep_memory_bytes={},glob_memory_bytes={},memory_bytes={}", config.process_calls, config.detached_calls, MAX_READ_ONLY_CALLS, config.worker_lanes, config.blocking_threads, config.grep_memory_bytes, config.glob_memory_bytes, config.memory_bytes));
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(config.scheduler_threads)
         .max_blocking_threads(config.blocking_threads)
@@ -39,11 +39,11 @@ fn main() -> ExitCode {
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            eprintln!("codexshim: failed to build runtime: {error}");
+            eprintln!("agentshim: failed to build runtime: {error}");
             return ExitCode::FAILURE;
         }
     };
-    tracing::info!(target: "codexshim", event = "runtime_ready", phase = "startup");
+    tracing::info!(target: "agentshim", event = "runtime_ready", phase = "startup");
     let outcome = runtime.block_on(run(config, command));
     // `tokio::io::stdin` uses an uncancellable blocking read. Once the service has
     // completed its own bounded shutdown, do not let that helper keep the process alive
@@ -52,7 +52,7 @@ fn main() -> ExitCode {
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("codexshim: {error}");
+            eprintln!("agentshim: {error}");
             ExitCode::FAILURE
         }
     }
@@ -78,7 +78,7 @@ fn initialize_diagnostics() -> DiagnosticsGuard {
                 diagnostics_warning(&error);
                 return DiagnosticsGuard::disabled(directory);
             }
-            tracing::info!(target: "codexshim", event = "diagnostics_start", phase = "startup");
+            tracing::info!(target: "agentshim", event = "diagnostics_start", phase = "startup");
             guard
         }
         Ok((guard, None)) => guard,
@@ -92,14 +92,14 @@ fn initialize_diagnostics() -> DiagnosticsGuard {
 fn diagnostics_warning(error: &dyn std::fmt::Display) {
     eprintln!(
         "{}",
-        bounded_diagnostic(&format!("codexshim diagnostics disabled: {error}"))
+        bounded_diagnostic(&format!("agentshim diagnostics disabled: {error}"))
     );
 }
 
 fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic| {
-        tracing::error!(target: "codexshim", event = "panic", phase = "lifecycle", error_class = "worker_panic");
+        tracing::error!(target: "agentshim", event = "panic", phase = "lifecycle", error_class = "worker_panic");
         previous(panic);
     }));
 }
@@ -108,7 +108,7 @@ fn run_logs_command(command: &CliCommand) -> ExitCode {
     let config = match DiagnosticsConfig::from_env() {
         Ok(config) => config,
         Err(error) => {
-            eprintln!("codexshim: {error}");
+            eprintln!("agentshim: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -138,7 +138,7 @@ fn run_logs_command(command: &CliCommand) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("codexshim: {error}");
+            eprintln!("agentshim: {error}");
             ExitCode::FAILURE
         }
     }

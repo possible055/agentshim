@@ -170,15 +170,15 @@ pub(crate) fn run(
     plan: &ExecPlan<'_>,
     cancellation: &CancellationToken,
 ) -> Result<ExecOutcome, ExecFailure> {
-    tracing::info!(target: "codexshim", event = "process_spawn", phase = "execution");
+    tracing::info!(target: "agentshim", event = "process_spawn", phase = "execution");
     let result = crate::platform::process::run(plan, cancellation);
     match &result {
-        Ok(_) => tracing::info!(target: "codexshim", event = "process_exit", phase = "execution"),
+        Ok(_) => tracing::info!(target: "agentshim", event = "process_exit", phase = "execution"),
         Err(ExecFailure::TimedOut { .. }) => {
-            tracing::error!(target: "codexshim", event = "process_timeout", phase = "cleanup", error_class = "resource_timeout");
+            tracing::error!(target: "agentshim", event = "process_timeout", phase = "cleanup", error_class = "resource_timeout");
         }
         Err(ExecFailure::Process(ProcessError::OutcomeUncertain)) => {
-            tracing::error!(target: "codexshim", event = "process_cleanup", phase = "cleanup", outcome = "uncertain", error_class = "outcome_uncertain");
+            tracing::error!(target: "agentshim", event = "process_cleanup", phase = "cleanup", outcome = "uncertain", error_class = "outcome_uncertain");
         }
         Err(_) => {}
     }

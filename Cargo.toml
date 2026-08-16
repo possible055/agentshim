@@ -10,12 +10,12 @@ exclude = ["repos", "local"]
 resolver = "3"
 
 [package]
-name = "codexshim"
+name = "agentshim"
 version = "0.1.4-alpha.1"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
-description = "Capability-aware MCP repository tools for Codex"
+description = "Capability-aware repository tools for coding agents"
 autotests = true
 
 [dependencies]
@@ -23,8 +23,8 @@ base64 = "=0.22.1"
 cap-std = "=4.0.2"
 chardetng = "=1.0.0"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
-codexshim-pdf-read = { path = "crates/pdf-read-core" }
-codexshim-gigatoken = { path = "crates/gigatoken-core" }
+agentshim-pdf-read = { path = "crates/pdf-read-core" }
+agentshim-gigatoken = { path = "crates/gigatoken-core" }
 encoding_rs = "0.8.35"
 globset = "0.4.16"
 grep-matcher = "0.1.9"

@@ -32,6 +32,54 @@ fn empty_native_success_is_only_the_exit_code() {
     assert_eq!(compact, "Exit code: 0");
 }
 
+#[test]
+fn stdin_child_fixture() {
+    if std::env::var("AGENTSHIM_STDIN_FIXTURE").as_deref() != Ok("child") {
+        return;
+    }
+    let mut input = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).expect("read stdin");
+    println!("stdin-bytes={}", input.len());
+}
+
+#[test]
+fn omitted_and_supplied_stdin_preserve_the_execution_contract() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+    let executable = std::env::current_exe().expect("test executable");
+    let resolver = ProcessResolver::capture();
+    let mut request = request(executable.to_string_lossy().into_owned());
+    request.args = vec![
+        "--exact".to_owned(),
+        "tools::run_program::tests::output::stdin_child_fixture".to_owned(),
+        "--nocapture".to_owned(),
+    ];
+    request
+        .env
+        .insert("AGENTSHIM_STDIN_FIXTURE".to_owned(), "child".to_owned());
+
+    let without_input = execute(
+        &root,
+        &resolver,
+        &request,
+        Duration::from_secs(5),
+        &CancellationToken::new(),
+    )
+    .expect("omitted stdin");
+    assert!(without_input.contains("stdin-bytes=0"), "{without_input}");
+
+    request.stdin = Some("payload".to_owned());
+    let with_input = execute(
+        &root,
+        &resolver,
+        &request,
+        Duration::from_secs(5),
+        &CancellationToken::new(),
+    )
+    .expect("supplied stdin");
+    assert!(with_input.contains("stdin-bytes=7"), "{with_input}");
+}
+
 #[cfg(windows)]
 #[test]
 fn non_native_success_keeps_resolution_diagnostics() {
@@ -112,7 +160,7 @@ fn unix_multicall_proxy_preserves_resolved_argv0() {
     ];
     proxy_request
         .env
-        .insert("CODEXSHIM_MULTICALL_FIXTURE".to_owned(), "child".to_owned());
+        .insert("AGENTSHIM_MULTICALL_FIXTURE".to_owned(), "child".to_owned());
 
     let output = execute(
         &root,
@@ -131,7 +179,7 @@ fn unix_multicall_proxy_preserves_resolved_argv0() {
 #[cfg(unix)]
 #[test]
 fn unix_multicall_argv0_child_fixture() {
-    if std::env::var("CODEXSHIM_MULTICALL_FIXTURE").as_deref() != Ok("child") {
+    if std::env::var("AGENTSHIM_MULTICALL_FIXTURE").as_deref() != Ok("child") {
         return;
     }
     let argv0 = std::env::args_os().next().expect("argv0");
@@ -357,7 +405,7 @@ fn timeout_projection_fits_the_complete_error_envelope() {
 fn high_escaping_output_child_fixture() {
     use std::io::Write as _;
 
-    if std::env::var("CODEXSHIM_OUTPUT_FIXTURE").as_deref() != Ok("child") {
+    if std::env::var("AGENTSHIM_OUTPUT_FIXTURE").as_deref() != Ok("child") {
         return;
     }
     let bytes = [b'\\', b'"', 0x01, 0xFF, b'\n']
@@ -378,7 +426,7 @@ fn high_escaping_output_child_fixture() {
 fn interleaved_output_child_fixture() {
     use std::io::Write as _;
 
-    if std::env::var("CODEXSHIM_INTERLEAVE_FIXTURE").as_deref() != Ok("child") {
+    if std::env::var("AGENTSHIM_INTERLEAVE_FIXTURE").as_deref() != Ok("child") {
         return;
     }
     for index in 1..=6 {
@@ -408,7 +456,7 @@ fn interleaved_child_output_stays_split_into_two_sections() {
         "--nocapture".to_owned(),
     ];
     interleaved.env.insert(
-        "CODEXSHIM_INTERLEAVE_FIXTURE".to_owned(),
+        "AGENTSHIM_INTERLEAVE_FIXTURE".to_owned(),
         "child".to_owned(),
     );
 
@@ -457,7 +505,7 @@ fn high_escaping_child_output_completes_within_the_result_budget() {
     ];
     high_output
         .env
-        .insert("CODEXSHIM_OUTPUT_FIXTURE".to_owned(), "child".to_owned());
+        .insert("AGENTSHIM_OUTPUT_FIXTURE".to_owned(), "child".to_owned());
 
     let output = execute_output(
         &root,

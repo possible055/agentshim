@@ -19,7 +19,7 @@ use super::{
     profile::{GrepProfiler, GrepStage, GrepWorkerActivity},
     request::{
         CONTENT_SEARCH_BATCH_SIZE, GrepBenchmarkVariant, GrepError, GrepMode, GrepRequest,
-        SEARCH_HEAP_BYTES, STREAM_SEARCH_BATCH_SIZE,
+        STREAM_SEARCH_BATCH_SIZE,
     },
     result::{Page, ReduceControl},
 };
@@ -27,7 +27,7 @@ use super::{
 use super::{
     candidates::Candidate,
     file_search::{
-        FileOutcome, FileSearchContext, OpenedCandidate, SearchPlan, build_searcher,
+        FileOutcome, FileSearchContext, OpenedCandidate, RetryReason, SearchPlan, build_searcher,
         fingerprint_opened_candidate, requires_path_identity, search_file_with_searcher,
         search_opened_candidate_with_searcher,
     },
@@ -148,6 +148,8 @@ pub(super) struct OrderedSearchContext<'a> {
     pub(super) variant: GrepBenchmarkVariant,
     pub(super) profiler: &'a GrepProfiler,
     pub(super) resources: &'a RuntimeResources,
+    pub(super) memory: super::request::GrepMemoryPolicy,
+    pub(super) candidate_bytes: usize,
 }
 
 #[derive(Clone)]
@@ -160,8 +162,12 @@ struct OwnedSearchContext {
     variant: GrepBenchmarkVariant,
     profiler: GrepProfiler,
     resources: RuntimeResources,
+    memory: super::request::GrepMemoryPolicy,
+    candidate_bytes: usize,
 }
 
+// Scheduling and reduction share one window whose lifetime must cover the complete search.
+#[allow(clippy::too_many_lines)]
 pub(super) fn ordered_search(
     candidates: &Arc<[Candidate]>,
     _lanes: usize,
@@ -190,7 +196,7 @@ pub(super) fn ordered_search(
             .clone()
     };
     let mut page = Page::new(request, traversal, context.plan.allow_early_stop);
-    let owned = OwnedSearchContext {
+    let mut owned = OwnedSearchContext {
         cancellation: context.cancellation.clone(),
         retirement: retirement_token,
         access: Arc::clone(context.access),
@@ -199,35 +205,64 @@ pub(super) fn ordered_search(
         variant: context.variant,
         profiler: context.profiler.clone(),
         resources: context.resources.clone(),
+        memory: context.memory,
+        candidate_bytes: context.candidate_bytes,
     };
     let reduce_span = context.profiler.span(GrepStage::OrderedReduceWall);
     let mut next_dispatch = 0_usize;
     let mut index = 0_usize;
+    let mut speculation_retired = false;
     while index < candidates.len() {
         if context.cancellation.is_cancelled() {
             return Err(GrepError::Cancelled);
         }
-        let current_len = search_batch_len(&candidates[index..], context.plan.mode);
+        let current_len = inline_batch_len(&candidates[index..], context.plan.mode);
         let current_end = index + current_len;
         if next_dispatch <= index {
             next_dispatch = current_end;
         }
-        while next_dispatch < candidates.len() {
+        while !speculation_retired && next_dispatch < candidates.len() {
             let dispatched = try_dispatch_batch(next_dispatch, candidates, &owned, &pool, &shared);
             if dispatched == 0 {
                 break;
             }
             next_dispatch += dispatched;
         }
-        let outcomes = match take_ready_batch(index, context, &shared)? {
-            Some(outcomes) => outcomes,
-            None => run_inline_batch(&candidates[index..current_end], &owned),
+        let ready = if speculation_retired {
+            None
+        } else {
+            take_ready_batch(index, context, &shared)?
         };
-        for outcome in outcomes {
-            let outcome = outcome?;
+        let (outcomes, mut processed) = match ready {
+            Some(outcomes) => {
+                let processed = outcomes.len();
+                (outcomes, processed)
+            }
+            None => (
+                run_inline_batch(&candidates[index..current_end], &owned),
+                current_len,
+            ),
+        };
+        for (position, outcome) in outcomes.into_iter().enumerate() {
+            let mut outcome = outcome?;
             if outcome.retired {
                 continue;
             }
+            let retried = if let Some(reason) = outcome.retry {
+                retire_window(&shared);
+                speculation_retired = true;
+                owned.retirement = CancellationToken::new();
+                processed = position.saturating_add(1);
+                outcome = run_isolated_retry(
+                    &candidates[index.saturating_add(position)],
+                    &owned,
+                    &page,
+                    reason,
+                )?;
+                true
+            } else {
+                false
+            };
             context.profiler.record_reduced_candidate();
             if page.reduce(
                 outcome,
@@ -240,8 +275,11 @@ pub(super) fn ordered_search(
                 retirement.disarm();
                 return Ok(page);
             }
+            if retried {
+                break;
+            }
         }
-        index = current_end;
+        index = index.saturating_add(processed.max(1));
     }
     drop(reduce_span);
     page.mark_complete();
@@ -552,7 +590,7 @@ fn try_dispatch_batch(
     pool: &Arc<crate::runtime::FileWorkPool>,
     shared: &SharedSearchWindow,
 ) -> usize {
-    let batch_len = search_batch_len(&candidates[index..], context.plan.mode);
+    let mut batch_len = search_batch_len(&candidates[index..], context.plan.mode);
     let Some(credit) = pool.try_credit() else {
         return 0;
     };
@@ -567,13 +605,23 @@ fn try_dispatch_batch(
         };
         Some(parent_open)
     };
-    let memory_charge = if context.plan.mode == GrepMode::Content {
-        SEARCH_HEAP_BYTES.saturating_mul(batch_len)
-    } else {
-        SEARCH_HEAP_BYTES
-    };
-    let Some(memory) = context.resources.try_reserve_memory(memory_charge) else {
-        return 0;
+    let memory = loop {
+        let memory_charge = context
+            .memory
+            .speculative_batch_bytes(context.plan.mode, batch_len);
+        if let Some(memory) = context.resources.try_reserve_memory(memory_charge) {
+            context
+                .profiler
+                .record_speculative_lease(memory_charge, true);
+            break memory;
+        }
+        context
+            .profiler
+            .record_speculative_lease(memory_charge, false);
+        if context.plan.mode != GrepMode::Content || batch_len == 1 {
+            return 0;
+        }
+        batch_len -= 1;
     };
     let slot_index = {
         let (lock, _) = &**shared;
@@ -646,6 +694,91 @@ fn search_batch_len(candidates: &[Candidate], mode: GrepMode) -> usize {
         .take(batch_size)
         .take_while(|candidate| first.path.has_same_parent(&candidate.path))
         .count()
+}
+
+fn run_isolated_retry(
+    candidate: &Candidate,
+    context: &OwnedSearchContext,
+    page: &Page,
+    reason: RetryReason,
+) -> SearchResult {
+    let mut retry_context = context.clone();
+    retry_context.retirement = CancellationToken::new();
+    if retry_context.plan.mode == GrepMode::Content {
+        let (skip, probe) = page.exact_search_window();
+        retry_context.plan.skip = skip;
+        retry_context.plan.probe = probe;
+    }
+    let large_heap = retry_context
+        .memory
+        .large_search_heap_ceiling(retry_context.candidate_bytes);
+    let extra_memory = if reason == RetryReason::HeapLimit {
+        let additional = large_heap.saturating_sub(retry_context.memory.base_search_heap_bytes);
+        if additional == 0 {
+            retry_context
+                .profiler
+                .record_retry(false, large_heap, false);
+            return Ok(FileOutcome::skipped(
+                Some(Arc::clone(&candidate.path)),
+                SkipReason::LineExceedsSearchHeap,
+            ));
+        }
+        let Some(memory) = retry_context.resources.try_reserve_memory(additional) else {
+            retry_context
+                .profiler
+                .record_retry(false, large_heap, false);
+            return Ok(FileOutcome::skipped(
+                Some(Arc::clone(&candidate.path)),
+                SkipReason::LineExceedsSearchHeap,
+            ));
+        };
+        retry_context.plan.memory.base_search_heap_bytes = large_heap;
+        Some(memory)
+    } else {
+        None
+    };
+    let mut searcher = build_searcher(retry_context.plan, retry_context.variant.source);
+    let outcome = run_candidate_with_searcher(candidate, &retry_context, &mut searcher)?;
+    drop(extra_memory);
+    let success = outcome.retry.is_none() && outcome.skip.is_none();
+    retry_context.profiler.record_retry(
+        reason == RetryReason::Capture,
+        if reason == RetryReason::Capture {
+            retry_context.memory.capture_bytes
+        } else {
+            large_heap
+        },
+        success,
+    );
+    tracing::info!(
+        target: "agentshim",
+        event = "grep_retry",
+        retry = ?reason,
+        ceiling_bytes = if reason == RetryReason::Capture {
+            retry_context.memory.capture_bytes
+        } else {
+            large_heap
+        },
+        success
+    );
+    Ok(match outcome.retry {
+        Some(RetryReason::Capture) => {
+            FileOutcome::skipped(Some(Arc::clone(&candidate.path)), SkipReason::CaptureBudget)
+        }
+        Some(RetryReason::HeapLimit) => FileOutcome::skipped(
+            Some(Arc::clone(&candidate.path)),
+            SkipReason::LineExceedsSearchHeap,
+        ),
+        None => outcome,
+    })
+}
+
+fn inline_batch_len(candidates: &[Candidate], mode: GrepMode) -> usize {
+    if mode == GrepMode::Content {
+        usize::from(!candidates.is_empty())
+    } else {
+        search_batch_len(candidates, mode)
+    }
 }
 
 fn take_ready_batch(

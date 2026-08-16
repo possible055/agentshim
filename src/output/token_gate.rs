@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use codexshim_gigatoken::{CountUpTo, CounterLimits, LoadError, O200kCounter, O200kPrototype};
+use agentshim_gigatoken::{CountUpTo, CounterLimits, LoadError, O200kCounter, O200kPrototype};
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde::Serialize;
 use serde_json::Value;
@@ -97,7 +97,7 @@ impl OutputTokenGate {
             }
             let projected_len = projected_text_encoded_len(text);
             if projected_len <= TOOL_CONTENT_TOKEN_LIMIT {
-                tracing::trace!(target: "codexshim", token_gate_path = "byte_fast", tokens_upper_bound = projected_len);
+                tracing::trace!(target: "agentshim", token_gate_path = "byte_fast", tokens_upper_bound = projected_len);
                 return GateDecision::FitsByBytes;
             }
             self.evaluate(&project_text_payload(text), cancellation)
@@ -241,10 +241,10 @@ impl OutputTokenGate {
             return GateDecision::Cancelled;
         }
         if payload.len() <= limit && payload.len() <= BYTE_FAST_PATH_LIMIT {
-            tracing::trace!(target: "codexshim", token_gate_path = "byte_fast", tokens_upper_bound = payload.len());
+            tracing::trace!(target: "agentshim", token_gate_path = "byte_fast", tokens_upper_bound = payload.len());
             return GateDecision::FitsByBytes;
         }
-        let trace_enabled = tracing::enabled!(target: "codexshim", tracing::Level::TRACE);
+        let trace_enabled = tracing::enabled!(target: "agentshim", tracing::Level::TRACE);
         let wait_started = trace_enabled.then(Instant::now);
         let Some(mut counter) = self.acquire(cancellation) else {
             return GateDecision::Cancelled;
@@ -262,7 +262,7 @@ impl OutputTokenGate {
             (wait_ns, count_ns, before, after)
         {
             tracing::trace!(
-                target: "codexshim",
+                target: "agentshim",
                 token_gate_path = "exact",
                 token_counter_pool_wait_ns = wait_ns,
                 token_count_ns = count_ns,

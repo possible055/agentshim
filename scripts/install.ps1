@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$Version,
-    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "codexshim\bin"),
+    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "agentshim\bin"),
     [string]$ReleaseDirectory
 )
 
@@ -9,7 +9,7 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2.0
 
 # Injected by the release workflow from the release tag; empty in source.
-$DefaultVersion = "" # @codexshim:default-version
+$DefaultVersion = "" # @agentshim:default-version
 
 function Get-ReplacementFailureMessage {
     param(
@@ -32,8 +32,8 @@ function Get-ReplacementFailureMessage {
     $detail = $ErrorRecord.Exception.Message
     $reason = switch ($errorCode) {
         5 { "Access was denied while replacing the destination." }
-        32 { "The destination is in use by another process. Stop Codex and any active codexshim process, then retry." }
-        33 { "The destination is locked by another process. Stop Codex and any active codexshim process, then retry." }
+        32 { "The destination is in use by another process. Stop Codex and any active agentshim process, then retry." }
+        33 { "The destination is locked by another process. Stop Codex and any active agentshim process, then retry." }
         183 { "A file already exists at the replacement path." }
         default { "The replacement operation failed." }
     }
@@ -45,7 +45,7 @@ function Get-ReplacementFailureMessage {
 }
 
 if (-not [Environment]::Is64BitOperatingSystem) {
-    throw "codexshim requires 64-bit Windows."
+    throw "agentshim requires 64-bit Windows."
 }
 if (-not $InstallDir) {
     throw "InstallDir is required."
@@ -56,12 +56,12 @@ $target = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchite
     X64 { "x86_64-pc-windows-msvc"; break }
     default { throw "Unsupported Windows architecture: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)" }
 }
-$temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ("codexshim-install-" + [guid]::NewGuid().ToString("N"))
+$temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ("agentshim-install-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $temporaryDirectory | Out-Null
 
 try {
     if ($ReleaseDirectory) {
-        $archive = @(Get-ChildItem -LiteralPath $ReleaseDirectory -Filter "codexshim-*-$target.zip" -File)
+        $archive = @(Get-ChildItem -LiteralPath $ReleaseDirectory -Filter "agentshim-*-$target.zip" -File)
         if ($archive.Count -ne 1) {
             throw "Expected exactly one Windows release archive in $ReleaseDirectory."
         }
@@ -75,14 +75,14 @@ try {
         if (-not $resolvedVersion) { $resolvedVersion = $DefaultVersion }
         if ($resolvedVersion) {
             $tag = if ($resolvedVersion.StartsWith("v")) { $resolvedVersion } else { "v$resolvedVersion" }
-            $releaseUrl = "https://api.github.com/repos/possible055/codexshim/releases/tags/$tag"
+            $releaseUrl = "https://api.github.com/repos/possible055/agentshim/releases/tags/$tag"
         } else {
-            $releaseUrl = "https://api.github.com/repos/possible055/codexshim/releases/latest"
+            $releaseUrl = "https://api.github.com/repos/possible055/agentshim/releases/latest"
         }
 
         $headers = @{ Accept = "application/vnd.github+json" }
         $release = Invoke-RestMethod -Uri $releaseUrl -Headers $headers
-        $archiveAsset = @($release.assets | Where-Object { $_.name -like "codexshim-*-$target.zip" })
+        $archiveAsset = @($release.assets | Where-Object { $_.name -like "agentshim-*-$target.zip" })
         if ($archiveAsset.Count -ne 1) {
             throw "The release does not contain exactly one Windows archive."
         }
@@ -114,22 +114,22 @@ try {
     New-Item -ItemType Directory -Path $extractDirectory | Out-Null
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [IO.Compression.ZipFile]::ExtractToDirectory($archivePath, $extractDirectory)
-    $binary = @(Get-ChildItem -LiteralPath $extractDirectory -Filter "codexshim.exe" -File -Recurse)
+    $binary = @(Get-ChildItem -LiteralPath $extractDirectory -Filter "agentshim.exe" -File -Recurse)
     if ($binary.Count -ne 1) {
-        throw "The release archive does not contain exactly one codexshim.exe."
+        throw "The release archive does not contain exactly one agentshim.exe."
     }
 
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
     $installPath = (Resolve-Path -LiteralPath $InstallDir).Path
-    $destination = [IO.Path]::GetFullPath((Join-Path $installPath "codexshim.exe"))
-    $staged = [IO.Path]::GetFullPath((Join-Path $installPath (".codexshim-" + [guid]::NewGuid().ToString("N") + ".exe")))
+    $destination = [IO.Path]::GetFullPath((Join-Path $installPath "agentshim.exe"))
+    $staged = [IO.Path]::GetFullPath((Join-Path $installPath (".agentshim-" + [guid]::NewGuid().ToString("N") + ".exe")))
     Copy-Item -LiteralPath $binary[0].FullName -Destination $staged
     $versionOutput = (& $staged --version | Out-String).Trim()
     if ($LASTEXITCODE -ne 0) {
-        throw "The downloaded codexshim executable failed verification."
+        throw "The downloaded agentshim executable failed verification."
     }
     if (-not $versionOutput) {
-        throw "The downloaded codexshim executable did not report a version."
+        throw "The downloaded agentshim executable did not report a version."
     }
 
     $backup = "$destination.old"
@@ -152,7 +152,7 @@ try {
     }
 
     $displayDestination = $destination.Replace('/', '\')
-    Write-Host "Installed codexshim at $displayDestination"
+    Write-Host "Installed agentshim at $displayDestination"
     Write-Host "Installed version: $versionOutput"
     Write-Host "Set command = '$displayDestination' in your Codex MCP configuration."
 } finally {

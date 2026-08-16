@@ -170,7 +170,7 @@ pub(crate) fn run(
 
 fn trace_process_started(lifecycle: &Lifecycle) {
     tracing::info!(
-        target: "codexshim",
+        target: "agentshim",
         event = "process_started",
         phase = "execution",
         primary_pid = lifecycle.primary_pid(),
@@ -180,7 +180,7 @@ fn trace_process_started(lifecycle: &Lifecycle) {
 
 fn trace_timeout_state(lifecycle: &Lifecycle, primary_running: bool, active_processes: u32) {
     tracing::error!(
-        target: "codexshim",
+        target: "agentshim",
         event = "process_timeout_state",
         phase = "cleanup",
         primary_pid = lifecycle.primary_pid(),
@@ -203,20 +203,20 @@ fn prepare_launch_inputs(
     ))
 }
 
-type IoThreads = (
+pub(super) type IoThreads = (
     Arc<AtomicBool>,
     ThreadCompletion,
-    thread::JoinHandle<io::Result<()>>,
+    Option<thread::JoinHandle<io::Result<()>>>,
     Vec<thread::JoinHandle<io::Result<Capture>>>,
 );
 
 type PendingIo = (
     ThreadCompletion,
-    thread::JoinHandle<io::Result<()>>,
+    Option<thread::JoinHandle<io::Result<()>>>,
     Vec<thread::JoinHandle<io::Result<Capture>>>,
 );
 
-fn spawn_io_threads(
+pub(super) fn spawn_io_threads(
     stdin: File,
     outputs: Vec<File>,
     input: Option<String>,
@@ -226,8 +226,10 @@ fn spawn_io_threads(
     let completion = ThreadCompletion::new();
     let capture_bytes = capture_bytes_per_stream(outputs.len());
     let oem_code_page = (launcher == Launcher::CmdCompat).then(|| unsafe { GetOEMCP() });
-    let stdin = spawn_monitored(Arc::clone(&failed), completion.clone(), move || {
-        write_stdin(stdin, input.as_deref())
+    let stdin = input.filter(|input| !input.is_empty()).map(|input| {
+        spawn_monitored(Arc::clone(&failed), completion.clone(), move || {
+            write_stdin(stdin, Some(&input))
+        })
     });
     let drains = outputs
         .into_iter()
@@ -274,7 +276,7 @@ fn terminate_after_timeout(
 fn terminate_after_io_failure(
     lifecycle: &mut Lifecycle,
     completion: &ThreadCompletion,
-    stdin: thread::JoinHandle<io::Result<()>>,
+    stdin: Option<thread::JoinHandle<io::Result<()>>>,
     drains: Vec<thread::JoinHandle<io::Result<Capture>>>,
 ) -> Result<ExecOutcome, ExecFailure> {
     lifecycle.terminate_and_wait()?;

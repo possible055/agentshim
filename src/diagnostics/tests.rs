@@ -100,7 +100,7 @@ fn control_plane_fields_are_persisted_without_sensitive_inputs() {
 
     tracing::subscriber::with_default(subscriber, || {
         tracing::info!(
-            target: "codexshim",
+            target: "agentshim",
             event = "tools_list",
             tool_count = 5_u64,
             toolset = "read,grep,glob,run_program,bash",
@@ -154,14 +154,14 @@ fn batch_is_json_lines_and_bounded() {
 #[test]
 fn log_name_parser_rejects_non_logs() {
     assert_eq!(
-        parse_log_date("codexshim-2026-08-06.0001.jsonl"),
+        parse_log_date("agentshim-2026-08-06.0001.jsonl"),
         NaiveDate::from_ymd_opt(2026, 8, 6)
     );
-    assert_eq!(parse_log_date("codexshim-2026-08-06.lock"), None);
+    assert_eq!(parse_log_date("agentshim-2026-08-06.lock"), None);
     assert_eq!(parse_log_date("other-2026-08-06.0001.jsonl"), None);
-    assert_eq!(parse_log_date("codexshim-2026-08-06.bad.jsonl"), None);
+    assert_eq!(parse_log_date("agentshim-2026-08-06.bad.jsonl"), None);
     assert_eq!(
-        parse_log_date("codexshim-2026-08-06.0001.extra.jsonl"),
+        parse_log_date("agentshim-2026-08-06.0001.extra.jsonl"),
         None
     );
 }

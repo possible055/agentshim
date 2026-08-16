@@ -24,7 +24,7 @@ use super::request::CANDIDATE_SOFT_TARGET_BYTES;
 use super::{
     profile::{GrepProfiler, GrepStage},
     request::{
-        CandidatePolicy, GrepError, GrepTraversal, PARALLEL_BATCH_SIZE,
+        CandidatePolicy, GrepError, GrepMemoryPolicy, GrepTraversal, PARALLEL_BATCH_SIZE,
         UNSTABLE_SORT_MIN_CANDIDATES,
     },
 };
@@ -32,6 +32,14 @@ use super::{
 #[derive(Clone, Debug)]
 pub(super) struct Candidate {
     pub(super) path: Arc<ResolvedPath>,
+}
+
+pub(super) struct CandidateSet {
+    pub(super) candidates: Arc<[Candidate]>,
+    pub(super) traversal: TraversalSummary,
+    pub(super) single_file: bool,
+    pub(super) retained_bytes: usize,
+    _memory: Option<MemoryReservation>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -47,7 +55,8 @@ pub(super) fn collect_candidates(
     policy: CandidatePolicy,
     profiler: &GrepProfiler,
     memory: Option<MemoryReservation>,
-) -> Result<(Vec<Candidate>, TraversalSummary, bool), GrepError> {
+    memory_policy: GrepMemoryPolicy,
+) -> Result<CandidateSet, GrepError> {
     let traversal_span = profiler.span(GrepStage::CandidateTraversal);
     let base = access.resolve(Path::new(input))?;
     if access.metadata_kind(&base)?.is_file {
@@ -58,13 +67,12 @@ pub(super) fn collect_candidates(
                 .slash_path()
                 .is_some_and(|path| glob.is_match(path))
         });
-        let mut collection =
-            CandidateCollection::new(policy, resources.config().grep_memory_bytes, memory);
+        let mut collection = CandidateCollection::new(policy, memory_policy, memory);
         if matches {
             collection.admit(candidate)?;
         }
         profiler.record_candidate_metrics(collection.metrics());
-        return Ok((collection.candidates, TraversalSummary::default(), true));
+        return Ok(collection.into_set(TraversalSummary::default(), true));
     }
     let wants_parallel = match traversal {
         GrepTraversal::Adaptive => prefer_parallel_root(access, &base),
@@ -92,8 +100,8 @@ pub(super) fn collect_candidates(
         }
         selected => selected,
     };
-    let collection = CandidateCollection::new(policy, resources.config().grep_memory_bytes, memory);
-    let (mut candidates, summary, metrics) = match traversal {
+    let collection = CandidateCollection::new(policy, memory_policy, memory);
+    let (mut collection, summary) = match traversal {
         GrepTraversal::Adaptive => unreachable!("adaptive traversal was resolved"),
         GrepTraversal::Serial => collect_candidates_serial(
             access,
@@ -139,10 +147,10 @@ pub(super) fn collect_candidates(
     drop(traversal_credits);
     drop(traversal_span);
     let sort_span = profiler.span(GrepStage::CandidateSort);
-    sort_candidates(&mut candidates, cancellation)?;
+    sort_candidates(&mut collection.candidates, cancellation)?;
     drop(sort_span);
-    profiler.record_candidate_metrics(metrics);
-    Ok((candidates, summary, false))
+    profiler.record_candidate_metrics(collection.metrics());
+    Ok(collection.into_set(summary, false))
 }
 
 fn sort_candidates(
@@ -199,7 +207,7 @@ fn collect_candidates_serial(
     cancellation: &CancellationToken,
     literal_prefix: Option<&Path>,
     mut collection: CandidateCollection,
-) -> Result<(Vec<Candidate>, TraversalSummary, CandidateMetrics), GrepError> {
+) -> Result<(CandidateCollection, TraversalSummary), GrepError> {
     let mut terminal_error = None;
     let mut visit = |entry: crate::traversal::TraversalEntry<'_>| {
         let candidate = match candidate_from_entry(
@@ -239,8 +247,7 @@ fn collect_candidates_serial(
     if let Some(error) = terminal_error {
         return Err(error);
     }
-    let metrics = collection.metrics();
-    Ok((collection.candidates, summary, metrics))
+    Ok((collection, summary))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -253,7 +260,7 @@ fn collect_candidates_parallel(
     literal_prefix: Option<&Path>,
     traversal_threads: usize,
     collection: CandidateCollection,
-) -> Result<(Vec<Candidate>, TraversalSummary, CandidateMetrics), GrepError> {
+) -> Result<(CandidateCollection, TraversalSummary), GrepError> {
     let collection = Mutex::new(collection);
     let prefilter = |entry: TraversalEntry<'_>| matches_candidate_entry(glob, entry);
     let visit =
@@ -296,8 +303,7 @@ fn collect_candidates_parallel(
     if let Some(error) = collection.terminal_error {
         return Err(error);
     }
-    let metrics = collection.metrics();
-    Ok((collection.candidates, summary, metrics))
+    Ok((collection, summary))
 }
 
 fn collect_candidate_batch(
@@ -376,6 +382,7 @@ pub(super) struct CandidateCollection {
     pub(super) candidates: Vec<Candidate>,
     policy: CandidatePolicy,
     memory_limit: usize,
+    reservation_base_bytes: usize,
     memory: Option<MemoryReservation>,
     pub(super) path_retained_bytes: usize,
     pub(super) estimated_retained_bytes: usize,
@@ -415,7 +422,7 @@ pub(super) struct CandidateMetrics {
 impl CandidateCollection {
     pub(super) fn new(
         policy: CandidatePolicy,
-        memory_limit: usize,
+        memory_policy: GrepMemoryPolicy,
         memory: Option<MemoryReservation>,
     ) -> Self {
         let candidates = Vec::with_capacity(1_024);
@@ -425,7 +432,8 @@ impl CandidateCollection {
         Self {
             candidates,
             policy,
-            memory_limit,
+            memory_limit: memory_policy.candidate_limit_bytes(),
+            reservation_base_bytes: memory_policy.base_reservation_bytes(),
             memory,
             path_retained_bytes: 0,
             estimated_retained_bytes,
@@ -470,11 +478,9 @@ impl CandidateCollection {
         if retained > hard_limit {
             return Err(GrepError::CandidateMemory);
         }
-        if self
-            .memory
-            .as_mut()
-            .is_some_and(|memory| !memory.try_grow_to(retained))
-        {
+        if self.memory.as_mut().is_some_and(|memory| {
+            !memory.try_grow_to(self.reservation_base_bytes.saturating_add(retained))
+        }) {
             return Err(GrepError::MemoryBusy);
         }
         self.path_retained_bytes = path_retained;
@@ -529,6 +535,17 @@ impl CandidateCollection {
             sort_key_capacity: self.sort_key_capacity,
             slash_path_bytes: self.slash_path_bytes,
             slash_path_capacity: self.slash_path_capacity,
+        }
+    }
+
+    pub(super) fn into_set(self, traversal: TraversalSummary, single_file: bool) -> CandidateSet {
+        let retained_bytes = self.estimated_retained_bytes;
+        CandidateSet {
+            candidates: self.candidates.into(),
+            traversal,
+            single_file,
+            retained_bytes,
+            _memory: self.memory,
         }
     }
 

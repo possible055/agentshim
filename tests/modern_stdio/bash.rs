@@ -6,15 +6,15 @@ use super::*;
 /// shutdown deadline even while responses are still pending on a blocked stdout pipe.
 #[test]
 fn stdin_eof_terminates_detached_trees_while_the_drain_is_still_blocked() {
-    if codexshim::bash_report().is_err() {
+    if agentshim::bash_report().is_err() {
         return;
     }
     let fixture = tempfile::tempdir().expect("fixture");
     let mut command = Session::base_command(fixture.path());
     command
-        .env("CODEXSHIM_OUTPUT_BYTES", "262144")
-        .env("CODEXSHIM_BURST_TOKENS", "32768")
-        .env("CODEXSHIM_DETACHED_CALLS", "4");
+        .env("AGENTSHIM_OUTPUT_BYTES", "262144")
+        .env("AGENTSHIM_BURST_TOKENS", "32768")
+        .env("AGENTSHIM_DETACHED_CALLS", "4");
     let mut session = Session::spawn(command);
     session.send(&modern_request(1, "server/discover", empty_params()));
     assert_eq!(session.receive()["id"], 1);
@@ -89,7 +89,7 @@ fn stdin_eof_terminates_detached_trees_while_the_drain_is_still_blocked() {
 /// turn into sixteen serialized five-second waits.
 #[test]
 fn shutdown_of_sixteen_detached_trees_shares_one_deadline() {
-    if codexshim::bash_report().is_err() {
+    if agentshim::bash_report().is_err() {
         return;
     }
     let fixture = tempfile::tempdir().expect("fixture");
@@ -136,7 +136,7 @@ fn shutdown_of_sixteen_detached_trees_shares_one_deadline() {
 /// including the discovery probe — ever sees it.
 #[test]
 fn bash_env_and_env_are_not_sourced_by_foreground_or_detached_bash() {
-    if codexshim::bash_report().is_err() {
+    if agentshim::bash_report().is_err() {
         return;
     }
     let fixture = tempfile::tempdir().expect("fixture");
@@ -175,7 +175,7 @@ fn bash_env_and_env_are_not_sourced_by_foreground_or_detached_bash() {
 
 #[test]
 fn detached_roster_saturation_fails_before_blocking_scheduling_over_stdio() {
-    if codexshim::bash_report().is_err() {
+    if agentshim::bash_report().is_err() {
         return;
     }
     let fixture = tempfile::tempdir().expect("fixture");
@@ -236,6 +236,6 @@ fn missing_bash_is_non_retryable_over_real_stdio() {
         response["result"]["structuredContent"]["error"]["retryable"],
         false
     );
-    assert!(response_text(&response).contains("CODEXSHIM_BASH"));
+    assert!(response_text(&response).contains("AGENTSHIM_BASH"));
     session.close();
 }

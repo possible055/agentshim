@@ -1,8 +1,8 @@
-# codexshim
+# AgentShim
 
 [English](README.md) | 简体中文
 
-`codexshim` 为 Codex 与 Cursor 提供一组精简而专注的源代码工具，优先支持 Windows x86-64，并为 Linux 与 macOS 提供兼容性发行资产。它以本地 stdio MCP 服务形式运行，并将启动目录作为仓库根目录。
+AgentShim 为 coding agent 提供一组精简而专注的源代码工具。Codex 与 Cursor 连接本地 stdio MCP 服务，DSH 则使用本仓库提供的原生 adapter。服务将启动目录作为仓库根目录，优先支持 Windows x86-64，并为 Linux 与 macOS 提供兼容性发行资产。
 
 ## 为什么使用
 
@@ -26,13 +26,13 @@
 **Windows (PowerShell):**
 
 ```powershell
-irm https://github.com/possible055/codexshim/releases/latest/download/install.ps1 | iex
+irm https://github.com/possible055/agentshim/releases/latest/download/install.ps1 | iex
 ```
 
 **Linux / macOS:**
 
 ```sh
-curl -fsSL https://github.com/possible055/codexshim/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/possible055/agentshim/releases/latest/download/install.sh | sh
 ```
 
 再次运行同一命令即可更新。安装指定版本时，传入 `-Version`（PowerShell）或 `--version`（sh）。
@@ -43,19 +43,21 @@ curl -fsSL https://github.com/possible055/codexshim/releases/latest/download/ins
 cargo build --release --locked
 ```
 
-二进制位于 `target/release/codexshim`（Linux 与 macOS）或 `target/release/codexshim.exe`（Windows）。
+二进制位于 `target/release/agentshim`（Linux 与 macOS）或 `target/release/agentshim.exe`（Windows）。
+
+现有 `codexshim` 安装不会被删除或覆盖。安装 AgentShim 后，请先将各客户端切换到新的可执行文件与 MCP server 名称，确认五个工具可用，再视需要移除旧安装。
 
 ## 配置 Codex
 
-将对应的示例复制到 `~/.codex/config.toml`（用户级）或项目的 `.codex/config.toml`，然后将 `command` 替换为 `codexshim` 二进制的绝对路径：
+将对应的示例复制到 `~/.codex/config.toml`（用户级）或项目的 `.codex/config.toml`，然后将 `command` 替换为 `agentshim` 二进制的绝对路径：
 
 - [Windows 示例](config/codex.windows.toml.example)
 - [Linux 示例](config/codex.linux.toml.example)
 - [macOS 示例](config/codex.macos.toml.example)
 
 ```toml
-[mcp_servers.codexshim]
-command = "/absolute/path/to/codexshim"
+[mcp_servers.agentshim]
+command = "/absolute/path/to/agentshim"
 args = ["serve", "--client-profile", "codex"]
 required = true
 supports_parallel_tool_calls = true
@@ -64,10 +66,10 @@ tool_timeout_sec = 600
 enabled_tools = ["read", "grep", "glob", "run_program", "bash"]
 default_tools_approval_mode = "writes"
 
-[mcp_servers.codexshim.tools.run_program]
+[mcp_servers.agentshim.tools.run_program]
 approval_mode = "on-request"
 
-[mcp_servers.codexshim.tools.bash]
+[mcp_servers.agentshim.tools.bash]
 approval_mode = "prompt"
 ```
 
@@ -78,9 +80,9 @@ approval_mode = "prompt"
 ```json
 {
   "mcpServers": {
-    "codexshim": {
+    "agentshim": {
       "type": "stdio",
-      "command": "/absolute/path/to/codexshim",
+      "command": "/absolute/path/to/agentshim",
       "args": ["serve", "--client-profile", "cursor"]
     }
   }
@@ -88,6 +90,20 @@ approval_mode = "prompt"
 ```
 
 在 Windows 上，JSON 路径必须转义每个反斜杠。
+
+## 配置 DSH
+
+先安装 AgentShim 二进制文件，再构建原生 adapter 并安装到指定 DSH profile：
+
+```sh
+cd adapters/dsh
+pnpm install --frozen-lockfile
+pnpm pack
+dsh plugin --profile <profile> add /absolute/path/to/dsh-agentshim-0.1.0.tgz
+dsh --profile <profile> --dump-config
+```
+
+使用 tarball 安装时不需要先将 `dsh-agentshim` 发布到 npm。发布后才可改用较短的 `dsh plugin --profile <profile> add dsh-agentshim`。前置条件、配置、sandbox 审批行为与移除流程请参阅 [DSH adapter 指南](adapters/dsh/README.md)。
 
 ## 选项
 
@@ -107,7 +123,7 @@ approval_mode = "prompt"
 | `codex`（默认） | 8,192 | 16,384 |
 | `cursor` | 8,192 | 32,768 |
 
-`CODEXSHIM_IDLE_TIMEOUT` 为 `codex` profile 启用空闲关闭。`cursor` profile 始终禁用看门狗，但设为非法值仍会导致启动失败。
+`AGENTSHIM_IDLE_TIMEOUT` 为 `codex` profile 启用空闲关闭。`cursor` profile 始终禁用看门狗，但设为非法值仍会导致启动失败。
 
 ### `--read-scope`
 
@@ -166,19 +182,19 @@ Git Bash 在启动 Windows 原生程序前，会转换看起来像 POSIX 路径�
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `CODEX_MCP_PROTOCOL_VERSION` | — | 向 Codex 声明的 MCP 协议版本。 |
-| `CODEXSHIM_PROCESS_CALLS` | `16` | 每个实例的进程调用并行上限；1–32。 |
-| `CODEXSHIM_DETACHED_CALLS` | `16` | 每个实例存活中的 detached `bash` 进程树数量；1–16。 |
-| `CODEXSHIM_OUTPUT_BYTES` | `32000` | 每次呼叫的输出上限（字节）；4096–262144。 |
-| `CODEXSHIM_BURST_TOKENS` | profile 默认值 | 共用的预估模型 token 预算；2048–32768。 |
-| `CODEXSHIM_TOOL_TIMEOUT_SHELF` | `600` | 服务端会保持低于此 shelf 值，以便客户端的 `tool_timeout_sec` 在服务端自身 Timeout 之后触发。有效最长执行时间为 shelf 减 10 秒；15–3600。 |
-| `CODEXSHIM_GREP_MEMORY_BYTES` | `268435456` | 每次 `grep` 呼叫保留候选项目的内存硬上限。 |
-| `CODEXSHIM_GLOB_MEMORY_BYTES` | `33554432` | 每次 `glob` 呼叫保留匹配项目的内存硬上限。 |
-| `CODEXSHIM_PDF_TEXT_MEMORY_BYTES` | `67108864` | `auto`/`text` 模式 PDF 读取的每次呼叫内存预算。 |
-| `CODEXSHIM_PDF_IMAGE_MEMORY_BYTES` | `100663296` | `image` 模式 PDF 读取的每次呼叫内存预算。 |
-| `CODEXSHIM_BASH` | 自动探测 | GNU bash 的绝对路径。 |
-| `CODEXSHIM_LOG_MODE` | `errors` | 取值 `off`、`errors`、`all` 之一。 |
-| `CODEXSHIM_LOG_DIR` | 平台默认 | 用绝对路径覆盖日志目录。 |
-| `CODEXSHIM_RESPECT_GITIGNORE` | `false` | 设为 `true` 时，`grep` 与 `glob` 才套用 `.gitignore`／`.ignore`。省略 `include_ignored` 时跟随此默认值。由于调用方读不到这项设定，过滤生效且结果为空时，响应末尾会附上一行建议改用 `include_ignored=true`。`.git` 以及 `node_modules`、`target`、`.venv`、`venv`、`dist`、`build`、`__pycache__` 无论开关都排除。binary、输出预算与内存上限仍会挡住内容。 |
+| `AGENTSHIM_PROCESS_CALLS` | `16` | 每个实例的进程调用并行上限；1–32。 |
+| `AGENTSHIM_DETACHED_CALLS` | `16` | 每个实例存活中的 detached `bash` 进程树数量；1–16。 |
+| `AGENTSHIM_OUTPUT_BYTES` | `32000` | 每次呼叫的输出上限（字节）；4096–262144。 |
+| `AGENTSHIM_BURST_TOKENS` | profile 默认值 | 共用的预估模型 token 预算；2048–32768。 |
+| `AGENTSHIM_TOOL_TIMEOUT_SHELF` | `600` | 服务端会保持低于此 shelf 值，以便客户端的 `tool_timeout_sec` 在服务端自身 Timeout 之后触发。有效最长执行时间为 shelf 减 10 秒；15–3600。 |
+| `AGENTSHIM_GREP_MEMORY_BYTES` | `268435456` | 每次 `grep` 呼叫保留候选项目的内存硬上限。 |
+| `AGENTSHIM_GLOB_MEMORY_BYTES` | `33554432` | 每次 `glob` 呼叫保留匹配项目的内存硬上限。 |
+| `AGENTSHIM_PDF_TEXT_MEMORY_BYTES` | `67108864` | `auto`/`text` 模式 PDF 读取的每次呼叫内存预算。 |
+| `AGENTSHIM_PDF_IMAGE_MEMORY_BYTES` | `100663296` | `image` 模式 PDF 读取的每次呼叫内存预算。 |
+| `AGENTSHIM_BASH` | 自动探测 | GNU bash 的绝对路径。 |
+| `AGENTSHIM_LOG_MODE` | `errors` | 取值 `off`、`errors`、`all` 之一。 |
+| `AGENTSHIM_LOG_DIR` | 平台默认 | 用绝对路径覆盖日志目录。 |
+| `AGENTSHIM_RESPECT_GITIGNORE` | `false` | 设为 `true` 时，`grep` 与 `glob` 才套用 `.gitignore`／`.ignore`。省略 `include_ignored` 时跟随此默认值。由于调用方读不到这项设定，过滤生效且结果为空时，响应末尾会附上一行建议改用 `include_ignored=true`。`.git` 以及 `node_modules`、`target`、`.venv`、`venv`、`dist`、`build`、`__pycache__` 无论开关都排除。binary、输出预算与内存上限仍会挡住内容。 |
 
 空闲看门狗在确认静默后会再次复核活动时间戳，然后才取消既有的优雅关闭 token。在这次复核与取消之间的最后窗口内到达的请求，仍可能与关闭发生竞态；启用看门狗即接受这一狭窄的边界条件。
 
@@ -186,17 +202,17 @@ Git Bash 在启动 Windows 原生程序前，会转换看起来像 POSIX 路径�
 
 日志为按 UTC 日期命名的 JSONL 文件：
 
-- Windows: `%LOCALAPPDATA%\codexshim\logs`
-- Linux: `${XDG_STATE_HOME:-$HOME/.local/state}/codexshim/logs`
+- Windows: `%LOCALAPPDATA%\agentshim\logs`
+- Linux: `${XDG_STATE_HOME:-$HOME/.local/state}/agentshim/logs`
 
 保留策略：总量 512 MiB，保留 30 天。可查看或清理：
 
 ```console
-codexshim logs status
-codexshim logs purge
+agentshim logs status
+agentshim logs purge
 ```
 
-记录包含标识符、阶段、结果、计时与错误类别——绝不包含 MCP 参数、grep 模式、进程参数、stdin、文件内容或 stdout/stderr。复现工具加载失败时，将 `CODEXSHIM_LOG_MODE` 设为 `all`。
+记录包含标识符、阶段、结果、计时与错误类别——绝不包含 MCP 参数、grep 模式、进程参数、stdin、文件内容或 stdout/stderr。复现工具加载失败时，将 `AGENTSHIM_LOG_MODE` 设为 `all`。
 
 ## 致谢
 

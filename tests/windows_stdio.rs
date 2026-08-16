@@ -15,14 +15,14 @@ struct Session {
 
 impl Session {
     fn start() -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_codexshim"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_agentshim"))
             .arg("serve")
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .expect("start codexshim");
+            .expect("start agentshim");
         Self {
             stdin: child.stdin.take().expect("child stdin"),
             stdout: BufReader::new(child.stdout.take().expect("child stdout")),
@@ -58,7 +58,7 @@ fn request(id: u64, method: &str, mut params: Value) -> Value {
         json!({
             "io.modelcontextprotocol/protocolVersion": "2026-07-28",
             "io.modelcontextprotocol/clientInfo": {
-                "name": "codexshim-windows-wire-test",
+                "name": "agentshim-windows-wire-test",
                 "version": "1.0.0"
             },
             "io.modelcontextprotocol/clientCapabilities": {}
@@ -84,7 +84,7 @@ fn cargo_multicall_proxy_reports_identity_on_nonzero_exit() {
             "name": "run_program",
             "arguments": {
                 "program": "cargo",
-                "args": ["codexshim-definitely-not-a-command"],
+                "args": ["agentshim-definitely-not-a-command"],
                 "cwd": env!("CARGO_MANIFEST_DIR"),
                 "timeout_ms": 30_000
             }

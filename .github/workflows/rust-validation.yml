@@ -164,35 +164,35 @@ jobs:
         if: inputs.run_format
         run: cargo fmt --all -- --check
       - name: Lint root package
-        run: cargo clippy --locked -p codexshim --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked -p agentshim --all-targets --all-features -- -D warnings
       - name: Test root package default features
-        run: cargo test --locked -p codexshim --tests
+        run: cargo test --locked -p agentshim --tests
       - name: Verify root all-features test targets compile
-        run: cargo check --locked -p codexshim --all-features --tests
+        run: cargo check --locked -p agentshim --all-features --tests
       - name: Test bench-internals profiled paths
-        run: cargo test --locked -p codexshim --features bench-internals --lib -- profiled
+        run: cargo test --locked -p agentshim --features bench-internals --lib -- profiled
       - name: Lint derivative packages
         if: steps.validation-scope.outputs.scope == 'full'
-        run: cargo clippy --locked -p codexshim-pdf-read -p codexshim-gigatoken --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked -p agentshim-pdf-read -p agentshim-gigatoken --all-targets --all-features -- -D warnings
       - name: Test derivative packages default features
         if: steps.validation-scope.outputs.scope == 'full'
-        run: cargo test --locked -p codexshim-pdf-read -p codexshim-gigatoken --tests
+        run: cargo test --locked -p agentshim-pdf-read -p agentshim-gigatoken --tests
       - name: Verify derivative all-features test targets compile
         if: steps.validation-scope.outputs.scope == 'full'
-        run: cargo check --locked -p codexshim-pdf-read -p codexshim-gigatoken --all-features --tests
+        run: cargo check --locked -p agentshim-pdf-read -p agentshim-gigatoken --all-features --tests
       - name: Check PDF rendering-only feature profile
         if: steps.validation-scope.outputs.scope == 'full'
-        run: cargo check --locked -p codexshim-pdf-read --all-targets --no-default-features --features rendering
+        run: cargo check --locked -p agentshim-pdf-read --all-targets --no-default-features --features rendering
       - name: Build root package documentation
         if: inputs.build_docs
         env:
           RUSTDOCFLAGS: -Dwarnings
-        run: cargo doc --locked -p codexshim --all-features --no-deps
+        run: cargo doc --locked -p agentshim --all-features --no-deps
       - name: Build derivative package documentation
         if: inputs.build_docs && steps.validation-scope.outputs.scope == 'full'
         env:
           RUSTDOCFLAGS: -Dwarnings
-        run: cargo doc --locked -p codexshim-pdf-read -p codexshim-gigatoken --all-features --no-deps
+        run: cargo doc --locked -p agentshim-pdf-read -p agentshim-gigatoken --all-features --no-deps
       - name: Metadata
         if: inputs.run_metadata
         run: cargo metadata --locked --no-deps --format-version 1

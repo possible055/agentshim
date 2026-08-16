@@ -1,6 +1,6 @@
 use std::io::{Seek, SeekFrom, Write};
 
-use codexshim_pdf_read::{
+use agentshim_pdf_read::{
     MarkdownOptions, PageTextStatus, ParserLimits, PdfReadDocument, RenderLimits,
 };
 

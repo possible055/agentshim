@@ -3,11 +3,11 @@
 //! This is a derivative of a full-featured PDF library. Everything that could write,
 //! edit, sign, redact, convert, or OCR was removed. `src/lib.rs` is the review boundary
 //! for new re-exports; these tests catch removals and signature drift in the facade that
-//! `codexshim` already consumes.
+//! `agentshim` already consumes.
 
 use std::io::{Seek, SeekFrom, Write};
 
-use codexshim_pdf_read::{
+use agentshim_pdf_read::{
     current_metrics, enter_budget, measure, CancelSignal, LimitScope, MarkdownChunk,
     MarkdownOptions, PageInfo, PageTextAssessment, PageTextStatus, PageVisualAssessment,
     ParserLimits, PdfReadDocument, PdfReadError, PdfReadErrorKind, PdfReadMetrics,
@@ -60,7 +60,7 @@ fn the_public_surface_is_read_only() {
     assert_eq!(DEFAULT_IMAGE_CALL_BYTES, 96 * 1024 * 1024);
     assert!(MAX_IMAGE_EDGE_PIXELS > 0);
     assert!(MAX_IMAGE_PIXELS > 0);
-    assert_eq!(NAME, "codexshim-pdf-read");
+    assert_eq!(NAME, "agentshim-pdf-read");
     assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
 }
 

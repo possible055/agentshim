@@ -49,7 +49,7 @@ sources, token-ID materialization, and training modules have no local analogue.
 
 ## Phase 0 baseline
 
-- codexshim commit: `ab710b43b4e2061b043bebe4e005c0dc3528890b`
+- agentshim commit: `ab710b43b4e2061b043bebe4e005c0dc3528890b`
 - Codex client commit: `bbcf5e10fb493f0f46e4155455e1b5c4f69cfe63`
 - Original planned 246,384-byte / 78,909-token artifact: not present in the
   tracked tree, `local/`, or any local reference checkout.

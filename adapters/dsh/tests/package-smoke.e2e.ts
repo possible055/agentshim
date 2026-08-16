@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 const packageRoot = fileURLToPath(new URL('..', import.meta.url))
-const enabled = process.env.CODEXSHIM_PACKAGE_E2E === '1'
+const enabled = process.env.AGENTSHIM_PACKAGE_E2E === '1'
 
 function runDsh(dshHome: string, args: string[]): string {
   const pnpmCli = process.env.npm_execpath
@@ -25,19 +25,19 @@ function runDsh(dshHome: string, args: string[]): string {
 
 describe.runIf(enabled)('packed adapter in a clean DSH profile', () => {
   it('adds, dumps, and removes the tarball with the pinned rc.6 CLI', async () => {
-    const dshHome = await mkdtemp(join(tmpdir(), 'dsh-codexshim-profile-'))
-    const tarball = join(packageRoot, 'dsh-codexshim-0.1.0.tgz')
+    const dshHome = await mkdtemp(join(tmpdir(), 'dsh-agentshim-profile-'))
+    const tarball = join(packageRoot, 'dsh-agentshim-0.1.0.tgz')
     try {
       await stat(tarball)
       runDsh(dshHome, ['plugin', '--profile', 'smoke', 'add', tarball])
       const installed = runDsh(dshHome, ['--profile', 'smoke', '--dump-config'])
-      expect(installed).toContain('dsh-codexshim')
-      expect(installed).toMatch(/\bid:\s*codexshim\b/)
+      expect(installed).toContain('dsh-agentshim')
+      expect(installed).toMatch(/\bid:\s*agentshim\b/)
 
-      runDsh(dshHome, ['plugin', '--profile', 'smoke', 'remove', 'dsh-codexshim'])
+      runDsh(dshHome, ['plugin', '--profile', 'smoke', 'remove', 'dsh-agentshim'])
       const removed = runDsh(dshHome, ['--profile', 'smoke', '--dump-config'])
-      expect(removed).not.toContain('dsh-codexshim')
-      expect(removed).not.toMatch(/\bid:\s*codexshim\b/)
+      expect(removed).not.toContain('dsh-agentshim')
+      expect(removed).not.toMatch(/\bid:\s*agentshim\b/)
     } finally {
       await rm(dshHome, { recursive: true, force: true })
     }

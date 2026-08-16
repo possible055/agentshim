@@ -3,4 +3,4 @@ pub(crate) mod path;
 pub(crate) mod process;
 
 #[cfg(not(any(unix, windows)))]
-compile_error!("codexshim supports only Windows and Unix hosts");
+compile_error!("agentshim supports only Windows and Unix hosts");

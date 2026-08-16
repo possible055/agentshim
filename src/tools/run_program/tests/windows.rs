@@ -3,10 +3,10 @@ use super::*;
 #[cfg(windows)]
 #[test]
 fn windows_grandchild_child_fixture() {
-    if env::var("CODEXSHIM_PROCESS_FIXTURE").as_deref() != Ok("child") {
+    if env::var("AGENTSHIM_PROCESS_FIXTURE").as_deref() != Ok("child") {
         return;
     }
-    let pid_file = env::var_os("CODEXSHIM_PROCESS_PID_FILE").expect("pid file");
+    let pid_file = env::var_os("AGENTSHIM_PROCESS_PID_FILE").expect("pid file");
     std::fs::write(pid_file, std::process::id().to_string()).expect("write child pid");
     thread::sleep(Duration::from_secs(30));
 }
@@ -16,11 +16,11 @@ fn windows_grandchild_child_fixture() {
 fn windows_grandchild_parent_fixture() {
     use std::io::Write as _;
 
-    if env::var("CODEXSHIM_PROCESS_FIXTURE").as_deref() != Ok("parent") {
+    if env::var("AGENTSHIM_PROCESS_FIXTURE").as_deref() != Ok("parent") {
         return;
     }
     let pid_file =
-        std::path::PathBuf::from(env::var_os("CODEXSHIM_PROCESS_PID_FILE").expect("pid file"));
+        std::path::PathBuf::from(env::var_os("AGENTSHIM_PROCESS_PID_FILE").expect("pid file"));
     let executable = env::current_exe().expect("test executable");
     let mut child = Command::new(executable)
         .args([
@@ -28,9 +28,9 @@ fn windows_grandchild_parent_fixture() {
             "tools::run_program::tests::windows::windows_grandchild_child_fixture",
             "--nocapture",
         ])
-        .env("CODEXSHIM_PROCESS_FIXTURE", "child")
+        .env("AGENTSHIM_PROCESS_FIXTURE", "child")
         .env(
-            "CODEXSHIM_PROCESS_PID_FILE",
+            "AGENTSHIM_PROCESS_PID_FILE",
             pid_file.with_extension("child-ready"),
         )
         .spawn()
@@ -47,10 +47,10 @@ fn windows_grandchild_parent_fixture() {
 #[cfg(windows)]
 #[test]
 fn windows_lingering_grandchild_parent_fixture() {
-    if env::var("CODEXSHIM_PROCESS_FIXTURE").as_deref() != Ok("lingering-parent") {
+    if env::var("AGENTSHIM_PROCESS_FIXTURE").as_deref() != Ok("lingering-parent") {
         return;
     }
-    let pid_file = env::var_os("CODEXSHIM_PROCESS_PID_FILE").expect("pid file");
+    let pid_file = env::var_os("AGENTSHIM_PROCESS_PID_FILE").expect("pid file");
     let executable = env::current_exe().expect("test executable");
     let child = Command::new(executable)
         .args([
@@ -58,8 +58,8 @@ fn windows_lingering_grandchild_parent_fixture() {
             "tools::run_program::tests::windows::windows_grandchild_child_fixture",
             "--nocapture",
         ])
-        .env("CODEXSHIM_PROCESS_FIXTURE", "child")
-        .env("CODEXSHIM_PROCESS_PID_FILE", &pid_file)
+        .env("AGENTSHIM_PROCESS_FIXTURE", "child")
+        .env("AGENTSHIM_PROCESS_PID_FILE", &pid_file)
         .spawn()
         .expect("spawn lingering child fixture");
     let pid_file = std::path::PathBuf::from(pid_file);
@@ -106,11 +106,11 @@ fn windows_primary_exit_terminates_lingering_grandchild() {
         "--nocapture".to_owned(),
     ];
     request.env.insert(
-        "CODEXSHIM_PROCESS_FIXTURE".to_owned(),
+        "AGENTSHIM_PROCESS_FIXTURE".to_owned(),
         "lingering-parent".to_owned(),
     );
     request.env.insert(
-        "CODEXSHIM_PROCESS_PID_FILE".to_owned(),
+        "AGENTSHIM_PROCESS_PID_FILE".to_owned(),
         pid_file.to_string_lossy().into_owned(),
     );
     request.timeout_ms = Some(5_000);
@@ -153,9 +153,9 @@ fn windows_timeout_terminates_grandchild_job_tree() {
     ];
     timed
         .env
-        .insert("CODEXSHIM_PROCESS_FIXTURE".to_owned(), "parent".to_owned());
+        .insert("AGENTSHIM_PROCESS_FIXTURE".to_owned(), "parent".to_owned());
     timed.env.insert(
-        "CODEXSHIM_PROCESS_PID_FILE".to_owned(),
+        "AGENTSHIM_PROCESS_PID_FILE".to_owned(),
         pid_file.to_string_lossy().into_owned(),
     );
     timed.timeout_ms = Some(2_000);

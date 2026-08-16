@@ -250,7 +250,7 @@ mod tests {
         for value in ["0", "86401", "-1", "many", ""] {
             let error = parse_idle_timeout(Some(OsStr::new(value))).expect_err(value);
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-            assert!(error.to_string().contains("CODEXSHIM_IDLE_TIMEOUT"));
+            assert!(error.to_string().contains("AGENTSHIM_IDLE_TIMEOUT"));
         }
     }
 

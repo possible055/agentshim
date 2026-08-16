@@ -8,15 +8,16 @@ mod tests {
     #[cfg(feature = "bench-internals")]
     use crate::tools::grep::execute_profiled;
     use crate::tools::grep::{
-        CandidateCollection, CandidatePolicy, CaseMode, GrepBenchmarkVariant, GrepError, GrepMode,
-        GrepRequest, GrepSourcePolicy, GrepTraversal, PAGE_MEMORY_BYTES, Page,
-        PathnameReopenPolicy, SearchPlan, build_matcher, candidate, execute,
-        execute_with_traversal, execute_with_variant, render, render_with_budget, search_file,
-        search_file_with_hook, search_file_with_variant_hook,
+        CandidateCollection, CandidatePolicy, CaseMode, GrepBenchmarkVariant, GrepError,
+        GrepMemoryPolicy, GrepMode, GrepRequest, GrepSourcePolicy, GrepTraversal,
+        PAGE_MEMORY_BYTES, Page, PathnameReopenPolicy, SearchPlan, build_matcher, candidate,
+        execute, execute_with_memory_budget, execute_with_traversal, execute_with_variant, render,
+        render_with_budget, search_file, search_file_with_hook, search_file_with_variant_hook,
     };
     use crate::{
         path::{FileAccess, ReadScope, RepositoryRoot},
         runtime::{MIN_TOOL_MEMORY_BYTES, MemoryReservation, RuntimeConfig, RuntimeResources},
+        traversal::TraversalSummary,
     };
 
     fn request(pattern: &str) -> GrepRequest {
@@ -99,6 +100,84 @@ mod tests {
         );
     }
 
+    #[test]
+    fn large_legacy_file_streams_without_a_decoded_whole_file_limit() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let text = "繁體中文測試資料內容\n".repeat(350_000);
+        let encoded = encoding_rs::BIG5.encode(&text).0;
+        assert!(text.len() > 8 * 1024 * 1024);
+        fs::write(fixture.path().join("large-big5.txt"), encoded).expect("large Big5 source");
+        let root = Arc::new(FileAccess::new(
+            Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
+            ReadScope::Normal,
+        ));
+        let mut query = request("繁體");
+        query.path = Some("large-big5.txt".to_owned());
+        query.glob = None;
+        query.mode = Some(GrepMode::Files);
+        query.fixed_strings = Some(true);
+        query.encoding = Some("big5".to_owned());
+
+        let output = execute(&root, &query, 1, &CancellationToken::new())
+            .expect("large streaming Big5 search");
+        assert!(
+            output.contains("large-big5.txt"),
+            "expected hit, got {output}"
+        );
+    }
+
+    #[test]
+    fn malformed_legacy_tail_invalidates_an_earlier_match() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let mut encoded = encoding_rs::BIG5
+            .encode("繁體中文測試資料\n")
+            .0
+            .into_owned();
+        encoded.push(0x81);
+        fs::write(fixture.path().join("malformed-big5.txt"), encoded)
+            .expect("malformed Big5 source");
+        let root = Arc::new(FileAccess::new(
+            Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
+            ReadScope::Normal,
+        ));
+        let mut query = request("繁體");
+        query.path = Some("malformed-big5.txt".to_owned());
+        query.glob = None;
+        query.fixed_strings = Some(true);
+        query.encoding = Some("big5".to_owned());
+
+        assert!(matches!(
+            execute(&root, &query, 1, &CancellationToken::new()),
+            Err(GrepError::Unsearchable(SkipReason::Undecodable))
+        ));
+    }
+
+    #[test]
+    fn bom_takes_precedence_over_explicit_encoding() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let mut encoded = vec![0xFF, 0xFE];
+        for unit in "繁體中文\n".encode_utf16() {
+            encoded.extend_from_slice(&unit.to_le_bytes());
+        }
+        fs::write(fixture.path().join("utf16.txt"), encoded).expect("UTF-16 source");
+        let root = Arc::new(FileAccess::new(
+            Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
+            ReadScope::Normal,
+        ));
+        let mut query = request("繁體");
+        query.path = Some("utf16.txt".to_owned());
+        query.glob = None;
+        query.fixed_strings = Some(true);
+        query.encoding = Some("big5".to_owned());
+
+        let output = execute(&root, &query, 1, &CancellationToken::new())
+            .expect("BOM-selected UTF-16 search");
+        assert!(
+            output.contains("utf16.txt:1:繁體中文"),
+            "expected hit, got {output}"
+        );
+    }
+
     /// An encoding detection cannot resolve must be reported, and the report must name the
     /// argument that makes the file reachable.
     #[test]
@@ -138,6 +217,30 @@ mod tests {
         assert!(
             !recovered.contains("fallback_encoding="),
             "the hint must not repeat once the argument is supplied"
+        );
+    }
+
+    #[test]
+    fn fallback_encoding_reaches_legacy_text_after_a_long_ascii_header() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let mut encoded = vec![b'a'; 9 * 1024];
+        encoded.push(b'\n');
+        encoded.extend_from_slice(&encoding_rs::BIG5.encode("繁體中文測試資料\n").0);
+        fs::write(fixture.path().join("header-big5.txt"), encoded).expect("Big5 source");
+        let root = Arc::new(FileAccess::new(
+            Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
+            ReadScope::Normal,
+        ));
+        let mut query = request("繁體");
+        query.glob = None;
+        query.fixed_strings = Some(true);
+        query.fallback_encoding = Some("big5".to_owned());
+
+        let output = execute(&root, &query, 1, &CancellationToken::new())
+            .expect("fallback search after ASCII header");
+        assert!(
+            output.contains("header-big5.txt"),
+            "expected hit, got {output}"
         );
     }
 
@@ -428,10 +531,18 @@ mod tests {
         let (_fixture, root) = fixture();
         let path = root.resolve(Path::new("src/a.rs")).expect("candidate path");
         let candidate = candidate(path).expect("candidate");
-        let mut oracle = CandidateCollection::new(CandidatePolicy::SoftTarget, usize::MAX, None);
+        let mut oracle = CandidateCollection::new(
+            CandidatePolicy::SoftTarget,
+            GrepMemoryPolicy::candidate_only(usize::MAX),
+            None,
+        );
         oracle.admit(candidate.clone()).expect("oracle admission");
         let limit = oracle.estimated_retained_bytes - 1;
-        let mut limited = CandidateCollection::new(CandidatePolicy::SoftTarget, limit, None);
+        let mut limited = CandidateCollection::new(
+            CandidatePolicy::SoftTarget,
+            GrepMemoryPolicy::candidate_only(limit),
+            None,
+        );
 
         assert!(matches!(
             limited.admit(candidate),
@@ -454,8 +565,11 @@ mod tests {
         let pressure = resources
             .try_reserve_memory(MIN_TOOL_MEMORY_BYTES - 1024)
             .expect("competing reservation");
-        let mut collection =
-            CandidateCollection::new(CandidatePolicy::SoftTarget, usize::MAX, Some(reservation));
+        let mut collection = CandidateCollection::new(
+            CandidatePolicy::SoftTarget,
+            GrepMemoryPolicy::candidate_only(usize::MAX),
+            Some(reservation),
+        );
 
         assert!(matches!(
             collection.admit(candidate),
@@ -468,6 +582,39 @@ mod tests {
                 .try_reserve_memory(MIN_TOOL_MEMORY_BYTES)
                 .is_some()
         );
+    }
+
+    #[test]
+    fn candidate_set_holds_its_memory_reservation_until_drop() {
+        let (_fixture, root) = fixture();
+        let path = root.resolve(Path::new("src/a.rs")).expect("candidate path");
+        let candidate = candidate(path).expect("candidate");
+        let mut config = RuntimeConfig::for_tests(1);
+        config.memory_bytes = 32 * 1024 * 1024;
+        config.grep_memory_bytes = config.memory_bytes;
+        let resources = RuntimeResources::new(config);
+        let policy = GrepMemoryPolicy::new(config.grep_memory_bytes);
+        let initial = resources
+            .try_reserve_memory(policy.base_reservation_bytes())
+            .expect("base reservation");
+        let reservation = MemoryReservation::from_initial(
+            resources.clone(),
+            initial,
+            policy.base_reservation_bytes(),
+        );
+        let mut collection =
+            CandidateCollection::new(CandidatePolicy::SoftTarget, policy, Some(reservation));
+        collection.admit(candidate).expect("candidate admission");
+        let available_while_collecting = resources.available_memory_bytes();
+        let candidates = collection.into_set(TraversalSummary::default(), false);
+
+        assert_eq!(
+            resources.available_memory_bytes(),
+            available_while_collecting,
+            "turning the collection into a searched set must retain the lease"
+        );
+        drop(candidates);
+        assert_eq!(resources.available_memory_bytes(), config.memory_bytes);
     }
 
     #[test]
@@ -774,6 +921,120 @@ mod tests {
     }
 
     #[test]
+    fn deep_offset_capture_overflow_retries_the_exact_window() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let line = format!("needle {}\n", "x".repeat(20_000));
+        fs::write(fixture.path().join("matches.rs"), line.repeat(500))
+            .expect("large matching fixture");
+        let root = Arc::new(FileAccess::new(
+            Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
+            ReadScope::Normal,
+        ));
+        let mut query = request("needle");
+        query.glob = None;
+        query.fixed_strings = Some(true);
+        query.offset = Some(499);
+        query.limit = Some(1);
+
+        let output =
+            execute(&root, &query, 4, &CancellationToken::new()).expect("exact capture retry");
+        assert!(
+            output.contains("matches.rs:500:"),
+            "expected final match, got {output}"
+        );
+        assert!(
+            !output.contains("capture budget"),
+            "unexpected skip: {output}"
+        );
+    }
+
+    #[test]
+    fn nine_mib_line_uses_isolated_heap_retry_and_bounded_capture() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let mut line = String::from("needle ");
+        line.push_str(&"x".repeat(9 * 1024 * 1024));
+        line.push('\n');
+        fs::write(fixture.path().join("long.rs"), line).expect("long line");
+        let root = Arc::new(FileAccess::new(
+            Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
+            ReadScope::Normal,
+        ));
+        let mut query = request("needle");
+        query.glob = None;
+        query.fixed_strings = Some(true);
+
+        let output = execute(&root, &query, 4, &CancellationToken::new())
+            .expect("isolated large-line retry");
+        assert!(
+            output.contains("long.rs:1:"),
+            "expected long-line match, got {output}"
+        );
+        assert!(
+            output.contains("line text omitted"),
+            "expected bounded text, got {output}"
+        );
+        assert!(
+            !output.contains("line exceeds search heap"),
+            "unexpected skip: {output}"
+        );
+    }
+
+    #[test]
+    fn isolated_heap_retry_searches_32_and_64_mib_lines() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root = Arc::new(FileAccess::new(
+            Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
+            ReadScope::Normal,
+        ));
+        let mut query = request("needle");
+        query.glob = None;
+        query.mode = Some(GrepMode::Files);
+        query.fixed_strings = Some(true);
+
+        for mebibytes in [32, 64] {
+            let mut line = String::from("needle ");
+            line.push_str(&"x".repeat(mebibytes * 1024 * 1024));
+            line.push('\n');
+            fs::write(fixture.path().join("long.rs"), line).expect("long line");
+            let output = execute(&root, &query, 4, &CancellationToken::new())
+                .expect("isolated large-line retry");
+            assert!(
+                output.contains("long.rs"),
+                "expected {mebibytes} MiB line match, got {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn eight_mib_envelope_rejects_a_nine_mib_line_without_oom() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let mut line = String::from("needle ");
+        line.push_str(&"x".repeat(9 * 1024 * 1024));
+        line.push('\n');
+        fs::write(fixture.path().join("long.rs"), line).expect("long line");
+        let root = Arc::new(FileAccess::new(
+            Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
+            ReadScope::Normal,
+        ));
+        let mut query = request("needle");
+        query.glob = None;
+        query.fixed_strings = Some(true);
+
+        let output = execute_with_memory_budget(
+            &root,
+            &query,
+            4,
+            8 * 1024 * 1024,
+            &CancellationToken::new(),
+        )
+        .expect("controlled large-line failure");
+        assert!(
+            output.contains("line exceeds search heap"),
+            "expected skip, got {output}"
+        );
+    }
+
+    #[test]
     fn single_file_capture_overflow_is_an_explicit_error() {
         let (fixture, root) = fixture();
         let line = format!("needle {}\n", "x".repeat(20_000));
@@ -815,9 +1076,11 @@ mod tests {
         let query = request("needle");
         let matcher = build_matcher(&query).expect("matcher");
         let plan = SearchPlan {
+            memory: GrepMemoryPolicy::new(256 * 1024 * 1024),
             mode: GrepMode::Content,
             context: 0,
             probe: 10,
+            skip: 0,
             allow_early_stop: false,
             encoding: None,
             fallback_encoding: None,
@@ -860,9 +1123,11 @@ mod tests {
         let query = request("needle");
         let matcher = build_matcher(&query).expect("matcher");
         let plan = SearchPlan {
+            memory: GrepMemoryPolicy::new(256 * 1024 * 1024),
             mode: GrepMode::Content,
             context: 0,
             probe: 10,
+            skip: 0,
             allow_early_stop: false,
             encoding: None,
             fallback_encoding: None,
@@ -917,9 +1182,11 @@ mod tests {
         query.fixed_strings = Some(true);
         let matcher = build_matcher(&query).expect("matcher");
         let plan = SearchPlan {
+            memory: GrepMemoryPolicy::new(256 * 1024 * 1024),
             mode: GrepMode::Content,
             context: 0,
             probe: 10,
+            skip: 0,
             allow_early_stop: false,
             encoding: None,
             fallback_encoding: None,
@@ -986,9 +1253,11 @@ mod tests {
             let query = request("needle");
             let matcher = build_matcher(&query).expect("matcher");
             let plan = SearchPlan {
+                memory: GrepMemoryPolicy::new(256 * 1024 * 1024),
                 mode: GrepMode::Content,
                 context: 0,
                 probe: 10,
+                skip: 0,
                 allow_early_stop: false,
                 encoding: None,
                 fallback_encoding: None,
@@ -1026,9 +1295,11 @@ mod tests {
             let query = request("needle");
             let matcher = build_matcher(&query).expect("matcher");
             let plan = SearchPlan {
+                memory: GrepMemoryPolicy::new(256 * 1024 * 1024),
                 mode: GrepMode::Content,
                 context: 0,
                 probe: 10,
+                skip: 0,
                 allow_early_stop: false,
                 encoding: None,
                 fallback_encoding: None,
@@ -1066,9 +1337,11 @@ mod tests {
             let query = request("needle");
             let matcher = build_matcher(&query).expect("matcher");
             let plan = SearchPlan {
+                memory: GrepMemoryPolicy::new(256 * 1024 * 1024),
                 mode: GrepMode::Content,
                 context: 0,
                 probe: 10,
+                skip: 0,
                 allow_early_stop: false,
                 encoding: None,
                 fallback_encoding: None,
