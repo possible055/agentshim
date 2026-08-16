@@ -38,7 +38,7 @@ export const Config = z.object({
 
 function canonicalOrUndefined(path: string): string | undefined {
   try {
-    return realpathSync(path)
+    return realpathSync.native(path)
   } catch {
     return undefined
   }
