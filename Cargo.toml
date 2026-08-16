@@ -1,9 +1,9 @@
 [workspace]
 # Do not list "." here. Cargo matches members/exclude with Path::starts_with,
 # so a "." member is the whole tree and disables exclude for nested checkouts.
-members = ["crates/gigatoken-core", "crates/pdf-read-core"]
+members = ["crates/core", "crates/gigatoken-core", "crates/napi", "crates/pdf-read-core"]
 # Keep bare workspace-root Cargo commands aligned with the explicit CI package scope.
-default-members = [".", "crates/gigatoken-core", "crates/pdf-read-core"]
+default-members = [".", "crates/core", "crates/gigatoken-core", "crates/napi", "crates/pdf-read-core"]
 # Nested checkouts and local-only trees are not members. Cargo matches exclude
 # with Path::starts_with (not globs), so list directory prefixes, not `dir/*`.
 exclude = ["repos", "local"]
@@ -19,6 +19,7 @@ description = "Capability-aware repository tools for coding agents"
 autotests = true
 
 [dependencies]
+agentshim-core = { path = "crates/core" }
 base64 = "=0.22.1"
 cap-std = "=4.0.2"
 chardetng = "=1.0.0"
@@ -49,11 +50,12 @@ windows-sys = { version = "0.61.0", features = ["Wdk_System_SystemServices", "Wi
 libc = "0.2.172"
 
 [dev-dependencies]
+agentshim-core = { path = "crates/core", features = ["test-hooks"] }
 log = "0.4.27"
 tempfile = "3.20.0"
 
 [features]
-bench-internals = []
+bench-internals = ["agentshim-core/bench-internals"]
 
 # Build artifacts live on a 24 GB RAM disk; full debug info dominated the budget
 # (4.5 GB of .pdb across 17 test binaries). Keep file:line for backtraces, drop

@@ -3,39 +3,32 @@ import type { FsInfo, FsTarget } from '@deepseek-ai/dsh-fs'
 import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { approveEscalation, validateEscalationArgs } from '@deepseek-ai/dsh-sandbox'
-import type { SandboxMode } from '@deepseek-ai/dsh-sandbox'
+import type {
+  ConfinedArgv,
+  RunnerFailureRule,
+  SandboxExecutionPolicy,
+  SandboxMode,
+  SandboxPolicy,
+} from '@deepseek-ai/dsh-sandbox'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
+import { defaultLaunch, serverCommand } from './session.ts'
+import type { ResolvedSessionConfig, SessionLaunch } from './session.ts'
 
-/** Adapter-only argument fields stripped before the MCP request (§12.5). */
 export const ESCALATION_PERMISSION_FIELD = 'sandbox_permissions'
 export const ESCALATION_JUSTIFICATION_FIELD = 'justification'
 
-/**
- * The only escalation target this adapter accepts. DSH's own ladder also
- * offers `workspace-write`, but the agentshim child runs outside the DSH
- * sandbox executor, so a narrower grant would be a false safety claim.
- */
-export const ESCALATION_TARGET: SandboxMode = 'danger-full-access'
-
 export function sameExecutionPath(left: string, right: string): boolean {
-  if (process.platform === 'win32') return left.toLowerCase() === right.toLowerCase()
-  return left === right
+  return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right
 }
 
-/**
- * Per-call re-check of the startup execution-world condition: the provider
- * must still be the local one and must map the root to the same canonical
- * path, or a local agentshim read could be mistaken for a provider
- * observation.
- */
 export async function assertExecutionWorld(ctx: Context, root: string): Promise<void> {
   const fs = ctx.fs
   if (!(fs instanceof LocalFileSystem)) {
-    throw new HarnessError('dsh-agentshim: ctx.fs is no longer the local filesystem provider; refusing to attribute agentshim reads to it', 'AGENTSHIM_EXECUTION_WORLD_MISMATCH')
+    throw new HarnessError('dsh-agentshim: ctx.fs is no longer the local filesystem provider', 'AGENTSHIM_EXECUTION_WORLD_MISMATCH')
   }
   const processed = fs.processPath(await fs.resolve(root))
   if (!sameExecutionPath(processed, root)) {
-    throw new HarnessError(`dsh-agentshim: ctx.fs maps the root ${JSON.stringify(root)} to ${JSON.stringify(processed)}; execution world mismatch`, 'AGENTSHIM_EXECUTION_WORLD_MISMATCH')
+    throw new HarnessError(`dsh-agentshim: ctx.fs maps ${JSON.stringify(root)} to ${JSON.stringify(processed)}`, 'AGENTSHIM_EXECUTION_WORLD_MISMATCH')
   }
 }
 
@@ -44,38 +37,21 @@ export interface ReadObservation {
   readonly pre: FsInfo | undefined
 }
 
-/**
- * Resolve the read argument through the agent's session cwd and take the
- * pre-stat. A confirmed-absent target records `{ kind: 'absent' }` immediately
- * (a later create re-validates atomically); a regular file defers its
- * observation until the read completes; directories and special files record
- * nothing and let agentshim produce the user-facing error.
- */
 export async function beginReadObservation(ctx: Context, exec: ToolExecution, root: string, path: string): Promise<ReadObservation> {
   await assertExecutionWorld(ctx, root)
   const cwd = exec.agent?.session.header.cwd
-  const target = await ctx.fs.resolve(path, {
-    ...(cwd === undefined ? {} : { cwd }),
-    signal: exec.signal,
-  })
+  const target = await ctx.fs.resolve(path, { ...(cwd === undefined ? {} : { cwd }), signal: exec.signal })
   const pre = await ctx.fs.stat(target, exec.signal)
-  if (pre === undefined) {
-    ctx.emit('fs/observed', target, { kind: 'absent' }, exec)
-  }
+  if (pre === undefined) ctx.emit('fs/observed', target, { kind: 'absent' }, exec)
   return { target, pre }
 }
 
-/**
- * After a successful MCP read, record `{ kind: 'present', version }` only
- * when the target is still the same regular file at the same version. A
- * changed file leaves no observation usable by write/edit, so the next
- * mutation demands a fresh read instead of racing a stale version.
- */
 export async function completeReadObservation(ctx: Context, exec: ToolExecution, observation: ReadObservation): Promise<void> {
   if (observation.pre === undefined || observation.pre.type !== 'file') return
   const post = await ctx.fs.stat(observation.target, exec.signal)
-  if (post === undefined || post.type !== 'file' || post.version !== observation.pre.version) return
-  ctx.emit('fs/observed', observation.target, { kind: 'present', version: post.version }, exec)
+  if (post?.type === 'file' && post.version === observation.pre.version) {
+    ctx.emit('fs/observed', observation.target, { kind: 'present', version: post.version }, exec)
+  }
 }
 
 function stringField(args: Record<string, unknown>, field: string): string | undefined {
@@ -84,127 +60,215 @@ function stringField(args: Record<string, unknown>, field: string): string | und
 }
 
 function stripEscalationFields(args: Record<string, unknown>): Record<string, unknown> {
-  const stripped: Record<string, unknown> = {}
-  for (const [key, value] of Object.entries(args)) {
-    if (key === ESCALATION_PERMISSION_FIELD || key === ESCALATION_JUSTIFICATION_FIELD) continue
-    stripped[key] = value
-  }
-  return stripped
+  return Object.fromEntries(Object.entries(args).filter(([key]) => key !== ESCALATION_PERMISSION_FIELD && key !== ESCALATION_JUSTIFICATION_FIELD))
+}
+
+export interface SandboxAttribution {
+  readonly mode: SandboxMode
+  readonly enforcement?: 'full' | 'partial'
+  readonly denialSignatures: readonly string[]
+  readonly runnerFailureRules: readonly RunnerFailureRule[]
+}
+
+export interface ProcessExecutionPlan {
+  readonly args: Record<string, unknown>
+  readonly launch: SessionLaunch | undefined
+  readonly sandbox: SandboxAttribution | undefined
 }
 
 export interface ProcessPolicy {
-  /** Whether the process schemas advertise the escalation fields (§18.7: gate on a sandboxing executor). */
   readonly advertisesEscalation: boolean
+  plan(
+    name: string,
+    args: Record<string, unknown>,
+    exec: ToolExecution,
+    config: ResolvedSessionConfig,
+    forceDedicated?: boolean,
+  ): Promise<ProcessExecutionPlan>
   /**
-   * Enforce the standing sandbox policy for one process call and return the
-   * arguments to send: a confined first attempt is refused with
-   * `AGENTSHIM_PROCESS_REQUIRES_FULL_ACCESS`; an approved retry loses the
-   * adapter-only fields before the MCP request.
+   * Standing policy + escalation for one final command argv: resolves the sandbox
+   * mode, runs the one-call approval when requested, and returns the wrapped argv
+   * (confined) or `undefined` (danger-full-access / no sandbox composed).
    */
-  prepareArguments(name: string, args: Record<string, unknown>, exec: ToolExecution): Promise<Record<string, unknown>>
+  wrapArgv(
+    name: string,
+    argv: readonly string[],
+    args: Record<string, unknown>,
+    exec: ToolExecution,
+  ): Promise<ConfinementDecision>
 }
 
-/**
- * The agentshim child runs outside the DSH per-call sandbox executor, so
- * process tools may only run under a standing `danger-full-access` policy or
- * after a one-shot full-access escalation through the DSH approval channel —
- * never silently under a confined mode.
- *
- * A missing `ctx.shell` is treated as unconfined: the minimal preset has no
- * one-shot executor, only a PTY realm, and already stands on
- * `danger-full-access`. Call time still re-checks the live capability.
- */
-export function createProcessPolicy(ctx: Context): ProcessPolicy {
-  const shell = ctx.get('shell')
-  const advertisesEscalation = shell?.sandboxMode !== undefined
-  if (advertisesEscalation && ctx.get('sandboxPolicy') === undefined) {
-    throw new Error('dsh-agentshim: the mounted shell executor confines but ctx.sandboxPolicy is missing; refusing to advertise escalation')
+export interface ConfinementDecision {
+  readonly mode: SandboxMode
+  readonly wrappedArgv: readonly string[] | undefined
+  readonly attribution: SandboxAttribution | undefined
+}
+
+function confinedLaunch(config: ResolvedSessionConfig, confined: ConfinedArgv): SessionLaunch {
+  const [command, ...args] = confined.argv
+  if (command === undefined || command.length === 0) {
+    throw new HarnessError('sandbox returned an empty command argv', 'SANDBOX_UNAVAILABLE')
   }
+  return { ...defaultLaunch(config), command, args }
+}
+
+export function createProcessPolicy(ctx: Context): ProcessPolicy {
+  const sandbox = ctx.get('sandbox')
+  const sandboxPolicy = ctx.get('sandboxPolicy')
+  if ((sandbox === undefined) !== (sandboxPolicy === undefined)) {
+    throw new Error('dsh-agentshim: ctx.sandbox and ctx.sandboxPolicy must either both be composed or both be absent')
+  }
+  const advertisesEscalation = sandbox !== undefined
   return {
     advertisesEscalation,
-    async prepareArguments(name, args, exec) {
+    async plan(name, args, exec, config, forceDedicated = false) {
       const permissions = stringField(args, ESCALATION_PERMISSION_FIELD)
       const justification = stringField(args, ESCALATION_JUSTIFICATION_FIELD)
       validateEscalationArgs(permissions, justification)
-      const currentShell = ctx.get('shell')
-      const currentlyConfines = currentShell?.sandboxMode !== undefined
-      if (currentlyConfines !== advertisesEscalation) {
-        throw new HarnessError(
-          'dsh-agentshim: the mounted shell executor capability changed after the process tools were registered; retry after the composition settles or reload the plugin',
-          'AGENTSHIM_PROCESS_POLICY_CHANGED',
-        )
+      const currentSandbox = ctx.get('sandbox')
+      const currentSandboxPolicy = ctx.get('sandboxPolicy')
+      if ((currentSandbox === undefined) !== (currentSandboxPolicy === undefined)
+        || (currentSandbox !== undefined) !== advertisesEscalation) {
+        throw new HarnessError('dsh-agentshim: sandbox capability changed after tool registration', 'AGENTSHIM_PROCESS_POLICY_CHANGED')
       }
-      if (!currentlyConfines) {
+      if (currentSandbox === undefined || currentSandboxPolicy === undefined) {
         if (permissions !== undefined) {
-          throw new HarnessError('sandbox_permissions is not available in this composition (no sandboxing executor to escalate from)', 'AGENTSHIM_ESCALATION_UNAVAILABLE')
+          throw new HarnessError('sandbox_permissions is unavailable without a composed DSH sandbox', 'AGENTSHIM_ESCALATION_UNAVAILABLE')
         }
-        return args
+        return {
+          args,
+          launch: forceDedicated ? defaultLaunch(config) : undefined,
+          sandbox: undefined,
+        }
       }
-      const sandboxPolicy = ctx.get('sandboxPolicy')
-      if (sandboxPolicy === undefined) {
-        throw new HarnessError(
-          'dsh-agentshim: ctx.sandboxPolicy disappeared while a sandboxing executor is mounted; refusing to run the private process',
-          'AGENTSHIM_PROCESS_POLICY_CHANGED',
-        )
+      const session = exec.agent?.session
+      const standing = currentSandboxPolicy.resolve(session === undefined ? {} : { session })
+      const approvedMode = permissions === undefined
+        ? undefined
+        : await approveEscalation(
+            {
+              requestedMode: permissions,
+              justification: justification as string,
+              effectiveMode: standing.mode,
+              subject: 'command',
+            },
+            {
+              approver: ctx.get('approval'),
+              agent: exec.agent,
+              callId: exec.callId,
+              toolName: name,
+              signal: exec.signal,
+            },
+          )
+      const policy: SandboxExecutionPolicy = approvedMode === undefined
+        ? standing
+        : currentSandboxPolicy.resolve(session === undefined ? { mode: approvedMode } : { session, mode: approvedMode })
+      const stripped = stripEscalationFields(args)
+      if (policy.mode === 'danger-full-access') {
+        return {
+          args: stripped,
+          launch: approvedMode !== undefined || forceDedicated ? defaultLaunch(config) : undefined,
+          sandbox: { mode: policy.mode, denialSignatures: [], runnerFailureRules: [] },
+        }
       }
-      const standing = await sandboxPolicy.resolve(exec.agent === undefined ? {} : { session: exec.agent.session })
-      const standingMode = standing?.mode
-      if (permissions === undefined) {
-        if (standingMode === 'danger-full-access') return args
-        throw new HarnessError(
-          `agentshim "${name}" runs outside the DSH sandbox and needs full access; the session policy is "${standingMode ?? 'unknown'}". Retry this exact call with the same arguments plus ${ESCALATION_PERMISSION_FIELD}: "${ESCALATION_TARGET}" and a one-sentence ${ESCALATION_JUSTIFICATION_FIELD} for the user to approve.`,
-          'AGENTSHIM_PROCESS_REQUIRES_FULL_ACCESS',
-        )
+      let confined: ConfinedArgv
+      try {
+        confined = currentSandbox.confine(serverCommand(config), policy as SandboxPolicy)
+      } catch (error) {
+        throw error instanceof HarnessError
+          ? error
+          : new HarnessError(`sandbox confinement failed: ${String(error)}`, 'SANDBOX_UNAVAILABLE')
       }
-      if (permissions !== ESCALATION_TARGET) {
-        throw new HarnessError(
-          `agentshim "${name}" only accepts ${ESCALATION_PERMISSION_FIELD}: "${ESCALATION_TARGET}"; narrower modes cannot confine the agentshim child process`,
-          'AGENTSHIM_ESCALATION_TARGET_REJECTED',
-        )
-      }
-      await approveEscalation(
-        { requestedMode: permissions, justification: justification as string, effectiveMode: standingMode as SandboxMode, subject: 'command' },
-        {
-          approver: ctx.get('approval'),
-          agent: exec.agent,
-          callId: exec.callId,
-          toolName: name,
-          signal: exec.signal,
+      return {
+        args: stripped,
+        launch: confinedLaunch(config, confined),
+        sandbox: {
+          mode: policy.mode,
+          enforcement: confined.enforcement,
+          denialSignatures: confined.denialSignatures,
+          runnerFailureRules: confined.runnerFailureRules,
         },
-      )
-      return stripEscalationFields(args)
+      }
+    },
+    async wrapArgv(name, argv, args, exec) {
+      const permissions = stringField(args, ESCALATION_PERMISSION_FIELD)
+      const justification = stringField(args, ESCALATION_JUSTIFICATION_FIELD)
+      validateEscalationArgs(permissions, justification)
+      const currentSandbox = ctx.get('sandbox')
+      const currentSandboxPolicy = ctx.get('sandboxPolicy')
+      if (currentSandbox === undefined || currentSandboxPolicy === undefined) {
+        if (permissions !== undefined) {
+          throw new HarnessError('sandbox_permissions is unavailable without a composed DSH sandbox', 'AGENTSHIM_ESCALATION_UNAVAILABLE')
+        }
+        return { mode: 'danger-full-access', wrappedArgv: undefined, attribution: undefined }
+      }
+      const session = exec.agent?.session
+      const standing = currentSandboxPolicy.resolve(session === undefined ? {} : { session })
+      const approvedMode = permissions === undefined
+        ? undefined
+        : await approveEscalation(
+            {
+              requestedMode: permissions,
+              justification: justification as string,
+              effectiveMode: standing.mode,
+              subject: 'command',
+            },
+            {
+              approver: ctx.get('approval'),
+              agent: exec.agent,
+              callId: exec.callId,
+              toolName: name,
+              signal: exec.signal,
+            },
+          )
+      const policy: SandboxExecutionPolicy = approvedMode === undefined
+        ? standing
+        : currentSandboxPolicy.resolve(session === undefined ? { mode: approvedMode } : { session, mode: approvedMode })
+      if (policy.mode === 'danger-full-access') {
+        return {
+          mode: policy.mode,
+          wrappedArgv: undefined,
+          attribution: { mode: policy.mode, denialSignatures: [], runnerFailureRules: [] },
+        }
+      }
+      let confined: ConfinedArgv
+      try {
+        confined = currentSandbox.confine(argv as [string, ...string[]], policy as SandboxPolicy)
+      } catch (error) {
+        throw error instanceof HarnessError
+          ? error
+          : new HarnessError(`sandbox confinement failed: ${String(error)}`, 'SANDBOX_UNAVAILABLE')
+      }
+      return {
+        mode: policy.mode,
+        wrappedArgv: confined.argv,
+        attribution: {
+          mode: policy.mode,
+          enforcement: confined.enforcement,
+          denialSignatures: confined.denialSignatures,
+          runnerFailureRules: confined.runnerFailureRules,
+        },
+      }
     },
   }
 }
 
-/**
- * Augment the run_program/bash schemas with the adapter-only escalation
- * fields when (and only when) a sandboxing executor is mounted. The catalog
- * fingerprint deliberately does not cover this composition-local overlay.
- */
-export function augmentProcessParameters(parameters: Record<string, unknown>, policy: ProcessPolicy): Record<string, unknown> {
-  if (!policy.advertisesEscalation) return parameters
-  const augmented = structuredClone(parameters)
-  const schemas = [augmented, ...(Array.isArray(augmented.oneOf) ? augmented.oneOf.filter(isRecord) : [])]
-  let changed = false
-  for (const schema of schemas) {
-    const properties = isRecord(schema.properties) ? schema.properties : undefined
-    if (properties === undefined) continue
-    changed = true
-    properties[ESCALATION_PERMISSION_FIELD] = {
-      type: 'string',
-      enum: [ESCALATION_TARGET],
-      description: `The wider access this command needs. Only valid as a one-shot retry of a call refused with AGENTSHIM_PROCESS_REQUIRES_FULL_ACCESS; requires a justification and user approval.`,
-    }
-    properties[ESCALATION_JUSTIFICATION_FIELD] = {
-      type: 'string',
-      description: `Required with ${ESCALATION_PERMISSION_FIELD}: one sentence for the user explaining why this exact command needs full access.`,
-    }
-  }
-  if (!changed) return parameters
-  return augmented
+function relevantLines(stderr: string, rule: RunnerFailureRule): string[] {
+  const informational = new Set((rule.informationalLines ?? []).map(line => line.toLowerCase()))
+  return stderr.split(/\r?\n/).filter(line => !informational.has(line.toLowerCase()))
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
+export function classifyRunnerFailure(exitCode: string | null, stderr: string, rules: readonly RunnerFailureRule[]): boolean {
+  const numericExit = exitCode === null ? undefined : Number.parseInt(exitCode, 10)
+  if (exitCode === '0') return false
+  return rules.some(rule => {
+    if (rule.allowedExitCodes !== undefined && (numericExit === undefined || !rule.allowedExitCodes.includes(numericExit))) return false
+    return relevantLines(stderr, rule).some(line => rule.fatalSignatures.some(signature => line.toLowerCase().includes(signature.toLowerCase())))
+  })
+}
+
+export function classifyDenial(exitCode: string | null, stderr: string, signatures: readonly string[]): boolean {
+  if (exitCode === '0') return false
+  const lowered = stderr.toLowerCase()
+  return signatures.some(signature => lowered.includes(signature.toLowerCase()))
 }

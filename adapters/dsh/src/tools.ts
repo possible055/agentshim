@@ -1,210 +1,574 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { JsonSchemaNode, ToolCallView, ToolDefinition, ToolResultView } from '@deepseek-ai/dsh-tools'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { CatalogSnapshot, AgentshimSession, AgentshimToolName, ResolvedSessionConfig } from './session.ts'
-import { EXPECTED_TOOL_ORDER } from './session.ts'
-import { materializeContent, normalizeMcpResult } from './content.ts'
-import { augmentProcessParameters, beginReadObservation, completeReadObservation, createProcessPolicy } from './policy.ts'
-
-/** Canonical output contract shared by all six tools (§9): content blocks plus optional lossless JSON. */
-const outputSchema: JsonSchemaNode = {
-  type: 'object',
-  properties: {
-    content: { type: 'array', items: {} },
-    structuredContent: {},
-  },
-  required: ['content'],
-  additionalProperties: false,
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function stringArg(args: unknown, key: string): string | undefined {
-  const value = isRecord(args) ? args[key] : undefined
-  return typeof value === 'string' ? value : undefined
-}
-
-function numberArg(args: unknown, key: string): number | undefined {
-  const value = isRecord(args) ? args[key] : undefined
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
-}
-
-function presentReadCall(args: unknown): ToolCallView | undefined {
-  const path = stringArg(args, 'path')
-  if (path === undefined) return undefined
-  const line = numberArg(args, 'start_line')
-  return {
-    card: 'generic',
-    title: `Read ${path}`,
-    kind: 'read',
-    locations: [{ path, ...(line !== undefined ? { line } : {}) }],
-  }
-}
-
-function presentSearchCall(kind: 'Grep' | 'Glob', argKey: string): (args: unknown) => ToolCallView | undefined {
-  return args => {
-    const needle = stringArg(args, argKey)
-    if (needle === undefined) return undefined
-    return { card: 'generic', title: `${kind} ${needle}`, kind: 'search' }
-  }
-}
-
-function presentRunProgramCall(args: unknown): ToolCallView | undefined {
-  const program = stringArg(args, 'program')
-  if (program === undefined) return undefined
-  const argv = isRecord(args) && Array.isArray(args.args) ? args.args : []
-  const title = [program, ...argv.filter(element => typeof element === 'string')].join(' ')
-  const cwd = stringArg(args, 'cwd')
-  return { card: 'terminal', title, ...(cwd !== undefined ? { cwd } : {}) }
-}
-
-function presentBashCall(args: unknown): ToolCallView | undefined {
-  const action = stringArg(args, 'action')
-  const jobId = stringArg(args, 'job_id')
-  if (action === 'terminate' && jobId !== undefined) {
-    return { card: 'terminal', title: `Terminate ${jobId}` }
-  }
-  const command = stringArg(args, 'command')
-  if (command === undefined) return undefined
-  const cwd = stringArg(args, 'cwd')
-  return { card: 'terminal', title: command, ...(cwd !== undefined ? { cwd } : {}) }
-}
-
-function presentBashStatusCall(args: unknown): ToolCallView | undefined {
-  const jobId = stringArg(args, 'job_id')
-  return jobId === undefined ? undefined : { card: 'terminal', title: `Status ${jobId}` }
-}
-
-function presentTerminalResult(_args: unknown, result: { content: ContentBlock[]; isError: boolean }): ToolResultView | undefined {
-  if (result.isError) return undefined
-  const output = result.content
-    .filter(block => block.type === 'text')
-    .map(block => block.type === 'text' ? block.text : '')
-    .join('\n')
-  return { card: 'terminal', output }
-}
+import { HarnessError } from '@deepseek-ai/dsh-llm'
+import { JobId } from '@deepseek-ai/dsh-jobs'
+import { defineTool } from '@deepseek-ai/dsh-tools'
+import type { ToolCallView, ToolDefinition, ToolResultView, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { createSession } from './session.ts'
+import type { CatalogSnapshot, AgentshimSession, ResolvedSessionConfig } from './session.ts'
+import { normalizeMcpResult, materializeReadAttachments, normalizedText } from './content.ts'
+import {
+  beginReadObservation,
+  classifyDenial,
+  classifyRunnerFailure,
+  completeReadObservation,
+  createProcessPolicy,
+} from './policy.ts'
+import type { ProcessPolicy } from './policy.ts'
+import {
+  assertExactKeys,
+  assertIntegerRange,
+  assertNonEmpty,
+  assertPositive,
+  assertStringRecord,
+  bashOutputSchema,
+  bashParameters,
+  bashStatusOutputSchema,
+  bashStatusParameters,
+  bridgeProcess,
+  bridgeText,
+  escalationParameters,
+  globParameters,
+  processOutputSchema,
+  PUBLIC_TOOL_NAMES,
+  readOutputSchema,
+  readParameters,
+  runProgramParameters,
+  textOutputSchema,
+  grepParameters,
+} from './contracts.ts'
+import type { BridgeProcess } from './contracts.ts'
+import { startBackgroundBash } from './jobs.ts'
+import type { BackgroundJobManager } from './jobs.ts'
+import { boundedProcessText } from './capture.ts'
+import type { CaptureCompletion, CaptureStore, CaptureStreamName } from './capture.ts'
+import type {
+  NativeBashArgs,
+  NativeEngine,
+  NativeGlobArgs,
+  NativeGrepArgs,
+  NativeReadArgs,
+  NativeRunProgramArgs,
+} from './native.ts'
 
 export interface ToolDependencies {
   readonly ctx: Context
   readonly session: AgentshimSession
   readonly snapshot: CatalogSnapshot
   readonly config: ResolvedSessionConfig
+  readonly jobs: BackgroundJobManager
+  readonly captureStore: CaptureStore
+  /** In-process engine; present only when the native addon loaded for this platform. */
+  readonly native?: NativeEngine
 }
 
-const PROCESS_DESCRIPTION_SUFFIX = ' This tool runs outside the DSH sandbox: a call refused with AGENTSHIM_PROCESS_REQUIRES_FULL_ACCESS must be retried with the exact same arguments plus sandbox_permissions: "danger-full-access" and a justification for the user to approve.'
-
-async function callAndMaterialize(deps: ToolDependencies, name: string, args: Record<string, unknown>, exec: ToolRunContext): Promise<{ content: ContentBlock[]; structuredContent?: unknown }> {
-  const raw = await deps.session.call(name, args, exec.signal)
-  const normalized = normalizeMcpResult(raw, name)
-  const content = await materializeContent(deps.ctx, exec, normalized.content)
+function nativeReadArgs(args: Record<string, unknown>): NativeReadArgs {
   return {
-    content,
-    ...(normalized.structuredContent !== undefined ? { structuredContent: normalized.structuredContent } : {}),
+    path: args.path as string,
+    ...(args.encoding === undefined ? {} : { encoding: args.encoding as string }),
+    ...(args.start_line === undefined ? {} : { startLine: args.start_line as number }),
+    ...(args.line_count === undefined ? {} : { lineCount: args.line_count as number }),
+    ...(args.pages === undefined ? {} : { pages: args.pages as string }),
+    ...(args.pdf_mode === undefined ? {} : { pdfMode: args.pdf_mode as 'auto' | 'text' | 'image' }),
+    ...(args.pdf_cursor === undefined ? {} : { pdfCursor: args.pdf_cursor as string }),
+  }
+}
+
+function nativeGrepArgs(args: Record<string, unknown>): NativeGrepArgs {
+  return {
+    pattern: args.pattern as string,
+    ...(args.path === undefined ? {} : { path: args.path as string }),
+    ...(args.glob === undefined ? {} : { glob: args.glob as string }),
+    ...(args.mode === undefined ? {} : { mode: args.mode as 'content' | 'files' | 'count' }),
+    ...(args.fixed_strings === undefined ? {} : { fixedStrings: args.fixed_strings as boolean }),
+    ...(args.case === undefined ? {} : { case: args.case as 'smart' | 'sensitive' | 'insensitive' }),
+    ...(args.context_lines === undefined ? {} : { contextLines: args.context_lines as number }),
+    ...(args.offset === undefined ? {} : { offset: args.offset as number }),
+    ...(args.limit === undefined ? {} : { limit: args.limit as number }),
+    ...(args.include_ignored === undefined ? {} : { includeIgnored: args.include_ignored as boolean }),
+    ...(args.encoding === undefined ? {} : { encoding: args.encoding as string }),
+    ...(args.fallback_encoding === undefined ? {} : { fallbackEncoding: args.fallback_encoding as string }),
+  }
+}
+
+function nativeGlobArgs(args: Record<string, unknown>): NativeGlobArgs {
+  return {
+    pattern: args.pattern as string,
+    ...(args.path === undefined ? {} : { path: args.path as string }),
+    ...(args.include_ignored === undefined ? {} : { includeIgnored: args.include_ignored as boolean }),
+    ...(args.type === undefined ? {} : { entryType: args.type as 'file' | 'directory' | 'any' }),
+    ...(args.offset === undefined ? {} : { offset: args.offset as number }),
+    ...(args.limit === undefined ? {} : { limit: args.limit as number }),
   }
 }
 
 /**
- * Build the six native tool definitions from the validated runtime catalog:
- * names/descriptions/parameters are cloned from the catalog, `timeoutMs`
- * declares the DSH 600-second shelf (enforced only when the composition loads
- * `dsh-tool-call-timeout-policy`), and only `read`/`grep`/`glob` opt into
- * concurrent dispatch. Reads bridge the DSH fs observation policy; process
- * tools enforce the fail-closed full-access escalation. The definition
- * objects are shared across agents; each agent registers them into its own
- * scope.
+ * A read is native-eligible only when it is a plain text page: PDF reads return
+ * image attachments through the bridge's structured content, and artifact paths
+ * still need the bridge's exact read grant while process tools remain on the MCP
+ * transport.
  */
-export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<AgentshimToolName, ToolDefinition> {
-  const processPolicy = createProcessPolicy(deps.ctx)
-  const definitions = new Map<AgentshimToolName, ToolDefinition>()
-  for (const entry of deps.snapshot.tools) {
-    const isProcessTool = entry.name === 'run_program' || entry.name === 'bash'
-    const parameters = isProcessTool
-      ? augmentProcessParameters(structuredClone(entry.parameters), processPolicy)
-      : structuredClone(entry.parameters)
-    const description = isProcessTool && processPolicy.advertisesEscalation
-      ? entry.description + PROCESS_DESCRIPTION_SUFFIX
-      : entry.description
-    const execute = async (args: unknown, exec: ToolRunContext): Promise<unknown> => {
-      const argsObj = isRecord(args) ? { ...args } : {}
-      if (entry.name === 'read' && typeof argsObj.path === 'string') {
-        const observation = await beginReadObservation(deps.ctx, exec, deps.config.root, argsObj.path)
-        const result = await callAndMaterialize(deps, entry.name, argsObj, exec)
-        await completeReadObservation(deps.ctx, exec, observation)
-        return result
-      }
-      const prepared = isProcessTool
-        ? await processPolicy.prepareArguments(entry.name, argsObj, exec)
-        : argsObj
-      return callAndMaterialize(deps, entry.name, prepared, exec)
-    }
-    const definition: ToolDefinition = {
-      name: entry.name,
-      description,
-      parameters,
-      output: {
-        schema: outputSchema,
-        render: (_args, value) => (value as unknown as { content: ContentBlock[] }).content,
-      },
-      timeoutMs: deps.config.toolCallTimeoutMs,
-      execute,
-      ...(entry.name === 'read' || entry.name === 'grep' || entry.name === 'glob' || entry.name === 'bash_status'
-        ? { isConcurrencySafe: () => true }
-        : {}),
-      ...(entry.name === 'read' ? { presentCall: presentReadCall } : {}),
-      ...(entry.name === 'grep' ? { presentCall: presentSearchCall('Grep', 'pattern') } : {}),
-      ...(entry.name === 'glob' ? { presentCall: presentSearchCall('Glob', 'pattern') } : {}),
-      ...(entry.name === 'run_program' ? { presentCall: presentRunProgramCall } : {}),
-      ...(entry.name === 'bash' ? { presentCall: presentBashCall } : {}),
-      ...(entry.name === 'bash_status' ? { presentCall: presentBashStatusCall } : {}),
-      ...(isProcessTool || entry.name === 'bash_status'
-        ? { presentResult: (args: unknown, result) => presentTerminalResult(args, result) }
-        : {}),
-    }
-    definitions.set(entry.name, definition)
-  }
-  return definitions
+function nativeReadEligible(deps: ToolDependencies, args: Record<string, unknown>): boolean {
+  if (deps.native === undefined) return false
+  if (args.pages !== undefined || args.pdf_mode !== undefined || args.pdf_cursor !== undefined) return false
+  return true
 }
 
-/** Prompt sections shadowing the preset's guidance for the replaced tools (§9). */
-export function promptSections(): ReadonlyArray<{ readonly name: string; readonly order: number; readonly text: string }> {
+async function nativeSearchEligible(deps: ToolDependencies, path: unknown): Promise<boolean> {
+  if (deps.native === undefined) return false
+  if (typeof path !== 'string') return true
+  return await deps.captureStore.grant(path) === undefined
+}
+
+function textBlock(text: string): ContentBlock[] {
+  return [{ type: 'text', text }]
+}
+
+function presentReadCall(args: { path: string; start_line?: number }): ToolCallView {
+  return {
+    card: 'generic',
+    title: `Read ${args.path}`,
+    kind: 'read',
+    locations: [{ path: args.path, ...(args.start_line === undefined ? {} : { line: args.start_line }) }],
+  }
+}
+
+function presentSearchCall(kind: 'Grep' | 'Glob'): (args: { pattern: string }) => ToolCallView {
+  return args => ({ card: 'generic', title: `${kind} ${args.pattern}`, kind: 'search' })
+}
+
+function presentRunProgramCall(args: { program: string; args?: string[]; cwd?: string }): ToolCallView {
+  return {
+    card: 'terminal',
+    title: [args.program, ...(args.args ?? [])].join(' '),
+    ...(args.cwd === undefined ? {} : { cwd: args.cwd }),
+  }
+}
+
+function presentBashCall(args: { command: string; description: string; workdir?: string; run_in_background?: boolean }): ToolCallView {
+  if (args.run_in_background === true) {
+    return { card: 'generic', title: args.command, kind: 'execute', rawInput: args.command, content: textBlock(args.description) }
+  }
+  return {
+    card: 'terminal',
+    title: args.command,
+    description: args.description,
+    ...(args.workdir === undefined ? {} : { cwd: args.workdir }),
+  }
+}
+
+function presentBashStatusCall(args: { job_id: string }): ToolCallView {
+  return { card: 'generic', title: `Status ${args.job_id}`, kind: 'execute' }
+}
+
+function presentTerminalResult(_args: unknown, result: { content: ContentBlock[]; isError: boolean }): ToolResultView | undefined {
+  if (result.isError) return undefined
+  return {
+    card: 'terminal',
+    output: result.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n'),
+  }
+}
+
+async function callBridge(
+  deps: ToolDependencies,
+  name: 'read' | 'grep' | 'glob' | 'run_program' | 'bash',
+  args: Record<string, unknown>,
+  exec: ToolRunContext,
+) {
+  const wire = { ...args }
+  if ((name === 'read' || name === 'grep') && typeof args.path === 'string') {
+    const grant = await deps.captureStore.grant(args.path)
+    if (grant !== undefined) wire._agentshimReadGrant = grant
+  }
+  const normalized = normalizeMcpResult(await deps.session.call(name, wire, exec.signal), name)
+  const text = bridgeText(normalized.structuredContent, name, normalizedText(normalized))
+  return { normalized, text }
+}
+
+function nativeRunProgramArgs(args: Record<string, unknown>): NativeRunProgramArgs {
+  const env: Record<string, string> = {}
+  if (args.env !== undefined && typeof args.env === 'object') {
+    for (const [key, value] of Object.entries(args.env as Record<string, unknown>)) {
+      if (typeof value === 'string') env[key] = value
+    }
+  }
+  return {
+    program: args.program as string,
+    args: Array.isArray(args.args) ? (args.args as string[]) : [],
+    ...(args.cwd === undefined ? {} : { cwd: args.cwd as string }),
+    ...(Object.keys(env).length === 0 ? {} : { env }),
+    ...(Array.isArray(args.unset_env) ? { unsetEnv: args.unset_env as string[] } : {}),
+    ...(args.stdin === undefined ? {} : { stdin: args.stdin as string }),
+    ...(args.timeout_ms === undefined ? {} : { timeoutMs: args.timeout_ms as number }),
+  }
+}
+
+function nativeBashArgs(wire: Record<string, unknown>): NativeBashArgs {
+  return {
+    command: wire.command as string,
+    ...(wire.cwd === undefined ? {} : { cwd: wire.cwd as string }),
+    ...(wire.timeout_ms === undefined ? {} : { timeoutMs: wire.timeout_ms as number }),
+    ...(wire.msys_argument_conversion === undefined ? {} : { msysArgumentConversion: wire.msys_argument_conversion as 'enabled' | 'disabled' }),
+  }
+}
+
+/**
+ * In-process foreground execution for unconfined calls: prepare the final argv,
+ * wrap it through the standing sandbox policy (escalation stays one-call), and
+ * spawn through the Engine's durable capture. Confined and dedicated-generation
+ * calls stay on the MCP bridge until the sandbox-runner E2E migrates.
+ */
+async function executeProcessNative(
+  deps: ToolDependencies,
+  policy: ProcessPolicy,
+  name: 'run_program' | 'bash',
+  args: Record<string, unknown>,
+  wire: Record<string, unknown>,
+  exec: ToolRunContext,
+) {
+  const engine = deps.native
+  if (engine === undefined) throw new Error('dsh-agentshim: native engine unavailable')
+  const prepared = name === 'run_program'
+    ? engine.prepareRunProgram(nativeRunProgramArgs(args))
+    : engine.prepareBash(nativeBashArgs(wire))
+  const decision = await policy.wrapArgv(name, prepared.argv, args, exec)
+  if (decision.mode !== 'danger-full-access' && decision.wrappedArgv === undefined) {
+    throw new HarnessError('sandbox confinement returned no wrapped argv', 'SANDBOX_UNAVAILABLE')
+  }
+  if (exec.signal.aborted) {
+    throw new HarnessError('tool call aborted before spawn', 'AGENTSHIM_CANCELLED')
+  }
+  const outcome = await engine.spawnPrepared(
+    prepared.handle,
+    decision.wrappedArgv === undefined ? undefined : [...decision.wrappedArgv],
+  )
+  if (outcome.errorCode !== undefined && outcome.errorCode !== 'AGENTSHIM_PROCESS_FAILED') {
+    throw new HarnessError(outcome.text, outcome.errorCode)
+  }
+  const notices = outcome.artifacts
+    .map(artifact => `Full raw ${artifact.stream}: ${artifact.path} (${artifact.bytes} bytes${artifact.complete ? '' : ', incomplete'})`)
+  const text = [outcome.text, ...notices].join('\n')
+  return {
+    kind: 'foreground' as const,
+    text,
+    exitCode: outcome.childNonzero ? '1' : '0',
+    stdout: { text: '', totalBytes: 0, shownBytes: 0, omittedBytes: 0 },
+    stderr: { text: '', totalBytes: 0, shownBytes: 0, omittedBytes: 0 },
+    ...(decision.attribution === undefined ? {} : {
+      sandbox: {
+        mode: decision.attribution.mode,
+        ...(decision.attribution.enforcement === undefined ? {} : { enforcement: decision.attribution.enforcement }),
+        denied: false,
+        runnerFailed: false,
+      },
+    }),
+  }
+}
+
+async function executeProcessBridge(
+  deps: ToolDependencies,
+  policy: ProcessPolicy,
+  name: 'run_program' | 'bash',
+  args: Record<string, unknown>,
+  exec: ToolRunContext,
+  forceDedicated = false,
+) {
+  const plan = await policy.plan(name, args, exec, deps.config, forceDedicated)
+  if (!forceDedicated && plan.sandbox === undefined && deps.native !== undefined && plan.launch === undefined) {
+    return executeProcessNative(deps, policy, name, plan.args, plan.args, exec)
+  }
+  const session = plan.launch === undefined
+    ? deps.session
+    : createSession(deps.config, {
+        launch: plan.launch,
+        reconnect: false,
+        logger: { info() {}, warn() {}, error() {} },
+        captureStore: deps.captureStore,
+      })
+  const streamNames: readonly CaptureStreamName[] = name === 'run_program' ? ['stdout', 'stderr'] : ['output']
+  const capture = await deps.captureStore.begin({
+    sessionId: exec.agent?.session.header.id ?? `direct-${globalThis.process.pid}`,
+    callId: String(exec.callId),
+    streams: streamNames,
+  })
+  try {
+    await session.ready
+    const normalized = normalizeMcpResult(await session.call(name, {
+      ...plan.args,
+      _agentshimCapture: capture.wire,
+    }, exec.signal), name)
+    const processResult: BridgeProcess = bridgeProcess(normalized.structuredContent, name, normalizedText(normalized))
+    const completed = await capture.completion
+    const withArtifacts = processArtifacts(processResult, completed, name)
+    const runnerFailed = plan.sandbox === undefined
+      ? false
+      : classifyRunnerFailure(processResult.exitCode, processResult.stderr.text, plan.sandbox.runnerFailureRules)
+    const denied = plan.sandbox === undefined || runnerFailed
+      ? false
+      : classifyDenial(processResult.exitCode, processResult.stderr.text, plan.sandbox.denialSignatures)
+    return {
+      kind: 'foreground' as const,
+      ...withArtifacts,
+      ...(plan.sandbox === undefined ? {} : {
+        sandbox: {
+          mode: plan.sandbox.mode,
+          ...(plan.sandbox.enforcement === undefined ? {} : { enforcement: plan.sandbox.enforcement }),
+          denied,
+          runnerFailed,
+        },
+      }),
+    }
+  } catch (error) {
+    const partial = Object.values(capture.artifacts())
+      .map(artifact => `${artifact.path} (${artifact.bytes} bytes, incomplete)`)
+      .join(', ')
+    await capture.abort(error instanceof Error ? error.message : String(error))
+    if (plan.sandbox !== undefined && classifyRunnerFailure(null, session.stderrTail(), plan.sandbox.runnerFailureRules)) {
+      throw new HarnessError(`sandbox runner failed before AgentShim initialized: ${session.stderrTail()}`, 'SANDBOX_UNAVAILABLE')
+    }
+    if (partial !== '' && error instanceof Error) {
+      error.message = `${error.message}; partial raw capture: ${partial}`
+    }
+    throw error
+  } finally {
+    if (session !== deps.session) await session.dispose()
+  }
+}
+
+function processArtifacts(
+  process: BridgeProcess,
+  completed: CaptureCompletion,
+  tool: 'run_program' | 'bash',
+): BridgeProcess {
+  const stdoutArtifact = tool === 'run_program' ? completed.artifacts.stdout : completed.artifacts.output
+  const stderrArtifact = tool === 'run_program' ? completed.artifacts.stderr : undefined
+  const stdout = { ...process.stdout, ...(stdoutArtifact === undefined ? {} : { artifact: stdoutArtifact }) }
+  const stderr = { ...process.stderr, ...(stderrArtifact === undefined ? {} : { artifact: stderrArtifact }) }
+  const notices = [
+    ...(stdoutArtifact === undefined ? [] : [`Full raw ${tool === 'bash' ? 'output' : 'stdout'}: ${stdoutArtifact.path} (${stdoutArtifact.bytes} bytes)`]),
+    ...(stderrArtifact === undefined ? [] : [`Full raw stderr: ${stderrArtifact.path} (${stderrArtifact.bytes} bytes)`]),
+  ]
+  return { ...process, text: boundedProcessText(process.text, notices), stdout, stderr }
+}
+
+function validateReadArgs(args: Record<string, unknown> & { path: string; line_count?: number; start_line?: number; pages?: string; pdf_cursor?: string }): void {
+  assertExactKeys(args, Object.keys(readParameters))
+  assertNonEmpty(args.path, 'path')
+  assertIntegerRange(args.line_count, 'line_count', 1, 2000)
+  assertIntegerRange(args.start_line, 'start_line', 1)
+  if (args.pages !== undefined && !/^[1-9][0-9]*(-[1-9][0-9]*)?$/.test(args.pages)) {
+    throw new HarnessError('invalid arguments: pages must be a positive page or inclusive range', 'INVALID_ARGS')
+  }
+  if (args.pdf_cursor !== undefined) assertNonEmpty(args.pdf_cursor, 'pdf_cursor')
+}
+
+function validateGrepArgs(args: Record<string, unknown> & { pattern: string; context_lines?: number; limit?: number; offset?: number; encoding?: string; fallback_encoding?: string }): void {
+  assertExactKeys(args, Object.keys(grepParameters))
+  assertIntegerRange(args.context_lines, 'context_lines', 0, 20)
+  assertIntegerRange(args.limit, 'limit', 1, 1000)
+  assertIntegerRange(args.offset, 'offset', 0)
+  if (args.encoding !== undefined && args.fallback_encoding !== undefined) {
+    throw new HarnessError('invalid arguments: encoding and fallback_encoding are mutually exclusive', 'INVALID_ARGS')
+  }
+}
+
+function validateGlobArgs(args: Record<string, unknown> & { pattern: string; limit?: number; offset?: number }): void {
+  assertExactKeys(args, Object.keys(globParameters))
+  assertNonEmpty(args.pattern, 'pattern')
+  assertIntegerRange(args.limit, 'limit', 1, 1000)
+  assertIntegerRange(args.offset, 'offset', 0)
+}
+
+function processKeys(base: Record<string, unknown>, escalation: boolean): string[] {
+  return [...Object.keys(base), ...(escalation ? Object.keys(escalationParameters) : [])]
+}
+
+function renderRead(value: { text: string; attachments: Array<{ attachmentId: string; mediaType: string; bytes: number; width: number; height: number; name?: string }> }): ContentBlock[] {
   return [
-    {
-      name: 'tool:read',
-      order: 100,
-      text: 'Continue a truncated read by passing back the argument named in its trailing "Partial:" line (such as next_start_line) with start_line — never re-read from line 1. For PDFs, drive rendering with pdf_mode and pages, and echo the pdf_cursor from the previous "Partial:" or "Retry:" line to resume.',
-    },
-    {
-      name: 'tool:glob',
-      order: 103,
-      text: 'Continue a truncated glob result by passing back the next_offset value from its "Partial:" line instead of restarting the scan.',
-    },
-    {
-      name: 'tool:grep',
-      order: 104,
-      text: 'Continue a truncated grep result by passing back the next_offset value from its "Partial:" line instead of re-scanning from the beginning.',
-    },
-    {
-      name: 'tool:run_program',
-      order: 104.5,
-      text: 'Prefer run_program with literal argv for a single program; use bash only when shell composition (pipelines, redirection, globbing, variable expansion, or several steps in one call) is required.',
-    },
-    {
-      name: 'tool:bash',
-      order: 105,
-      text: 'Each call is a fresh non-interactive bash: cwd, exports, and functions do not persist — pass cwd instead of using cd. A non-zero exit code is a normal result, not a tool error. For long work, set detach with a log_path, retain the returned job_id, inspect it with bash_status, and stop its complete server-owned tree with bash action=terminate. Detached Bash jobs belong to this agentshim server instance, not to DSH jobs (job_output/job_kill cannot see them).',
-    },
-    {
-      name: 'tool:bash_status',
-      order: 105.5,
-      text: 'Use bash_status with the opaque job_id returned by bash(detach=true) for an immediate lifecycle snapshot and bounded log tail. It does not list jobs, wait for output, or reconnect across server restarts; tail_bytes=0 requests metadata only.',
-    },
+    { type: 'text', text: value.text },
+    ...value.attachments.map(attachment => ({ type: 'image' as const, attachment: attachment as never })),
   ]
 }
 
-/** The inherited names this adapter restricts before registering its own (§8.2): DSH has no run_program, so the intersection decides. */
-export const RESTRICT_CANDIDATES = [...EXPECTED_TOOL_ORDER, 'pwsh'] as const
+export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string, ToolDefinition> {
+  const processPolicy = createProcessPolicy(deps.ctx)
+  const processParameters = {
+    ...runProgramParameters,
+    ...(processPolicy.advertisesEscalation ? escalationParameters : {}),
+  }
+  const shellParameters = {
+    ...bashParameters,
+    ...(processPolicy.advertisesEscalation ? escalationParameters : {}),
+  }
 
-export { outputSchema }
+  const read = defineTool({
+    name: 'read',
+    description: 'Read one local file as numbered lines, including an exact published process artifact path, or render PDF text and images. Native text pages are bounded to 50,000 bytes and continuations are explicit.',
+    parameters: readParameters,
+    output: { schema: readOutputSchema, render: (_args, value) => renderRead(value) },
+    timeoutMs: deps.config.toolCallTimeoutMs,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      validateReadArgs(args)
+      const observation = await beginReadObservation(deps.ctx, exec, deps.config.root, args.path)
+      let text: string
+      let attachments: Awaited<ReturnType<typeof materializeReadAttachments>> = []
+      if (nativeReadEligible(deps, args)) {
+        const native = await deps.native?.readText(nativeReadArgs(args))
+        if (native === undefined) throw new Error('dsh-agentshim: native engine vanished before read')
+        text = native.text
+      } else {
+        const { normalized } = await callBridge(deps, 'read', args, exec)
+        text = bridgeText(normalized.structuredContent, 'read', normalizedText(normalized))
+        attachments = await materializeReadAttachments(deps.ctx, exec, normalized.content)
+      }
+      await completeReadObservation(deps.ctx, exec, observation)
+      return { kind: 'read' as const, text, attachments }
+    },
+    presentCall: presentReadCall,
+  })
+
+  const grep = defineTool({
+    name: 'grep',
+    description: 'Search local file contents, including one exact published process artifact path, with Rust regular expressions or fixed strings. Native result pages are bounded to 50,000 bytes with explicit continuation.',
+    parameters: grepParameters,
+    output: { schema: textOutputSchema('grep'), render: (_args, value) => textBlock(value.text) },
+    timeoutMs: deps.config.toolCallTimeoutMs,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      validateGrepArgs(args)
+      if (await nativeSearchEligible(deps, args.path)) {
+        const native = await deps.native?.grepText(nativeGrepArgs(args))
+        if (native === undefined) throw new Error('dsh-agentshim: native engine vanished before grep')
+        return { kind: 'grep' as const, text: native.text }
+      }
+      const { text } = await callBridge(deps, 'grep', args, exec)
+      return { kind: 'grep' as const, text }
+    },
+    presentCall: presentSearchCall('Grep'),
+  })
+
+  const glob = defineTool({
+    name: 'glob',
+    description: 'Find local filesystem paths with a glob pattern. Native result pages are bounded to 50,000 bytes with explicit continuation; private capture roots are never enumerable.',
+    parameters: globParameters,
+    output: { schema: textOutputSchema('glob'), render: (_args, value) => textBlock(value.text) },
+    timeoutMs: deps.config.toolCallTimeoutMs,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      validateGlobArgs(args)
+      if (deps.native !== undefined) {
+        const native = await deps.native.globText(nativeGlobArgs(args))
+        return { kind: 'glob' as const, text: native.text }
+      }
+      const { text } = await callBridge(deps, 'glob', args, exec)
+      return { kind: 'glob' as const, text }
+    },
+    presentCall: presentSearchCall('Glob'),
+  })
+
+  const runProgram = defineTool({
+    name: 'run_program',
+    description: 'Run one local program with literal arguments. Model text is a 50,000-byte head/tail preview; larger or non-text output is preserved at the returned raw artifact path. File effects follow the per-call DSH sandbox policy.',
+    parameters: processParameters,
+    output: { schema: processOutputSchema, render: (_args, value) => textBlock(value.text) },
+    timeoutMs: deps.config.toolCallTimeoutMs,
+    async execute(args, exec) {
+      assertExactKeys(args, processKeys(runProgramParameters, processPolicy.advertisesEscalation))
+      assertNonEmpty(args.program, 'program')
+      assertPositive(args.timeout_ms, 'timeout_ms')
+      assertStringRecord(args.env, 'env')
+      return executeProcessBridge(deps, processPolicy, 'run_program', args, exec)
+    },
+    presentCall: presentRunProgramCall,
+    presentResult: presentTerminalResult,
+  })
+
+  const bash = defineTool({
+    name: 'bash',
+    description: 'Run a fresh non-interactive POSIX Bash command. Model text is a 50,000-byte head/tail preview and complete larger or non-text output is preserved as a raw artifact. Set run_in_background for a DSH-owned job.',
+    parameters: shellParameters,
+    output: { schema: bashOutputSchema, render: (_args, value) => value.kind === 'background' ? textBlock(`started background job ${value.jobId}`) : textBlock(value.text) },
+    timeoutMs: deps.config.toolCallTimeoutMs,
+    async execute(args, exec) {
+      assertExactKeys(args, processKeys(bashParameters, processPolicy.advertisesEscalation))
+      assertNonEmpty(args.command, 'command')
+      assertNonEmpty(args.description, 'description')
+      assertPositive(args.timeoutMs, 'timeoutMs')
+      const commonWire = {
+        command: args.command,
+        ...(args.workdir === undefined ? {} : { cwd: args.workdir }),
+        ...(args.msys_argument_conversion === undefined ? {} : { msys_argument_conversion: args.msys_argument_conversion }),
+        ...(args.sandbox_permissions === undefined ? {} : { sandbox_permissions: args.sandbox_permissions }),
+        ...(args.justification === undefined ? {} : { justification: args.justification }),
+      }
+      if (args.run_in_background === true) {
+        if (args.timeoutMs !== undefined) {
+          throw new HarnessError('invalid arguments: timeoutMs does not apply to a background job', 'INVALID_ARGS')
+        }
+        const jobId = await startBackgroundBash(deps.ctx, deps.config, processPolicy, deps.jobs, deps.captureStore, {
+          command: args.command,
+          wire: { ...commonWire, detach: true },
+        }, exec)
+        return { kind: 'background' as const, jobId }
+      }
+      const wire = {
+        ...commonWire,
+        ...(args.timeoutMs === undefined ? {} : { timeout_ms: args.timeoutMs }),
+      }
+      return executeProcessBridge(deps, processPolicy, 'bash', wire, exec)
+    },
+    presentCall: presentBashCall,
+    presentResult: presentTerminalResult,
+  })
+
+  const bashStatus = defineTool({
+    name: 'bash_status',
+    description: 'Return the non-consuming DSH lifecycle snapshot for a background Bash job. Available only together with bash.',
+    parameters: bashStatusParameters,
+    output: {
+      schema: bashStatusOutputSchema,
+      render: (_args, value) => textBlock([
+        `Job: ${value.jobId}`,
+        `Status: ${value.status}`,
+        `Label: ${value.label}`,
+        ...(value.detail === undefined ? [] : [`Detail: ${value.detail}`]),
+      ].join('\n')),
+    },
+    timeoutMs: deps.config.toolCallTimeoutMs,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      assertExactKeys(args, Object.keys(bashStatusParameters))
+      assertNonEmpty(args.job_id, 'job_id')
+      const jobs = deps.ctx.get('jobs')
+      if (jobs === undefined) {
+        throw new Error('background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs')
+      }
+      const snapshot = jobs.get(JobId(args.job_id), exec.agent)
+      return {
+        kind: 'status' as const,
+        jobId: snapshot.id,
+        status: snapshot.status,
+        label: snapshot.label,
+        ...(snapshot.detail === undefined ? {} : { detail: snapshot.detail }),
+      }
+    },
+    presentCall: presentBashStatusCall,
+  })
+
+  const definitions = { read, grep, glob, run_program: runProgram, bash, bash_status: bashStatus }
+  return new Map(PUBLIC_TOOL_NAMES.map(name => [name, definitions[name]]))
+}
+
+export function promptSections(): ReadonlyArray<{ readonly name: string; readonly order: number; readonly text: string }> {
+  return [
+    { name: 'tool:read', order: 100, text: 'Continue truncated reads with the exact continuation argument returned by AgentShim, such as next_start_line passed as start_line.' },
+    { name: 'tool:glob', order: 103, text: 'Continue a truncated glob result with its next_offset rather than restarting.' },
+    { name: 'tool:grep', order: 104, text: 'Continue a truncated grep result with its next_offset rather than restarting.' },
+    { name: 'tool:run_program', order: 104.5, text: 'Prefer run_program for one executable with literal argv; use bash only for shell composition.' },
+    { name: 'tool:bash', order: 105, text: 'Each Bash call is fresh. Use run_in_background for long work, then job_output and job_kill with the returned DSH job id.' },
+    { name: 'tool:bash_status', order: 105.5, text: 'Use bash_status for a non-consuming lifecycle snapshot of a DSH Bash job; use job_output to consume output and job_kill to stop it.' },
+  ]
+}
+
+export const RESTRICT_CANDIDATES = [...PUBLIC_TOOL_NAMES, 'pwsh'] as const

@@ -29,18 +29,7 @@ pub(crate) enum GateDecision {
     Cancelled,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ProjectedTokenCost {
-    pub(crate) tokens: usize,
-    pub(crate) exact: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ProjectionDecision {
-    Fits(ProjectedTokenCost),
-    Exceeded,
-    Cancelled,
-}
+pub(crate) use agentshim_core::output::{ProjectedTokenCost, ProjectionDecision};
 
 pub(crate) struct OutputTokenGate {
     prototype: O200kPrototype,

@@ -27,8 +27,9 @@ use crate::tools::{
 };
 
 use super::{
+    RemoteCaptureSink,
     response::{
-        PdfAdmission, blocking_response, cancellation_class, classified_tool_error,
+        PdfAdmission, blocking_response_for_profile, cancellation_class, classified_tool_error,
         diagnostic_tool_error, duration_ms, parse_request, pdf_busy, pdf_timeout, queue_timeout,
         relayed_cancellation, requests_detach, resource_busy, resource_busy_with_message,
     },
@@ -44,6 +45,22 @@ pub(super) enum ToolAdmission {
     Detached(DetachedAdmission),
     DetachedControl,
     None,
+}
+
+fn finish_remote_capture(
+    capture: Option<&RemoteCaptureSink>,
+    result: &mut Result<crate::tools::ToolOutput, ProcessError>,
+) {
+    let Some(capture) = capture else {
+        return;
+    };
+    let complete = result.is_ok();
+    let error = result.as_ref().err().map(ToString::to_string);
+    if let Err(capture_error) = capture.complete(complete, error.as_deref())
+        && result.is_ok()
+    {
+        *result = Err(ProcessError::from(capture_error));
+    }
 }
 
 fn requests_bash_terminate(arguments: Option<&JsonObject>) -> bool {
@@ -105,6 +122,31 @@ pub(super) fn shell_delegate(request: &CallToolRequestParams) -> &'static str {
 }
 
 impl AgentShim {
+    #[allow(
+        clippy::result_large_err,
+        reason = "the MCP response is the natural rejection channel for capture setup"
+    )]
+    fn remote_capture(
+        &self,
+        request: Option<&crate::server::DshCaptureRequest>,
+        expected_streams: &[&str],
+        context: &RequestContext<RoleServer>,
+    ) -> Result<Option<RemoteCaptureSink>, CallToolResponse> {
+        let Some(request) = request else {
+            return Ok(None);
+        };
+        if self.client_profile() != crate::ClientProfile::Dsh {
+            return Err(classified_tool_error(
+                "validation",
+                "_agentshimCapture is available only to the DSH bridge",
+            ));
+        }
+        request
+            .validate(expected_streams)
+            .map_err(|error| classified_tool_error("validation", error))?;
+        Ok(Some(RemoteCaptureSink::new(context.peer.clone(), request)))
+    }
+
     // Read retries intentionally keep capability and reservation lifetimes in one scope.
     #[allow(clippy::too_many_lines)]
     pub(super) async fn call_read(
@@ -131,7 +173,27 @@ impl AgentShim {
             }
         };
         tracing::info!(target: "agentshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
-        let access = self.file_access.clone();
+        let access = match read_request.read_grant.as_deref() {
+            Some(grant)
+                if self.client_profile() == crate::ClientProfile::Dsh
+                    && grant == read_request.path =>
+            {
+                match self
+                    .file_access
+                    .with_exact_grant(std::path::Path::new(grant))
+                {
+                    Ok(access) => Arc::new(access),
+                    Err(error) => return classified_tool_error("validation", error.to_string()),
+                }
+            }
+            Some(_) => {
+                return classified_tool_error(
+                    "validation",
+                    "artifact read grant must exactly match the DSH read path",
+                );
+            }
+            None => self.file_access.clone(),
+        };
         let (cancellation, cancellation_relay) =
             relayed_cancellation(request_cancellation, self.resources.shutdown_token());
         let span = tracing::Span::current();
@@ -282,13 +344,14 @@ impl AgentShim {
         // data is copied again into content blocks and again by the JSON serialiser, and
         // that is the single largest allocation on the whole path. Releasing the
         // reservation before it happens would leave the biggest number off the books.
-        let response = blocking_response(
+        let response = blocking_response_for_profile(
             "read",
             duration_ms(running.elapsed()),
             result,
-            &self.output_token_gate,
+            self.output_token_gate.as_deref(),
             &cancellation,
             output_budget,
+            self.client_profile(),
         );
         cancellation_relay.abort();
         drop(pdf_admission);
@@ -376,13 +439,14 @@ impl AgentShim {
             })
         })
         .await;
-        let response = blocking_response(
+        let response = blocking_response_for_profile(
             "glob",
             duration_ms(running.elapsed()),
             result,
-            &self.output_token_gate,
+            self.output_token_gate.as_deref(),
             &response_cancellation,
             output_budget,
+            self.client_profile(),
         );
         cancellation_relay.abort();
         response
@@ -419,7 +483,28 @@ impl AgentShim {
             }
         };
         tracing::info!(target: "agentshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
-        let access = self.file_access.clone();
+        let access = match grep_request.read_grant.as_deref() {
+            Some(grant)
+                if self.client_profile() == crate::ClientProfile::Dsh
+                    && grep_request.path.as_deref() == Some(grant)
+                    && grep_request.glob.is_none() =>
+            {
+                match self
+                    .file_access
+                    .with_exact_grant(std::path::Path::new(grant))
+                {
+                    Ok(access) => Arc::new(access),
+                    Err(error) => return classified_tool_error("validation", error.to_string()),
+                }
+            }
+            Some(_) => {
+                return classified_tool_error(
+                    "validation",
+                    "artifact grep grant requires one exact DSH file path and no glob",
+                );
+            }
+            None => self.file_access.clone(),
+        };
         let resources = self.resources.clone();
         let reservation = crate::runtime::MemoryReservation::from_initial(
             resources.clone(),
@@ -448,13 +533,14 @@ impl AgentShim {
             })
         })
         .await;
-        let response = blocking_response(
+        let response = blocking_response_for_profile(
             "grep",
             duration_ms(running.elapsed()),
             result,
-            &self.output_token_gate,
+            self.output_token_gate.as_deref(),
             &response_cancellation,
             output_budget,
+            self.client_profile(),
         );
         cancellation_relay.abort();
         response
@@ -463,18 +549,28 @@ impl AgentShim {
     async fn call_process(
         &self,
         arguments: Option<JsonObject>,
-        request_cancellation: &CancellationToken,
+        context: &RequestContext<RoleServer>,
         admission: OwnedSemaphorePermit,
         output_budget: &crate::output::CallOutputBudget,
     ) -> CallToolResponse {
+        let request_cancellation = &context.ct;
         let process_request: ProcessRequest = match parse_request(arguments, "run_program") {
             Ok(request) => request,
             Err(error) => return classified_tool_error("validation", error),
         };
-        if let Err(error) = process_request.validate() {
+        if let Err(error) = process_request.validate(super::service::max_timeout_ms()) {
             return classified_tool_error("validation", error.to_string());
         }
-        let timeout = Duration::from_millis(process_request.timeout_ms());
+        let remote_capture = match self.remote_capture(
+            process_request.capture.as_ref(),
+            &["stdout", "stderr"],
+            context,
+        ) {
+            Ok(capture) => capture,
+            Err(response) => return response,
+        };
+        let timeout =
+            Duration::from_millis(process_request.timeout_ms(super::service::max_timeout_ms()));
         let memory_charge = process_request.memory_charge();
         let queued = Instant::now();
         let permits = tokio::time::timeout(timeout, async {
@@ -493,11 +589,19 @@ impl AgentShim {
                     "run_program cancelled while waiting for process capacity",
                 );
             }
-            Err(_) => return queue_timeout("run_program", process_request.timeout_ms()),
+            Err(_) => {
+                return queue_timeout(
+                    "run_program",
+                    process_request.timeout_ms(super::service::max_timeout_ms()),
+                );
+            }
         };
         tracing::info!(target: "agentshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
         let Some(remaining) = timeout.checked_sub(queued.elapsed()) else {
-            return queue_timeout("run_program", process_request.timeout_ms());
+            return queue_timeout(
+                "run_program",
+                process_request.timeout_ms(super::service::max_timeout_ms()),
+            );
         };
         let root = self.root.clone();
         let resolver = self.process_resolver.clone();
@@ -512,29 +616,36 @@ impl AgentShim {
                 let Some(remaining) = remaining.checked_sub(running.elapsed()) else {
                     drop(permits);
                     return Err(ProcessError::TimeoutBeforeSpawn {
-                        timeout_ms: process_request.timeout_ms(),
+                        timeout_ms: process_request.timeout_ms(super::service::max_timeout_ms()),
                     });
                 };
-                let result = crate::tools::run_program::execute_output_with_budget(
+                let capture_sink = remote_capture.as_ref().map(|capture| {
+                    Arc::new(capture.clone()) as Arc<dyn crate::tools::exec::spawn::CaptureSink>
+                });
+                let mut result = crate::tools::run_program::execute_output_with_capture(
                     &root,
                     &resolver,
                     &process_request,
                     remaining,
                     &cancellation,
+                    super::service::max_timeout_ms(),
                     &execute_output_budget,
+                    capture_sink.as_ref(),
                 );
+                finish_remote_capture(remote_capture.as_ref(), &mut result);
                 drop(permits);
                 result
             })
         })
         .await;
-        let response = blocking_response(
+        let response = blocking_response_for_profile(
             "run_program",
             duration_ms(running.elapsed()),
             result,
-            &self.output_token_gate,
+            self.output_token_gate.as_deref(),
             &response_cancellation,
             output_budget,
+            self.client_profile(),
         );
         cancellation_relay.abort();
         response
@@ -543,18 +654,30 @@ impl AgentShim {
     pub(super) async fn call_bash(
         &self,
         arguments: Option<JsonObject>,
-        request_cancellation: &CancellationToken,
+        context: &RequestContext<RoleServer>,
         admission: ToolAdmission,
         output_budget: &crate::output::CallOutputBudget,
     ) -> CallToolResponse {
+        let request_cancellation = &context.ct;
         let request: BashToolRequest = match parse_request(arguments, "bash") {
             Ok(request) => request,
             Err(error) => return classified_tool_error("validation", error),
         };
         match request {
             BashToolRequest::Run(request) => {
-                self.call_bash_run(request, request_cancellation, admission, output_budget)
-                    .await
+                let remote_capture =
+                    match self.remote_capture(request.capture.as_ref(), &["output"], context) {
+                        Ok(capture) => capture,
+                        Err(response) => return response,
+                    };
+                self.call_bash_run(
+                    request,
+                    request_cancellation,
+                    remote_capture,
+                    admission,
+                    output_budget,
+                )
+                .await
             }
             BashToolRequest::Terminate(request) => {
                 if let Err(error) = request.validate() {
@@ -591,14 +714,44 @@ impl AgentShim {
                     }
                     Err(error) => Ok(Err(error)),
                 };
-                blocking_response(
+                blocking_response_for_profile(
                     "bash",
                     duration_ms(started.elapsed()),
                     result,
-                    &self.output_token_gate,
+                    self.output_token_gate.as_deref(),
                     request_cancellation,
                     output_budget,
+                    self.client_profile(),
                 )
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) async fn call_bash_for_test(
+        &self,
+        arguments: Option<JsonObject>,
+        request_cancellation: &CancellationToken,
+        admission: ToolAdmission,
+        output_budget: &crate::output::CallOutputBudget,
+    ) -> CallToolResponse {
+        let request: BashToolRequest = match parse_request(arguments, "bash") {
+            Ok(request) => request,
+            Err(error) => return classified_tool_error("validation", error),
+        };
+        match request {
+            BashToolRequest::Run(request) => {
+                self.call_bash_run(
+                    request,
+                    request_cancellation,
+                    None,
+                    admission,
+                    output_budget,
+                )
+                .await
+            }
+            BashToolRequest::Terminate(_) => {
+                classified_tool_error("validation", "test helper accepts bash run requests only")
             }
         }
     }
@@ -609,10 +762,11 @@ impl AgentShim {
         &self,
         bash_request: BashRequest,
         request_cancellation: &CancellationToken,
+        remote_capture: Option<RemoteCaptureSink>,
         admission: ToolAdmission,
         output_budget: &crate::output::CallOutputBudget,
     ) -> CallToolResponse {
-        if let Err(error) = bash_request.validate() {
+        if let Err(error) = bash_request.validate(super::service::max_timeout_ms()) {
             return classified_tool_error("validation", error.to_string());
         }
         // The parsed request, not the pre-admission peek, decides which resource this call
@@ -640,7 +794,8 @@ impl AgentShim {
             }
             _ => unreachable!("bash is admitted as a process or a detached call"),
         };
-        let timeout = Duration::from_millis(bash_request.timeout_ms());
+        let timeout =
+            Duration::from_millis(bash_request.timeout_ms(super::service::max_timeout_ms()));
         let queued = Instant::now();
         let memory_charge = bash_request.memory_charge();
         let permits = match tokio::time::timeout(timeout, async {
@@ -662,11 +817,17 @@ impl AgentShim {
             Err(_) => None,
         };
         let Some(permits) = permits else {
-            return queue_timeout("bash", bash_request.timeout_ms());
+            return queue_timeout(
+                "bash",
+                bash_request.timeout_ms(super::service::max_timeout_ms()),
+            );
         };
         tracing::info!(target: "agentshim", event = "capacity_acquired", phase = "queue", queue_ms = duration_ms(queued.elapsed()));
         let Some(remaining) = timeout.checked_sub(queued.elapsed()) else {
-            return queue_timeout("bash", bash_request.timeout_ms());
+            return queue_timeout(
+                "bash",
+                bash_request.timeout_ms(super::service::max_timeout_ms()),
+            );
         };
         let root = self.root.clone();
         let locator = self.bash_locator.clone();
@@ -685,37 +846,46 @@ impl AgentShim {
                     let Some(remaining) = remaining.checked_sub(running.elapsed()) else {
                         drop(permits);
                         return Err(ProcessError::TimeoutBeforeSpawn {
-                            timeout_ms: bash_request.timeout_ms(),
+                            timeout_ms: bash_request.timeout_ms(super::service::max_timeout_ms()),
                         });
                     };
                     remaining
                 };
-                let result = crate::tools::bash::execute_output_with_budget(
+                let capture_sink = remote_capture.as_ref().map(|capture| {
+                    Arc::new(capture.clone()) as Arc<dyn crate::tools::exec::spawn::CaptureSink>
+                });
+                let mut result = crate::tools::bash::execute_output_with_capture(
                     &root,
                     &locator,
                     detached_admission,
                     &bash_request,
                     remaining,
                     &cancellation,
+                    super::service::max_timeout_ms(),
                     &execute_output_budget,
+                    capture_sink.as_ref(),
                 );
+                if !bash_request.detach {
+                    finish_remote_capture(remote_capture.as_ref(), &mut result);
+                }
                 drop(permits);
                 result
             })
         })
         .await;
         let committed_response_cancellation = CancellationToken::new();
-        let response = blocking_response(
+        let response = blocking_response_for_profile(
             "bash",
             duration_ms(running.elapsed()),
             result,
-            &self.output_token_gate,
+            self.output_token_gate.as_deref(),
             if detached_response {
                 &committed_response_cancellation
             } else {
                 &response_cancellation
             },
             output_budget,
+            self.client_profile(),
         );
         cancellation_relay.abort();
         response
@@ -754,10 +924,34 @@ impl AgentShim {
         let execute_budget = output_budget.clone();
         let started = Instant::now();
         let result = tokio::task::spawn_blocking(move || {
-            let snapshot = detached.status(&request.job_id, request.tail_bytes)?;
+            let read_snapshot = || {
+                if let Some(cursor) = request.cursor {
+                    detached.status_cursor(
+                        &request.job_id,
+                        cursor,
+                        request.max_bytes.unwrap_or(request.tail_bytes),
+                    )
+                } else {
+                    detached.status(&request.job_id, request.tail_bytes)
+                }
+            };
+            let mut snapshot = read_snapshot()?;
+            if request.wait_ms > 0
+                && snapshot.log.bytes.is_empty()
+                && matches!(
+                    snapshot.state,
+                    crate::tools::bash::status::JobState::Running
+                        | crate::tools::bash::status::JobState::StatusUnknown
+                        | crate::tools::bash::status::JobState::Finalizing
+                        | crate::tools::bash::status::JobState::Terminating
+                )
+            {
+                std::thread::sleep(Duration::from_millis(request.wait_ms));
+                snapshot = read_snapshot()?;
+            }
             let rendered = crate::tools::bash::status::render_with_budget(
                 &snapshot,
-                request.tail_bytes,
+                request.max_bytes.unwrap_or(request.tail_bytes),
                 &cancellation,
                 &execute_budget,
             );
@@ -765,13 +959,14 @@ impl AgentShim {
             rendered
         })
         .await;
-        blocking_response(
+        blocking_response_for_profile(
             "bash_status",
             duration_ms(started.elapsed()),
             result,
-            &self.output_token_gate,
+            self.output_token_gate.as_deref(),
             request_cancellation,
             output_budget,
+            self.client_profile(),
         )
     }
     pub(super) async fn dispatch_tool(
@@ -792,7 +987,7 @@ impl AgentShim {
                 .call_grep(request.arguments, &context.ct, admission, output_budget)
                 .await),
             ("run_program", ToolAdmission::Process(admission)) => Ok(self
-                .call_process(request.arguments, &context.ct, admission, output_budget)
+                .call_process(request.arguments, context, admission, output_budget)
                 .await),
             (
                 "bash",
@@ -800,7 +995,7 @@ impl AgentShim {
                 | ToolAdmission::Detached(_)
                 | ToolAdmission::DetachedControl),
             ) => Ok(self
-                .call_bash(request.arguments, &context.ct, admission, output_budget)
+                .call_bash(request.arguments, context, admission, output_budget)
                 .await),
             ("bash_status", ToolAdmission::ReadOnly(admission)) => Ok(self
                 .call_bash_status(request.arguments, &context.ct, admission, output_budget)

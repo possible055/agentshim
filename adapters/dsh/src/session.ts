@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto'
 import { constants as fsConstants } from 'node:fs'
 import { access, realpath, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -10,68 +9,60 @@ import { ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js'
 import type { Tool } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { scrubbedParentEnv } from '@deepseek-ai/dsh-subprocess'
-import { assertSupportedJsonSchema, TOOL_ABORTED } from '@deepseek-ai/dsh-tools'
+import { TOOL_ABORTED } from '@deepseek-ai/dsh-tools'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
+import { BRIDGE_VERSION, REQUIRED_BRIDGE_OPERATIONS } from './contracts.ts'
+import type { BridgeOperation } from './contracts.ts'
+import type { CaptureAppendParams, CaptureCompleteParams, CaptureStore } from './capture.ts'
 
-/** The only tool names this adapter may ever serve, in the server's fixed order. */
-export const EXPECTED_TOOL_ORDER = ['read', 'grep', 'glob', 'run_program', 'bash', 'bash_status'] as const
-
-export type AgentshimToolName = (typeof EXPECTED_TOOL_ORDER)[number]
-
-/** Lower bound for the per-call timeout: the DSH 600-second tool shelf. */
 export const MIN_TOOL_CALL_TIMEOUT_MS = 600_000
-
-/**
- * The raw tools/call result is validated only as a record here, exactly like
- * the DSH bridge; the adapter's own trust boundary validates content blocks
- * later. Owning the raw request also keeps the SDK's per-page output-validator
- * cache from pre-validating a contract it may not support.
- */
-const RawCallToolResultSchema = z.record(z.string(), z.unknown())
-
-/**
- * Standard JSON Schema vocabulary the agentshim catalog uses that falls
- * outside the DSH-supported subset: the numeric/string constraint keywords,
- * and schema-form `additionalProperties` (DSH only supports the boolean
- * form). These are omitted from the schema copy the startup gate asserts on,
- * but kept verbatim in the published parameters and covered by the catalog
- * fingerprint, so any other drift still fails loud.
- */
-const GATE_OMITTED_KEYWORDS = new Set(['minimum', 'maximum', 'minLength', 'maxLength', 'pattern'])
-
-/** One additional second past the SDK's two two-second termination grace periods. */
 const GENERATION_CLOSE_TIMEOUT_MS = 5_000
+const RawCallToolResultSchema = z.record(z.string(), z.unknown())
+const CaptureStreamSchema = z.enum(['stdout', 'stderr', 'output'])
+const CaptureAppendRequestSchema = z.object({
+  method: z.literal('agentshim/dsh.capture.append'),
+  params: z.object({
+    bridgeVersion: z.literal(BRIDGE_VERSION),
+    captureId: z.string().min(1),
+    stream: CaptureStreamSchema,
+    offset: z.number().int().nonnegative(),
+    data: z.string(),
+  }),
+})
+const CaptureCompleteRequestSchema = z.object({
+  method: z.literal('agentshim/dsh.capture.complete'),
+  params: z.object({
+    bridgeVersion: z.literal(BRIDGE_VERSION),
+    captureId: z.string().min(1),
+    complete: z.boolean(),
+    totals: z.object({
+      stdout: z.number().int().nonnegative().optional(),
+      stderr: z.number().int().nonnegative().optional(),
+      output: z.number().int().nonnegative().optional(),
+    }),
+    error: z.string().optional(),
+  }),
+})
 
 export interface SessionConfigInput {
-  /** Plugin working root; empty string resolves to `process.cwd()`. */
   readonly root: string
-  /** agentshim executable; empty string resolves to the platform install path. */
   readonly command: string
-  /** Arguments placed before the fixed server argv (development wrappers only). */
   readonly commandArgs: readonly string[]
   readonly readScope: 'normal' | 'unrestricted'
-  /** Extra environment merged on top of the scrubbed parent environment. */
   readonly env: Record<string, string>
   readonly toolCallTimeoutMs: number
+  readonly captureRoot?: string
+  readonly captureMaxBytes?: number
 }
 
 export interface ResolvedSessionConfig extends SessionConfigInput {
-  /** Canonical absolute root: also the child cwd and the agent-cwd match value. */
   readonly root: string
   readonly command: string
 }
 
-export interface CatalogEntry {
-  readonly name: AgentshimToolName
-  readonly title: string | undefined
-  readonly description: string
-  /** Runtime input schema after the deterministic type-array rewrite. */
-  readonly parameters: Record<string, unknown>
-}
-
 export interface CatalogSnapshot {
-  readonly tools: readonly CatalogEntry[]
-  readonly fingerprint: string
+  readonly operations: readonly BridgeOperation[]
+  readonly bridgeVersion: number
 }
 
 export interface SessionLogger {
@@ -80,16 +71,26 @@ export interface SessionLogger {
   error(message: string): void
 }
 
+export interface SessionLaunch {
+  readonly command: string
+  readonly args: readonly string[]
+  readonly cwd: string
+  readonly env: Record<string, string>
+  readonly stderr?: 'pipe' | 'inherit'
+}
+
 export interface SessionOptions {
-  /** Test seam; production always builds the official SDK client. */
   readonly createClient?: () => Client
   readonly logger?: SessionLogger
+  readonly launch?: SessionLaunch
+  readonly reconnect?: boolean
+  readonly captureStore?: CaptureStore
 }
 
 export interface AgentshimSession {
-  /** Settles with the first validated catalog; rejects on startup failure. */
   readonly ready: Promise<CatalogSnapshot>
-  call(name: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Record<string, unknown>>
+  call(name: BridgeOperation, args: Record<string, unknown>, signal: AbortSignal): Promise<Record<string, unknown>>
+  stderrTail(): string
   dispose(): Promise<void>
 }
 
@@ -102,164 +103,35 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-/**
- * Transform every schema-position node (root, `properties` values, `items`,
- * object-form `additionalProperties`, `oneOf` elements) while leaving
- * annotation, enum, and const values untouched — those are data, not schemas.
- */
-function transformSchemaValue(
-  value: unknown,
-  transform: (node: Record<string, unknown>) => Record<string, unknown>,
-): unknown {
-  if (!isRecord(value)) return value
-  const replaced = transform(value)
-  const out: Record<string, unknown> = {}
-  for (const [key, child] of Object.entries(replaced)) {
-    if (key === 'properties' && isRecord(child)) {
-      const properties: Record<string, unknown> = {}
-      for (const [name, property] of Object.entries(child)) properties[name] = transformSchemaValue(property, transform)
-      out[key] = properties
-    } else if (key === 'items' || (key === 'additionalProperties' && isRecord(child))) {
-      out[key] = transformSchemaValue(child, transform)
-    } else if (key === 'oneOf' && Array.isArray(child)) {
-      out[key] = child.map(element => transformSchemaValue(element, transform))
-    } else {
-      out[key] = child
-    }
-  }
-  return out
+function bridgeVersion(tool: Tool): number | undefined {
+  const meta = isRecord(tool._meta) ? tool._meta['agentshim.dshBridge'] : undefined
+  return isRecord(meta) && Number.isInteger(meta.version) ? meta.version as number : undefined
 }
 
-/**
- * Deterministically rewrite `"type": [a, b]` into `oneOf: [{ type: a }, { type: b }]`
- * (the DSH tool-bash idiom). The whole node is replaced — oneOf cannot keep
- * constraint siblings — preserving only the `description` and `default`
- * annotations. The rewrite is part of the published parameters and of the
- * catalog fingerprint.
- */
-export function rewriteTypeArrays(schema: unknown): unknown {
-  return transformSchemaValue(schema, node => {
-    if (!Array.isArray(node.type)) return node
-    const variants: unknown[] = node.type
-    if (variants.length < 2 || variants.some(variant => typeof variant !== 'string')) {
-      throw new Error(`dsh-agentshim: catalog validation failed: type array must list at least two string types, got ${JSON.stringify(variants)}`)
-    }
-    const replacement: Record<string, unknown> = {
-      oneOf: (variants as string[]).map(variant => ({ type: variant })),
-    }
-    if (typeof node.description === 'string') replacement.description = node.description
-    if (Object.hasOwn(node, 'default')) replacement.default = node.default
-    return replacement
-  })
-}
-
-function projectSchemaForGate(schema: unknown): unknown {
-  return transformSchemaValue(schema, node => {
-    const out: Record<string, unknown> = {}
-    for (const [key, value] of Object.entries(node)) {
-      if (GATE_OMITTED_KEYWORDS.has(key)) continue
-      if (key === 'additionalProperties' && typeof value !== 'boolean') continue
-      if (key === 'type' && Array.isArray(node.oneOf)) continue
-      out[key] = value
-    }
-    return out
-  })
-}
-
-/** Stable JSON with recursively sorted object keys; arrays keep their order. */
-export function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
-  if (isRecord(value)) {
-    const keys = Object.keys(value).sort()
-    return `{${keys.map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
-  }
-  return JSON.stringify(value) ?? 'null'
-}
-
-export interface FingerprintRecord {
-  readonly name: string
-  readonly title?: string
-  readonly description: string
-  readonly inputSchema: unknown
-  readonly annotations?: unknown
-  readonly execution?: unknown
-  readonly meta?: unknown
-}
-
-/**
- * Deterministic identity of the drained catalog over name, description,
- * rewritten schema, and execution metadata. Two generations of the same
- * server must produce the same digest or reconnects fail with
- * `AGENTSHIM_CATALOG_CHANGED`.
- */
-export function catalogFingerprint(tools: readonly FingerprintRecord[]): string {
-  return createHash('sha256').update(canonicalJson(tools)).digest('hex')
-}
-
-function toolExecution(tool: Tool): Record<string, unknown> | undefined {
-  const execution = (tool as { execution?: unknown }).execution
-  return isRecord(execution) ? execution : undefined
-}
-
-/**
- * Validate a drained tools/list against the fixed six-name contract: exact
- * set and order, no duplicates, no required task execution, and every input
- * schema inside the DSH-supported subset after the deterministic rewrites.
- * Returns the published entries plus their fingerprint.
- */
 export function validateCatalog(tools: readonly Tool[]): CatalogSnapshot {
-  const names = tools.map(tool => tool.name)
-  const duplicates = names.filter((name, index) => names.indexOf(name) !== index)
-  if (duplicates.length > 0) {
-    throw new Error(`dsh-agentshim: catalog validation failed: server listed tools more than once: ${[...new Set(duplicates)].join(', ')}`)
-  }
-  if (names.join('\0') !== EXPECTED_TOOL_ORDER.join('\0')) {
-    const expected = EXPECTED_TOOL_ORDER.join(', ')
-    throw new Error(
-      `dsh-agentshim: catalog validation failed: server must list exactly [${expected}] in this order, got [${names.join(', ') || 'no tools'}]`,
-    )
-  }
-  const entries: CatalogEntry[] = []
-  const records: FingerprintRecord[] = []
+  const byName = new Map<string, Tool>()
   for (const tool of tools) {
-    const execution = toolExecution(tool)
-    if (execution?.['taskSupport'] === 'required') {
-      throw new Error(`dsh-agentshim: catalog validation failed: tool "${tool.name}" requires task-based execution, which this adapter does not support`)
+    if (byName.has(tool.name)) {
+      throw new Error(`dsh-agentshim: bridge validation failed: duplicate operation "${tool.name}"`)
     }
-    if (typeof tool.description !== 'string') {
-      throw new Error(`dsh-agentshim: catalog validation failed: tool "${tool.name}" has no string description`)
-    }
-    if (!isRecord(tool.inputSchema)) {
-      throw new Error(`dsh-agentshim: catalog validation failed: tool "${tool.name}" inputSchema is not an object`)
-    }
-    const parameters = rewriteTypeArrays(tool.inputSchema) as Record<string, unknown>
-    try {
-      assertSupportedJsonSchema(projectSchemaForGate(parameters))
-    } catch (error) {
-      throw new Error(`dsh-agentshim: catalog validation failed: tool "${tool.name}" inputSchema is outside the supported subset: ${String(error)}`)
-    }
-    const name = tool.name as AgentshimToolName
-    const title = typeof tool.title === 'string' ? tool.title : undefined
-    entries.push({ name, title, description: tool.description, parameters })
-    records.push({
-      name,
-      ...(title !== undefined ? { title } : {}),
-      description: tool.description,
-      inputSchema: parameters,
-      ...(isRecord(tool.annotations) ? { annotations: tool.annotations } : {}),
-      ...(execution !== undefined ? { execution } : {}),
-      ...(isRecord((tool as { _meta?: unknown })._meta) ? { meta: (tool as { _meta: Record<string, unknown> })._meta } : {}),
-    })
+    byName.set(tool.name, tool)
   }
-  return { tools: entries, fingerprint: catalogFingerprint(records) }
+  const missing = REQUIRED_BRIDGE_OPERATIONS.filter(name => !byName.has(name))
+  if (missing.length > 0) {
+    throw new Error(`dsh-agentshim: bridge validation failed: missing required operations: ${missing.join(', ')}`)
+  }
+  const versions = REQUIRED_BRIDGE_OPERATIONS.map(name => bridgeVersion(byName.get(name) as Tool))
+  if (versions.some(version => version !== BRIDGE_VERSION)) {
+    throw new Error(`dsh-agentshim: bridge validation failed: expected agentshim.dshBridge version ${BRIDGE_VERSION} on every required operation`)
+  }
+  return { operations: [...REQUIRED_BRIDGE_OPERATIONS], bridgeVersion: BRIDGE_VERSION }
 }
 
-/** The platform's standard agentshim install path; fails loud when the base env is missing. */
 export function defaultInstallCommand(): string {
   if (process.platform === 'win32') {
     const localAppData = process.env.LOCALAPPDATA
     if (localAppData === undefined || localAppData === '') {
-      throw new Error("dsh-agentshim: cannot resolve the default agentshim path: LOCALAPPDATA is not set; set the plugin's `command` config to the agentshim executable")
+      throw new Error("dsh-agentshim: cannot resolve the default agentshim path: LOCALAPPDATA is not set; set the plugin's `command` config")
     }
     return join(localAppData, 'agentshim', 'bin', 'agentshim.exe')
   }
@@ -269,69 +141,54 @@ export function defaultInstallCommand(): string {
   return join(dataHome, 'agentshim', 'bin', 'agentshim')
 }
 
-/**
- * Resolve and validate the session config: canonical absolute root that must
- * exist, an executable that must be an absolute existing file (executable on
- * POSIX), and a bounded call timeout. Failures name the checked path and the
- * `command` override so misconfiguration is actionable.
- */
 export async function resolveSessionConfig(input: SessionConfigInput): Promise<ResolvedSessionConfig> {
   const rawRoot = input.root === '' ? process.cwd() : input.root
-  if (!isAbsolute(rawRoot)) {
-    throw new Error(`dsh-agentshim: root must be an absolute path, got ${JSON.stringify(input.root)}`)
-  }
+  if (!isAbsolute(rawRoot)) throw new Error(`dsh-agentshim: root must be absolute, got ${JSON.stringify(input.root)}`)
   let root: string
   try {
     root = await realpath(rawRoot)
   } catch (error) {
     throw new Error(`dsh-agentshim: root ${JSON.stringify(rawRoot)} does not exist: ${String(error)}`)
   }
-  const rootStat = await stat(root)
-  if (!rootStat.isDirectory()) {
-    throw new Error(`dsh-agentshim: root ${JSON.stringify(root)} is not a directory`)
-  }
+  if (!(await stat(root)).isDirectory()) throw new Error(`dsh-agentshim: root ${JSON.stringify(root)} is not a directory`)
   const defaultCommand = defaultInstallCommand()
   const command = input.command === '' ? defaultCommand : input.command
-  if (!isAbsolute(command)) {
-    throw new Error(`dsh-agentshim: command must be an absolute path, got ${JSON.stringify(input.command)} (platform default: ${defaultCommand})`)
-  }
+  if (!isAbsolute(command)) throw new Error(`dsh-agentshim: command must be absolute, got ${JSON.stringify(input.command)}`)
   try {
-    const commandStat = await stat(command)
-    if (!commandStat.isFile()) {
-      throw new Error(`dsh-agentshim: command ${JSON.stringify(command)} is not a file; set the plugin's \`command\` config to the agentshim executable`)
-    }
+    if (!(await stat(command)).isFile()) throw new Error('not a file')
   } catch (error) {
-    throw new Error(
-      `dsh-agentshim: agentshim executable not found at ${JSON.stringify(command)}`
-      + `${input.command === '' ? ' (resolved platform default)' : ''}: ${String(error)}`
-      + " — install agentshim or set the plugin's `command` config",
-      { cause: error instanceof Error ? error : undefined },
-    )
+    throw new Error(`dsh-agentshim: agentshim executable not found at ${JSON.stringify(command)}: ${String(error)}`)
   }
-  if (process.platform !== 'win32') {
-    try {
-      await access(command, fsConstants.X_OK)
-    } catch (error) {
-      throw new Error(`dsh-agentshim: command ${JSON.stringify(command)} is not executable: ${String(error)}`)
-    }
-  }
+  if (process.platform !== 'win32') await access(command, fsConstants.X_OK)
   if (input.readScope !== 'normal' && input.readScope !== 'unrestricted') {
     throw new Error(`dsh-agentshim: readScope must be "normal" or "unrestricted", got ${JSON.stringify(input.readScope)}`)
   }
   if (!Number.isFinite(input.toolCallTimeoutMs) || input.toolCallTimeoutMs < MIN_TOOL_CALL_TIMEOUT_MS) {
-    throw new Error(`dsh-agentshim: toolCallTimeoutMs must be a finite number >= ${MIN_TOOL_CALL_TIMEOUT_MS}, got ${String(input.toolCallTimeoutMs)}`)
+    throw new Error(`dsh-agentshim: toolCallTimeoutMs must be >= ${MIN_TOOL_CALL_TIMEOUT_MS}`)
   }
   return { ...input, root, command }
 }
 
-/** The fixed server argv: `<command> <commandArgs...> serve --client-profile codex --read-scope <mode>`. */
 export function serverArgs(config: ResolvedSessionConfig): string[] {
-  return [...config.commandArgs, 'serve', '--client-profile', 'codex', '--read-scope', config.readScope]
+  return [...config.commandArgs, 'serve', '--client-profile', 'dsh', '--read-scope', config.readScope]
 }
 
-/** Credential-scrubbed parent environment with the config's explicit env layered on top. */
 export function childEnv(extra: Record<string, string>): Record<string, string> {
   return { ...scrubbedParentEnv(), ...extra }
+}
+
+export function defaultLaunch(config: ResolvedSessionConfig): SessionLaunch {
+  return {
+    command: config.command,
+    args: serverArgs(config),
+    cwd: config.root,
+    env: childEnv(config.env),
+    stderr: 'pipe',
+  }
+}
+
+export function serverCommand(config: ResolvedSessionConfig): string[] {
+  return [config.command, ...serverArgs(config)]
 }
 
 function awaitClosed(closed: Promise<void>): Promise<boolean> {
@@ -351,29 +208,35 @@ function abortError(): HarnessError {
   return error
 }
 
-/**
- * One private agentshim MCP session: spawns `agentshim serve` over stdio,
- * validates the six-tool catalog before going live, serves raw tools/call
- * requests, and reconnects at most once per new call after an unexpected
- * close — never on a timer, never replaying in-flight calls.
- */
 export function createSession(config: ResolvedSessionConfig, options: SessionOptions = {}): AgentshimSession {
-  const createClient = options.createClient ?? (() => new Client({ name: 'dsh-agentshim', version: '0.0.1' }, { capabilities: {} }))
-  const logger: SessionLogger = options.logger ?? console
-  const args = serverArgs(config)
-  const env = childEnv(config.env)
+  const createClient = options.createClient ?? (() => new Client({ name: 'dsh-agentshim', version: '0.1.0' }, { capabilities: {} }))
+  const logger = options.logger ?? console
+  const launch = options.launch ?? defaultLaunch(config)
+  const reconnect = options.reconnect ?? true
+  const captureStore = options.captureStore
 
   let disposed = false
   let current: Generation | undefined
   let opening: Generation | undefined
   let connecting: Promise<{ generation: Generation; snapshot: CatalogSnapshot }> | undefined
-  let expectedFingerprint: string | undefined
   let previousClosed: Promise<unknown> | undefined
   const activeControllers = new Set<AbortController>()
   const activeCallPromises = new Set<Promise<unknown>>()
+  let stderrBytes = Buffer.alloc(0)
 
   function createTransport(): Transport {
-    return new StdioClientTransport({ command: config.command, args, cwd: config.root, env })
+    const transport = new StdioClientTransport({
+      command: launch.command,
+      args: [...launch.args],
+      cwd: launch.cwd,
+      env: launch.env,
+      stderr: launch.stderr ?? 'pipe',
+    })
+    transport.stderr?.on('data', (chunk: Buffer | string) => {
+      const incoming = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      stderrBytes = Buffer.concat([stderrBytes, incoming]).subarray(-32 * 1024)
+    })
+    return transport
   }
 
   async function drainCatalog(client: Client): Promise<CatalogSnapshot> {
@@ -395,54 +258,61 @@ export function createSession(config: ResolvedSessionConfig, options: SessionOpt
     if (previousClosed !== undefined) await previousClosed
     if (disposed) throw new Error('dsh-agentshim: session is disposed')
     const client = createClient()
+    if (captureStore !== undefined) {
+      client.setRequestHandler(CaptureAppendRequestSchema, request => {
+        return captureStore.append(request.params as CaptureAppendParams)
+      })
+      client.setRequestHandler(CaptureCompleteRequestSchema, request => {
+        return captureStore.complete(request.params as CaptureCompleteParams)
+      })
+    }
     const closed = Promise.withResolvers<void>()
-    const generation: Generation = { client, closed: closed.promise }
+    const generation = { client, closed: closed.promise }
     opening = generation
-    let attemptSettled = false
+    let settled = false
     client.onclose = () => {
       closed.resolve()
       previousClosed = closed.promise
-      if (attemptSettled && current === generation) {
+      if (settled && current === generation) {
         current = undefined
-        logger.warn('dsh-agentshim: agentshim server closed unexpectedly; the next tool call attempts one reconnect')
+        logger.warn('dsh-agentshim: agentshim server closed unexpectedly')
       }
     }
-    let snapshot: CatalogSnapshot
     try {
       await client.connect(createTransport(), { timeout: config.toolCallTimeoutMs })
-      snapshot = await drainCatalog(client)
-      if (expectedFingerprint !== undefined && snapshot.fingerprint !== expectedFingerprint) {
-        throw new HarnessError(
-          `dsh-agentshim: server catalog changed after reconnect (expected fingerprint ${expectedFingerprint}, got ${snapshot.fingerprint}); reload the plugin to re-register the tools`,
-          'AGENTSHIM_CATALOG_CHANGED',
-        )
-      }
+      const snapshot = await drainCatalog(client)
+      settled = true
+      opening = undefined
+      current = generation
+      return { generation, snapshot }
     } catch (error) {
-      attemptSettled = true
-      if (opening === generation) opening = undefined
+      settled = true
+      opening = undefined
       current = undefined
-      try { await client.close() } catch { /* transport already gone */ }
+      try { await client.close() } catch { /* transport already closed */ }
       previousClosed = closed.promise
-      if (!await awaitClosed(closed.promise)) {
-        logger.error(`dsh-agentshim: failed generation did not close within ${GENERATION_CLOSE_TIMEOUT_MS}ms; not starting an overlapping server process`)
-      }
+      if (!await awaitClosed(closed.promise)) logger.error('dsh-agentshim: failed generation did not close promptly')
       throw error
     }
-    attemptSettled = true
-    expectedFingerprint ??= snapshot.fingerprint
-    if (opening === generation) opening = undefined
-    current = generation
-    return { generation, snapshot }
+  }
+
+  function startConnecting(): Promise<{ generation: Generation; snapshot: CatalogSnapshot }> {
+    const attempt = connectGeneration().finally(() => {
+      if (connecting === attempt) connecting = undefined
+    })
+    connecting = attempt
+    return attempt
   }
 
   async function ensureGeneration(): Promise<Generation> {
     if (disposed) throw new Error('dsh-agentshim: session is disposed')
     if (current !== undefined) return current
+    if (!reconnect && previousClosed !== undefined) throw new Error('dsh-agentshim: dedicated session closed')
     connecting ??= startConnecting()
     return (await connecting).generation
   }
 
-  async function performCall(name: string, callArgs: Record<string, unknown>, signal: AbortSignal): Promise<Record<string, unknown>> {
+  async function performCall(name: BridgeOperation, args: Record<string, unknown>, signal: AbortSignal): Promise<Record<string, unknown>> {
     const generation = await ensureGeneration()
     const controller = new AbortController()
     activeControllers.add(controller)
@@ -451,7 +321,7 @@ export function createSession(config: ResolvedSessionConfig, options: SessionOpt
     else signal.addEventListener('abort', forwardAbort, { once: true })
     try {
       return await generation.client.request(
-        { method: 'tools/call', params: { name, arguments: callArgs } },
+        { method: 'tools/call', params: { name, arguments: args } },
         RawCallToolResultSchema,
         { signal: controller.signal, timeout: config.toolCallTimeoutMs },
       ) as Record<string, unknown>
@@ -464,41 +334,26 @@ export function createSession(config: ResolvedSessionConfig, options: SessionOpt
     }
   }
 
-  function startConnecting(): Promise<{ generation: Generation; snapshot: CatalogSnapshot }> {
-    const attempt = connectGeneration().finally(() => {
-      if (connecting === attempt) connecting = undefined
-    })
-    connecting = attempt
-    return attempt
-  }
-
   const firstAttempt = startConnecting()
-
   return {
     ready: firstAttempt.then(attempt => attempt.snapshot),
-    call(name, callArgs, signal) {
-      const promise = performCall(name, callArgs, signal)
+    call(name, args, signal) {
+      const promise = performCall(name, args, signal)
       activeCallPromises.add(promise)
-      void promise.then(
-        () => activeCallPromises.delete(promise),
-        () => activeCallPromises.delete(promise),
-      )
+      void promise.finally(() => activeCallPromises.delete(promise)).catch(() => {})
       return promise
     },
+    stderrTail: () => stderrBytes.toString('utf8'),
     async dispose() {
       if (disposed) return
       disposed = true
       for (const controller of activeControllers) controller.abort()
-      const generations = new Set<Generation>()
-      if (opening !== undefined) generations.add(opening)
-      if (current !== undefined) generations.add(current)
+      const generations = new Set([opening, current].filter((value): value is Generation => value !== undefined))
       opening = undefined
       current = undefined
       for (const generation of generations) {
-        try { await generation.client.close() } catch { /* transport already gone */ }
-        if (!await awaitClosed(generation.closed)) {
-          logger.error(`dsh-agentshim: server did not close within ${GENERATION_CLOSE_TIMEOUT_MS}ms during teardown; its detached process trees may not have been collected`)
-        }
+        try { await generation.client.close() } catch { /* transport already closed */ }
+        if (!await awaitClosed(generation.closed)) logger.error('dsh-agentshim: server did not close promptly during teardown')
       }
       if (connecting !== undefined) await connecting.catch(() => {})
       await Promise.allSettled(activeCallPromises)

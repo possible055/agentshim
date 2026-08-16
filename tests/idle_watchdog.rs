@@ -140,6 +140,10 @@ fn invalid_values_fail_startup_and_doctor_reports_profile_gating() {
     assert!(cursor.status.success());
     assert!(String::from_utf8_lossy(&cursor.stdout).contains("idle timeout: disabled"));
 
+    let dsh = doctor("dsh", Some("7"));
+    assert!(dsh.status.success());
+    assert!(String::from_utf8_lossy(&dsh.stdout).contains("idle timeout: disabled"));
+
     let disabled = doctor("codex", None);
     assert!(disabled.status.success());
     assert!(String::from_utf8_lossy(&disabled.stdout).contains("idle timeout: disabled"));
@@ -162,6 +166,14 @@ fn cursor_profile_ignores_the_idle_timeout() {
         "cursor",
         1,
     );
+    session.handshake();
+
+    session.assert_alive_for(Duration::from_secs(3));
+}
+
+#[test]
+fn dsh_profile_ignores_the_idle_timeout() {
+    let mut session = Session::start(std::path::Path::new(env!("CARGO_MANIFEST_DIR")), "dsh", 1);
     session.handshake();
 
     session.assert_alive_for(Duration::from_secs(3));

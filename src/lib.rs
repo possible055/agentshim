@@ -1,21 +1,20 @@
 mod diagnostics;
-mod encoding;
 mod output;
-mod path;
 mod platform;
 mod profile;
-mod runtime;
 mod server;
-mod sorting;
-mod tools;
-mod traversal;
+
+// The MCP shell owns transport, catalog, client profiles, and output gating; every
+// compute path below lives in the host-neutral core crate.
+pub use agentshim_core::{encoding, path, runtime, sorting, tools, traversal};
 
 pub use diagnostics::{
     DiagnosticsConfig, DiagnosticsGuard, LogMode, LogStatus, PurgeReport, capacity_bytes, purge,
     retention_days, status,
 };
 pub use output::{
-    NEXT_OFFSET_FIELD, NEXT_START_LINE_FIELD, PARTIAL_MARKER, PDF_CURSOR_FIELD, bounded_diagnostic,
+    DSH_NATIVE_PREVIEW_BYTES, DSH_WIRE_BYTE_LIMIT, NEXT_OFFSET_FIELD, NEXT_START_LINE_FIELD,
+    PARTIAL_MARKER, PDF_CURSOR_FIELD, bounded_diagnostic,
 };
 pub use path::ReadScope;
 pub use profile::ClientProfile;

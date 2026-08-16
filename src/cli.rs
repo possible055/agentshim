@@ -9,7 +9,8 @@ use std::{
 };
 
 use agentshim::{
-    AgentShim, ClientProfile, MAX_READ_ONLY_CALLS, ReadScope, RuntimeLimits, bash_report,
+    AgentShim, ClientProfile, DSH_NATIVE_PREVIEW_BYTES, DSH_WIRE_BYTE_LIMIT, MAX_READ_ONLY_CALLS,
+    ReadScope, RuntimeLimits, bash_report,
 };
 use rmcp::{
     ServiceExt,
@@ -181,7 +182,11 @@ pub(super) async fn run(config: RuntimeLimits, command: CliCommand) -> Result<()
                 shutdown: service.shutdown_token(),
                 termination_reported: false,
             };
-            tracing::info!(target: "agentshim", event = "server_start", phase = "lifecycle", read_scope = %read_scope, client_profile = %service.client_profile(), tool_output_tokens = service.tool_output_token_limit(), burst_tokens = service.burst_token_limit(), idle_timeout_secs = service.runtime_limits().idle_timeout.map(|timeout| timeout.as_secs()));
+            if service.client_profile() == ClientProfile::Dsh {
+                tracing::info!(target: "agentshim", event = "server_start", phase = "lifecycle", read_scope = %read_scope, client_profile = %service.client_profile(), tool_output_tokens = "n/a", burst_tokens = "n/a", native_preview_bytes = DSH_NATIVE_PREVIEW_BYTES, wire_limit_bytes = DSH_WIRE_BYTE_LIMIT, idle_timeout_secs = service.runtime_limits().idle_timeout.map(|timeout| timeout.as_secs()));
+            } else {
+                tracing::info!(target: "agentshim", event = "server_start", phase = "lifecycle", read_scope = %read_scope, client_profile = %service.client_profile(), tool_output_tokens = service.tool_output_token_limit(), burst_tokens = service.burst_token_limit(), idle_timeout_secs = service.runtime_limits().idle_timeout.map(|timeout| timeout.as_secs()));
+            }
             let shutdown_token = service.shutdown_token();
             let transport = (reader, stdout).into_transport();
             // Seed before transport polling starts so an instance whose client never
@@ -323,8 +328,15 @@ fn run_doctor(config: RuntimeLimits, options: &ServeOptions) -> Result<(), Box<d
         service.runtime_limits().respect_gitignore
     );
     println!("client profile: {}", service.client_profile());
-    println!("tool output tokens: {}", service.tool_output_token_limit());
-    println!("burst tokens: {}", service.burst_token_limit());
+    if service.client_profile() == ClientProfile::Dsh {
+        println!("tool output tokens: n/a");
+        println!("burst tokens: n/a");
+        println!("native preview bytes: {DSH_NATIVE_PREVIEW_BYTES}");
+        println!("wire safety bytes: {DSH_WIRE_BYTE_LIMIT}");
+    } else {
+        println!("tool output tokens: {}", service.tool_output_token_limit());
+        println!("burst tokens: {}", service.burst_token_limit());
+    }
     match service.runtime_limits().idle_timeout {
         Some(timeout) => println!("idle timeout: {}s", timeout.as_secs()),
         None => println!("idle timeout: disabled"),

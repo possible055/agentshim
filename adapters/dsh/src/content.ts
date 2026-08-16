@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { createUserMessage, HarnessError } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { JsonValue, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 
 /** One MCP image block still in wire form (base64 + declared MIME). */
 export interface RawImageBlock {
@@ -85,6 +86,10 @@ export function normalizeMcpResult(raw: Record<string, unknown>, toolName: strin
     }
   }
   return { content, structuredContent: raw.structuredContent === undefined ? undefined : raw.structuredContent as JsonValue }
+}
+
+export function normalizedText(result: NormalizedResult): string {
+  return result.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
 }
 
 const PDF_TEXT_RETRY_HINT = ' — retry the same call with pdf_mode: "text" to receive page Markdown instead'
@@ -180,4 +185,13 @@ export async function materializeContent(
     }))
   }
   return blocks
+}
+
+export async function materializeReadAttachments(
+  ctx: Context,
+  exec: ToolRunContext,
+  content: readonly RawContentBlock[],
+): Promise<ImageAttachmentRef[]> {
+  const blocks = await materializeContent(ctx, exec, content)
+  return blocks.flatMap(block => block.type === 'image' ? [block.attachment] : [])
 }

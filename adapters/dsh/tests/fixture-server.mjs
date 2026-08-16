@@ -2,6 +2,7 @@ import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
+import { z } from 'zod'
 
 // Stand-in for `agentshim serve` over stdio. Catalog and behavior variants are
 // selected with FIXTURE_MODE so session.spec.ts can exercise every startup
@@ -170,6 +171,10 @@ const baseTools = [
   },
 ]
 
+for (const tool of baseTools) {
+  tool._meta = { 'agentshim.dshBridge': { version: mode === 'wrong-bridge' ? 1 : 2 } }
+}
+
 let tools = baseTools
 if (mode === 'missing') tools = baseTools.filter(tool => tool.name !== 'grep')
 if (mode === 'extra') {
@@ -201,6 +206,42 @@ server.setRequestHandler(ListToolsRequestSchema, request => {
 })
 
 const PNG_1X1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+const fixtureJobs = new Map()
+const captureAck = z.object({ nextOffset: z.number().int().nonnegative() })
+const captureCompleteAck = z.object({ complete: z.literal(true) })
+
+async function captureOutput(args, streams) {
+  const capture = args._agentshimCapture
+  if (capture === undefined) return
+  const totals = {}
+  for (const [stream, bytes] of Object.entries(streams)) {
+    const data = Buffer.from(bytes)
+    totals[stream] = data.byteLength
+    if (data.byteLength > 0) {
+      await server.request({
+        method: 'agentshim/dsh.capture.append',
+        params: {
+          bridgeVersion: 2,
+          captureId: capture.id,
+          stream,
+          offset: 0,
+          data: data.toString('base64'),
+        },
+      }, captureAck)
+    }
+  }
+  const failed = process.env.FIXTURE_CAPTURE_ERROR === '1'
+  await server.request({
+    method: 'agentshim/dsh.capture.complete',
+    params: {
+      bridgeVersion: 2,
+      captureId: capture.id,
+      complete: !failed,
+      totals,
+      ...(failed ? { error: 'AGENTSHIM_CAPTURE_IO_FAILED: injected fixture storage failure' } : {}),
+    },
+  }, captureCompleteAck)
+}
 
 server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   if (process.env.FIXTURE_CALL_ERROR === '1') {
@@ -218,6 +259,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         { type: 'text', text: 'page 1' },
         { type: 'image', data, mimeType },
       ],
+      structuredContent: { bridgeVersion: 2, tool: request.params.name },
     }
   }
   const delay = Number.parseInt(process.env.FIXTURE_CALL_DELAY_MS ?? '0', 10) || 0
@@ -230,8 +272,101 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       }, { once: true })
     })
   }
+  const args = request.params.arguments ?? {}
+  if (request.params.name === 'bash' && args.detach === true) {
+    if (process.env.FIXTURE_BACKGROUND_START_ERROR === '1') {
+      return {
+        content: [{ type: 'text', text: 'fixture background start failed' }],
+        isError: true,
+        structuredContent: { error: { code: 'fixture_start_failed', message: 'fixture background start failed', retryable: false, details: null } },
+      }
+    }
+    const jobId = `bash-00000000-0000-4000-8000-${String(fixtureJobs.size + 1).padStart(12, '0')}`
+    fixtureJobs.set(jobId, {
+      body: process.env.FIXTURE_JOB_OUTPUT ?? 'background output\n',
+      state: process.env.FIXTURE_JOB_RUNNING === '1' ? 'running' : 'completed',
+    })
+    await captureOutput(args, { output: process.env.FIXTURE_JOB_OUTPUT ?? 'background output\n' })
+    return {
+      content: [{ type: 'text', text: `Detached: job_id=${jobId}` }],
+      structuredContent: {
+        bridgeVersion: 2,
+        tool: 'bash',
+        job: { jobId, pid: 1234 },
+      },
+    }
+  }
+  if (request.params.name === 'bash' && args.action === 'terminate') {
+    if (process.env.FIXTURE_TERMINATE_ERROR === '1') {
+      return {
+        content: [{ type: 'text', text: 'fixture terminate failed' }],
+        isError: true,
+        structuredContent: { error: { code: 'fixture_terminate_failed', message: 'fixture terminate failed', retryable: false, details: null } },
+      }
+    }
+    const job = fixtureJobs.get(args.job_id)
+    if (job !== undefined) job.state = 'terminated'
+    return {
+      content: [{ type: 'text', text: `terminated ${args.job_id}` }],
+      structuredContent: { bridgeVersion: 2, tool: 'bash' },
+    }
+  }
+  if (request.params.name === 'bash_status') {
+    if (process.env.FIXTURE_JOB_STATUS_ERROR === '1') {
+      return {
+        content: [{ type: 'text', text: 'fixture status failed' }],
+        isError: true,
+        structuredContent: { error: { code: 'fixture_status_failed', message: 'fixture status failed', retryable: false, details: null } },
+      }
+    }
+    const job = fixtureJobs.get(args.job_id) ?? { body: '', state: 'completed' }
+    const body = job.body
+    const cursor = Number(args.cursor ?? 0)
+    const chunk = body.slice(cursor)
+    return {
+      content: [{ type: 'text', text: `State: ${job.state}\n${chunk}` }],
+      structuredContent: {
+        bridgeVersion: 2,
+        tool: 'bash_status',
+        job: {
+          jobId: args.job_id,
+          state: job.state,
+          exitCode: job.state === 'completed' ? '0' : null,
+          totalBytes: body.length,
+          chunkStart: cursor,
+          nextCursor: body.length,
+          chunk,
+          invalidUtf8Bytes: 0,
+          capture: 'remote-spool',
+          truncated: process.env.FIXTURE_JOB_TRUNCATED === '1',
+          error: null,
+        },
+      },
+    }
+  }
+  if (request.params.name === 'run_program' || request.params.name === 'bash') {
+    const visibleArgs = Object.fromEntries(Object.entries(args).filter(([key]) => !key.startsWith('_agentshim')))
+    const text = JSON.stringify({ name: request.params.name, arguments: visibleArgs })
+    await captureOutput(args, request.params.name === 'run_program' ? { stdout: text, stderr: '' } : { output: text })
+    return {
+      content: [{ type: 'text', text }],
+      structuredContent: {
+        bridgeVersion: 2,
+        tool: request.params.name,
+        process: {
+          exitCode: '0',
+          stdout: { text, totalBytes: text.length, shownBytes: text.length, omittedBytes: 0 },
+          stderr: { text: '', totalBytes: 0, shownBytes: 0, omittedBytes: 0 },
+        },
+      },
+    }
+  }
   return {
     content: [{ type: 'text', text: JSON.stringify({ name: request.params.name, arguments: request.params.arguments ?? null }) }],
+    structuredContent: {
+      bridgeVersion: 2,
+      tool: request.params.name,
+    },
   }
 })
 

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { copyFile, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -8,17 +8,32 @@ import { CallId } from '@deepseek-ai/dsh-llm'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime, { TOOL_ABORTED } from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { TOOL_ABORTED, renderToolsSdk, renderToolsSdkPy } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import * as ObservationPolicy from '@deepseek-ai/dsh-fs-observation-policy'
 import LocalAttachmentStore from '@deepseek-ai/dsh-attachment-local'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { JobId } from '@deepseek-ai/dsh-jobs'
+import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as agentshim from '../src/index.ts'
 import type { Config } from '../src/index.ts'
+import { PUBLIC_TOOL_NAMES } from '../src/contracts.ts'
 
 const fixturePath = fileURLToPath(new URL('./fixture-server.mjs', import.meta.url))
+const builtNativeDll = fileURLToPath(new URL('../../../target/debug/agentshim_napi.dll', import.meta.url))
 const callSignal = new AbortController().signal
+
+const stagedNativeAddon = await (async (): Promise<string | undefined> => {
+  try {
+    const directory = await mkdtemp(join(tmpdir(), 'agentshim-composition-native-'))
+    const staged = join(directory, 'agentshim_napi.node')
+    await copyFile(builtNativeDll, staged)
+    return staged
+  } catch {
+    return undefined
+  }
+})()
 
 const contexts: Context[] = []
 const pluginFibers: Array<{ dispose(): unknown }> = []
@@ -89,6 +104,7 @@ async function mountComposition(
     command: process.execPath,
     commandArgs: [fixturePath],
     readScope: 'normal',
+    captureRoot: join(root, '.dsh-test-captures'),
     env: {
       FIXTURE_REPORT: join(root, 'report.json'),
       FIXTURE_BOOT_FILE: join(root, 'boot.txt'),
@@ -125,6 +141,46 @@ async function mintStandardAgent(ctx: Context, name: string, cwd: string): Promi
   const minted = await mintAgent(ctx, name, cwd)
   ctx.emit('agent/created', { agent: minted.agent })
   return minted
+}
+
+async function mountJobComposition(
+  root: string,
+  name: string,
+  fixtureEnv: Record<string, string> = {},
+): Promise<{ ctx: Context; agent: Agent }> {
+  const ctx = await mountComposition(root, {
+    env: {
+      FIXTURE_REPORT: join(root, 'report.json'),
+      FIXTURE_BOOT_FILE: join(root, 'boot.txt'),
+      FIXTURE_EXIT_FILE: join(root, 'exit.txt'),
+      ...fixtureEnv,
+    },
+  }, async inner => {
+    await inner.plugin(LocalJobRegistry, {})
+    inner.jobs.attachController('composition-test')
+  })
+  const { agent } = await mintStandardAgent(ctx, name, root)
+  await ctx.plugin(class extends Service {
+    constructor(inner: Context) {
+      super(inner, 'agents')
+    }
+    list(): Agent[] {
+      return [agent]
+    }
+    get(id: string): Agent | undefined {
+      return id === agent.id ? agent : undefined
+    }
+  })
+  return { ctx, agent }
+}
+
+async function waitForBackgroundOutput(ctx: Context, agent: Agent, jobId: string): Promise<void> {
+  const deadline = Date.now() + 5_000
+  for (;;) {
+    if (ctx.jobs.read(JobId(jobId), agent).text.includes('background output')) return
+    if (Date.now() >= deadline) throw new Error(`background output did not arrive for ${jobId}`)
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
 }
 
 function visibleNames(ctx: Context, agent: Agent): string[] {
@@ -165,10 +221,65 @@ describe('agent scope replacement', () => {
     expect(names).not.toContain('pwsh')
     expect(names.filter(name => name.startsWith('mcp__'))).toEqual([])
 
-    const replaced = await runTool(ctx, agent, 'bash', { command: 'true' })
+    const replaced = await runTool(ctx, agent, 'bash', { command: 'true', description: 'Run successful command' })
     expect(JSON.parse(replaced)).toEqual({ name: 'bash', arguments: { command: 'true' } })
     const read = ctx.tools.schemas(agent).find(schema => schema.name === 'read')
     expect(read?.description).toContain('numbered lines')
+  })
+
+  it('emits fully typed TypeScript and Python Code Mode contracts for all six tools', async () => {
+    const root = await makeRoot()
+    const ctx = await mountComposition(root)
+    const { agent } = await mintStandardAgent(ctx, 'code-contracts', root)
+    const schemas = PUBLIC_TOOL_NAMES.map(name => {
+      const definition = ctx.tools.get(name, agent)
+      expect(definition, name).toBeDefined()
+      return {
+        name,
+        description: definition!.description,
+        parameters: definition!.parameters,
+        output: definition!.output.schema,
+      }
+    })
+
+    const typescript = renderToolsSdk(schemas)
+    const python = renderToolsSdkPy(schemas)
+    for (const name of PUBLIC_TOOL_NAMES) {
+      expect(typescript).toContain(`${name}: {`)
+      expect(python).toContain(`async def ${name}`)
+    }
+    expect(typescript).not.toContain(': unknown')
+    expect(python).not.toContain(': Any')
+    expect(python).not.toContain('-> Any')
+  })
+
+  it('rejects schema and manual argument violations before reaching MCP', async () => {
+    const root = await makeRoot()
+    const ctx = await mountComposition(root)
+    const { agent } = await mintStandardAgent(ctx, 'invalid-args', root)
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['read', {}],
+      ['read', { path: 7 }],
+      ['bash', { command: 'true', description: 'Run a command', msys_argument_conversion: 'invalid' }],
+      ['run_program', { program: 'node', stdin: 7 }],
+      ['read', { path: 'notes.txt', extra: true }],
+      ['read', { path: 'notes.txt', line_count: 0 }],
+      ['bash', { command: ' ', description: 'Run a command' }],
+      ['grep', { pattern: 'needle', encoding: 'utf8', fallback_encoding: 'utf8' }],
+      ['run_program', { program: 'node', env: { INVALID: 7 } }],
+    ]
+
+    for (const [name, args] of cases) {
+      const result = await ctx.tools.execute({
+        signal: callSignal,
+        callId: CallId(`invalid-${name}`),
+        name,
+        arguments: args,
+        agent,
+      })
+      expect(result.isError, `${name}: ${JSON.stringify(args)}`).toBe(true)
+      expect(result.error?.info).toMatchObject({ code: 'INVALID_ARGS' })
+    }
   })
 
   it('shadows the inherited prompt sections for the replaced tools', async () => {
@@ -186,8 +297,8 @@ describe('agent scope replacement', () => {
     expect(prompt).toContain('next_offset')
     expect(prompt).not.toContain('INHERITED-READ-GUIDANCE')
     expect(prompt).not.toContain('INHERITED-PWSH-GUIDANCE')
-    expect(prompt).toContain('do not persist')
-    expect(prompt).toContain('immediate lifecycle snapshot')
+    expect(prompt).toContain('Each Bash call is fresh')
+    expect(prompt).toContain('non-consuming lifecycle snapshot')
   })
 
   it('adds bash_status beside bash on a minimal catalog and leaves the editor', async () => {
@@ -212,22 +323,33 @@ describe('agent scope replacement', () => {
     expect(visibleNames(ctx, agent)).toEqual(['bash', 'bash_status', 'str_replace_editor'])
     const bash = ctx.tools.get('bash', agent)
     expect(bash?.description).toContain('POSIX')
-    const alternatives = (bash!.parameters as { oneOf?: Array<{ properties?: Record<string, unknown> }> }).oneOf ?? []
-    expect(alternatives).toHaveLength(2)
-    for (const alternative of alternatives) {
-      expect(alternative.properties).not.toHaveProperty('sandbox_permissions')
-    }
-    expect(JSON.parse(await runTool(ctx, agent, 'bash', { command: 'true' })))
+    const properties = (bash!.parameters as { properties: Record<string, unknown> }).properties
+    expect(properties).toHaveProperty('run_in_background')
+    expect(properties).not.toHaveProperty('detach')
+    expect(properties).not.toHaveProperty('sandbox_permissions')
+    expect(JSON.parse(await runTool(ctx, agent, 'bash', { command: 'true', description: 'Run successful command' })))
       .toEqual({ name: 'bash', arguments: { command: 'true' } })
     expect(await runTool(ctx, agent, 'str_replace_editor', { command: 'view', path: 'notes.txt' }))
       .toBe('inherited:str_replace_editor')
 
     const assembly = await ctx.systemPrompt.assemble({ scope: agent })
     const prompt = JSON.stringify(assembly)
-    expect(prompt).toContain('do not persist')
-    expect(prompt).toContain('immediate lifecycle snapshot')
+    expect(prompt).toContain('Each Bash call is fresh')
+    expect(prompt).toContain('non-consuming lifecycle snapshot')
     expect(prompt).not.toContain('next_start_line')
     expect(prompt).not.toContain('Prefer run_program')
+  })
+
+  it('hides an isolated inherited bash_status when bash is unavailable', async () => {
+    const root = await makeRoot()
+    const ctx = await mountComposition(root)
+    registerInheritedTools(ctx, ['bash_status', 'str_replace_editor'])
+    const { agent } = await mintAgent(ctx, 'status-without-bash', root)
+    ctx.emit('agent/created', { agent })
+
+    expect(visibleNames(ctx, agent)).toEqual(['str_replace_editor'])
+    const assembly = await ctx.systemPrompt.assemble({ scope: agent })
+    expect(JSON.stringify(assembly)).not.toContain('non-consuming lifecycle snapshot')
   })
 
   it('leaves an agent whose cwd is not the plugin root completely untouched', async () => {
@@ -392,12 +514,9 @@ describe('agent scope replacement', () => {
     expect(await exists(join(root, 'boot.txt'))).toBe(true)
     const unconfinedBash = ctx.tools.get('bash', existing.agent)
     expect(unconfinedBash).toBeDefined()
-    const unconfinedAlternatives = (unconfinedBash!.parameters as { oneOf?: Array<{ properties?: Record<string, unknown> }> }).oneOf ?? []
-    expect(unconfinedAlternatives).toHaveLength(2)
-    for (const alternative of unconfinedAlternatives) {
-      expect(alternative.properties).not.toHaveProperty('sandbox_permissions')
-    }
-    expect(JSON.parse(await runTool(ctx, existing.agent, 'bash', { command: 'true' })))
+    const unconfinedProperties = (unconfinedBash!.parameters as { properties: Record<string, unknown> }).properties
+    expect(unconfinedProperties).not.toHaveProperty('sandbox_permissions')
+    expect(JSON.parse(await runTool(ctx, existing.agent, 'bash', { command: 'true', description: 'Run successful command' })))
       .toEqual({ name: 'bash', arguments: { command: 'true' } })
 
     await ctx.plugin(class extends Service {
@@ -418,7 +537,7 @@ describe('agent scope replacement', () => {
       signal: callSignal,
       callId: CallId('hmr-denied'),
       name: 'bash',
-      arguments: { command: 'true' },
+      arguments: { command: 'true', description: 'Run command after policy change' },
       agent: existing.agent,
     })
     expect(denied.error?.info).toMatchObject({ code: 'AGENTSHIM_PROCESS_POLICY_CHANGED' })
@@ -466,13 +585,157 @@ describe('DSH contract bridges', () => {
     })
   }
 
+  it.skipIf(stagedNativeAddon === undefined)('serves native read and glob in-process beside the MCP bridge', async () => {
+    const previous = process.env.AGENTSHIM_DSH_NATIVE_DLL
+    process.env.AGENTSHIM_DSH_NATIVE_DLL = stagedNativeAddon
+    try {
+      const root = await makeRoot()
+      await writeFile(join(root, 'native-notes.txt'), 'native needle\n'.repeat(4))
+      await writeFile(join(root, 'bridge.log'), 'bridge only\n')
+      const ctx = await mountComposition(root)
+      const { agent } = await mintStandardAgent(ctx, 'n1', root)
+
+      const read = await runTool(ctx, agent, 'read', { path: 'native-notes.txt' })
+      expect(read).toContain('native needle')
+
+      const glob = await runTool(ctx, agent, 'glob', { pattern: 'native-*.txt' })
+      expect(glob).toContain('native-notes.txt')
+      expect(glob).not.toContain('bridge.log')
+
+      const grep = await runTool(ctx, agent, 'grep', { pattern: 'needle', path: '.', fixed_strings: true })
+      expect(grep).toContain('native-notes.txt')
+
+      const bash = await runTool(ctx, agent, 'bash', { command: 'printf bash-native-exec-ok', description: 'Run successful command' })
+      expect(bash).toContain('bash-native-exec-ok')
+    } finally {
+      if (previous === undefined) {
+        delete process.env.AGENTSHIM_DSH_NATIVE_DLL
+      } else {
+        process.env.AGENTSHIM_DSH_NATIVE_DLL = previous
+      }
+    }
+  })
+
   it('maps agentshim tool errors to stable codes through the registry', async () => {
     const root = await makeRoot()
     const ctx = await mountComposition(root, { env: { FIXTURE_REPORT: '', FIXTURE_BOOT_FILE: '', FIXTURE_CALL_ERROR: '1' } })
     const { agent } = await mintStandardAgent(ctx, 'e1', root)
-    const result = await executeTool(ctx, agent, 'bash', { command: 'explode' })
+    const result = await executeTool(ctx, agent, 'bash', { command: 'explode', description: 'Run failing command' })
     expect(result.isError).toBe(true)
     expect(result.error?.info).toMatchObject({ code: 'AGENTSHIM_FIXTURE_DENIED' })
+  })
+
+  it('registers background Bash as a DSH job and exposes bound bash_status', async () => {
+    const root = await makeRoot()
+    const ctx = await mountComposition(root, {}, async inner => {
+      await inner.plugin(LocalJobRegistry, {})
+      inner.jobs.attachController('composition-test')
+    })
+    const { agent } = await mintStandardAgent(ctx, 'jobs-owner', root)
+    await ctx.plugin(class extends Service {
+      constructor(inner: Context) {
+        super(inner, 'agents')
+      }
+      list(): Agent[] {
+        return [agent]
+      }
+      get(id: string): Agent | undefined {
+        return id === agent.id ? agent : undefined
+      }
+    })
+    const started = await executeTool(ctx, agent, 'bash', {
+      command: 'printf background',
+      description: 'Print background output',
+      run_in_background: true,
+    })
+    expect(started.isError).toBe(false)
+    const value = (started as unknown as { value: { kind: string; jobId: string } }).value
+    expect(value).toEqual({ kind: 'background', jobId: 'bash-1' })
+
+    const snapshot = await ctx.jobs.wait(JobId(value.jobId), 5_000, agent)
+    expect(snapshot).toMatchObject({ id: 'bash-1', status: 'completed', detail: 'exit code: 0' })
+    expect(ctx.jobs.read(JobId(value.jobId), agent).text).toBe('background output\n')
+
+    const status = await executeTool(ctx, agent, 'bash_status', { job_id: value.jobId })
+    expect((status as unknown as { value: unknown }).value).toEqual({
+      kind: 'status',
+      jobId: 'bash-1',
+      status: 'completed',
+      label: 'printf background',
+      detail: 'exit code: 0',
+    })
+  })
+
+  it('settles private launch and output-pump failures as observable failed DSH jobs', async () => {
+    for (const [suffix, env] of [
+      ['start', { FIXTURE_BACKGROUND_START_ERROR: '1' }],
+      ['pump', { FIXTURE_JOB_STATUS_ERROR: '1' }],
+      ['capture', { FIXTURE_CAPTURE_ERROR: '1' }],
+    ] as const) {
+      const root = await makeRoot()
+      const { ctx, agent } = await mountJobComposition(root, `jobs-${suffix}`, env)
+      const started = await executeTool(ctx, agent, 'bash', {
+        command: 'printf background',
+        description: 'Exercise a background failure',
+        run_in_background: true,
+      })
+      expect(started.isError).toBe(false)
+      const jobId = (started as unknown as { value: { jobId: string } }).value.jobId
+      const terminal = await ctx.jobs.wait(JobId(jobId), 5_000, agent)
+      expect(terminal.status).toBe('failed')
+      expect(ctx.jobs.read(JobId(jobId), agent).text).toContain('agentshim job failed')
+    }
+  })
+
+  it('maps DSH job cancellation to private tree termination and reports terminate failure', async () => {
+    const root = await makeRoot()
+    const successful = await mountJobComposition(root, 'jobs-kill', { FIXTURE_JOB_RUNNING: '1' })
+    const started = await executeTool(successful.ctx, successful.agent, 'bash', {
+      command: 'while :; do printf x; done',
+      description: 'Run until cancelled',
+      run_in_background: true,
+    })
+    const jobId = (started as unknown as { value: { jobId: string } }).value.jobId
+    await waitForBackgroundOutput(successful.ctx, successful.agent, jobId)
+    expect(successful.ctx.jobs.kill(JobId(jobId), successful.agent, 'test cancellation')).toBe('requested')
+    expect(await successful.ctx.jobs.wait(JobId(jobId), 5_000, successful.agent))
+      .toMatchObject({ status: 'killed' })
+
+    const failingRoot = await makeRoot()
+    const failing = await mountJobComposition(failingRoot, 'jobs-kill-failure', {
+      FIXTURE_JOB_RUNNING: '1',
+      FIXTURE_TERMINATE_ERROR: '1',
+    })
+    const failingStart = await executeTool(failing.ctx, failing.agent, 'bash', {
+      command: 'while :; do printf x; done',
+      description: 'Expose a terminate failure',
+      run_in_background: true,
+    })
+    const failingId = (failingStart as unknown as { value: { jobId: string } }).value.jobId
+    await waitForBackgroundOutput(failing.ctx, failing.agent, failingId)
+    expect(failing.ctx.jobs.kill(JobId(failingId), failing.agent, 'test terminate failure')).toBe('requested')
+    expect(await failing.ctx.jobs.wait(JobId(failingId), 5_000, failing.agent))
+      .toMatchObject({ status: 'failed', detail: expect.stringContaining('fixture terminate failed') })
+    expect(failing.ctx.jobs.read(JobId(failingId), failing.agent).text).toContain('terminate failed')
+  })
+
+  it('cancels and awaits a running background generation during plugin unload', async () => {
+    const root = await makeRoot()
+    const { ctx, agent } = await mountJobComposition(root, 'jobs-unload', { FIXTURE_JOB_RUNNING: '1' })
+    const started = await executeTool(ctx, agent, 'bash', {
+      command: 'while :; do printf x; done',
+      description: 'Run until plugin unload',
+      run_in_background: true,
+    })
+    const jobId = (started as unknown as { value: { jobId: string } }).value.jobId
+    await waitForBackgroundOutput(ctx, agent, jobId)
+
+    const adapter = pluginFibers.pop()
+    expect(adapter).toBeDefined()
+    await adapter!.dispose()
+
+    expect(await ctx.jobs.wait(JobId(jobId), 5_000, agent)).toMatchObject({ status: 'killed' })
+    expect(ctx.tools.get('bash_status', agent)).toBeUndefined()
   })
 
   it('bridges the DSH fs observation policy across a agentshim read', async () => {
@@ -577,22 +840,34 @@ describe('DSH contract bridges', () => {
     expect(result.additionalContexts?.[0]?.source).toEqual({ kind: 'plugin', plugin: 'agentshim' })
   })
 
-  it('denies confined process calls before execution and strips fields after one-time approval', async () => {
+  it('confines standing process calls and keeps one-time approval out of the shared generation', async () => {
     const root = await makeRoot()
     const approvalRequests: unknown[] = []
+    const confinedCalls: Array<{ argv: readonly string[]; policy: { mode: string } }> = []
     const ctx = await mountComposition(root, {}, async inner => {
       await inner.plugin(class extends Service {
-        readonly sandboxMode = 'workspace-write'
         constructor(ctx: Context) {
-          super(ctx, 'shell')
+          super(ctx, 'sandbox')
+        }
+        confine(argv: readonly string[], policy: { mode: string }) {
+          confinedCalls.push({ argv, policy })
+          return {
+            argv: [...argv],
+            enforcement: 'partial' as const,
+            denialSignatures: ['permission denied'],
+            runnerFailureRules: [],
+          }
         }
       })
       await inner.plugin(class extends Service {
         constructor(ctx: Context) {
           super(ctx, 'sandboxPolicy')
         }
-        resolve(): Promise<{ mode: 'workspace-write' }> {
-          return Promise.resolve({ mode: 'workspace-write' })
+        resolve(request: { mode?: 'workspace-write' | 'danger-full-access' } = {}) {
+          return {
+            mode: request.mode ?? 'workspace-write',
+            workspaceRoot: root,
+          }
         }
       })
       await inner.plugin(class extends Service {
@@ -607,17 +882,26 @@ describe('DSH contract bridges', () => {
     })
     const { agent } = await mintStandardAgent(ctx, 'p1', root)
 
-    const denied = await executeTool(ctx, agent, 'bash', { command: 'true' })
-    expect(denied.isError).toBe(true)
-    expect(denied.error?.info).toMatchObject({ code: 'AGENTSHIM_PROCESS_REQUIRES_FULL_ACCESS' })
+    const confined = await executeTool(ctx, agent, 'bash', { command: 'true', description: 'Run confined command' })
+    expect(confined.isError).toBe(false)
+    expect((confined as unknown as { value: { sandbox: unknown } }).value.sandbox).toEqual({
+      mode: 'workspace-write',
+      enforcement: 'partial',
+      denied: false,
+      runnerFailed: false,
+    })
+    expect(confinedCalls).toHaveLength(1)
+    expect(confinedCalls[0]?.policy.mode).toBe('workspace-write')
 
     const approved = await executeTool(ctx, agent, 'bash', {
       command: 'true',
+      description: 'Run approved command',
       sandbox_permissions: 'danger-full-access',
       justification: 'the command must run through the private local agentshim process',
     })
     expect(approved.isError).toBe(false)
     expect(approvalRequests).toHaveLength(1)
+    expect(confinedCalls).toHaveLength(1)
     const text = approved.content[0]
     expect(text?.type).toBe('text')
     expect(JSON.parse(text?.type === 'text' ? text.text : '')).toEqual({ name: 'bash', arguments: { command: 'true' } })
@@ -628,7 +912,7 @@ describe('DSH contract bridges', () => {
     const ctx = await mountComposition(root, { env: { FIXTURE_REPORT: '', FIXTURE_BOOT_FILE: '', FIXTURE_CALL_DELAY_MS: '8000' } })
     const { agent } = await mintStandardAgent(ctx, 'cancel', root)
     const controller = new AbortController()
-    const pending = executeTool(ctx, agent, 'bash', { command: 'slow' }, { signal: controller.signal })
+    const pending = executeTool(ctx, agent, 'bash', { command: 'slow', description: 'Run slow command' }, { signal: controller.signal })
     setTimeout(() => controller.abort(), 100)
     const result = await pending
     expect(result.isError).toBe(true)
@@ -646,7 +930,7 @@ describe('DSH contract bridges', () => {
       },
     })
     const { agent } = await mintStandardAgent(ctx, 'unload-call', root)
-    const pending = executeTool(ctx, agent, 'bash', { command: 'slow' })
+    const pending = executeTool(ctx, agent, 'bash', { command: 'slow', description: 'Run slow command' })
     await new Promise(resolve => setTimeout(resolve, 100))
     const fiber = pluginFibers.at(-1)
     expect(fiber).toBeDefined()

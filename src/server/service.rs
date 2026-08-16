@@ -16,6 +16,7 @@ use rmcp::{
     },
     service::{NotificationContext, RequestContext},
 };
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use uuid::Uuid;
@@ -42,7 +43,7 @@ use super::{
 #[cfg(test)]
 use super::{
     dispatch::ToolAdmission,
-    response::{blocking_response, pdf_busy, pdf_timeout},
+    response::{blocking_response, blocking_response_for_profile, pdf_busy, pdf_timeout},
 };
 
 pub const SERVER_INSTRUCTIONS: &str = "Local repository and Codex extension tools for reading source files, searching contents, finding paths, running one program with literal arguments, and running POSIX bash command lines with instance-bound managed detached-job status and termination.";
@@ -59,6 +60,31 @@ const TOOLSET: &str = "read,grep,glob,run_program,bash,bash_status";
 const TOOL_COUNT: u64 = 6;
 const TOOLS_CACHE_TTL_MS: u64 = 300_000;
 const TOOLS_CACHE_SCOPE: &str = "private";
+pub(crate) use agentshim_core::dsh_bridge::DSH_BRIDGE_VERSION;
+
+static MAX_TIMEOUT_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+/// Install the MCP shell's process-wide max execution time from the configured shelf.
+/// Later calls are ignored because the tool catalog may already have cached schemas
+/// built from the first value.
+pub(crate) fn install_max_timeout_ms(shelf: std::time::Duration) {
+    let _ =
+        MAX_TIMEOUT_MS.set(agentshim_core::tools::exec::spawn::max_timeout_ms_from_shelf(shelf));
+}
+
+/// The MCP shell's max execution time in milliseconds; before `install_max_timeout_ms`
+/// runs this is the default-shelf derivation.
+pub(crate) fn max_timeout_ms() -> u64 {
+    *MAX_TIMEOUT_MS
+        .get()
+        .unwrap_or(&agentshim_core::tools::exec::spawn::default_max_timeout_ms())
+}
+
+/// The per-call timeout used when the caller omits `timeout_ms`, clamped below the
+/// installed maximum.
+pub(crate) fn default_timeout_ms() -> u64 {
+    agentshim_core::tools::exec::spawn::DEFAULT_TIMEOUT_MS.min(max_timeout_ms())
+}
 
 #[derive(Clone)]
 pub struct AgentShim {
@@ -68,8 +94,8 @@ pub struct AgentShim {
     pub(super) process_resolver: ProcessResolver,
     pub(super) detached: DetachedTrees,
     pub(super) bash_locator: BashLocator,
-    pub(super) output_token_gate: Arc<OutputTokenGate>,
-    pub(super) burst_output_gate: Arc<BurstOutputGate>,
+    pub(super) output_token_gate: Option<Arc<OutputTokenGate>>,
+    pub(super) burst_output_gate: Option<Arc<BurstOutputGate>>,
     shutdown_execution: Arc<ShutdownExecution>,
     client_profile: crate::ClientProfile,
 }
@@ -156,13 +182,22 @@ impl AgentShimBuilder {
         let root = Arc::new(RepositoryRoot::open(self.root)?);
         let mut runtime = self.runtime;
         runtime.tool_timeout_shelf =
-            crate::runtime::resolve_tool_timeout_shelf(self.client_profile);
+            crate::profile::resolve_tool_timeout_shelf(self.client_profile);
         runtime.idle_timeout =
-            crate::runtime::resolve_idle_timeout_from(runtime.idle_timeout, self.client_profile);
-        crate::tools::exec::spawn::install_max_timeout_ms(runtime.tool_timeout_shelf);
-        let output_token_gate = OutputTokenGate::load_shared().map_err(io::Error::other)?;
-        let burst_output_gate =
-            BurstOutputGate::new(crate::output::configured_burst_tokens(self.client_profile)?);
+            crate::profile::resolve_idle_timeout_from(runtime.idle_timeout, self.client_profile);
+        install_max_timeout_ms(runtime.tool_timeout_shelf);
+        crate::output::install_output_profile(self.client_profile);
+        let (output_token_gate, burst_output_gate) =
+            if self.client_profile == crate::ClientProfile::Dsh {
+                (None, None)
+            } else {
+                (
+                    Some(OutputTokenGate::load_shared().map_err(io::Error::other)?),
+                    Some(BurstOutputGate::new(
+                        crate::output::configured_burst_tokens(self.client_profile)?,
+                    )),
+                )
+            };
         Ok(AgentShim {
             file_access: Arc::new(FileAccess::new(Arc::clone(&root), self.read_scope)),
             root,
@@ -209,7 +244,9 @@ impl AgentShim {
 
     #[must_use]
     pub fn burst_token_limit(&self) -> usize {
-        self.burst_output_gate.limit()
+        self.burst_output_gate
+            .as_ref()
+            .map_or(0, |gate| gate.limit())
     }
 
     /// Return the fixed token ceiling applied to one tool response.
@@ -288,13 +325,17 @@ impl AgentShim {
             unset_env: Vec::new(),
             stdin: None,
             timeout_ms: Some(5_000),
+            capture: None,
         };
-        let output = crate::tools::run_program::execute(
+        let output = crate::tools::run_program::execute_output_with_capture(
             &self.root,
             &self.process_resolver,
             &request,
             Duration::from_secs(5),
             &CancellationToken::new(),
+            max_timeout_ms(),
+            &crate::output::CallOutputBudget::standalone(),
+            None,
         )
         .map_err(io::Error::other)?;
         if output.contains("Exit code: 0") && output.contains("agentshim ") {
@@ -314,7 +355,7 @@ impl AgentShim {
     fn discovery_result_for(read_scope: ReadScope) -> DiscoverResult {
         DiscoverResult::from_server_info(
             SUPPORTED_PROTOCOLS.to_vec(),
-            Self::server_info(read_scope),
+            Self::server_info(read_scope, None),
         )
     }
 
@@ -325,7 +366,14 @@ impl AgentShim {
 
     #[must_use]
     pub fn tools_result_for(read_scope: ReadScope) -> ListToolsResult {
-        ListToolsResult::with_all_items(tool_catalog(read_scope).to_vec())
+        Self::tools_result_for_profile(read_scope, crate::ClientProfile::Codex)
+    }
+
+    fn tools_result_for_profile(
+        read_scope: ReadScope,
+        client_profile: crate::ClientProfile,
+    ) -> ListToolsResult {
+        ListToolsResult::with_all_items(tool_catalog(read_scope, client_profile).to_vec())
             .with_ttl_ms(TOOLS_CACHE_TTL_MS)
             .with_cache_scope(CacheScope::Private)
     }
@@ -340,21 +388,33 @@ impl AgentShim {
         (protocol, client.name, client.version)
     }
 
-    fn server_info(read_scope: ReadScope) -> ServerInfo {
+    fn server_info(
+        read_scope: ReadScope,
+        client_profile: Option<crate::ClientProfile>,
+    ) -> ServerInfo {
         let instructions = match read_scope {
             ReadScope::Normal => SERVER_INSTRUCTIONS,
             ReadScope::Unrestricted => UNRESTRICTED_SERVER_INSTRUCTIONS,
         };
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("agentshim", env!("CARGO_PKG_VERSION")))
             .with_protocol_version(ProtocolVersion::V_2026_07_28)
-            .with_instructions(instructions)
+            .with_instructions(instructions);
+        if client_profile == Some(crate::ClientProfile::Dsh) {
+            let mut meta = serde_json::Map::new();
+            meta.insert(
+                "agentshim.dshBridge".to_owned(),
+                json!({ "version": DSH_BRIDGE_VERSION }),
+            );
+            info.meta = Some(rmcp::model::MetaObject(meta));
+        }
+        info
     }
 }
 
 impl ServerHandler for AgentShim {
     fn get_info(&self) -> ServerInfo {
-        Self::server_info(self.read_scope())
+        Self::server_info(self.read_scope(), Some(self.client_profile))
     }
 
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
@@ -368,7 +428,10 @@ impl ServerHandler for AgentShim {
     ) -> Result<InitializeResult, McpError> {
         tracing::info!(target: "agentshim", event = "initialize", phase = "protocol", protocol = %request.protocol_version, client_name = %request.client_info.name, client_version = %request.client_info.version);
         context.peer.set_peer_info(request);
-        Ok(Self::server_info(self.read_scope()))
+        Ok(Self::server_info(
+            self.read_scope(),
+            Some(self.client_profile),
+        ))
     }
 
     async fn discover(
@@ -387,7 +450,7 @@ impl ServerHandler for AgentShim {
     ) -> Result<ListToolsResult, McpError> {
         let (protocol, client_name, client_version) = Self::request_identity(&context);
         let has_cursor = request.is_some_and(|request| request.cursor.is_some());
-        let result = Self::tools_result_for(self.read_scope());
+        let result = Self::tools_result_for_profile(self.read_scope(), self.client_profile);
         if let Some(correlation) = context.extensions.get::<ToolsListCorrelation>() {
             tracing::info!(
                 target: "agentshim",
@@ -428,7 +491,7 @@ impl ServerHandler for AgentShim {
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        tool_catalog(self.read_scope())
+        tool_catalog(self.read_scope(), self.client_profile)
             .iter()
             .find(|tool| tool.name == name)
             .cloned()
@@ -440,10 +503,13 @@ impl ServerHandler for AgentShim {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         let tool = request.name.to_string();
-        let budget = CallOutputBudget::new(
-            Arc::clone(&self.output_token_gate),
-            self.burst_output_gate.begin_call(),
-        );
+        let budget = match (&self.output_token_gate, &self.burst_output_gate) {
+            (Some(token_gate), Some(burst_gate)) => {
+                CallOutputBudget::new(Arc::clone(token_gate), burst_gate.begin_call())
+            }
+            (None, None) => CallOutputBudget::dsh(),
+            _ => unreachable!("model token and burst gates are installed together"),
+        };
         let result = self.call_tool_inner(request, &context, &budget).await;
         super::response::finalize_tool_response(&tool, &budget, result, &context.ct)
     }

@@ -1,4 +1,4 @@
-use std::{fmt::Display, io, str::FromStr, time::Duration};
+use std::{env, ffi::OsString, fmt::Display, io, str::FromStr, time::Duration};
 
 pub(crate) const CODEX_BURST_TOKENS: usize = 16_384;
 pub(crate) const CURSOR_BURST_TOKENS: usize = 32_768;
@@ -7,6 +7,7 @@ pub(crate) const CURSOR_BURST_TOKENS: usize = 32_768;
 /// configuration override, so the server shelf must stay at or below that ceiling
 /// for the server's own Timeout response to arrive before the client gives up.
 pub(crate) const CURSOR_TOOL_TIMEOUT_SHELF: Duration = Duration::from_secs(120);
+pub(crate) const DSH_TOOL_TIMEOUT_SHELF: Duration = Duration::from_secs(600);
 
 /// Client-specific defaults for aggregate tool-response output.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -16,6 +17,8 @@ pub enum ClientProfile {
     Codex,
     /// Larger aggregate output for Cursor's rapidly sequenced tool-call batches.
     Cursor,
+    /// Private bridge contract used by the `DeepSeek Harness` adapter.
+    Dsh,
 }
 
 impl ClientProfile {
@@ -25,6 +28,7 @@ impl ClientProfile {
         match self {
             Self::Codex => CODEX_BURST_TOKENS,
             Self::Cursor => CURSOR_BURST_TOKENS,
+            Self::Dsh => 0,
         }
     }
 
@@ -35,6 +39,7 @@ impl ClientProfile {
         match self {
             Self::Codex => crate::runtime::DEFAULT_TOOL_TIMEOUT_SHELF,
             Self::Cursor => CURSOR_TOOL_TIMEOUT_SHELF,
+            Self::Dsh => DSH_TOOL_TIMEOUT_SHELF,
         }
     }
 }
@@ -44,7 +49,41 @@ impl Display for ClientProfile {
         match self {
             Self::Codex => formatter.write_str("codex"),
             Self::Cursor => formatter.write_str("cursor"),
+            Self::Dsh => formatter.write_str("dsh"),
         }
+    }
+}
+
+/// Gate the idle watchdog by client profile: only the codex profile — whose host is
+/// known to leave conversation servers running — arms it. `RuntimeConfig::from_env()`
+/// already parsed and validated the value; this runs in `build()` where the profile is
+/// known.
+pub(crate) fn resolve_idle_timeout_from(
+    value: Option<Duration>,
+    profile: ClientProfile,
+) -> Option<Duration> {
+    match profile {
+        ClientProfile::Codex => value,
+        ClientProfile::Cursor | ClientProfile::Dsh => None,
+    }
+}
+
+/// Resolve the effective tool-timeout shelf: use the environment override when set,
+/// otherwise fall back to the client-profile default. Called from `build()` after the
+/// profile is known, because `RuntimeConfig::from_env()` predates the profile selection
+/// and always uses `DEFAULT_TOOL_TIMEOUT_SHELF`.
+pub(crate) fn resolve_tool_timeout_shelf(profile: ClientProfile) -> Duration {
+    resolve_tool_timeout_shelf_from(env::var_os("AGENTSHIM_TOOL_TIMEOUT_SHELF"), profile)
+}
+
+fn resolve_tool_timeout_shelf_from(
+    env_value: Option<OsString>,
+    profile: ClientProfile,
+) -> Duration {
+    match env_value {
+        None => profile.default_tool_timeout_shelf(),
+        Some(value) => agentshim_core::runtime::parse_tool_timeout_shelf(Some(&value))
+            .unwrap_or(agentshim_core::runtime::DEFAULT_TOOL_TIMEOUT_SHELF),
     }
 }
 
@@ -55,9 +94,10 @@ impl FromStr for ClientProfile {
         match value {
             "codex" => Ok(Self::Codex),
             "cursor" => Ok(Self::Cursor),
+            "dsh" => Ok(Self::Dsh),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("client profile must be either `codex` or `cursor`, got `{value}`"),
+                format!("client profile must be `codex`, `cursor`, or `dsh`, got `{value}`"),
             )),
         }
     }
@@ -67,9 +107,10 @@ impl FromStr for ClientProfile {
 mod tests {
     use super::{
         CODEX_BURST_TOKENS, CURSOR_BURST_TOKENS, CURSOR_TOOL_TIMEOUT_SHELF, ClientProfile,
+        DSH_TOOL_TIMEOUT_SHELF,
     };
     use crate::runtime::DEFAULT_TOOL_TIMEOUT_SHELF;
-    use std::time::Duration;
+    use std::{ffi::OsString, time::Duration};
 
     #[test]
     fn profile_burst_defaults_match_the_client_contract() {
@@ -82,6 +123,7 @@ mod tests {
             ClientProfile::Cursor.default_burst_tokens(),
             CURSOR_BURST_TOKENS
         );
+        assert_eq!(ClientProfile::Dsh.default_burst_tokens(), 0);
     }
 
     #[test]
@@ -94,6 +136,54 @@ mod tests {
             ClientProfile::Cursor.default_tool_timeout_shelf(),
             CURSOR_TOOL_TIMEOUT_SHELF,
         );
+        assert_eq!(
+            ClientProfile::Dsh.default_tool_timeout_shelf(),
+            DSH_TOOL_TIMEOUT_SHELF,
+        );
         assert_eq!(CURSOR_TOOL_TIMEOUT_SHELF, Duration::from_secs(120));
+        assert_eq!(DSH_TOOL_TIMEOUT_SHELF, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn resolve_tool_timeout_shelf_uses_profile_default_when_env_unset_and_env_when_set() {
+        assert_eq!(
+            super::resolve_tool_timeout_shelf_from(None, ClientProfile::Codex),
+            DEFAULT_TOOL_TIMEOUT_SHELF,
+        );
+        assert_eq!(
+            super::resolve_tool_timeout_shelf_from(None, ClientProfile::Cursor),
+            Duration::from_secs(120),
+        );
+        assert_eq!(
+            super::resolve_tool_timeout_shelf_from(
+                Some(OsString::from("300")),
+                ClientProfile::Cursor
+            ),
+            Duration::from_secs(300),
+        );
+        assert_eq!(
+            super::resolve_tool_timeout_shelf_from(
+                Some(OsString::from("600")),
+                ClientProfile::Codex
+            ),
+            DEFAULT_TOOL_TIMEOUT_SHELF,
+        );
+    }
+
+    #[test]
+    fn idle_timeout_only_applies_to_the_codex_profile() {
+        let timeout = Some(Duration::from_secs(30));
+        assert_eq!(
+            super::resolve_idle_timeout_from(timeout, ClientProfile::Codex),
+            timeout
+        );
+        assert_eq!(
+            super::resolve_idle_timeout_from(timeout, ClientProfile::Cursor),
+            None
+        );
+        assert_eq!(
+            super::resolve_idle_timeout_from(None, ClientProfile::Codex),
+            None
+        );
     }
 }

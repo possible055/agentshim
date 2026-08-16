@@ -50,6 +50,10 @@ fn client_profile_defaults_to_codex_and_accepts_both_argument_forms() {
         ClientProfile::Cursor
     );
     assert_eq!(
+        serve_options(parse(&["serve", "--client-profile", "dsh"])).client_profile,
+        ClientProfile::Dsh
+    );
+    assert_eq!(
         serve_options(parse(&["doctor", "--client-profile=codex"])).client_profile,
         ClientProfile::Codex
     );

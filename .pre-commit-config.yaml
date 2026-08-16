@@ -53,6 +53,20 @@ repos:
         pass_filenames: false
         require_serial: true
 
+      - id: dsh-lint
+        name: DSH adapter lint
+        entry: pnpm --dir adapters/dsh lint
+        language: system
+        files: '^adapters/dsh/(?:.*\.[cm]?[jt]sx?|package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|tsconfig(?:\.build)?\.json)$'
+        pass_filenames: false
+
+      - id: dsh-typecheck
+        name: DSH adapter typecheck
+        entry: pnpm --dir adapters/dsh typecheck
+        language: system
+        files: '^adapters/dsh/(?:.*\.[cm]?[jt]sx?|package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|tsconfig(?:\.build)?\.json)$'
+        pass_filenames: false
+
       - id: cargo-fmt
         name: cargo fmt
         entry: cargo fmt --all -- --check

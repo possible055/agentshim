@@ -13,10 +13,12 @@ only; no `mcp__*` tool name is exposed to the agent.
 ## Prerequisites
 
 - Node.js `^22.19.0 || >=24.0.0` and pnpm.
-- A DSH profile compatible with the `0.1.0-rc.5` package family.
+- A DSH profile using the exact `0.1.0-rc.6` package family.
 - A mounted local filesystem service. A `shell` executor is optional: the
-  minimal preset has none, and process tools then run unconfined. A sandboxing
-  executor still requires `sandboxPolicy` and fail-closed escalation.
+  minimal preset has none, and process tools then run unconfined.
+- Background Bash additionally requires `ctx.jobs` and a job controller,
+  normally supplied by `@deepseek-ai/dsh-jobs-local` and
+  `@deepseek-ai/dsh-tool-jobs` in standard compositions.
 - agentshim installed at its standard platform path, or an absolute `command`
   override:
   - Windows: `%LOCALAPPDATA%\agentshim\bin\agentshim.exe`
@@ -52,6 +54,8 @@ profile can override the configuration in
     root: /absolute/path/to/repo
     readScope: normal
     toolCallTimeoutMs: 600000
+    captureRoot: /absolute/private/artifact/root
+    captureMaxBytes: 67108864
     env: {}
 ```
 
@@ -61,7 +65,7 @@ checkout can run agentshim through Cargo without installing it by setting
 `["run", "--locked", "--"]`. The spawned command is always:
 
 ```text
-<command> <commandArgs...> serve --client-profile codex --read-scope <readScope>
+<command> <commandArgs...> serve --client-profile dsh --read-scope <readScope>
 ```
 
 ## Configuration
@@ -74,15 +78,19 @@ checkout can run agentshim through Cargo without installing it by setting
 | `readScope` | `normal` | `normal` or `unrestricted`, always passed explicitly to agentshim. |
 | `env` | `{}` | Extra child variables layered over DSH's credential-scrubbed parent environment. |
 | `toolCallTimeoutMs` | `600000` | DSH tool-call deadline and every private MCP request timeout, including initialize and catalog listing; values below 600000 are rejected. |
+| `captureRoot` | Stable platform data directory | Private persistent process-artifact root; an explicit value must be absolute. |
+| `captureMaxBytes` | `67108864` | Aggregate raw bytes for all streams in one process call; configurable from 1 MiB through 1 GiB. |
 
 A missing or mismatched root, an incompatible filesystem provider, an
-unresolvable executable, server startup failure, or catalog drift fails plugin
-activation. The plugin never falls back silently to DSH's inherited tools.
-Changing the mounted shell executor's confinement capability after activation
-fails later process calls with `AGENTSHIM_PROCESS_POLICY_CHANGED` until the
-plugin is reloaded.
+unresolvable executable, server startup failure, missing private operation, or
+DSH bridge-version mismatch fails plugin activation. Extra private operations
+and catalog reordering are allowed. The plugin never falls back silently to
+DSH's inherited tools. If `ctx.sandbox` and `ctx.sandboxPolicy` are not both
+present or both absent, activation fails. Changing that capability composition
+after activation makes later process calls fail with
+`AGENTSHIM_PROCESS_POLICY_CHANGED` until the plugin is reloaded.
 
-## Timeouts and detached commands
+## Timeouts and background jobs
 
 All six definitions declare `timeoutMs` (600 seconds by default). DSH enforces
 that deadline only when the composition includes
@@ -92,35 +100,74 @@ request timeout always applies, including during initialize and paginated
 catalog requests, so development wrappers get the full configured startup
 budget.
 
-agentshim's runtime catalog is authoritative for `bash.timeout_ms`, including
-its default and maximum. Long-running work that exceeds that cap must use
-`detach: true` with a repository-local `log_path`, retain the returned
-instance-bound `job_id`, inspect it with `bash_status`, and stop it with
-`bash({ action: "terminate", job_id })`. These are not DSH jobs:
-`job_output` and `job_kill` cannot inspect or control them. Unloading the
-plugin closes the private server, which cleans up detached process trees it
-owns.
+Foreground Bash uses `timeoutMs`; long-running work uses
+`run_in_background: true`. The latter registers a DSH-owned job and returns a
+DSH `JobId` such as `bash-1`. Use `job_output`, `job_list`, and `job_kill` for
+output, discovery, and termination. `bash_status` is published only beside
+`bash` and returns a non-consuming DSH lifecycle snapshot for the same public
+id. It does not consume the `job_output` cursor.
+
+The adapter keeps AgentShim's instance-bound UUID, remote capture protocol, and
+terminate operation private. The confined process writes only inherited pipes;
+the adapter, outside the sandbox, persists byte-exact output under `captureRoot`.
+`bash_status` polls lifecycle only. Its 1 MiB live buffer and DSH's 64 KiB job
+view may omit old text with an explicit marker, while the raw artifact remains
+complete. Exceeding `captureMaxBytes`, storage failure, or protocol drift stops
+the process tree and settles the job as failed with a partial artifact locator.
+Owner disposal, plugin unload, and job cancellation wait for the tree, pipe
+drain, capture flush, and dedicated generation to quiesce.
+
+## Output capture and retention
+
+Model-visible process text is limited to 50,000 bytes including headings,
+omission markers, and artifact notices. Output at or below that threshold is not
+retained when it is valid UTF-8 without NUL. Larger or non-text output is stored
+as a permanent `application/octet-stream` artifact. `read` and single-file
+`grep` can use an exact published path without broadening `readScope`; the grant
+does not expose its parent, adjacent files, or `glob` enumeration.
+
+Artifacts are deliberately not garbage-collected so locators remain valid in
+durable logs, resumed sessions, and forks. They can contain credentials or other
+sensitive process output and accumulate indefinitely; operators must secure and
+clean `captureRoot` according to local retention policy. Unix directories use
+mode `0700` and files `0600`. `danger-full-access` retains its existing trust
+boundary: a process running as the same OS user may discover host data.
+
+The DSH server profile has no token or burst gate. `AGENTSHIM_OUTPUT_BYTES` and
+`AGENTSHIM_BURST_TOKENS` do not affect it; the native preview is 50,000 bytes and
+the encoded text/structured transport safety cap is 1 MiB. Codex and Cursor
+output behavior is unchanged.
 
 ## Process security
 
-The private agentshim child does not run inside DSH's per-call sandbox
-executor. When the composition has a sandboxing executor, `run_program` and
-`bash` fail closed unless the standing policy is already `danger-full-access`.
-Under `read-only` or `workspace-write`, retry the identical call with both:
+When `ctx.sandbox` and `ctx.sandboxPolicy` are composed, every `run_program`,
+foreground `bash`, and background `bash` resolves the authoritative policy for
+that call. `read-only` and `workspace-write` launch a dedicated private MCP
+generation through `ctx.sandbox.confine()` using the exact AgentShim server
+argv. `danger-full-access` foreground calls may use the shared generation;
+background work always owns a dedicated generation.
+
+A call may request a strictly wider one-shot mode with both:
 
 ```text
-sandbox_permissions: "danger-full-access"
-justification: "one sentence explaining why this exact command needs full access"
+sandbox_permissions: "workspace-write" | "danger-full-access"
+justification: "one sentence explaining why this exact command needs wider access"
 ```
 
-Only `danger-full-access` is accepted. A user must grant the one-time approval
-before the command is sent to agentshim, and the two adapter-only fields are
-removed before transport. Rejection, cancellation, an unavailable approval
-channel, or an unpaired field prevents execution. If the mounted shell executor
-is unsandboxed, or no shell executor is mounted, these fields are not
-advertised and process calls run without DSH confinement. A changed
-confinement capability or a missing sandbox policy under a confining
-executor fails with `AGENTSHIM_PROCESS_POLICY_CHANGED`.
+Approval completes before the generation starts, and its authority lasts only
+for that foreground call or background job. The adapter-only fields are removed
+before MCP transport. Rejection, cancellation, an unavailable approval channel,
+or an unpaired field prevents execution. If neither sandbox service is mounted,
+the escalation fields are not advertised and process calls run explicitly
+unconfined.
+
+DSH sandbox modes constrain filesystem effects; they are not a confidentiality
+boundary and do not promise network or process-visibility isolation.
+`readScope` is independent: it controls which paths AgentShim's structured
+`read`, `grep`, and `glob` can reach. Keep `readScope: normal` unless broader
+local reads are intentional. A backend may report partial enforcement; the
+canonical result preserves that attribution. Runner or confinement failure is
+`SANDBOX_UNAVAILABLE` and never retries unconfined.
 
 ## Images and filesystem observations
 
@@ -139,12 +186,14 @@ during the read, no stale observation is recorded.
   an absolute `command`; the plugin intentionally does not search `PATH`.
 - **Root or execution-world mismatch:** start DSH from the configured root and
   use the local filesystem provider. Remote/E2B filesystems are not supported.
-- **Catalog validation or `AGENTSHIM_CATALOG_CHANGED`:** the running agentshim
-  contract differs from the one registered with DSH. Reload the plugin after
-  installing a compatible agentshim build.
-- **Process requires full access:** retry the exact call with the two escalation
-  fields shown above and approve it, or use a profile whose standing policy is
-  already `danger-full-access`.
+- **Bridge validation or `AGENTSHIM_CATALOG_CHANGED`:** the running AgentShim
+  lacks a required private operation or advertises an incompatible DSH bridge
+  version. Reload the plugin after installing a compatible build.
+- **Background jobs unavailable:** compose `@deepseek-ai/dsh-jobs` with a
+  controller such as `@deepseek-ai/dsh-tool-jobs`; `bash_status` cannot replace
+  the controller required by `ctx.jobs.start()`.
+- **Sandbox unavailable:** inspect the backend/runner diagnostic. The adapter
+  deliberately does not retry the command outside confinement.
 - **PDF image refusal:** select an image-capable model with an attachment store,
   or use `pdf_mode: "text"`.
 - **Unexpected server close:** the failed in-flight call is never replayed. The

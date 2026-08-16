@@ -3,10 +3,21 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
-import { createSession, EXPECTED_TOOL_ORDER, MIN_TOOL_CALL_TIMEOUT_MS, resolveSessionConfig } from './session.ts'
+import { createSession, MIN_TOOL_CALL_TIMEOUT_MS, resolveSessionConfig } from './session.ts'
 import type { CatalogSnapshot, ResolvedSessionConfig } from './session.ts'
 import { assertExecutionWorld, sameExecutionPath } from './policy.ts'
 import { buildToolDefinitions, promptSections, RESTRICT_CANDIDATES } from './tools.ts'
+import { PUBLIC_TOOL_NAMES } from './contracts.ts'
+import { BackgroundJobManager } from './jobs.ts'
+import { loadNativeAddon, nativeEngineEnv } from './native.ts'
+import type { NativeEngine } from './native.ts'
+import {
+  CaptureStore,
+  DEFAULT_CAPTURE_MAX_BYTES,
+  MAX_CAPTURE_MAX_BYTES,
+  MIN_CAPTURE_MAX_BYTES,
+  resolveCaptureRoot,
+} from './capture.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'agentshim'
@@ -25,6 +36,10 @@ export interface Config {
   env: Record<string, string>
   /** Applied to both the DSH tool deadline and the private MCP request timeout. */
   toolCallTimeoutMs: number
+  /** Private persistent root for byte-exact process capture artifacts. */
+  captureRoot?: string
+  /** Aggregate raw capture ceiling for one process call. */
+  captureMaxBytes?: number
 }
 
 export const Config = z.object({
@@ -34,24 +49,27 @@ export const Config = z.object({
   readScope: z.union([z.const('normal'), z.const('unrestricted')]).default('normal'),
   env: z.dict(String).default({}),
   toolCallTimeoutMs: z.number().min(MIN_TOOL_CALL_TIMEOUT_MS).default(MIN_TOOL_CALL_TIMEOUT_MS),
+  captureRoot: z.string().default(''),
+  captureMaxBytes: z.number().min(MIN_CAPTURE_MAX_BYTES).max(MAX_CAPTURE_MAX_BYTES).default(DEFAULT_CAPTURE_MAX_BYTES),
 }) as unknown as z<Config>
 
 /**
  * Publish only names the agent already had, plus the shell/filesystem
  * companions those names imply: hiding `pwsh` still yields `bash`, `bash`
- * always yields `bash_status`, and a filesystem agent gets `run_program`.
+ * always yields `bash_status`, an isolated inherited `bash_status` is hidden,
+ * and a filesystem agent gets `run_program`.
  */
-function replacementNames(present: readonly string[]): Array<(typeof EXPECTED_TOOL_ORDER)[number]> {
+function replacementNames(present: readonly string[]): Array<(typeof PUBLIC_TOOL_NAMES)[number]> {
   const selected = new Set<string>()
   for (const name of present) {
-    if ((EXPECTED_TOOL_ORDER as readonly string[]).includes(name)) selected.add(name)
+    if (name !== 'bash_status' && (PUBLIC_TOOL_NAMES as readonly string[]).includes(name)) selected.add(name)
   }
   if (present.includes('pwsh')) selected.add('bash')
   if (selected.has('bash')) selected.add('bash_status')
   if (selected.has('read') || selected.has('grep') || selected.has('glob')) {
     selected.add('run_program')
   }
-  return EXPECTED_TOOL_ORDER.filter(name => selected.has(name))
+  return PUBLIC_TOOL_NAMES.filter(name => selected.has(name))
 }
 
 function canonicalOrUndefined(path: string): string | undefined {
@@ -102,7 +120,7 @@ function installAgentTools(
     try {
       const present = RESTRICT_CANDIDATES.filter(name => agent.ctx.tools.get(name) !== undefined)
       const replacements = replacementNames(present)
-      if (replacements.length === 0 && !present.includes('pwsh')) return
+      if (replacements.length === 0 && !present.includes('pwsh') && !present.includes('bash_status')) return
       if (present.length > 0) disposers.push(agent.ctx.tools.restrict({ deny: [...present] }))
       for (const name of replacements) {
         const definition = definitions.get(name)
@@ -157,11 +175,30 @@ function installAgentTools(
  * tools.
  */
 export async function apply(ctx: Context, config: Config): Promise<void> {
-  const resolved = await resolveSessionConfig(config)
+  const captureRoot = resolveCaptureRoot(config.captureRoot ?? '')
+  const captureMaxBytes = config.captureMaxBytes ?? DEFAULT_CAPTURE_MAX_BYTES
+  const resolved = await resolveSessionConfig({ ...config, captureRoot, captureMaxBytes })
   await assertExecutionWorld(ctx, resolved.root)
-  const session = createSession(resolved, { logger: ctx.logger })
+  const captureStore = new CaptureStore(captureRoot, captureMaxBytes)
+  ctx.effect(() => () => captureStore.dispose(), 'agentshim.captureStore')
+  const session = createSession(resolved, { logger: ctx.logger, captureStore })
   ctx.effect(() => () => session.dispose(), 'agentshim.session')
+  const jobs = new BackgroundJobManager()
+  ctx.effect(() => () => jobs.dispose(), 'agentshim.jobs')
   const snapshot: CatalogSnapshot = await session.ready
-  const definitions = buildToolDefinitions({ ctx, session, snapshot, config: resolved })
+  let native: NativeEngine | undefined
+  const loaded = loadNativeAddon()
+  if (loaded.engine !== undefined) {
+    native = new loaded.engine.Engine(resolved.root, {
+      env: nativeEngineEnv(config.env),
+      timeoutCeilingMs: MIN_TOOL_CALL_TIMEOUT_MS,
+    })
+    ctx.effect(() => () => {
+      void native?.close().catch(() => {})
+    }, 'agentshim.nativeEngine')
+  } else {
+    ctx.logger.warn(`dsh-agentshim: native engine unavailable (${loaded.failure.reason}: ${loaded.failure.detail}); read/grep/glob stay on the MCP bridge`)
+  }
+  const definitions = buildToolDefinitions({ ctx, session, snapshot, config: resolved, jobs, captureStore, ...(native === undefined ? {} : { native }) })
   installAgentTools(ctx, resolved, definitions)
 }

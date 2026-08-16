@@ -1,0 +1,53 @@
+[package]
+name = "agentshim-core"
+version = "0.1.4-alpha.1"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+description = "Host-neutral repository tool engine shared by the agentshim MCP shell and native hosts"
+
+[dependencies]
+agentshim-pdf-read = { path = "../pdf-read-core" }
+base64 = "=0.22.1"
+cap-std = "=4.0.2"
+chardetng = "=1.0.0"
+encoding_rs = "0.8.35"
+globset = "0.4.16"
+grep-matcher = "0.1.9"
+grep-regex = "0.1.14"
+grep-searcher = "=0.1.17"
+ignore = "0.4.23"
+rayon = "=1.11.0"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.142"
+thiserror = "2.0.12"
+tokio = { version = "1.47.1", features = ["macros", "rt", "sync", "time"] }
+tokio-util = "0.7.16"
+tracing = "0.1.44"
+uuid = { version = "1.24.0", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.0", features = ["Wdk_System_SystemServices", "Win32_Foundation", "Win32_Globalization", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_WindowsProgramming"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.172"
+
+[dev-dependencies]
+tempfile = "3.20.0"
+
+[features]
+bench-internals = []
+test-hooks = []
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# The engine's compute surface was lifted wholesale from the MCP shell; doc-attribute
+# pedantry that only fires on `pub` items would flood this crate until the typed Engine
+# API curates the surface in the napi phase.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"

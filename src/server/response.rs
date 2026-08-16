@@ -27,7 +27,7 @@ pub(super) fn finalize_tool_response(
         budget.finish(tokens, false);
         return response;
     }
-    match budget.project_result(result, allowance, cancellation) {
+    match budget.project_call_result(result, allowance, cancellation) {
         ProjectionDecision::Fits(cost) => {
             budget.finish(cost.tokens, false);
             response
@@ -39,7 +39,7 @@ pub(super) fn finalize_tool_response(
             let CallToolResponse::Complete(replacement_result) = &replacement else {
                 unreachable!("burst limit response is complete")
             };
-            let cost = match budget.project_result(
+            let cost = match budget.project_call_result(
                 replacement_result,
                 MAX_CONTROL_RESPONSE_TOKENS,
                 &CancellationToken::new(),
@@ -390,6 +390,11 @@ impl DiagnosticError for crate::tools::exec::ProcessError {
             ProcessError::Resolve(_) => "path",
             ProcessError::ResourceBusy(_) => "resource_busy",
             ProcessError::Io(_) | ProcessError::Unavailable(_) => "io",
+            ProcessError::Capture { kind, .. } => match kind {
+                crate::tools::exec::CaptureFailureKind::LimitExceeded => "capture_limit_exceeded",
+                crate::tools::exec::CaptureFailureKind::Io => "capture_io_failed",
+                crate::tools::exec::CaptureFailureKind::Protocol => "capture_protocol",
+            },
             ProcessError::Timeout { .. } | ProcessError::TimeoutBeforeSpawn { .. } => {
                 "resource_timeout"
             }
@@ -458,6 +463,7 @@ pub(super) fn diagnostic_tool_error<E: DiagnosticError + ?Sized>(error: &E) -> C
     )
 }
 
+#[cfg(test)]
 pub(super) fn blocking_response<E: DiagnosticError>(
     tool: &str,
     run_ms: u64,
@@ -465,6 +471,26 @@ pub(super) fn blocking_response<E: DiagnosticError>(
     output_token_gate: &crate::output::OutputTokenGate,
     cancellation: &CancellationToken,
     output_budget: &CallOutputBudget,
+) -> CallToolResponse {
+    blocking_response_for_profile(
+        tool,
+        run_ms,
+        result,
+        Some(output_token_gate),
+        cancellation,
+        output_budget,
+        crate::ClientProfile::Codex,
+    )
+}
+
+pub(super) fn blocking_response_for_profile<E: DiagnosticError>(
+    tool: &str,
+    run_ms: u64,
+    result: Result<Result<crate::tools::ToolOutput, E>, tokio::task::JoinError>,
+    output_token_gate: Option<&crate::output::OutputTokenGate>,
+    cancellation: &CancellationToken,
+    output_budget: &CallOutputBudget,
+    client_profile: crate::ClientProfile,
 ) -> CallToolResponse {
     match result {
         Ok(Ok(output)) => {
@@ -480,6 +506,14 @@ pub(super) fn blocking_response<E: DiagnosticError>(
             }
             let call_budget_verified = output.fits_call_budget(output_budget, cancellation);
             let projected_cost = output.projected_cost();
+            let structured = (client_profile == crate::ClientProfile::Dsh).then(|| {
+                output.structured.unwrap_or_else(|| {
+                    json!({
+                        "bridgeVersion": super::service::DSH_BRIDGE_VERSION,
+                        "tool": tool,
+                    })
+                })
+            });
             let mut content = Vec::with_capacity(output.images.len() + 1);
             content.push(ContentBlock::text(output.text));
             content.extend(
@@ -488,7 +522,8 @@ pub(super) fn blocking_response<E: DiagnosticError>(
                     .into_iter()
                     .map(|image| ContentBlock::image(image.data, image.mime_type)),
             );
-            let result = CallToolResult::success(content);
+            let mut result = CallToolResult::success(content);
+            result.structured_content = structured;
             if call_budget_verified {
                 if let Some(cost) = projected_cost {
                     output_budget.cache_response_cost(cost);
@@ -496,7 +531,10 @@ pub(super) fn blocking_response<E: DiagnosticError>(
                 tracing::trace!(target: "agentshim", token_gate_path = "verified_renderer");
                 return result.into();
             }
-            match output_token_gate.evaluate_result(&result, cancellation) {
+            match output_token_gate
+                .expect("non-native response fallback has a token gate")
+                .evaluate_result(&result, cancellation)
+            {
                 crate::output::GateDecision::FitsByBytes
                 | crate::output::GateDecision::FitsExactly(_) => result.into(),
                 crate::output::GateDecision::Exceeded => tool_error(
