@@ -94,6 +94,16 @@ impl RuntimeResources {
         self.shutdown.cancel();
     }
 
+    /// Non-blocking probe for the idle watchdog: true while any foreground read-only or
+    /// process permit is held. Work queued but not yet admitted is invisible by design —
+    /// admission re-checks the shutdown token, so such callers fail fast instead of being
+    /// killed mid-call.
+    #[must_use]
+    pub fn has_in_flight_calls(&self) -> bool {
+        self.read_only_calls.available_permits() < MAX_READ_ONLY_CALLS
+            || self.process_calls.available_permits() < self.config.process_calls
+    }
+
     /// Blocking quiescence barrier for foreground process owners: returns once every
     /// configured permit is free, or `false` at `deadline`. The wait deliberately ignores
     /// the shutdown token — cancelling it is what started the shutdown — and acquires

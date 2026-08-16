@@ -93,19 +93,21 @@ On Windows, JSON paths must escape each backslash.
 
 ### `--client-profile`
 
-Selects the aggregate burst policy. These layers are not the same limit:
+Selects the aggregate burst policy. These layers are separate limits, not a single cap:
 
 | Layer | Value | Meaning |
 | --- | ---: | --- |
 | Codex per-item truncation | 10,000 tokens or bytes | Client history cap after `Wall time:` / `Output:` |
 | Server content ceiling | 9,872 | 10,000 minus 128 wrapper tokens |
-| Per-call ceiling | 8,192 | Both profiles; a single page cannot exceed this today |
+| Per-call ceiling | 8,192 | Both profiles; a single page cannot exceed this currently |
 | Burst aggregate | profile default | Remaining budget split across in-flight calls |
 
 | Value | Per-call token ceiling | Default burst tokens |
 | --- | ---: | ---: |
 | `codex` (default) | 8,192 | 16,384 |
 | `cursor` | 8,192 | 32,768 |
+
+`CODEXSHIM_IDLE_TIMEOUT` enables idle shutdown for the `codex` profile. The `cursor` profile always disables the watchdog, but setting an invalid value still fails startup.
 
 ### `--read-scope`
 
@@ -168,7 +170,8 @@ The response tells you how far it got and how to continue. A document that mixes
 | `CODEXSHIM_DETACHED_CALLS` | `16` | Per-instance live detached `bash` trees; 1–16. |
 | `CODEXSHIM_OUTPUT_BYTES` | `32000` | Per-call output ceiling in bytes; 4096–262144. |
 | `CODEXSHIM_BURST_TOKENS` | profile default | Shared projected model-token budget; 2048–32768. |
-| `CODEXSHIM_TOOL_TIMEOUT_SHELF` | `600` | Shelf the server stays below so the client's `tool_timeout_sec` fires after the server's own Timeout. Effective max execution time is shelf minus 10 seconds; 15–3600. |
+| `CODEXSHIM_TOOL_TIMEOUT_SHELF` | `600` | The shelf value the server stays below so the client's `tool_timeout_sec` fires after the server's own Timeout. Effective max execution time is shelf minus 10 seconds; 15–3600. |
+| `CODEXSHIM_IDLE_TIMEOUT` | off | Idle shutdown in seconds for the `codex` profile only; 1–86400. Inbound JSON-RPC messages reset the deadline, and active foreground calls or detached trees defer shutdown. |
 | `CODEXSHIM_GREP_MEMORY_BYTES` | `268435456` | Per-call hard limit for retained `grep` candidates. |
 | `CODEXSHIM_GLOB_MEMORY_BYTES` | `33554432` | Per-call hard limit for retained `glob` matches. |
 | `CODEXSHIM_PDF_TEXT_MEMORY_BYTES` | `67108864` | Per-call memory budget for `auto`/`text` PDF reads. |
@@ -176,7 +179,12 @@ The response tells you how far it got and how to continue. A document that mixes
 | `CODEXSHIM_BASH` | probed | Absolute path to a GNU bash. |
 | `CODEXSHIM_LOG_MODE` | `errors` | One of `off`, `errors`, `all`. |
 | `CODEXSHIM_LOG_DIR` | platform default | Override the log directory with an absolute path. |
-| `CODEXSHIM_RESPECT_GITIGNORE` | `false` | When `true`, `grep` and `glob` apply `.gitignore` / `.ignore` filters. Omitted `include_ignored` follows this default; because the caller cannot read this setting, an empty result under active filtering ends with a line recommending `include_ignored=true`. `.git` and `node_modules`, `target`, `.venv`, `venv`, `dist`, `build`, `__pycache__` stay excluded either way. Binary, output-budget, and memory limits still apply. |
+| `CODEXSHIM_RESPECT_GITIGNORE` | `false` | When `true`, `grep` and `glob` apply `.gitignore` / `.ignore` filters. Omitted `include_ignored` follows this default. Because the caller cannot read this setting, an empty result under active filtering ends with a line recommending `include_ignored=true`. `.git` and `node_modules`, `target`, `.venv`, `venv`, `dist`, `build`, `__pycache__` stay excluded either way. Binary, output-budget, and memory limits still apply. |
+
+The idle watchdog rechecks the activity timestamp after confirming quiescence before it
+cancels the existing graceful-shutdown token. A request arriving in the final interval
+between that check and cancellation can still race with shutdown; enabling the watchdog
+accepts that narrow boundary condition.
 
 ## Diagnostics
 
@@ -196,9 +204,10 @@ Records contain identifiers, phases, outcomes, timings, and error classes — ne
 
 ## Acknowledgments
 
-PDF reading is based on [PDFOxide](https://github.com/yfedoseev/pdf_oxide). Token counting is based on [Gigatoken](https://github.com/marcelroed/gigatoken). We're grateful to both projects for their work.
-
-We've also learned a lot from [FastCtx](https://github.com/yc-duan/fastctx) while designing and measuring `read`, `grep`, and `glob`.
+- [PDFOxide](https://github.com/yfedoseev/pdf_oxide) — PDF reading backend
+- [Gigatoken](https://github.com/marcelroed/gigatoken) — token counting backend
+- [FastCtx](https://github.com/yc-duan/fastctx) — design and benchmarking reference for `read`, `grep`, and `glob`
+- [Linux Do](https://linux.do/) — forum community that inspired the initial idea for this project
 
 ## License
 

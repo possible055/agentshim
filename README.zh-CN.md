@@ -2,13 +2,13 @@
 
 [English](README.md) | 简体中文
 
-`codexshim` 为 Codex 与 Cursor 提供一组小而聚焦的源代码工具，优先支持 Windows x86-64，并为 Linux 与 macOS 提供兼容发行版。它以本地 stdio MCP 服务形式运行，并将启动目录作为仓库根目录。
+`codexshim` 为 Codex 与 Cursor 提供一组精简而专注的源代码工具，优先支持 Windows x86-64，并为 Linux 与 macOS 提供兼容性发行资产。它以本地 stdio MCP 服务形式运行，并将启动目录作为仓库根目录。
 
 ## 为什么使用
 
 - **受限的文件访问。** `read`、`grep` 和 `glob` 默认仅在仓库内操作，可选访问 Codex skill 和 plugin 目录。
 - **两种命令执行方式。** `run_program` 接收一个可执行文件和字面量参数列表——参数不经任何 shell 解析。需要管道、重定向或命令组合时使用 `bash`，它接收 POSIX 命令行，用以替代 Cursor 内置 Shell 在 Windows 上不可靠的 pwsh7。
-- **跨平台。** 完全支持 Windows x86-64，并为 Linux x86-64、Linux ARM64 与 macOS Apple Silicon 提供兼容支持的发行资产。
+- **跨平台。** 完全支持 Windows x86-64，并为 Linux x86-64、Linux ARM64 与 macOS Apple Silicon 提供兼容性发行资产。
 - **可读 PDF。** `read` 依内容识别 PDF（不靠扩展名），返回页面文字或渲染图片，长文档带续读游标。
 
 ## 工具
@@ -93,19 +93,21 @@ approval_mode = "prompt"
 
 ### `--client-profile`
 
-选择 aggregate burst 策略。这些层不是同一条限制：
+选择 aggregate burst 策略。下列各层是相互独立的限制，而非同一条上限：
 
 | 层 | 数值 | 含义 |
 | --- | ---: | --- |
-| Codex 单项 truncation | 10,000 tokens 或 bytes | 包上 `Wall time:` / `Output:` 后的 history 上限 |
+| Codex 单项 truncation | 10,000 tokens 或 bytes | 在包上 `Wall time:` / `Output:` 之后的 history 上限 |
 | 服务端内容上限 | 9,872 | 10,000 减去 128 wrapper tokens |
-| 单次呼叫上限 | 8,192 | 两个 profile 都是；单页目前不能超过它 |
+| 单次呼叫上限 | 8,192 | 两个 profile 均为此值；单页目前不能超过它 |
 | Burst 合计 | profile 默认值 | 剩余预算在未完成呼叫之间均分 |
 
 | 值 | 单次 token 上限 | 默认 burst token |
 | --- | ---: | ---: |
 | `codex`（默认） | 8,192 | 16,384 |
 | `cursor` | 8,192 | 32,768 |
+
+`CODEXSHIM_IDLE_TIMEOUT` 为 `codex` profile 启用空闲关闭。`cursor` profile 始终禁用看门狗，但设为非法值仍会导致启动失败。
 
 ### `--read-scope`
 
@@ -114,7 +116,7 @@ approval_mode = "prompt"
 | 取值 | 行为 |
 | --- | --- |
 | `unrestricted`（默认） | 服务用户可读的任意绝对路径。 |
-| `normal` | 仓库路径加上 Codex skill/plugin 目录。`.codex` 下的凭据和历史记录保持不可访问。 |
+| `normal` | 仓库路径加上 Codex skill/plugin 目录。`.codex` 下的凭据和历史记录仍不可访问。 |
 
 ```toml
 args = ["serve", "--read-scope", "normal"]
@@ -130,7 +132,7 @@ args = ["serve", "--read-scope", "normal"]
 { "command": "cargo test > /dev/null; echo EXIT=$?", "detach": true, "log_path": "local/test.log" }
 ```
 
-用 `read` 读取 `log_path` 观察进度。同时最多可有 16 棵存活中的 detached 进程树。
+用 `read` 读取 `log_path` 观察进度。同时最多可有 16 棵存活的 detached 进程树。
 
 ### Windows Bash 参数转换
 
@@ -148,7 +150,7 @@ Git Bash 在启动 Windows 原生程序前，会转换看起来像 POSIX 路径�
 | --- | --- | --- |
 | `pdf_mode` | `auto`（默认）、`text`、`image` | `auto`/`text` 返回页面 Markdown；`image` 渲染 PNG 内容块。 |
 | `pages` | `"7"` 或 `"7-12"` | 单页或一段连续范围。 |
-| `pdf_cursor` | 不透明 token | 原样回带上一轮响应给出的值。它同时携带来源版本，以及响应停在页内时的续读位置。 |
+| `pdf_cursor` | 不透明 token | 原样回传上一轮响应给出的值。它同时携带来源版本，以及响应停在页内时的续读位置。 |
 
 页数限制的是一次调用的工作量：
 
@@ -157,7 +159,7 @@ Git Bash 在启动 Windows 原生程序前，会转换看起来像 POSIX 路径�
 | `auto`、`text` | 前 10 页 | 20 页 |
 | `image` | 第 1 页 | 4 页 |
 
-响应会说明交付到哪里以及如何继续。同时含可读页与纯图片页的文件算成功：可读页以 Markdown 返回，其余变成 placeholder。单一实例同时最多只跑一个 PDF 呼叫；第二个并行呼叫会返回可重试的 `resource_busy`。
+响应会说明交付到哪里以及如何继续。同时包含可读页与纯图片页的文档视为成功：可读页以 Markdown 返回，其余变成 placeholder。单一实例同时最多只跑一个 PDF 呼叫；第二个并行呼叫会返回可重试的 `resource_busy`。
 
 ### 环境变量
 
@@ -168,7 +170,7 @@ Git Bash 在启动 Windows 原生程序前，会转换看起来像 POSIX 路径�
 | `CODEXSHIM_DETACHED_CALLS` | `16` | 每个实例存活中的 detached `bash` 进程树数量；1–16。 |
 | `CODEXSHIM_OUTPUT_BYTES` | `32000` | 每次呼叫的输出上限（字节）；4096–262144。 |
 | `CODEXSHIM_BURST_TOKENS` | profile 默认值 | 共用的预估模型 token 预算；2048–32768。 |
-| `CODEXSHIM_TOOL_TIMEOUT_SHELF` | `600` | 服务端会低于此 shelf，以便客户端的 `tool_timeout_sec` 在服务端自身 Timeout 之后触发。有效最长执行时间为 shelf 减 10 秒；15–3600。 |
+| `CODEXSHIM_TOOL_TIMEOUT_SHELF` | `600` | 服务端会保持低于此 shelf 值，以便客户端的 `tool_timeout_sec` 在服务端自身 Timeout 之后触发。有效最长执行时间为 shelf 减 10 秒；15–3600。 |
 | `CODEXSHIM_GREP_MEMORY_BYTES` | `268435456` | 每次 `grep` 呼叫保留候选项目的内存硬上限。 |
 | `CODEXSHIM_GLOB_MEMORY_BYTES` | `33554432` | 每次 `glob` 呼叫保留匹配项目的内存硬上限。 |
 | `CODEXSHIM_PDF_TEXT_MEMORY_BYTES` | `67108864` | `auto`/`text` 模式 PDF 读取的每次呼叫内存预算。 |
@@ -176,7 +178,9 @@ Git Bash 在启动 Windows 原生程序前，会转换看起来像 POSIX 路径�
 | `CODEXSHIM_BASH` | 自动探测 | GNU bash 的绝对路径。 |
 | `CODEXSHIM_LOG_MODE` | `errors` | 取值 `off`、`errors`、`all` 之一。 |
 | `CODEXSHIM_LOG_DIR` | 平台默认 | 用绝对路径覆盖日志目录。 |
-| `CODEXSHIM_RESPECT_GITIGNORE` | `false` | 设为 `true` 时，`grep` 与 `glob` 才套用 `.gitignore`／`.ignore`。省略 `include_ignored` 时跟随此默认值；由于调用方读不到这项设定，过滤生效且结果为空时，响应末尾会附上一行建议改用 `include_ignored=true`。`.git` 以及 `node_modules`、`target`、`.venv`、`venv`、`dist`、`build`、`__pycache__` 无论开关都排除。binary、输出预算与内存上限仍会挡住内容。 |
+| `CODEXSHIM_RESPECT_GITIGNORE` | `false` | 设为 `true` 时，`grep` 与 `glob` 才套用 `.gitignore`／`.ignore`。省略 `include_ignored` 时跟随此默认值。由于调用方读不到这项设定，过滤生效且结果为空时，响应末尾会附上一行建议改用 `include_ignored=true`。`.git` 以及 `node_modules`、`target`、`.venv`、`venv`、`dist`、`build`、`__pycache__` 无论开关都排除。binary、输出预算与内存上限仍会挡住内容。 |
+
+空闲看门狗在确认静默后会再次复核活动时间戳，然后才取消既有的优雅关闭 token。在这次复核与取消之间的最后窗口内到达的请求，仍可能与关闭发生竞态；启用看门狗即接受这一狭窄的边界条件。
 
 ## 诊断
 
@@ -192,13 +196,14 @@ codexshim logs status
 codexshim logs purge
 ```
 
-记录包含标识符、阶段、结果、计时与错误类别——绝不包含 MCP 参数、grep 模式、进程参数、stdin、文件内容或 stdout/stderr。复现工具加载失败时，将 `CODEXSHIM_LOG_MODE=all`。
+记录包含标识符、阶段、结果、计时与错误类别——绝不包含 MCP 参数、grep 模式、进程参数、stdin、文件内容或 stdout/stderr。复现工具加载失败时，将 `CODEXSHIM_LOG_MODE` 设为 `all`。
 
 ## 致谢
 
-PDF 读取基于 [PDFOxide](https://github.com/yfedoseev/pdf_oxide)，token 计数基于 [Gigatoken](https://github.com/marcelroed/gigatoken)。感谢这两个项目的工作。
-
-设计和测量 `read`、`grep` 与 `glob` 时，我们也从 [FastCtx](https://github.com/yc-duan/fastctx) 学到很多。
+- [PDFOxide](https://github.com/yfedoseev/pdf_oxide) — PDF 读取后端
+- [Gigatoken](https://github.com/marcelroed/gigatoken) — token 计数后端
+- [FastCtx](https://github.com/yc-duan/fastctx) — `read`、`grep` 与 `glob` 的设计与基准参考
+- [Linux Do](https://linux.do/) — 啟發本項目最初構想的論壇社群
 
 ## 许可证
 

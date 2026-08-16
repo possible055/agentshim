@@ -30,6 +30,7 @@ __pycache__/
 .agent/
 .augment/
 .junie/
+.zcode/
 AGENTS.md
 CLAUDE.md
 
@@ -39,12 +40,12 @@ CLAUDE.md
 !.env.example
 
 # Project-specific
-local/
-repos/
-
-# Evaluation datasets & benchmarks runtime
+adapters/dsh/lib/
+adapters/dsh/*.tgz
 evals/datasets/codebase/codebase_*/
 evals/datasets/pdf/corpus/
 evals/datasets/pdf/long/
 evals/datasets/pdf/short/
 evals/datasets/pdf/ocr/
+local/
+repos/

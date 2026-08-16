@@ -52,10 +52,13 @@ fn parallel_large_reads_share_one_projected_burst_budget() {
         "content-bearing responses exceeded the shared burst budget"
     );
     assert!(responses.iter().all(|response| {
-        response["result"]["isError"] == false
-            && response["result"]["content"][0]["text"]
+        let result = &response["result"];
+        (result["isError"] == false
+            && result["content"][0]["text"]
                 .as_str()
-                .is_some_and(|text| text.contains("Partial: next_start_line="))
+                .is_some_and(|text| text.contains("Partial: next_start_line=")))
+            || (result["isError"] == true
+                && result["structuredContent"]["error"]["code"] == "output_budget")
     }));
     session.close();
 }

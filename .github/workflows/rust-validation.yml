@@ -58,6 +58,81 @@ jobs:
       RUSTFLAGS: ${{ inputs.deny_test_warnings && '-Dwarnings' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Determine validation scope
+        id: validation-scope
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          scope=full
+          reason="manual or unsupported event"
+          base_sha=""
+
+          case "$EVENT_NAME" in
+            pull_request)
+              base_sha="$PULL_REQUEST_BASE_SHA"
+              ;;
+            push)
+              base_sha="$PUSH_BASE_SHA"
+              ;;
+          esac
+
+          if [[ "$EVENT_NAME" == "pull_request" || "$EVENT_NAME" == "push" ]]; then
+            if [[ ! "$base_sha" =~ ^[0-9a-fA-F]{40}$ || "$base_sha" =~ ^0{40}$ ]]; then
+              reason="base commit is unavailable; using full validation"
+            elif [[ ! "$HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              reason="head commit is invalid; using full validation"
+            else
+              if ! git cat-file -e "${base_sha}^{commit}" 2>/dev/null; then
+                if ! git fetch --no-tags --depth=1 origin "$base_sha"; then
+                  reason="base commit fetch failed; using full validation"
+                  base_sha=""
+                fi
+              fi
+
+              if [[ -n "$base_sha" ]]; then
+                set +e
+                git diff --quiet "$base_sha" "$HEAD_SHA" -- \
+                  crates/pdf-read-core \
+                  crates/gigatoken-core \
+                  Cargo.toml \
+                  Cargo.lock \
+                  rust-toolchain.toml \
+                  .gitattributes \
+                  .cargo \
+                  .github/workflows/ci.yml \
+                  .github/workflows/optional-platform-ci.yml \
+                  .github/workflows/rust-validation.yml
+                diff_status=$?
+                set -e
+
+                case "$diff_status" in
+                  0)
+                    scope=root
+                    reason="no derivative validation inputs changed"
+                    ;;
+                  1)
+                    reason="derivative validation inputs changed"
+                    ;;
+                  *)
+                    reason="change detection failed; using full validation"
+                    ;;
+                esac
+              fi
+            fi
+          fi
+
+          printf 'scope=%s\n' "$scope" >> "$GITHUB_OUTPUT"
+          {
+            printf '### Validation scope\n\n'
+            printf -- '- Scope: `%s`\n' "$scope"
+            printf -- '- Reason: %s\n' "$reason"
+          } >> "$GITHUB_STEP_SUMMARY"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         if: inputs.setup_node
@@ -88,21 +163,36 @@ jobs:
       - name: Format
         if: inputs.run_format
         run: cargo fmt --all -- --check
-      - name: Lint workspace
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-      - name: Test workspace default features
-        run: cargo test --locked --workspace --tests
-      - name: Verify all-features test targets compile
-        run: cargo check --locked --workspace --all-features --tests
+      - name: Lint root package
+        run: cargo clippy --locked -p codexshim --all-targets --all-features -- -D warnings
+      - name: Test root package default features
+        run: cargo test --locked -p codexshim --tests
+      - name: Verify root all-features test targets compile
+        run: cargo check --locked -p codexshim --all-features --tests
       - name: Test bench-internals profiled paths
         run: cargo test --locked -p codexshim --features bench-internals --lib -- profiled
+      - name: Lint derivative packages
+        if: steps.validation-scope.outputs.scope == 'full'
+        run: cargo clippy --locked -p codexshim-pdf-read -p codexshim-gigatoken --all-targets --all-features -- -D warnings
+      - name: Test derivative packages default features
+        if: steps.validation-scope.outputs.scope == 'full'
+        run: cargo test --locked -p codexshim-pdf-read -p codexshim-gigatoken --tests
+      - name: Verify derivative all-features test targets compile
+        if: steps.validation-scope.outputs.scope == 'full'
+        run: cargo check --locked -p codexshim-pdf-read -p codexshim-gigatoken --all-features --tests
       - name: Check PDF rendering-only feature profile
+        if: steps.validation-scope.outputs.scope == 'full'
         run: cargo check --locked -p codexshim-pdf-read --all-targets --no-default-features --features rendering
-      - name: Build workspace documentation
+      - name: Build root package documentation
         if: inputs.build_docs
         env:
           RUSTDOCFLAGS: -Dwarnings
-        run: cargo doc --locked --workspace --all-features --no-deps
+        run: cargo doc --locked -p codexshim --all-features --no-deps
+      - name: Build derivative package documentation
+        if: inputs.build_docs && steps.validation-scope.outputs.scope == 'full'
+        env:
+          RUSTDOCFLAGS: -Dwarnings
+        run: cargo doc --locked -p codexshim-pdf-read -p codexshim-gigatoken --all-features --no-deps
       - name: Metadata
         if: inputs.run_metadata
         run: cargo metadata --locked --no-deps --format-version 1

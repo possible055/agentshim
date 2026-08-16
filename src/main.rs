@@ -1,6 +1,6 @@
 mod cli;
 
-use std::{env, process::ExitCode};
+use std::{env, process::ExitCode, time::Duration};
 
 use cli::{CliCommand, parse_command, run, usage};
 use codexshim::{
@@ -44,7 +44,12 @@ fn main() -> ExitCode {
         }
     };
     tracing::info!(target: "codexshim", event = "runtime_ready", phase = "startup");
-    match runtime.block_on(run(config, command)) {
+    let outcome = runtime.block_on(run(config, command));
+    // `tokio::io::stdin` uses an uncancellable blocking read. Once the service has
+    // completed its own bounded shutdown, do not let that helper keep the process alive
+    // solely because the client retained its stdin pipe.
+    runtime.shutdown_timeout(Duration::ZERO);
+    match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("codexshim: {error}");

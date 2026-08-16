@@ -4,9 +4,10 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     task::{Context, Poll},
+    time::SystemTime,
 };
 
 use codexshim::ToolsListCorrelation;
@@ -140,6 +141,17 @@ pub(super) struct DiagnosticTransport<T> {
     correlations: Arc<Mutex<CorrelationTracker>>,
     failure: TransportFailure,
     shutdown: CancellationToken,
+    last_activity: Arc<AtomicU64>,
+}
+
+/// Wall-clock milliseconds for the idle watchdog's activity tracker. Wall clock rather
+/// than a monotonic source because the value is shared across tasks as a plain atomic.
+pub(super) fn unix_epoch_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since_epoch| {
+            u64::try_from(since_epoch.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 #[derive(Default)]
@@ -193,7 +205,11 @@ impl CorrelationTracker {
 }
 
 impl<T> DiagnosticTransport<T> {
-    pub(super) fn new(inner: T, shutdown: CancellationToken) -> (Self, TransportFailure) {
+    pub(super) fn new(
+        inner: T,
+        shutdown: CancellationToken,
+        last_activity: Arc<AtomicU64>,
+    ) -> (Self, TransportFailure) {
         let failure = TransportFailure(Arc::new(AtomicBool::new(false)));
         (
             Self {
@@ -201,6 +217,7 @@ impl<T> DiagnosticTransport<T> {
                 correlations: Arc::new(Mutex::new(CorrelationTracker::default())),
                 failure: failure.clone(),
                 shutdown,
+                last_activity,
             },
             failure,
         )
@@ -255,9 +272,16 @@ where
 
     fn receive(&mut self) -> impl Future<Output = Option<RxJsonRpcMessage<RoleServer>>> + Send {
         let correlations = Arc::clone(&self.correlations);
+        let last_activity = Arc::clone(&self.last_activity);
         let receive = self.inner.receive();
         async move {
             let mut message = receive.await;
+            // Every inbound frame — request, notification, or response — proves the
+            // client is still driving this server, which is all the idle watchdog
+            // needs; `None` means the transport closed, which cancels the token anyway.
+            if message.is_some() {
+                last_activity.store(unix_epoch_millis(), Ordering::Release);
+            }
             match &mut message {
                 Some(JsonRpcMessage::Request(request))
                     if matches!(&request.request, ClientRequest::ListToolsRequest(_)) =>
@@ -302,7 +326,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, future::ready};
+    use std::{
+        collections::VecDeque,
+        future::ready,
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
+    };
 
     use rmcp::{
         RoleServer,
@@ -372,6 +403,10 @@ mod tests {
 
     fn inbound(value: serde_json::Value) -> RxJsonRpcMessage<RoleServer> {
         serde_json::from_value(value).expect("inbound JSON")
+    }
+
+    fn activity() -> Arc<AtomicU64> {
+        Arc::new(AtomicU64::new(0))
     }
 
     #[test]
@@ -445,6 +480,7 @@ mod tests {
                 fail_send: false,
             },
             shutdown,
+            activity(),
         );
         {
             let mut tracker = transport.correlations.lock().expect("tracker");
@@ -486,6 +522,7 @@ mod tests {
                 fail_send: false,
             },
             shutdown,
+            activity(),
         );
 
         let message = transport.receive().await.expect("tools/list request");
@@ -522,6 +559,7 @@ mod tests {
                     fail_send: false,
                 },
                 shutdown,
+                activity(),
             );
             transport
                 .correlations
@@ -551,6 +589,7 @@ mod tests {
                 fail_send: true,
             },
             shutdown.clone(),
+            activity(),
         );
         transport
             .correlations
@@ -570,5 +609,27 @@ mod tests {
         );
         assert!(failure.failed());
         assert!(shutdown.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn receive_updates_last_activity_for_every_inbound_message() {
+        let received = VecDeque::from([inbound(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "ping",
+            "params": {}
+        }))]);
+        let last_activity = activity();
+        let (mut transport, _) = DiagnosticTransport::new(
+            TestTransport {
+                received,
+                fail_send: false,
+            },
+            tokio_util::sync::CancellationToken::new(),
+            Arc::clone(&last_activity),
+        );
+
+        assert!(transport.receive().await.is_some());
+        assert!(last_activity.load(Ordering::Acquire) > 0);
     }
 }

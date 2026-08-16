@@ -97,26 +97,7 @@ impl DetachedTrees {
         if state.state != RosterState::Accepting {
             return Err(stopping_admission_error());
         }
-        state
-            .live
-            .retain_mut(|slot| match self.liveness(&mut slot.tree) {
-                Ok(running) => running,
-                Err(error) => {
-                    // A failed liveness query is a degraded observation, not an exit report:
-                    // dropping the slot would close the only job handle and kill a tree that
-                    // may still be running, so the owner and its capacity stay booked.
-                    tracing::warn!(
-                        target: "codexshim",
-                        event = "detached_liveness_degraded",
-                        phase = "execution",
-                        outcome = "degraded",
-                        error_class = "io",
-                        io_kind = ?error.kind(),
-                        pid = slot.tree.pid()
-                    );
-                    true
-                }
-            });
+        self.sweep_liveness(&mut state);
         if state.live.len().saturating_add(state.reserved) >= self.capacity {
             let busy = state
                 .live
@@ -181,6 +162,40 @@ impl DetachedTrees {
         state.shutdown_deadline = Some(Instant::now() + CLEANUP_DEADLINE);
         self.changed.notify_all();
         state.live.drain(..).map(|slot| slot.tree).collect()
+    }
+
+    /// Reap finished trees and count what is still live, including reservations that
+    /// have not spawned yet. The idle watchdog treats a non-zero count as client
+    /// activity: a quiet conversation with a running build must not be reaped out
+    /// from under it.
+    pub(crate) fn live_tree_count(&self) -> usize {
+        let mut state = self.lock();
+        self.sweep_liveness(&mut state);
+        state.live.len().saturating_add(state.reserved)
+    }
+
+    /// Drop finished trees from the roster. A failed liveness query is a degraded
+    /// observation, not an exit report: dropping the slot would close the only job
+    /// handle and kill a tree that may still be running, so the owner and its capacity
+    /// stay booked.
+    fn sweep_liveness(&self, state: &mut Roster) {
+        state
+            .live
+            .retain_mut(|slot| match self.liveness(&mut slot.tree) {
+                Ok(running) => running,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "codexshim",
+                        event = "detached_liveness_degraded",
+                        phase = "execution",
+                        outcome = "degraded",
+                        error_class = "io",
+                        io_kind = ?error.kind(),
+                        pid = slot.tree.pid()
+                    );
+                    true
+                }
+            });
     }
 
     #[cfg(test)]

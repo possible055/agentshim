@@ -10,6 +10,7 @@ fn doctor(process_calls: Option<&str>) -> std::process::Output {
         .env_remove("CODEXSHIM_GREP_MEMORY_BYTES")
         .env_remove("CODEXSHIM_GLOB_MEMORY_BYTES")
         .env_remove("CODEXSHIM_BURST_TOKENS")
+        .env_remove("CODEXSHIM_IDLE_TIMEOUT")
         .env("CODEXSHIM_LOG_MODE", "off");
     if let Some(process_calls) = process_calls {
         command.env("CODEXSHIM_PROCESS_CALLS", process_calls);

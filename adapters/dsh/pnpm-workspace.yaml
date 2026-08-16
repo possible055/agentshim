@@ -1,0 +1,5 @@
+# pnpm 11 reads package-manager settings here, not from package.json.
+# koffi (@deepseek-ai/dsh-fs-local's native dep) ships prebuilt platform
+# binaries, so its postinstall fallback build is deliberately not run.
+allowBuilds:
+  koffi: false

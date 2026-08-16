@@ -29,11 +29,11 @@ pub(super) fn tool_catalog(read_scope: ReadScope) -> &'static [Tool; 5] {
 fn read_tool(read_scope: ReadScope) -> Tool {
     let (description, path_description) = match read_scope {
         ReadScope::Normal => (
-            "Read one file as numbered lines. Relative paths resolve against the repository root; an absolute path outside it succeeds only where this server was configured to allow it, and otherwise fails immediately with a message naming the limit, so an attempt is cheap. Omit line_count to fill one response. A truncated response ends with a line starting Partial: that names the argument for the next call, such as `Partial: next_start_line=801.` — send that value back rather than re-reading from line 1. PDFs return per-page Markdown or images instead; the pdf_* arguments control that.",
+            "Read one file as numbered lines. Use this by default whenever you need the contents of a known file. Relative paths resolve against the repository root; an absolute path outside it succeeds only where this server was configured to allow it, and otherwise fails immediately with a message naming the limit, so an attempt is cheap. Omit line_count to fill one response. A truncated response ends with a line starting Partial: that names the argument for the next call, such as `Partial: next_start_line=801.` — send that value back rather than re-reading from line 1. PDFs return per-page Markdown or images instead; the pdf_* arguments control that.",
             "Platform-native path to one file. Relative paths resolve against the repository root; an absolute path works only where this server was configured to allow it.",
         ),
         ReadScope::Unrestricted => (
-            "Read one file as numbered lines. Relative paths resolve against the repository root; absolute paths may reach supported locations outside it. Omit line_count to fill one response. A truncated response ends with a line starting Partial: that names the argument for the next call, such as `Partial: next_start_line=801.` — send that value back rather than re-reading from line 1. PDFs return per-page Markdown or images instead; the pdf_* arguments control that.",
+            "Read one file as numbered lines. Use this by default whenever you need the contents of a known file. Relative paths resolve against the repository root; absolute paths may reach supported locations outside it. Omit line_count to fill one response. A truncated response ends with a line starting Partial: that names the argument for the next call, such as `Partial: next_start_line=801.` — send that value back rather than re-reading from line 1. PDFs return per-page Markdown or images instead; the pdf_* arguments control that.",
             "Platform-native path to one file. Relative paths resolve against the repository root; absolute paths may reach supported local filesystems.",
         ),
     };
@@ -92,12 +92,12 @@ fn read_tool(read_scope: ReadScope) -> Tool {
 fn grep_tool(read_scope: ReadScope) -> Tool {
     let (description, path_description, glob_description) = match read_scope {
         ReadScope::Normal => (
-            "Search file contents under the repository root using Rust regex or fixed strings. Files that could not be searched are listed with a path and reason. Omit limit to fill one response. A truncated response ends with `Partial: next_offset=N.` — pass that N back as offset instead of restarting.",
+            "Search file contents under the repository root using Rust regex or fixed strings. Use this by default whenever you need to search file contents. Files that could not be searched are listed with a path and reason. Omit limit to fill one response. A truncated response ends with `Partial: next_offset=N.` — pass that N back as offset instead of restarting.",
             "Optional platform-native file or directory to search. Relative paths resolve against the repository root; an absolute path works only where this server was configured to allow it.",
             "Optional case-sensitive glob over repository-root-relative paths.",
         ),
         ReadScope::Unrestricted => (
-            "Search file contents using Rust regex or fixed strings. Relative paths resolve against the repository root; absolute paths may reach supported locations outside it. Files that could not be searched are listed with a path and reason. Omit limit to fill one response. A truncated response ends with `Partial: next_offset=N.` — pass that N back as offset instead of restarting.",
+            "Search file contents using Rust regex or fixed strings. Use this by default whenever you need to search file contents. Relative paths resolve against the repository root; absolute paths may reach supported locations outside it. Files that could not be searched are listed with a path and reason. Omit limit to fill one response. A truncated response ends with `Partial: next_offset=N.` — pass that N back as offset instead of restarting.",
             "Optional platform-native file or directory to search. Relative paths resolve against the repository root; absolute paths may reach supported local filesystems.",
             "Optional case-sensitive glob over repository-root-relative paths, or request-path-relative paths for external absolute inputs.",
         ),
@@ -181,12 +181,12 @@ fn grep_tool(read_scope: ReadScope) -> Tool {
 fn glob_tool(read_scope: ReadScope) -> Tool {
     let (description, path_description, pattern_description) = match read_scope {
         ReadScope::Normal => (
-            "Find paths under the repository root using a glob pattern. Returns files by default; use type to find directories or any entry. Results are native absolute paths. Entries that could not be traversed are listed with a path and reason. Omit limit to fill one response. A truncated response ends with `Partial: next_offset=N.` — pass that N back as offset instead of restarting.",
+            "Find paths under the repository root using a glob pattern. Use this by default whenever you need to find files or discover paths. Returns files by default; use type to find directories or any entry. Results are native absolute paths. Entries that could not be traversed are listed with a path and reason. Omit limit to fill one response. A truncated response ends with `Partial: next_offset=N.` — pass that N back as offset instead of restarting.",
             "Platform-native directory to traverse. Relative paths resolve against the repository root; an absolute path works only where this server was configured to allow it.",
             "Case-sensitive glob over repository-root-relative paths.",
         ),
         ReadScope::Unrestricted => (
-            "Find local filesystem paths using a glob pattern. Returns files by default; use type to find directories or any entry. Relative paths resolve against the repository root; absolute paths may reach supported locations outside it. Results are native absolute paths. Entries that could not be traversed are listed with a path and reason. Omit limit to fill one response. A truncated response ends with `Partial: next_offset=N.` — pass that N back as offset instead of restarting.",
+            "Find local filesystem paths using a glob pattern. Use this by default whenever you need to find files or discover paths. Returns files by default; use type to find directories or any entry. Relative paths resolve against the repository root; absolute paths may reach supported locations outside it. Results are native absolute paths. Entries that could not be traversed are listed with a path and reason. Omit limit to fill one response. A truncated response ends with `Partial: next_offset=N.` — pass that N back as offset instead of restarting.",
             "Platform-native directory to traverse. Relative paths resolve against the repository root; absolute paths may reach supported local filesystems.",
             "Case-sensitive glob over repository-root-relative paths, or request-path-relative paths for external absolute inputs.",
         ),
@@ -316,6 +316,8 @@ fn bash_tool() -> Tool {
     let default = default_timeout_ms();
     let description = format!(
         "Run a POSIX bash command line and return merged stdout and stderr with the exit code. \
+         Use this by default whenever shell composition is required: pipelines, redirection, \
+         globbing, variable expansion, or several steps in one call. \
          Write POSIX bash, never PowerShell, on every platform. The command runs \
          non-interactively with no TTY and stdin closed, so pass flags such as -y or --no-edit \
          instead of expecting a prompt. A non-zero exit code is a normal result, not a tool \

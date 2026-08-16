@@ -2,13 +2,29 @@
 
 ## Validation
 
-Run the smallest relevant check while developing. Before handing off a complete change, run:
+Run the smallest relevant check while developing. For ordinary changes to the root package, use the same fast path as CI:
+
+```console
+cargo fmt --all -- --check
+cargo clippy --locked -p codexshim --all-targets --all-features -- -D warnings
+cargo test --locked -p codexshim --tests
+cargo check --locked -p codexshim --all-features --tests
+cargo test --locked -p codexshim --features bench-internals --lib -- profiled
+cargo doc --locked -p codexshim --all-features --no-deps
+```
+
+Run the documentation command with `RUSTDOCFLAGS=-Dwarnings`, using the assignment syntax for the current shell.
+
+Before handing off a complete change, run the full local validation:
 
 ```console
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked
+cargo check --locked --workspace --all-features --tests
 ```
+
+CI always runs the root-package fast path. It adds the derivative-package checks when either derivative source tree, the workspace manifests or lockfile, the Rust toolchain, checkout attributes, or the validation workflows change. Manual validation runs the full scope.
 
 Probe, soak, and other `#[ignore]` integration binaries stay out of the default run. Build one explicitly with `cargo test --locked --test <name> -- --ignored`.
 
@@ -37,7 +53,7 @@ Assert public parse boundaries, MCP wire (lifecycle, versions, annotations, erro
 
 Windows and Unix mechanisms live under `crate::platform`. Portable policy and result formatting remain in their owning modules. Add shared contract tests for platform implementations, then exercise each implementation on its native CI runner.
 
-The fully supported platform runs the complete native validation suite on every pull request and every push to `main`:
+The fully supported platform runs the root package's complete native validation suite on every pull request and every push to `main`; derivative packages receive their complete suite when their validation inputs change:
 
 - Windows x86-64
 

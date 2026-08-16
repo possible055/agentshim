@@ -1,4 +1,12 @@
-use std::{error::Error, ffi::OsString};
+use std::{
+    error::Error,
+    ffi::OsString,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use codexshim::{
     ClientProfile, CodexShim, MAX_READ_ONLY_CALLS, ReadScope, RuntimeLimits, bash_report,
@@ -9,7 +17,7 @@ use rmcp::{
     transport::{IntoTransport, stdio},
 };
 
-use self::transport::{DiagnosticTransport, ReceiveFrameReader, ShutdownReader};
+use self::transport::{DiagnosticTransport, ReceiveFrameReader, ShutdownReader, unix_epoch_millis};
 
 mod transport;
 
@@ -173,11 +181,17 @@ pub(super) async fn run(config: RuntimeLimits, command: CliCommand) -> Result<()
                 shutdown: service.shutdown_token(),
                 termination_reported: false,
             };
-            tracing::info!(target: "codexshim", event = "server_start", phase = "lifecycle", read_scope = %read_scope, client_profile = %service.client_profile(), tool_output_tokens = service.tool_output_token_limit(), burst_tokens = service.burst_token_limit());
+            tracing::info!(target: "codexshim", event = "server_start", phase = "lifecycle", read_scope = %read_scope, client_profile = %service.client_profile(), tool_output_tokens = service.tool_output_token_limit(), burst_tokens = service.burst_token_limit(), idle_timeout_secs = service.runtime_limits().idle_timeout.map(|timeout| timeout.as_secs()));
             let shutdown_token = service.shutdown_token();
             let transport = (reader, stdout).into_transport();
-            let (transport, transport_failure) =
-                DiagnosticTransport::new(transport, shutdown_token.clone());
+            // Seed before transport polling starts so an instance whose client never
+            // sends its first frame is still reclaimed after the configured timeout.
+            let last_activity = Arc::new(AtomicU64::new(unix_epoch_millis()));
+            let (transport, transport_failure) = DiagnosticTransport::new(
+                transport,
+                shutdown_token.clone(),
+                Arc::clone(&last_activity),
+            );
             // Process shutdown begins the moment the global token fires — EOF, transport
             // failure, or explicit stop — and runs in parallel with the protocol drain,
             // instead of waiting for the service to finish first.
@@ -189,12 +203,18 @@ pub(super) async fn run(config: RuntimeLimits, command: CliCommand) -> Result<()
                     shutdown_service.shutdown_processes().await;
                 })
             };
+            let idle_watchdog = spawn_idle_watchdog(
+                service.clone(),
+                Arc::clone(&last_activity),
+                shutdown_token.clone(),
+            );
             let drain_service = service.clone();
             let running = match service.serve_with_ct(transport, shutdown_token).await {
                 Ok(running) => running,
                 Err(error) => {
                     drain_service.shutdown_processes().await;
                     let _ = shutdown_watcher.await;
+                    let _ = idle_watchdog.await;
                     tracing::error!(target: "codexshim", event = "server_stop", phase = "lifecycle", outcome = "error", error_class = initialize_error_class(&error));
                     return Err(error.into());
                 }
@@ -203,6 +223,7 @@ pub(super) async fn run(config: RuntimeLimits, command: CliCommand) -> Result<()
             let outcome = running.waiting().await;
             drain_service.shutdown_processes().await;
             let _ = shutdown_watcher.await;
+            let _ = idle_watchdog.await;
             match outcome {
                 Ok(QuitReason::Closed) if transport_failure.failed() => {
                     tracing::error!(target: "codexshim", event = "server_stop", phase = "lifecycle", outcome = "error", error_class = "transport");
@@ -239,6 +260,45 @@ pub(super) async fn run(config: RuntimeLimits, command: CliCommand) -> Result<()
     Ok(())
 }
 
+fn spawn_idle_watchdog(
+    service: CodexShim,
+    last_activity: Arc<AtomicU64>,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let Some(timeout) = service.runtime_limits().idle_timeout else {
+            return;
+        };
+        let recheck = timeout.min(Duration::from_secs(30));
+        loop {
+            let last = last_activity.load(Ordering::Acquire);
+            let elapsed = Duration::from_millis(unix_epoch_millis().saturating_sub(last));
+            let Some(remaining) = timeout.checked_sub(elapsed) else {
+                if !service.is_idle_quiescent() {
+                    tokio::select! {
+                        () = shutdown.cancelled() => return,
+                        () = tokio::time::sleep(recheck) => {}
+                    }
+                    continue;
+                }
+                // Re-read after the quiescence probe so a message that raced the
+                // deadline gets its stay of execution. A frame landing between this
+                // load and cancellation is the unavoidable idle-timeout boundary race.
+                if last != last_activity.load(Ordering::Acquire) {
+                    continue;
+                }
+                tracing::info!(target: "codexshim", event = "idle_shutdown", phase = "lifecycle", idle_secs = timeout.as_secs());
+                shutdown.cancel();
+                return;
+            };
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                () = tokio::time::sleep(remaining) => {}
+            }
+        }
+    })
+}
+
 fn run_doctor(config: RuntimeLimits, options: &ServeOptions) -> Result<(), Box<dyn Error>> {
     let service = CodexShim::builder(std::env::current_dir()?)?
         .runtime_limits(config)
@@ -265,6 +325,10 @@ fn run_doctor(config: RuntimeLimits, options: &ServeOptions) -> Result<(), Box<d
     println!("client profile: {}", service.client_profile());
     println!("tool output tokens: {}", service.tool_output_token_limit());
     println!("burst tokens: {}", service.burst_token_limit());
+    match service.runtime_limits().idle_timeout {
+        Some(timeout) => println!("idle timeout: {}s", timeout.as_secs()),
+        None => println!("idle timeout: disabled"),
+    }
     print_memory_limits(service.runtime_limits());
     match bash_report() {
         Ok((executable, locale)) => {

@@ -1,0 +1,66 @@
+name: DSH adapter CI
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - adapters/dsh/**
+      - src/**
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .cargo/**
+      - .github/workflows/dsh-adapter.yml
+  pull_request:
+    paths:
+      - adapters/dsh/**
+      - src/**
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .cargo/**
+      - .github/workflows/dsh-adapter.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  adapter:
+    name: Adapter (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.21.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.21.1
+          cache: pnpm
+          cache-dependency-path: adapters/dsh/pnpm-lock.yaml
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: pnpm --dir adapters/dsh install --frozen-lockfile
+      - run: pnpm --dir adapters/dsh typecheck
+      - run: pnpm --dir adapters/dsh lint
+      - run: cargo build --locked -p codexshim
+      - run: pnpm --dir adapters/dsh test
+        env:
+          CODEXSHIM_REAL_E2E: '1'
+          CODEXSHIM_LONG_E2E: ${{ runner.os == 'Linux' && '1' || '0' }}
+      - run: pnpm --dir adapters/dsh build
+      - run: pnpm --dir adapters/dsh pack
+      - run: pnpm --dir adapters/dsh test:package-smoke
+        env:
+          CODEXSHIM_PACKAGE_E2E: '1'

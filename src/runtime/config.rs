@@ -39,6 +39,7 @@ const TRANSPORT_BLOCKING_THREADS: usize = 2;
 const WORKER_ENV: &str = "CODEXSHIM_IO_WORKERS";
 const PROCESS_CALLS_ENV: &str = "CODEXSHIM_PROCESS_CALLS";
 const TOOL_TIMEOUT_SHELF_ENV: &str = "CODEXSHIM_TOOL_TIMEOUT_SHELF";
+const IDLE_TIMEOUT_ENV: &str = "CODEXSHIM_IDLE_TIMEOUT";
 pub const GREP_MEMORY_BYTES_ENV: &str = "CODEXSHIM_GREP_MEMORY_BYTES";
 pub const GLOB_MEMORY_BYTES_ENV: &str = "CODEXSHIM_GLOB_MEMORY_BYTES";
 pub const PDF_TEXT_MEMORY_BYTES_ENV: &str = "CODEXSHIM_PDF_TEXT_MEMORY_BYTES";
@@ -54,6 +55,10 @@ pub const DEFAULT_TOOL_TIMEOUT_SHELF: Duration = Duration::from_secs(600);
 /// deadline and protocol slack are subtracted.
 pub const MIN_TOOL_TIMEOUT_SHELF: Duration = Duration::from_secs(15);
 pub const MAX_TOOL_TIMEOUT_SHELF: Duration = Duration::from_secs(3600);
+/// The floor stays at one second so integration tests can exercise the idle watchdog
+/// quickly; the watchdog is opt-in, so the low bound costs nothing in production.
+pub const MIN_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
+pub const MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(86_400);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeConfig {
@@ -69,6 +74,9 @@ pub struct RuntimeConfig {
     pub pdf_image_memory_bytes: usize,
     pub memory_bytes: usize,
     pub tool_timeout_shelf: Duration,
+    /// Idle-watchdog deadline for the codex client profile; `None` disables the
+    /// watchdog. Validated in `from_env`, gated by client profile in `build`.
+    pub idle_timeout: Option<Duration>,
     pub respect_gitignore: bool,
 }
 
@@ -126,6 +134,7 @@ impl RuntimeConfig {
         let memory_bytes = global_memory_bytes(grep_memory_bytes, glob_memory_bytes);
         let tool_timeout_shelf =
             parse_tool_timeout_shelf(env::var_os(TOOL_TIMEOUT_SHELF_ENV).as_deref())?;
+        let idle_timeout = parse_idle_timeout(env::var_os(IDLE_TIMEOUT_ENV).as_deref())?;
         let respect_gitignore =
             parse_respect_gitignore(env::var_os(RESPECT_GITIGNORE_ENV).as_deref())?;
         // A per-call reservation larger than the pool it is drawn from could never be
@@ -157,6 +166,7 @@ impl RuntimeConfig {
             pdf_image_memory_bytes,
             memory_bytes,
             tool_timeout_shelf,
+            idle_timeout,
             respect_gitignore,
         })
     }
@@ -179,6 +189,7 @@ impl RuntimeConfig {
             pdf_image_memory_bytes: DEFAULT_PDF_IMAGE_MEMORY_BYTES,
             memory_bytes: DEFAULT_MEMORY_BYTES,
             tool_timeout_shelf: DEFAULT_TOOL_TIMEOUT_SHELF,
+            idle_timeout: None,
             respect_gitignore: false,
         }
     }
@@ -300,6 +311,43 @@ pub(super) fn parse_tool_timeout_shelf(value: Option<&OsStr>) -> io::Result<Dura
                     ),
                 )
             }),
+    }
+}
+
+/// Parse the idle-watchdog deadline. Unset disables the watchdog; a set value outside
+/// the documented range fails startup rather than arming a mis-sized watchdog.
+pub(super) fn parse_idle_timeout(value: Option<&OsStr>) -> io::Result<Option<Duration>> {
+    match value {
+        None => Ok(None),
+        Some(value) => value
+            .to_str()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .filter(|duration| (MIN_IDLE_TIMEOUT..=MAX_IDLE_TIMEOUT).contains(duration))
+            .map(Some)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "{IDLE_TIMEOUT_ENV} must be an integer from {} to {} seconds",
+                        MIN_IDLE_TIMEOUT.as_secs(),
+                        MAX_IDLE_TIMEOUT.as_secs(),
+                    ),
+                )
+            }),
+    }
+}
+
+/// Gate the idle watchdog by client profile: only the codex profile — whose host is
+/// known to leave conversation servers running — arms it. `from_env()` already parsed
+/// and validated the value; this runs in `build()` where the profile is known.
+pub(crate) fn resolve_idle_timeout_from(
+    value: Option<Duration>,
+    profile: crate::ClientProfile,
+) -> Option<Duration> {
+    match profile {
+        crate::ClientProfile::Codex => value,
+        crate::ClientProfile::Cursor => None,
     }
 }
 

@@ -204,6 +204,8 @@ fn allowed_field(name: &str) -> bool {
             | "request_id"
             | "tool_output_tokens"
             | "burst_tokens"
+            | "idle_timeout_secs"
+            | "idle_secs"
     )
 }
 

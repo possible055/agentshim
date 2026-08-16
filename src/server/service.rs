@@ -157,6 +157,8 @@ impl CodexShimBuilder {
         let mut runtime = self.runtime;
         runtime.tool_timeout_shelf =
             crate::runtime::resolve_tool_timeout_shelf(self.client_profile);
+        runtime.idle_timeout =
+            crate::runtime::resolve_idle_timeout_from(runtime.idle_timeout, self.client_profile);
         crate::tools::exec::spawn::install_max_timeout_ms(runtime.tool_timeout_shelf);
         let output_token_gate = OutputTokenGate::load_shared().map_err(io::Error::other)?;
         let burst_output_gate =
@@ -225,6 +227,14 @@ impl CodexShim {
     #[must_use]
     pub fn shutdown_token(&self) -> CancellationToken {
         self.resources.shutdown_token()
+    }
+
+    /// Whether no foreground tool call is in flight and no detached tree is live. The
+    /// idle watchdog requires this before cancelling the shutdown token: in-flight work
+    /// counts as activity even while the client itself stays quiet.
+    #[must_use]
+    pub fn is_idle_quiescent(&self) -> bool {
+        !self.resources.has_in_flight_calls() && self.detached.live_tree_count() == 0
     }
 
     /// The single, re-entrant server-level process shutdown. The first caller runs one

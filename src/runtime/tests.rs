@@ -6,14 +6,15 @@ mod tests {
     use crate::runtime::{
         DEFAULT_GLOB_MEMORY_BYTES, DEFAULT_GREP_MEMORY_BYTES, DEFAULT_MEMORY_BYTES,
         DEFAULT_PDF_IMAGE_MEMORY_BYTES, DEFAULT_PDF_TEXT_MEMORY_BYTES, DEFAULT_PROCESS_CALLS,
-        DEFAULT_TOOL_TIMEOUT_SHELF, GLOB_MEMORY_BYTES_ENV, GREP_MEMORY_BYTES_ENV,
+        DEFAULT_TOOL_TIMEOUT_SHELF, GLOB_MEMORY_BYTES_ENV, GREP_MEMORY_BYTES_ENV, MAX_IDLE_TIMEOUT,
         MAX_PDF_IMAGE_MEMORY_BYTES, MAX_PDF_TEXT_MEMORY_BYTES, MAX_READ_ONLY_CALLS,
-        MAX_TOOL_MEMORY_BYTES, MAX_TOOL_TIMEOUT_SHELF, MIN_PDF_IMAGE_MEMORY_BYTES,
-        MIN_PDF_TEXT_MEMORY_BYTES, MIN_TOOL_MEMORY_BYTES, MemoryReservation,
-        PDF_IMAGE_MEMORY_BYTES_ENV, PDF_TEXT_MEMORY_BYTES_ENV, RESPECT_GITIGNORE_ENV,
-        RuntimeConfig, RuntimeResources, blocking_threads, global_memory_bytes,
-        parse_memory_bytes_in_range, parse_process_calls, parse_respect_gitignore,
-        parse_tool_memory_bytes, parse_tool_timeout_shelf, resolve_tool_timeout_shelf_from,
+        MAX_TOOL_MEMORY_BYTES, MAX_TOOL_TIMEOUT_SHELF, MIN_IDLE_TIMEOUT,
+        MIN_PDF_IMAGE_MEMORY_BYTES, MIN_PDF_TEXT_MEMORY_BYTES, MIN_TOOL_MEMORY_BYTES,
+        MemoryReservation, PDF_IMAGE_MEMORY_BYTES_ENV, PDF_TEXT_MEMORY_BYTES_ENV,
+        RESPECT_GITIGNORE_ENV, RuntimeConfig, RuntimeResources, blocking_threads,
+        global_memory_bytes, parse_idle_timeout, parse_memory_bytes_in_range, parse_process_calls,
+        parse_respect_gitignore, parse_tool_memory_bytes, parse_tool_timeout_shelf,
+        resolve_idle_timeout_from, resolve_tool_timeout_shelf_from,
     };
     use tokio_util::sync::CancellationToken;
 
@@ -233,6 +234,38 @@ mod tests {
             resolve_tool_timeout_shelf_from(Some(OsString::from("600")), ClientProfile::Codex),
             DEFAULT_TOOL_TIMEOUT_SHELF,
         );
+    }
+
+    #[test]
+    fn idle_timeout_is_opt_in_and_bounded() {
+        assert_eq!(parse_idle_timeout(None).expect("disabled"), None);
+        assert_eq!(
+            parse_idle_timeout(Some(OsStr::new("1"))).expect("minimum"),
+            Some(MIN_IDLE_TIMEOUT)
+        );
+        assert_eq!(
+            parse_idle_timeout(Some(OsStr::new("86400"))).expect("maximum"),
+            Some(MAX_IDLE_TIMEOUT)
+        );
+        for value in ["0", "86401", "-1", "many", ""] {
+            let error = parse_idle_timeout(Some(OsStr::new(value))).expect_err(value);
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains("CODEXSHIM_IDLE_TIMEOUT"));
+        }
+    }
+
+    #[test]
+    fn idle_timeout_only_applies_to_the_codex_profile() {
+        let timeout = Some(std::time::Duration::from_secs(30));
+        assert_eq!(
+            resolve_idle_timeout_from(timeout, ClientProfile::Codex),
+            timeout
+        );
+        assert_eq!(
+            resolve_idle_timeout_from(timeout, ClientProfile::Cursor),
+            None
+        );
+        assert_eq!(resolve_idle_timeout_from(None, ClientProfile::Codex), None);
     }
 
     #[test]
