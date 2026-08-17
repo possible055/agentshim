@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { FsTarget } from '@deepseek-ai/dsh-fs'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
-import { assertExecutionWorld, completeReadObservation, createProcessPolicy } from '../src/policy.ts'
+import { assertLocalFileSystem, completeReadObservation, createProcessPolicy } from '../src/policy.ts'
 
 const signal = new AbortController().signal
 
@@ -103,8 +103,8 @@ describe('read observation', () => {
     expect(emit).toHaveBeenCalledWith('fs/observed', target, { kind: 'present', version: 'v1' }, exec)
   })
 
-  it('fails execution-world attribution for a non-local filesystem provider', async () => {
+  it('fails execution-world attribution for a non-local filesystem provider', () => {
     const ctx = { fs: { processPath: () => 'x' } } as unknown as Context
-    await expect(assertExecutionWorld(ctx, '/root')).rejects.toMatchObject({ code: 'AGENTSHIM_EXECUTION_WORLD_MISMATCH' })
+    expect(() => assertLocalFileSystem(ctx)).toThrow(/local filesystem provider/)
   })
 })

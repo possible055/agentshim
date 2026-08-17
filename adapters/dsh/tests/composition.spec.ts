@@ -321,7 +321,7 @@ describe('agent scope replacement', () => {
     expect(JSON.stringify(assembly)).not.toContain('lifecycle status of a background Bash job')
   })
 
-  it('leaves an agent whose cwd is not the plugin root completely untouched', async () => {
+  it('installs agents whose cwd differs from the plugin root using a per-cwd engine', async () => {
     const root = await makeRoot()
     const elsewhere = await makeRoot()
     const ctx = await mountComposition(root)
@@ -331,9 +331,11 @@ describe('agent scope replacement', () => {
     ctx.emit('agent/created', { agent: matching.agent })
     ctx.emit('agent/created', { agent: other.agent })
 
-    expect(visibleNames(ctx, other.agent)).not.toContain('run_program')
-    expect(await runTool(ctx, other.agent, 'read', {})).toBe('inherited:read')
+    expect(visibleNames(ctx, other.agent)).toContain('run_program')
     expect(visibleNames(ctx, matching.agent)).toContain('run_program')
+    await writeFile(join(elsewhere, 'file.txt'), 'from elsewhere')
+    const read = await runTool(ctx, other.agent, 'read', { path: 'file.txt' })
+    expect(read).toContain('from elsewhere')
   })
 
   it('rolls back the whole installation when one registration conflicts and vetoes publication', async () => {
@@ -526,6 +528,57 @@ describe('agent scope replacement', () => {
       env: {},
       toolCallTimeoutMs: 600_000,
     })).rejects.toThrow(/local filesystem provider/)
+  })
+})
+
+describe('multi-workspace engine pool', () => {
+  it('shares one engine between two agents on the same cwd', async () => {
+    const root = await makeRoot()
+    const ctx = await mountComposition(root)
+    registerInheritedTools(ctx, ['read', 'grep', 'glob', 'bash'])
+    const a = await mintAgent(ctx, 'shared-a', root)
+    const b = await mintAgent(ctx, 'shared-b', root)
+    ctx.emit('agent/created', { agent: a.agent })
+    ctx.emit('agent/created', { agent: b.agent })
+
+    expect(visibleNames(ctx, a.agent)).toContain('run_program')
+    expect(visibleNames(ctx, b.agent)).toContain('run_program')
+
+    ctx.emit('agent/disposed', { agent: a.agent })
+    expect(visibleNames(ctx, b.agent)).toContain('run_program')
+    const read = await runTool(ctx, b.agent, 'bash', { command: 'true', description: 'still alive' })
+    expect(read).toContain('Exit code: 0')
+  })
+
+  it('skips an agent whose cwd does not exist and leaves its inherited tools intact', async () => {
+    const root = await makeRoot()
+    const ctx = await mountComposition(root)
+    registerInheritedTools(ctx, ['read', 'grep', 'glob', 'bash'])
+    const { agent } = await mintAgent(ctx, 'bad-cwd', join(tmpdir(), 'agentshim-nonexistent-' + Math.random()))
+    ctx.emit('agent/created', { agent })
+
+    expect(visibleNames(ctx, agent)).not.toContain('run_program')
+    expect(await runTool(ctx, agent, 'read', {})).toBe('inherited:read')
+  })
+
+  it('installs agents on two distinct cwds and resolves relative paths independently', async () => {
+    const rootA = await makeRoot()
+    const rootB = await makeRoot()
+    const ctx = await mountComposition(rootA)
+    registerInheritedTools(ctx, ['read', 'grep', 'glob', 'bash'])
+    await writeFile(join(rootA, 'marker.txt'), 'workspace A')
+    await writeFile(join(rootB, 'marker.txt'), 'workspace B')
+    const agentA = await mintAgent(ctx, 'ws-a', rootA)
+    const agentB = await mintAgent(ctx, 'ws-b', rootB)
+    ctx.emit('agent/created', { agent: agentA.agent })
+    ctx.emit('agent/created', { agent: agentB.agent })
+
+    expect(visibleNames(ctx, agentA.agent)).toContain('run_program')
+    expect(visibleNames(ctx, agentB.agent)).toContain('run_program')
+    const readA = await runTool(ctx, agentA.agent, 'read', { path: 'marker.txt' })
+    const readB = await runTool(ctx, agentB.agent, 'read', { path: 'marker.txt' })
+    expect(readA).toContain('workspace A')
+    expect(readB).toContain('workspace B')
   })
 })
 
@@ -750,7 +803,7 @@ describe('DSH native contracts', () => {
     expect(observed).toHaveBeenCalledWith(expect.stringContaining('missing.txt'), { kind: 'absent' })
   })
 
-  it('refuses reads with AGENTSHIM_EXECUTION_WORLD_MISMATCH when the provider mapping changes', async () => {
+  it('reads via the native engine regardless of ctx.fs.processPath mapping', async () => {
     const root = await makeRoot()
     const ctx = new Context()
     contexts.push(ctx)
@@ -769,7 +822,7 @@ describe('DSH native contracts', () => {
     vi.spyOn(ctx.fs, 'processPath').mockReturnValue(join(root, 'other-world'))
     const result = await executeTool(ctx, agent, 'read', { path: 'notes.txt' })
     expect(result.isError).toBe(true)
-    expect(result.error?.info).toMatchObject({ code: 'AGENTSHIM_EXECUTION_WORLD_MISMATCH' })
+    expect(result.error?.info).toMatchObject({ code: 'AGENTSHIM_READ_IO_FAILED' })
   })
 
   it('delivers native PDF images as durable attachments without raw base64', async () => {
@@ -940,18 +993,21 @@ describe('DSH native contracts', () => {
     }
   })
 
-  it.skipIf(stagedNativeAddon === undefined)('fails activation when GNU bash is unavailable at load time', async () => {
+  it.skipIf(stagedNativeAddon === undefined)('skips agents when GNU bash is unavailable per-cwd', async () => {
     const previousDll = process.env.AGENTSHIM_DSH_NATIVE_DLL
     const previousBash = process.env.AGENTSHIM_BASH
     process.env.AGENTSHIM_DSH_NATIVE_DLL = stagedNativeAddon
     process.env.AGENTSHIM_BASH = join(tmpdir(), 'definitely-missing-bash.exe')
     try {
       const root = await makeRoot()
-      await expect(mountComposition(root, {}, async inner => {
+      const ctx = await mountComposition(root, {}, async inner => {
         await mountSandboxServices(inner, 'read-only', root)
-      })).rejects.toMatchObject({
-        code: 'AGENTSHIM_BASH_UNAVAILABLE',
       })
+      registerInheritedTools(ctx, ['read', 'grep', 'glob', 'bash'])
+      const { agent } = await mintAgent(ctx, 'no-bash', root)
+      ctx.emit('agent/created', { agent })
+      expect(visibleNames(ctx, agent)).not.toContain('run_program')
+      expect(await runTool(ctx, agent, 'read', {})).toBe('inherited:read')
     } finally {
       if (previousDll === undefined) {
         delete process.env.AGENTSHIM_DSH_NATIVE_DLL

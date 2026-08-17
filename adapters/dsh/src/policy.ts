@@ -19,14 +19,9 @@ export function sameExecutionPath(left: string, right: string): boolean {
   return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right
 }
 
-export async function assertExecutionWorld(ctx: Context, root: string): Promise<void> {
-  const fs = ctx.fs
-  if (!(fs instanceof LocalFileSystem)) {
+export function assertLocalFileSystem(ctx: Context): void {
+  if (!(ctx.fs instanceof LocalFileSystem)) {
     throw new HarnessError('dsh-agentshim: ctx.fs is no longer the local filesystem provider', 'AGENTSHIM_EXECUTION_WORLD_MISMATCH')
-  }
-  const processed = fs.processPath(await fs.resolve(root))
-  if (!sameExecutionPath(processed, root)) {
-    throw new HarnessError(`dsh-agentshim: ctx.fs maps ${JSON.stringify(root)} to ${JSON.stringify(processed)}`, 'AGENTSHIM_EXECUTION_WORLD_MISMATCH')
   }
 }
 
@@ -35,8 +30,7 @@ export interface ReadObservation {
   readonly pre: FsInfo | undefined
 }
 
-export async function beginReadObservation(ctx: Context, exec: ToolExecution, root: string, path: string): Promise<ReadObservation> {
-  await assertExecutionWorld(ctx, root)
+export async function beginReadObservation(ctx: Context, exec: ToolExecution, path: string): Promise<ReadObservation> {
   const cwd = exec.agent?.session.header.cwd
   const target = await ctx.fs.resolve(path, { ...(cwd === undefined ? {} : { cwd }), signal: exec.signal })
   const pre = await ctx.fs.stat(target, exec.signal)

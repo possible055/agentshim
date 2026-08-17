@@ -98,17 +98,17 @@ mcp_2026_07_28 = true
 
 ## 配置 DSH
 
-先安装 AgentShim 二进制文件，再构建原生 adapter 并安装到指定 DSH profile：
+构建原生 adapter 并安装到指定的 DSH profile（如 Web UI 使用 `web`，CLI 任务使用 `headless`）：
 
 ```sh
 cd adapters/dsh
 pnpm install --frozen-lockfile
 pnpm pack
-dsh plugin --profile <profile> add /absolute/path/to/dsh-agentshim-0.1.0.tgz
-dsh --profile <profile> --dump-config
+dsh plugin --profile web add /absolute/path/to/dsh-agentshim-0.1.0.tgz
+dsh web --dump-config
 ```
 
-使用 tarball 安装时不需要先将 `dsh-agentshim` 发布到 npm。发布后才可改用较短的 `dsh plugin --profile <profile> add dsh-agentshim`。前置条件、配置、sandbox 审批行为与移除流程请参阅 [DSH adapter 指南](adapters/dsh/README.md)。
+使用 tarball 安装时不需要先将 `dsh-agentshim` 发布到 npm。发布后才可改用较短的 `dsh plugin --profile web add dsh-agentshim`。前置条件、配置、sandbox 审批行为与移除流程请参阅 [DSH adapter 指南](adapters/dsh/README.md)。
 
 ## 选项
 

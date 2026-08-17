@@ -53,6 +53,7 @@ export interface ToolDependencies {
   readonly config: ResolvedPluginConfig
   readonly jobs: BackgroundJobManager
   readonly native: NativeEngine
+  readonly root: string
 }
 
 function nativeReadArgs(args: Record<string, unknown>): NativeReadArgs {
@@ -306,7 +307,7 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       validateReadArgs(args)
-      const observation = await beginReadObservation(deps.ctx, exec, deps.config.root, args.path)
+      const observation = await beginReadObservation(deps.ctx, exec, args.path)
       const native = await deps.native.readText(nativeReadArgs(args), exec.signal)
       const content = [
         { type: 'text' as const, text: native.text },

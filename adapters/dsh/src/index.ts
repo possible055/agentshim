@@ -1,15 +1,16 @@
-import { realpathSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
 import { MIN_TOOL_CALL_TIMEOUT_MS, resolvePluginConfig } from './config.ts'
 import type { ResolvedPluginConfig } from './config.ts'
-import { assertExecutionWorld, sameExecutionPath } from './policy.ts'
+import { assertLocalFileSystem } from './policy.ts'
 import { buildToolDefinitions, promptSections, RESTRICT_CANDIDATES } from './tools.ts'
 import { PUBLIC_TOOL_NAMES } from './contracts.ts'
 import { BackgroundJobManager } from './jobs.ts'
 import { loadNativeAddon, nativeEngineEnv, nativeLoadFailureError } from './native.ts'
+import type { NativeEngine, NativeEngineOptions } from './native.ts'
+import { EnginePool } from './engine-pool.ts'
 import {
   DEFAULT_CAPTURE_MAX_BYTES,
   MAX_CAPTURE_MAX_BYTES,
@@ -66,32 +67,27 @@ function replacementNames(present: readonly string[]): Array<(typeof PUBLIC_TOOL
   return PUBLIC_TOOL_NAMES.filter(name => selected.has(name))
 }
 
-function canonicalOrUndefined(path: string): string | undefined {
-  try {
-    return realpathSync.native(path)
-  } catch {
-    return undefined
-  }
-}
-
 interface AgentInstallation {
   readonly disposers: ReadonlyArray<() => void>
+  readonly root: string
 }
 
 /**
- * Install this adapter's contributions on every root-matched agent: restrict
- * only the inherited names that already exist, register the matching
- * agent-local definitions, and shadow those prompt sections. The six-tool
- * catalog stays available; a composition that only mounted `bash` also gets
- * its managed-job `bash_status` companion after replacement.
+ * Install this adapter's contributions on every agent whose session carries a
+ * canonicalizable cwd: restrict only the inherited names that already exist,
+ * register the matching agent-local definitions bound to a per-cwd native
+ * engine, and shadow those prompt sections. The six-tool catalog stays
+ * available; a composition that only mounted `bash` also gets its managed-job
+ * `bash_status` companion after replacement.
  * Every step is one transaction — a failure rolls back and (for new agents)
- * vetoes publication. Agents whose canonical cwd is not exactly the plugin
- * root are left completely untouched.
+ * vetoes publication. Agents without a session cwd, or whose cwd cannot be
+ * canonicalized or fails bash preflight, are left completely untouched.
  */
 function installAgentTools(
   ctx: Context,
   resolved: ResolvedPluginConfig,
-  definitions: ReadonlyMap<string, ToolDefinition>,
+  pool: EnginePool,
+  jobs: BackgroundJobManager,
 ): void {
   const installed = new Map<Agent, AgentInstallation>()
   const promptByName = new Map(promptSections().map(section => [section.name, section]))
@@ -102,19 +98,35 @@ function installAgentTools(
     for (let index = installation.disposers.length - 1; index >= 0; index--) {
       installation.disposers[index]?.()
     }
+    pool.release(installation.root)
     installed.delete(agent)
   }
 
   function install(agent: Agent): void {
     if (installed.has(agent)) return
     const cwd = agent.session.header.cwd
-    const canonicalCwd = cwd === undefined ? undefined : canonicalOrUndefined(cwd)
-    if (canonicalCwd === undefined || !sameExecutionPath(canonicalCwd, resolved.root)) return
+    if (cwd === undefined) return
+
+    let acquired: { readonly engine: NativeEngine; readonly root: string }
+    try {
+      acquired = pool.acquire(cwd)
+    } catch (error) {
+      ctx.logger.warn(
+        `dsh-agentshim: skipping agent ${agent.id}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+      return
+    }
+    const { engine, root } = acquired
+
     const disposers: Array<() => void> = []
     try {
+      const definitions: ReadonlyMap<string, ToolDefinition> = buildToolDefinitions({ ctx, config: resolved, jobs, native: engine, root })
       const present = RESTRICT_CANDIDATES.filter(name => agent.ctx.tools.get(name) !== undefined)
       const replacements = replacementNames(present)
-      if (replacements.length === 0 && !present.includes('pwsh') && !present.includes('bash_status')) return
+      if (replacements.length === 0 && !present.includes('pwsh') && !present.includes('bash_status')) {
+        pool.release(root)
+        return
+      }
       if (present.length > 0) disposers.push(agent.ctx.tools.restrict({ deny: [...present] }))
       for (const name of replacements) {
         const definition = definitions.get(name)
@@ -134,9 +146,10 @@ function installAgentTools(
       for (let index = disposers.length - 1; index >= 0; index--) {
         disposers[index]?.()
       }
+      pool.release(root)
       throw error
     }
-    installed.set(agent, { disposers })
+    installed.set(agent, { disposers, root })
   }
 
   ctx.on('agent/created', ({ agent }) => {
@@ -159,16 +172,16 @@ function installAgentTools(
   }
 }
 
-/** Load the native engine and replace overlapping tools in every matching agent scope. */
+/** Load the native engine pool and replace overlapping tools in every session-cwd-matched agent scope. */
 export async function apply(ctx: Context, config: Config): Promise<void> {
   const resolved = await resolvePluginConfig(config)
-  await assertExecutionWorld(ctx, resolved.root)
+  assertLocalFileSystem(ctx)
   const jobs = new BackgroundJobManager()
   const loaded = loadNativeAddon()
   if (loaded.engine === undefined) {
     throw nativeLoadFailureError(loaded.failure)
   }
-  const native = new loaded.engine.Engine(resolved.root, {
+  const engineOptions: NativeEngineOptions = {
     env: nativeEngineEnv(config.env),
     readScope: resolved.readScope,
     pageBudgetBytes: 50_000,
@@ -176,17 +189,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     captureRoot: resolved.captureRoot,
     captureMaxBytes: resolved.captureMaxBytes,
     captureCleanup: resolved.captureCleanup,
-  })
+  }
+  const pool = new EnginePool(loaded.engine.Engine, engineOptions)
   ctx.effect(() => async () => {
     await jobs.dispose()
-    await native.close()
-  }, 'agentshim.nativeEngine')
-  try {
-    native.verifyBash()
-  } catch (error) {
-    ctx.logger.warn(`dsh-agentshim: bash preflight failed: ${error instanceof Error ? error.message : String(error)}`)
-    throw error
-  }
-  const definitions = buildToolDefinitions({ ctx, config: resolved, jobs, native })
-  installAgentTools(ctx, resolved, definitions)
+    await pool.dispose()
+  }, 'agentshim.enginePool')
+  installAgentTools(ctx, resolved, pool, jobs)
 }

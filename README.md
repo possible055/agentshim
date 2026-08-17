@@ -98,11 +98,11 @@ On Windows, JSON paths must escape each backslash.
 
 ## Configure DSH
 
-Install the native adapter and its exact optional platform package into a DSH profile:
+Install the native adapter and its exact optional platform package into your target DSH profile (e.g. `web` for Web UI, `headless` for CLI):
 
 ```sh
-dsh plugin --profile <profile> add dsh-agentshim
-dsh --profile <profile> --dump-config
+dsh plugin --profile web add dsh-agentshim
+dsh web --dump-config
 ```
 
 DSH loads `agentshim-core` through the platform addon in-process; it does not start the MCP server or require an installed `agentshim` executable. Unsupported platforms, missing packages, and native API mismatches fail plugin activation. See the [DSH adapter guide](adapters/dsh/README.md) for configuration, capture retention, sandbox approval behavior, and removal.

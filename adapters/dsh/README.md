@@ -14,9 +14,16 @@ An unsupported platform, a missing optional native package, a load failure, or a
 
 ## Install
 
+Plugins are managed per profile under `$DSH_HOME/profiles/<profile>`. Choose the profile matching your use case (e.g. `web` for the standard Web UI or `headless` for CLI tasks):
+
 ```sh
-dsh plugin --profile <profile> add dsh-agentshim
-dsh --profile <profile> --dump-config
+# For DSH Web UI (most common):
+dsh plugin --profile web add dsh-agentshim
+dsh web --dump-config
+
+# For Headless CLI:
+dsh plugin --profile headless add dsh-agentshim
+dsh --profile headless --dump-config
 ```
 
 The entry package exact-pins its platform package. There is no install script or downloaded binary.
@@ -83,5 +90,9 @@ Tests stage the locally built library through `AGENTSHIM_DSH_NATIVE_DLL`. Produc
 ## Remove
 
 ```sh
-dsh plugin --profile <profile> remove dsh-agentshim
+# For DSH Web UI:
+dsh plugin --profile web remove dsh-agentshim
+
+# For Headless CLI:
+dsh plugin --profile headless remove dsh-agentshim
 ```
