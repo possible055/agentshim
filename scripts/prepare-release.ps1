@@ -104,6 +104,29 @@ function Set-PackageVersion {
         $Content.Substring($match.Groups[1].Index + $match.Groups[1].Length)
 }
 
+function Update-CargoManifestVersion {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$NewVersion
+    )
+
+    $content = [IO.File]::ReadAllText($Path)
+    $updated = Set-PackageVersion -Content $content -NewVersion $NewVersion
+    [IO.File]::WriteAllText($Path, $updated, [Text.UTF8Encoding]::new($false))
+}
+
+function Update-JsonPackageVersion {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$NewVersion
+    )
+
+    $content = [IO.File]::ReadAllText($Path)
+    $updated = [regex]::Replace($content, '(?m)^(\s*"version"\s*:\s*)"[^"]+"', "`${1}`"$NewVersion`"")
+    $updated = [regex]::Replace($updated, '(?m)("dsh-agentshim-[^"]+"\s*:\s*)"workspace:[^"]+"', "`${1}`"workspace:$NewVersion`"")
+    [IO.File]::WriteAllText($Path, $updated, [Text.UTF8Encoding]::new($false))
+}
+
 function Normalize-LockDependencies {
     param([Parameter(Mandatory)][string]$Content)
 
@@ -113,7 +136,17 @@ function Normalize-LockDependencies {
 
 $repository = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $manifestPath = Join-Path $repository "Cargo.toml"
+$coreManifestPath = Join-Path $repository "crates/core/Cargo.toml"
+$napiManifestPath = Join-Path $repository "crates/napi/Cargo.toml"
 $lockPath = Join-Path $repository "Cargo.lock"
+
+$dshPackagePath = Join-Path $repository "adapters/dsh/package.json"
+$platformPackagePaths = @(
+    (Join-Path $repository "adapters/dsh/npm/darwin-arm64/package.json"),
+    (Join-Path $repository "adapters/dsh/npm/linux-arm64-gnu/package.json"),
+    (Join-Path $repository "adapters/dsh/npm/linux-x64-gnu/package.json"),
+    (Join-Path $repository "adapters/dsh/npm/win32-x64-msvc/package.json")
+)
 
 if (-not $AllowDirty) {
     $status = @(& git -C $repository status --porcelain --untracked-files=all)
@@ -138,9 +171,18 @@ if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
     $lockBefore = [IO.File]::ReadAllText($lockPath)
 }
 
-$manifestAfter = Set-PackageVersion -Content $manifestBefore -NewVersion $Version
-[IO.File]::WriteAllText($manifestPath, $manifestAfter, [Text.UTF8Encoding]::new($false))
+# Update all Rust crate manifests
+Update-CargoManifestVersion -Path $manifestPath -NewVersion $Version
+Update-CargoManifestVersion -Path $coreManifestPath -NewVersion $Version
+Update-CargoManifestVersion -Path $napiManifestPath -NewVersion $Version
 
+# Update DSH root and platform npm package.json manifests
+Update-JsonPackageVersion -Path $dshPackagePath -NewVersion $Version
+foreach ($platformPath in $platformPackagePaths) {
+    Update-JsonPackageVersion -Path $platformPath -NewVersion $Version
+}
+
+# Sync Cargo workspace lockfile
 Push-Location $repository
 try {
     & cargo update --workspace
@@ -158,6 +200,18 @@ if ($null -ne $lockBefore) {
     }
 }
 
+# Sync pnpm workspace lockfile
+Push-Location (Join-Path $repository "adapters/dsh")
+try {
+    & pnpm install
+    if ($LASTEXITCODE -ne 0) {
+        throw "pnpm install in adapters/dsh failed."
+    }
+} finally {
+    Pop-Location
+}
+
+# Validate Rust crate versions via cargo metadata
 Push-Location $repository
 try {
     $metadataJson = & cargo metadata --locked --no-deps --format-version 1
@@ -168,9 +222,24 @@ try {
     Pop-Location
 }
 $metadata = ($metadataJson -join "`n") | ConvertFrom-Json
-$package = @($metadata.packages | Where-Object { $_.name -eq "agentshim" })
-if ($package.Count -ne 1 -or $package[0].version -cne $Version) {
-    throw "Cargo metadata reports an unexpected agentshim version. Expected $Version."
+$expectedCrates = @("agentshim", "agentshim-core", "agentshim-napi")
+foreach ($crateName in $expectedCrates) {
+    $pkg = @($metadata.packages | Where-Object { $_.name -eq $crateName })
+    if ($pkg.Count -ne 1 -or $pkg[0].version -cne $Version) {
+        throw "Cargo metadata reports an unexpected $crateName version: $($pkg[0].version). Expected $Version."
+    }
 }
 
-Write-Host "Prepared agentshim version $Version."
+# Validate npm package versions
+$dshPkg = Get-Content -Raw -LiteralPath $dshPackagePath | ConvertFrom-Json
+if ($dshPkg.version -cne $Version) {
+    throw "DSH package.json reports an unexpected version $($dshPkg.version). Expected $Version."
+}
+foreach ($platformPath in $platformPackagePaths) {
+    $platPkg = Get-Content -Raw -LiteralPath $platformPath | ConvertFrom-Json
+    if ($platPkg.version -cne $Version) {
+        throw "Platform package $platformPath reports an unexpected version $($platPkg.version). Expected $Version."
+    }
+}
+
+Write-Host "Prepared agentshim and dsh-agentshim version $Version."

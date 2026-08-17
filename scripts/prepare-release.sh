@@ -40,7 +40,17 @@ fi
 
 repository=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 manifest_path=$repository/Cargo.toml
+core_manifest_path=$repository/crates/core/Cargo.toml
+napi_manifest_path=$repository/crates/napi/Cargo.toml
 lock_path=$repository/Cargo.lock
+
+dsh_package_path=$repository/adapters/dsh/package.json
+platform_package_paths="
+$repository/adapters/dsh/npm/darwin-arm64/package.json
+$repository/adapters/dsh/npm/linux-arm64-gnu/package.json
+$repository/adapters/dsh/npm/linux-x64-gnu/package.json
+$repository/adapters/dsh/npm/win32-x64-msvc/package.json
+"
 
 if [ "$allow_dirty" -eq 0 ]; then
     status=$(git -C "$repository" status --porcelain --untracked-files=all)
@@ -148,29 +158,48 @@ if [ -f "$lock_path" ]; then
     lock_before=$(cat "$lock_path")
 fi
 
-tmp_manifest=$(mktemp)
-trap 'rm -f "$tmp_manifest"' EXIT HUP INT TERM
-awk -v version="$version" '
-    !changed && $0 ~ /^version[[:space:]]*=[[:space:]]*"[^"]+"[[:space:]]*$/ {
-        sub(/"[^"]+"/, "\"" version "\"")
-        changed=1
-    }
-    { print }
-    END { if (!changed) exit 1 }
-' "$manifest_path" > "$tmp_manifest" || {
-    echo "Cargo.toml does not contain a package version" >&2
-    exit 1
-}
-if ! cmp -s "$manifest_path" "$tmp_manifest"; then
-    if ! mv "$tmp_manifest" "$manifest_path"; then
-        echo "could not update Cargo.toml" >&2
+update_cargo_manifest() {
+    target_manifest=$1
+    target_version=$2
+    tmp_manifest=$(mktemp)
+    awk -v version="$target_version" '
+        !changed && $0 ~ /^version[[:space:]]*=[[:space:]]*"[^"]+"[[:space:]]*$/ {
+            sub(/"[^"]+"/, "\"" version "\"")
+            changed=1
+        }
+        { print }
+        END { if (!changed) exit 1 }
+    ' "$target_manifest" > "$tmp_manifest" || {
+        rm -f "$tmp_manifest"
+        echo "could not update version in $target_manifest" >&2
         exit 1
-    fi
-else
-    rm -f "$tmp_manifest"
-fi
-trap - EXIT HUP INT TERM
+    }
+    mv "$tmp_manifest" "$target_manifest"
+}
 
+update_json_package() {
+    target_pkg=$1
+    target_version=$2
+    tmp_pkg=$(mktemp)
+    sed -E \
+        -e "s/^([[:space:]]*\"version\"[[:space:]]*:[[:space:]]*)\"[^\"]+\"/\1\"$target_version\"/" \
+        -e "s/(\"dsh-agentshim-[^\"]+\"[[:space:]]*:[[:space:]]*)\"workspace:[^\"]+\"/\1\"workspace:$target_version\"/" \
+        "$target_pkg" > "$tmp_pkg"
+    mv "$tmp_pkg" "$target_pkg"
+}
+
+# Update all Cargo manifests
+update_cargo_manifest "$manifest_path" "$version"
+update_cargo_manifest "$core_manifest_path" "$version"
+update_cargo_manifest "$napi_manifest_path" "$version"
+
+# Update DSH package manifests
+update_json_package "$dsh_package_path" "$version"
+for path in $platform_package_paths; do
+    [ -n "$path" ] && update_json_package "$path" "$version"
+done
+
+# Sync Cargo workspace lockfile
 if ! cargo update --manifest-path "$manifest_path" --workspace; then
     echo "cargo update --workspace failed; inspect the working tree" >&2
     exit 1
@@ -186,14 +215,34 @@ if [ -n "$lock_before" ]; then
     fi
 fi
 
+# Sync pnpm workspace lockfile
+if ! (cd "$repository/adapters/dsh" && pnpm install); then
+    echo "pnpm install in adapters/dsh failed" >&2
+    exit 1
+fi
+
+# Validate Cargo crate versions
 metadata=$(cargo metadata --locked --no-deps --format-version 1) || {
     echo "cargo metadata --locked failed" >&2
     exit 1
 }
-metadata_version=$(printf '%s\n' "$metadata" | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"agentshim"[[:space:]]*,[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')
-if [ "$metadata_version" != "$version" ]; then
-    echo "Cargo metadata reports version $metadata_version; expected $version" >&2
-    exit 1
-fi
+for crate in agentshim agentshim-core agentshim-napi; do
+    crate_version=$(printf '%s\n' "$metadata" | sed -n "s/.*\"name\"[[:space:]]*:[[:space:]]*\"$crate\"[[:space:]]*,[[:space:]]*\"version\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | sed -n '1p')
+    if [ "$crate_version" != "$version" ]; then
+        echo "Cargo metadata reports $crate version $crate_version; expected $version" >&2
+        exit 1
+    fi
+done
 
-echo "Prepared agentshim version $version."
+# Validate DSH package versions
+for json_file in "$dsh_package_path" $platform_package_paths; do
+    if [ -n "$json_file" ]; then
+        pkg_version=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$json_file" | sed -n '1p')
+        if [ "$pkg_version" != "$version" ]; then
+            echo "$json_file reports version $pkg_version; expected $version" >&2
+            exit 1
+        fi
+    fi
+done
+
+echo "Prepared agentshim and dsh-agentshim version $version."
