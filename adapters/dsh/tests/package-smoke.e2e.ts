@@ -24,6 +24,7 @@ function runDsh(dshHome: string, args: string[]): string {
     cwd: packageRoot,
     env: { ...process.env, DSH_HOME: dshHome },
     encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
     timeout: 180_000,
   })
   if (result.error !== undefined || result.status !== 0) {
