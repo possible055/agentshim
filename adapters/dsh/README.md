@@ -39,7 +39,7 @@ The entry package exact-pins its platform package. There is no install script or
 | --- | --- | --- |
 | `root` | `process.cwd()` | Canonical local root and exact agent-cwd match target. |
 | `readScope` | `normal` | `normal` or `unrestricted`. |
-| `env` | `{}` | Child variables layered over DSH's credential-scrubbed parent environment. |
+| `env` | `{}` | Child variables layered over DSH's credential-scrubbed parent environment. `AGENTSHIM_BASH` set here also directs load-time bash discovery, so plugin config is honored even when the host process never had it. |
 | `toolCallTimeoutMs` | `600000` | DSH deadline shelf; values below 600000 are rejected and the process ceiling is 590000 ms. |
 | `captureRoot` | Platform data directory | Private persistent process-artifact root; an explicit value must be absolute. |
 | `captureMaxBytes` | `67108864` | Aggregate raw bytes per process call; 1 MiB through 1 GiB. |

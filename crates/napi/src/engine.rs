@@ -18,7 +18,7 @@ use crate::background::{NativeJobHandleResult, start_background_prepared};
 use crate::budget::NativeCallBudget;
 use crate::capture::ArtifactRecord;
 use crate::process::{
-    BashArgs, NativePreparedProcessResult, NativeProcessOutcomeResult, NativeResult,
+    BashArgs, NativeFailure, NativePreparedProcessResult, NativeProcessOutcomeResult, NativeResult,
     NativeVoidResult, ProcessArgs, clamp_capture_ceiling, napi_failure, prepared_result,
     process_outcome_result,
 };
@@ -217,7 +217,15 @@ impl Engine {
             .unwrap_or_default()
             .into_iter()
             .map(|entry| (entry.key, entry.value))
-            .collect();
+            .collect::<Vec<(String, String)>>();
+        // The locator probes at construction time and reads AGENTSHIM_BASH from
+        // std::env, which is the host process env rather than the scrubbed child
+        // env DSH hands us. Resolve the override from the same env the child will
+        // see so plugin config is honored even when the host process never had it.
+        let bash_override = env
+            .iter()
+            .find(|(key, _)| key == agentshim_core::tools::bash::locate::BASH_OVERRIDE_ENV)
+            .map(|(_, value)| std::ffi::OsString::from(value));
         let capture_root = options.capture_root.map_or_else(
             || {
                 std::env::temp_dir().join(format!(
@@ -254,7 +262,9 @@ impl Engine {
                 capture_max_bytes: clamp_capture_ceiling(options.capture_max_bytes),
                 capture_cleanup_session_end,
                 session_key: uuid::Uuid::new_v4().simple().to_string(),
-                locator: agentshim_core::tools::bash::locate::BashLocator::capture(),
+                locator: agentshim_core::tools::bash::locate::BashLocator::capture_with_override(
+                    bash_override,
+                ),
                 artifacts: Arc::new(std::sync::Mutex::new(Vec::new())),
                 prepared: crate::process::PreparedHandles::new(),
                 active_calls: Arc::new(AtomicUsize::new(0)),
@@ -304,6 +314,52 @@ impl Engine {
             }
         };
         Ok(void_result(state.release_call(&call_id)))
+    }
+
+    /// Probe the bash runtime once at load time so a missing GNU bash surfaces
+    /// at plugin installation instead of mid-task. The result is cached on the
+    /// engine's locator, so the first `bash` tool call reuses it without
+    /// re-probing.
+    #[napi]
+    pub fn verify_bash(&self) -> Result<NativeVoidResult> {
+        let state = match self.state() {
+            Ok(state) => state,
+            Err(error) => {
+                return Ok(NativeVoidResult {
+                    value: false,
+                    failure: Some(napi_failure("call", error)),
+                });
+            }
+        };
+        let result = state.locator.resolve(&state.shutdown);
+        Ok(match result {
+            Ok(_) => NativeVoidResult {
+                value: true,
+                failure: None,
+            },
+            Err(error) => {
+                let message = match error {
+                    agentshim_core::tools::bash::locate::LocateError::Cancelled => {
+                        "bash discovery was cancelled".to_owned()
+                    }
+                    agentshim_core::tools::bash::locate::LocateError::TimedOut => {
+                        "bash discovery timed out".to_owned()
+                    }
+                    agentshim_core::tools::bash::locate::LocateError::Unavailable(message) => {
+                        message.to_string()
+                    }
+                };
+                NativeVoidResult {
+                    value: false,
+                    failure: Some(NativeFailure::new(
+                        "AGENTSHIM_BASH_UNAVAILABLE",
+                        message,
+                        false,
+                        Some(serde_json::json!({ "kind": "preflight" })),
+                    )),
+                }
+            }
+        })
     }
 
     /// Resolve one `run_program` launch to its final argv without spawning, so

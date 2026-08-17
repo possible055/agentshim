@@ -310,19 +310,9 @@ fn missing_bash_is_non_retryable_over_real_stdio() {
         .bash_override(&missing)
         .spawn();
     session.send(&modern_request(1, "server/discover", empty_params()));
-    assert_eq!(session.receive()["id"], 1);
-
-    let response = session.call_tool(2, "bash", json!({ "command": "true" }));
-
-    assert_eq!(response["result"]["isError"], true);
-    assert_eq!(
-        response["result"]["structuredContent"]["error"]["code"],
-        "io"
+    let status = session.wait_for_exit(Duration::from_secs(10));
+    assert!(
+        !status.success(),
+        "server must exit non-zero when GNU bash is unavailable at startup"
     );
-    assert_eq!(
-        response["result"]["structuredContent"]["error"]["retryable"],
-        false
-    );
-    assert!(response_text(&response).contains("AGENTSHIM_BASH"));
-    session.close();
 }

@@ -1,6 +1,7 @@
 use std::{
     error::Error,
     ffi::OsString,
+    io,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -175,6 +176,17 @@ pub(super) async fn run(config: RuntimeLimits, command: CliCommand) -> Result<()
                 .read_scope(read_scope)
                 .client_profile(client_profile)
                 .build()?;
+            service.verify_root()?;
+            let probe_service = service.clone();
+            let bash_probe = tokio::task::spawn_blocking(move || probe_service.verify_bash())
+                .await
+                .map_err(|join_error| {
+                    io::Error::other(format!("bash preflight probe panicked: {join_error}"))
+                })?;
+            if let Err(message) = bash_probe {
+                tracing::error!(target: "agentshim", event = "preflight_bash_unavailable", phase = "startup");
+                return Err(io::Error::other(message).into());
+            }
             let (stdin, stdout) = stdio();
             let reader = ShutdownReader {
                 inner: ReceiveFrameReader::new(stdin),

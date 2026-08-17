@@ -277,10 +277,10 @@ fn validate_windows_version() -> std::io::Result<()> {
     if unsafe { RtlGetVersion(&raw mut version) } < 0 {
         return Err(std::io::Error::other("RtlGetVersion failed"));
     }
-    if version.dwMajorVersion != 10 || version.dwBuildNumber < 22_621 {
+    if version.dwMajorVersion < 10 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "agentshim requires Windows 11 build 22621 or newer",
+            "agentshim requires Windows 10 or newer",
         ));
     }
     Ok(())

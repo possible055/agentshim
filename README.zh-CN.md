@@ -204,7 +204,7 @@ Git Bash 在启动 Windows 原生程序前，会转换看起来像 POSIX 路径�
 | `AGENTSHIM_GLOB_MEMORY_BYTES` | `33554432` | 每次 `glob` 呼叫保留匹配项目的内存硬上限。 |
 | `AGENTSHIM_PDF_TEXT_MEMORY_BYTES` | `67108864` | `auto`/`text` 模式 PDF 读取的每次呼叫内存预算。 |
 | `AGENTSHIM_PDF_IMAGE_MEMORY_BYTES` | `100663296` | `image` 模式 PDF 读取的每次呼叫内存预算。 |
-| `AGENTSHIM_BASH` | 自动探测 | GNU bash 的绝对路径。 |
+| `AGENTSHIM_BASH` | 自动探测 | GNU bash 的绝对路径。在 DSH adapter 中，plugin config `env` 段里设定的同名键也会在加载时驱动 bash 探测，因此无需在 host process 环境中预设。 |
 | `AGENTSHIM_LOG_MODE` | `errors` | 取值 `off`、`errors`、`all` 之一。 |
 | `AGENTSHIM_LOG_DIR` | 平台默认 | 用绝对路径覆盖日志目录。 |
 | `AGENTSHIM_RESPECT_GITIGNORE` | `false` | 设为 `true` 时，`grep` 与 `glob` 才套用 `.gitignore`／`.ignore`。省略 `include_ignored` 时跟随此默认值。由于调用方读不到这项设定，过滤生效且结果为空时，响应末尾会附上一行建议改用 `include_ignored=true`。`.git` 以及 `node_modules`、`target`、`.venv`、`venv`、`dist`、`build`、`__pycache__` 无论开关都排除。binary、输出预算与内存上限仍会挡住内容。 |

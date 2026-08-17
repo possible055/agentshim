@@ -940,6 +940,32 @@ describe('DSH native contracts', () => {
     }
   })
 
+  it.skipIf(stagedNativeAddon === undefined)('fails activation when GNU bash is unavailable at load time', async () => {
+    const previousDll = process.env.AGENTSHIM_DSH_NATIVE_DLL
+    const previousBash = process.env.AGENTSHIM_BASH
+    process.env.AGENTSHIM_DSH_NATIVE_DLL = stagedNativeAddon
+    process.env.AGENTSHIM_BASH = join(tmpdir(), 'definitely-missing-bash.exe')
+    try {
+      const root = await makeRoot()
+      await expect(mountComposition(root, {}, async inner => {
+        await mountSandboxServices(inner, 'read-only', root)
+      })).rejects.toMatchObject({
+        code: 'AGENTSHIM_BASH_UNAVAILABLE',
+      })
+    } finally {
+      if (previousDll === undefined) {
+        delete process.env.AGENTSHIM_DSH_NATIVE_DLL
+      } else {
+        process.env.AGENTSHIM_DSH_NATIVE_DLL = previousDll
+      }
+      if (previousBash === undefined) {
+        delete process.env.AGENTSHIM_BASH
+      } else {
+        process.env.AGENTSHIM_BASH = previousBash
+      }
+    }
+  })
+
   it.skipIf(stagedNativeAddon === undefined)('classifies denials, runner failures, and framed self-prints through the native engine', async () => {
     const previous = process.env.AGENTSHIM_DSH_NATIVE_DLL
     process.env.AGENTSHIM_DSH_NATIVE_DLL = stagedNativeAddon

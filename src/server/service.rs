@@ -299,6 +299,30 @@ impl AgentShim {
         self.root.verify()
     }
 
+    /// Probe the bash runtime once so a missing GNU bash surfaces at startup
+    /// instead of mid-task. The result is cached on the service's locator, so
+    /// the first `bash` tool call reuses it without re-probing.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operator-facing explanation when no usable GNU bash was found.
+    pub fn verify_bash(&self) -> Result<(), String> {
+        self.bash_locator
+            .resolve(&self.resources.shutdown_token())
+            .map(|_| ())
+            .map_err(|error| match error {
+                crate::tools::bash::locate::LocateError::Cancelled => {
+                    "bash discovery was cancelled".to_owned()
+                }
+                crate::tools::bash::locate::LocateError::TimedOut => {
+                    "bash discovery timed out".to_owned()
+                }
+                crate::tools::bash::locate::LocateError::Unavailable(message) => {
+                    message.to_string()
+                }
+            })
+    }
+
     /// Spawn this binary through the platform process lifecycle and verify clean completion.
     ///
     /// # Errors

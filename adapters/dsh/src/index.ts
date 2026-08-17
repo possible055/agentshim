@@ -181,6 +181,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     await jobs.dispose()
     await native.close()
   }, 'agentshim.nativeEngine')
+  try {
+    native.verifyBash()
+  } catch (error) {
+    ctx.logger.warn(`dsh-agentshim: bash preflight failed: ${error instanceof Error ? error.message : String(error)}`)
+    throw error
+  }
   const definitions = buildToolDefinitions({ ctx, config: resolved, jobs, native })
   installAgentTools(ctx, resolved, definitions)
 }

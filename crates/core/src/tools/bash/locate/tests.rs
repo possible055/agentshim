@@ -31,6 +31,23 @@ fn locator_instances_keep_captured_inputs_independent() {
 }
 
 #[test]
+fn capture_with_override_uses_the_explicit_path() {
+    let Some(runtime) = available_bash() else {
+        return;
+    };
+    let valid =
+        BashLocator::capture_with_override(Some(runtime.executable.clone().into_os_string()));
+    assert!(valid.resolve(&CancellationToken::new()).is_ok());
+
+    let missing = std::env::temp_dir().join("agentshim-definitely-missing-bash");
+    let invalid = BashLocator::capture_with_override(Some(missing.into_os_string()));
+    let error = invalid
+        .resolve(&CancellationToken::new())
+        .expect_err("explicit override must be used even when ambient AGENTSHIM_BASH is unset");
+    assert!(matches!(error, LocateError::Unavailable(_)));
+}
+
+#[test]
 fn cancelled_probe_returns_to_empty_and_can_be_retried() {
     let Some(runtime) = available_bash() else {
         return;

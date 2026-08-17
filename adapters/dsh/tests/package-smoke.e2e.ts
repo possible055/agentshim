@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { mkdtemp, rm, stat } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -7,6 +7,15 @@ import { describe, expect, it } from 'vitest'
 
 const packageRoot = fileURLToPath(new URL('..', import.meta.url))
 const enabled = process.env.AGENTSHIM_PACKAGE_E2E === '1'
+
+async function resolveTarballName(): Promise<string> {
+  const pkg = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8')) as {
+    name: string
+    version: string
+  }
+  const scopedName = pkg.name.startsWith('@') ? pkg.name.split('/').slice(1).join('/') : pkg.name
+  return `${scopedName}-${pkg.version}.tgz`
+}
 
 function runDsh(dshHome: string, args: string[]): string {
   const pnpmCli = process.env.npm_execpath
@@ -26,7 +35,7 @@ function runDsh(dshHome: string, args: string[]): string {
 describe.runIf(enabled)('packed adapter in a clean DSH profile', () => {
   it('adds, dumps, and removes the tarball with the pinned rc.6 CLI', async () => {
     const dshHome = await mkdtemp(join(tmpdir(), 'dsh-agentshim-profile-'))
-    const tarball = join(packageRoot, 'dsh-agentshim-0.1.0.tgz')
+    const tarball = join(packageRoot, await resolveTarballName())
     try {
       await stat(tarball)
       runDsh(dshHome, ['plugin', '--profile', 'smoke', 'add', tarball])

@@ -202,7 +202,7 @@ The response tells you how far it got and how to continue. A document that mixes
 | `AGENTSHIM_GLOB_MEMORY_BYTES` | `33554432` | Per-call hard limit for retained `glob` matches. |
 | `AGENTSHIM_PDF_TEXT_MEMORY_BYTES` | `67108864` | Per-call memory budget for `auto`/`text` PDF reads. |
 | `AGENTSHIM_PDF_IMAGE_MEMORY_BYTES` | `100663296` | Per-call memory budget for `image` PDF reads. |
-| `AGENTSHIM_BASH` | probed | Absolute path to a GNU bash. |
+| `AGENTSHIM_BASH` | probed | Absolute path to a GNU bash. In the DSH adapter, the same key set in plugin config `env` also drives load-time bash discovery, so it need not be preset on the host process. |
 | `AGENTSHIM_LOG_MODE` | `errors` | One of `off`, `errors`, `all`. |
 | `AGENTSHIM_LOG_DIR` | platform default | Override the log directory with an absolute path. |
 | `AGENTSHIM_RESPECT_GITIGNORE` | `false` | When `true`, `grep` and `glob` apply `.gitignore` / `.ignore` filters. Omitted `include_ignored` follows this default. Because the caller cannot read this setting, an empty result under active filtering ends with a line recommending `include_ignored=true`. `.git` and `node_modules`, `target`, `.venv`, `venv`, `dist`, `build`, `__pycache__` stay excluded either way. Binary, output-budget, and memory limits still apply. |

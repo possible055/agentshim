@@ -225,6 +225,7 @@ interface RawNativeEngine {
   beginCall(callId: string): NativeResult<boolean>
   cancelCall(callId: string): NativeResult<boolean>
   releaseCall(callId: string): NativeResult<boolean>
+  verifyBash(): NativeResult<boolean>
   readText(callId: string, args: NativeReadArgs): Promise<NativeResult<NativeToolText>>
   grepText(callId: string, args: NativeGrepArgs): Promise<NativeResult<NativeToolText>>
   globText(callId: string, args: NativeGlobArgs): Promise<NativeResult<NativeToolText>>
@@ -236,6 +237,7 @@ interface RawNativeEngine {
 }
 
 export interface NativeEngine {
+  verifyBash(): void
   readText(args: NativeReadArgs, signal?: AbortSignal): Promise<NativeToolText>
   grepText(args: NativeGrepArgs, signal?: AbortSignal): Promise<NativeToolText>
   globText(args: NativeGlobArgs, signal?: AbortSignal): Promise<NativeToolText>
@@ -281,6 +283,10 @@ class NativeEngineAdapter implements NativeEngine {
   private readonly pending = new Map<string, { callId: string; signal: AbortSignal | undefined; onAbort: () => void }>()
 
   constructor(private readonly raw: RawNativeEngine) {}
+
+  verifyBash(): void {
+    unwrapNativeResult(this.raw.verifyBash())
+  }
 
   private begin(signal?: AbortSignal): { callId: string; signal: AbortSignal | undefined; onAbort: () => void } {
     const callId = randomUUID()

@@ -148,6 +148,29 @@ jobs:
             exit 1
           fi
 
+          dsh_runs="$(gh api -X GET \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/dsh-adapter.yml/runs" \
+            -f branch=main \
+            -f event=push \
+            -f head_sha="$commit_sha" \
+            -f status=success \
+            -f per_page=100)"
+          if ! dsh_ci_url="$(jq -er --arg sha "$commit_sha" '
+            .workflow_runs
+            | map(select(
+                .head_sha == $sha
+                and .head_branch == "main"
+                and .event == "push"
+                and .status == "completed"
+                and .conclusion == "success"
+              ))
+            | first
+            | .html_url
+          ' <<<"$dsh_runs")"; then
+            echo "commit $commit_sha has no successful completed DSH adapter CI push run on main" >&2
+            exit 1
+          fi
+
           if [[ "$version" == *-* ]]; then
             if [[ "$version" == *-alpha* ]]; then
               npm_dist_tag="alpha"
@@ -163,6 +186,7 @@ jobs:
           fi
 
           echo "validated CI run: $ci_url"
+          echo "validated DSH adapter CI run: $dsh_ci_url"
           echo "commit_sha=$commit_sha" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
@@ -402,6 +426,22 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.napi_dylib }}" "adapters/dsh/npm/${{ matrix.npm_platform }}/agentshim_napi.node"
           Copy-Item LICENSE "adapters/dsh/npm/${{ matrix.npm_platform }}/LICENSE"
           npm pack "adapters/dsh/npm/${{ matrix.npm_platform }}" --pack-destination dist/npm
+      - name: Load and verify native addon (Unix)
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          node -e '
+            const addon = require("./adapters/dsh/npm/${{ matrix.npm_platform }}/agentshim_napi.node");
+            const api = addon.apiVersion();
+            if (api !== 3) { throw new Error("apiVersion " + api + " !== 3"); }
+            console.log("addon apiVersion=" + api);
+          '
+      - name: Load and verify native addon (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          node -e "const addon = require('./adapters/dsh/npm/${{ matrix.npm_platform }}/agentshim_napi.node'); const api = addon.apiVersion(); if (api !== 3) { throw new Error('apiVersion ' + api + ' !== 3'); } console.log('addon apiVersion=' + api);"
       - name: Test Windows installer
         if: matrix.platform == 'windows'
         shell: pwsh
@@ -623,12 +663,12 @@ jobs:
 
   publish_npm:
     name: Publish npm packages
-    needs: [preflight, package]
+    needs: [preflight, package, publish]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
+      actions: read
       contents: read
-      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -664,17 +704,6 @@ jobs:
             printf 'unexpected platform npm packages:\n%s\n' "$actual" >&2
             exit 1
           fi
-      - name: Publish platform npm packages
-        shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_DIST_TAG: ${{ needs.preflight.outputs.npm_dist_tag }}
-        run: |
-          set -euo pipefail
-          for tgz in npm-dist/dsh-agentshim-*.tgz; do
-            echo "publishing platform package $tgz with tag $NPM_DIST_TAG"
-            npm publish "$tgz" --access public --tag "$NPM_DIST_TAG"
-          done
       - name: Build and pack root dsh-agentshim package
         shell: bash
         run: |
@@ -683,6 +712,36 @@ jobs:
           pnpm --dir adapters/dsh build
           pnpm --dir adapters/dsh verify:cutover
           pnpm --dir adapters/dsh pack --pack-destination "$PWD/npm-dist"
+      - name: Validate root package
+        shell: bash
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          root_tgz="npm-dist/dsh-agentshim-$VERSION.tgz"
+          if [[ ! -f "$root_tgz" ]]; then
+            echo "root package tarball $root_tgz not found" >&2
+            exit 1
+          fi
+      - name: Publish platform npm packages
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_DIST_TAG: ${{ needs.preflight.outputs.npm_dist_tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          for tgz in npm-dist/dsh-agentshim-*.tgz; do
+            base="$(basename "$tgz" .tgz)"
+            # base is e.g. dsh-agentshim-darwin-arm64-0.1.4-alpha.2
+            pkg_name="${base%%-$VERSION}"
+            if npm view "$pkg_name@$VERSION" >/dev/null 2>&1; then
+              echo "platform package $pkg_name@$VERSION already published; skipping"
+              continue
+            fi
+            echo "publishing platform package $tgz with tag $NPM_DIST_TAG"
+            npm publish "$tgz" --access public --tag "$NPM_DIST_TAG"
+          done
       - name: Publish root dsh-agentshim package
         shell: bash
         env:
@@ -691,5 +750,9 @@ jobs:
           VERSION: ${{ needs.preflight.outputs.version }}
         run: |
           set -euo pipefail
+          if npm view "dsh-agentshim@$VERSION" >/dev/null 2>&1; then
+            echo "root package dsh-agentshim@$VERSION already published; skipping"
+            exit 0
+          fi
           echo "publishing root package dsh-agentshim-$VERSION.tgz with tag $NPM_DIST_TAG"
           npm publish "npm-dist/dsh-agentshim-$VERSION.tgz" --access public --tag "$NPM_DIST_TAG"
