@@ -6,8 +6,9 @@ on:
       - main
     paths:
       - adapters/dsh/**
-      - src/**
-      - crates/**
+      - crates/core/**
+      - crates/napi/**
+      - crates/pdf-read-core/**
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
@@ -16,8 +17,9 @@ on:
   pull_request:
     paths:
       - adapters/dsh/**
-      - src/**
-      - crates/**
+      - crates/core/**
+      - crates/napi/**
+      - crates/pdf-read-core/**
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
@@ -38,7 +40,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2025, macos-15]
+        # macOS runners bill at 10x, so pull requests validate on the two cheap
+        # platforms. Pushes keep the full matrix because release.yml preflight
+        # accepts a release commit only if its push run succeeded.
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-24.04","windows-2025"]') || fromJSON('["ubuntu-24.04","windows-2025","macos-15"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

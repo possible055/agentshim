@@ -37,8 +37,16 @@ export function resolveCaptureRoot(value: string): string {
 
 const execFileAsync = promisify(execFile)
 
+// Bare names resolve through PATH, and a Git Bash / MSYS launch puts its own
+// coreutils ahead of System32: `whoami` there is the GNU build, which rejects
+// `/user` and exits non-zero, failing plugin activation and taking the whole
+// cordis plugin tree down with it. These two must be the Windows executables.
+const system32 = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')
+const whoamiExe = join(system32, 'whoami.exe')
+const icaclsExe = join(system32, 'icacls.exe')
+
 async function currentUserSid(): Promise<string> {
-  const result = await execFileAsync('whoami.exe', ['/user', '/fo', 'csv', '/nh'], { windowsHide: true })
+  const result = await execFileAsync(whoamiExe, ['/user', '/fo', 'csv', '/nh'], { windowsHide: true })
   const match = result.stdout.match(/S-1-5-[0-9-]+/)
   if (!match) throw new Error('dsh-agentshim: could not resolve current user SID')
   return match[0]
@@ -46,12 +54,12 @@ async function currentUserSid(): Promise<string> {
 
 async function secureWindowsDirectory(path: string): Promise<void> {
   const sid = await currentUserSid()
-  await execFileAsync('icacls.exe', [path, '/reset'], { windowsHide: true })
-  await execFileAsync('icacls.exe', [path, '/inheritance:r'], { windowsHide: true })
-  await execFileAsync('icacls.exe', [path, '/grant:r', `*${sid}:(OI)(CI)F`], { windowsHide: true })
+  await execFileAsync(icaclsExe, [path, '/reset'], { windowsHide: true })
+  await execFileAsync(icaclsExe, [path, '/inheritance:r'], { windowsHide: true })
+  await execFileAsync(icaclsExe, [path, '/grant:r', `*${sid}:(OI)(CI)F`], { windowsHide: true })
   let sidPresent = false
   try {
-    await execFileAsync('icacls.exe', [path, '/findsid', `*${sid}`], { windowsHide: true })
+    await execFileAsync(icaclsExe, [path, '/findsid', `*${sid}`], { windowsHide: true })
     sidPresent = true
   } catch {
     sidPresent = false
@@ -59,7 +67,7 @@ async function secureWindowsDirectory(path: string): Promise<void> {
   if (!sidPresent) {
     throw new Error(`dsh-agentshim: owner-only DACL verification failed for ${path}`)
   }
-  const listing = await execFileAsync('icacls.exe', [path], { windowsHide: true })
+  const listing = await execFileAsync(icaclsExe, [path], { windowsHide: true })
   const aceCount = (listing.stdout.match(/:\(/g) ?? []).length
   const hasInherited = listing.stdout.includes('(I)')
   const hasFullControl = listing.stdout.includes('(F)')

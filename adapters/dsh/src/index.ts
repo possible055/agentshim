@@ -121,9 +121,17 @@ function installAgentTools(
     const disposers: Array<() => void> = []
     try {
       const definitions: ReadonlyMap<string, ToolDefinition> = buildToolDefinitions({ ctx, config: resolved, jobs, native: engine, root })
-      const present = RESTRICT_CANDIDATES.filter(name => agent.ctx.tools.get(name) !== undefined)
+      // `tools.get()` takes its viewing scope as an argument and falls back to
+      // the GLOBAL layer when none is given. An agent preset registers the
+      // model-facing tools into a standing mount that is this agent's scope
+      // PARENT, so a scope-less read finds nothing and every preset-composed
+      // agent would silently keep its inherited tools.
+      const present = RESTRICT_CANDIDATES.filter(name => agent.ctx.tools.get(name, agent) !== undefined)
       const replacements = replacementNames(present)
       if (replacements.length === 0 && !present.includes('pwsh') && !present.includes('bash_status')) {
+        ctx.logger.info(
+          `dsh-agentshim: agent ${agent.id} resolves none of ${RESTRICT_CANDIDATES.join(', ')}; leaving its catalog untouched`,
+        )
         pool.release(root)
         return
       }

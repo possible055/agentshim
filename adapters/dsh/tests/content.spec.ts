@@ -83,10 +83,30 @@ describe('materializeContent', () => {
     expect(error).toMatchObject({ code: 'AGENTSHIM_IMAGE_ROUTE_UNSUPPORTED' })
   })
 
-  it('persists validated images as attachment references and defers nested context', async () => {
+  it('persists images via batch saveImages and skips manual deferral when rc.7+ host capability is present', async () => {
+    const saveImages = vi.fn(async () => [
+      { attachmentId: 'att-1', mediaType: 'image/png', bytes: 70, width: 1, height: 1 },
+      { attachmentId: 'att-2', mediaType: 'image/png', bytes: 70, width: 1, height: 1 },
+    ])
+    const attachments = stubAttachments({ saveImages })
+    const deferContext = vi.fn()
+    const exec = stubExec({ agent: routedAgent(), parent: Symbol('code-mode') as never, deferContext })
+    const blocks = await materializeContent(stubContext({ attachments, llm: stubLlm(['text', 'image']) }), exec, [
+      { type: 'text', text: 'header' },
+      { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
+      { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
+    ])
+    expect(blocks).toHaveLength(3)
+    expect(blocks[1]).toMatchObject({ type: 'image', attachment: { attachmentId: 'att-1' } })
+    expect(blocks[2]).toMatchObject({ type: 'image', attachment: { attachmentId: 'att-2' } })
+    expect(saveImages).toHaveBeenCalledTimes(1)
+    expect(deferContext).not.toHaveBeenCalled()
+  })
+
+  it('persists validated images and manually defers under rc.6 legacy host without saveImages', async () => {
     const attachments = stubAttachments()
     const deferContext = vi.fn()
-    const exec = stubExec({ agent: routedAgent(), parent: Symbol('token') as never, deferContext })
+    const exec = stubExec({ agent: routedAgent(), parent: Symbol('code-mode') as never, deferContext })
     const blocks = await materializeContent(stubContext({ attachments, llm: stubLlm(['text', 'image']) }), exec, [
       { type: 'text', text: 'page 1' },
       { type: 'image', data: PNG_1X1, mimeType: 'image/png' },

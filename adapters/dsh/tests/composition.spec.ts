@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { CallId } from '@deepseek-ai/dsh-llm'
-import { createScope } from '@deepseek-ai/dsh-scope'
+import { bindScopeParent, createScope } from '@deepseek-ai/dsh-scope'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { TOOL_ABORTED, renderToolsSdk, renderToolsSdkPy } from '@deepseek-ai/dsh-tools'
@@ -142,6 +142,41 @@ async function mintStandardAgent(ctx: Context, name: string, cwd: string): Promi
   const minted = await mintAgent(ctx, name, cwd)
   ctx.emit('agent/created', { agent: minted.agent })
   return minted
+}
+
+interface MintedPresetAgent extends MintedAgent {
+  readonly standing: Scope
+}
+
+/**
+ * Mint an agent in the DSH Web shape: the model-facing tools sit in a standing
+ * preset mount that is the agent's scope PARENT, not in the host's global
+ * layer. `mintAgent` above builds the TUI/headless shape instead, where those
+ * tools are global — a registry read that forgets its viewing scope still
+ * resolves them there, so only this topology exercises the scoped lookup.
+ */
+async function mintPresetAgent(
+  ctx: Context,
+  name: string,
+  cwd: string,
+  presetTools: readonly string[],
+): Promise<MintedPresetAgent> {
+  const agent = {
+    id: name,
+    session: { header: { cwd }, requestHeader: () => ({ config: {} }) },
+    options: { provider: 'stub-provider', model: 'stub-model' },
+  } as unknown as Agent
+  const presetKey = { agentPreset: name }
+  let standing!: Scope
+  let scope!: Scope
+  await ctx.plugin(Object.assign((inner: Context) => {
+    standing = createScope(inner, presetKey)
+    for (const tool of presetTools) standing.ctx.tools.register(inheritedTool(tool))
+    scope = createScope(inner, agent)
+    bindScopeParent(agent, presetKey)
+  }, { inject: ['tools', 'systemPrompt'] }))
+  ;(agent as { ctx?: unknown }).ctx = scope.ctx
+  return { agent, scope, standing }
 }
 
 async function waitForBackgroundOutput(ctx: Context, agent: Agent, jobId: string): Promise<void> {
@@ -531,6 +566,75 @@ describe('agent scope replacement', () => {
   })
 })
 
+describe('preset-scoped catalog (web surface topology)', () => {
+  it('replaces the preset-scoped tools for a standard-shaped preset and hides pwsh', async () => {
+    const root = await makeRoot()
+    const ctx = await mountComposition(root)
+    const { agent } = await mintPresetAgent(ctx, 'standard', root, [
+      'read', 'grep', 'glob', 'pwsh', 'write', 'edit', 'read_image', 'todo',
+    ])
+    ctx.emit('agent/created', { agent })
+
+    expect(visibleNames(ctx, agent)).toEqual([
+      'bash', 'bash_status', 'edit', 'glob', 'grep', 'read', 'read_image', 'run_program', 'todo', 'write',
+    ])
+    expect(ctx.tools.get('read', agent)?.description).toContain('numbered lines')
+    expect(ctx.tools.get('write', agent)?.description).toBe('inherited write')
+    expect(await runTool(ctx, agent, 'bash', { command: 'true', description: 'Run successful command' }))
+      .toContain('Exit code: 0')
+    expect(await runTool(ctx, agent, 'todo', {})).toBe('inherited:todo')
+  })
+
+  it('replaces only bash on a minimal-shaped preset', async () => {
+    const root = await makeRoot()
+    const ctx = await mountComposition(root)
+    const { agent } = await mintPresetAgent(ctx, 'minimal', root, ['bash', 'str_replace_editor'])
+    ctx.emit('agent/created', { agent })
+
+    expect(visibleNames(ctx, agent)).toEqual(['bash', 'bash_status', 'str_replace_editor'])
+    expect(ctx.tools.get('bash', agent)?.description).toContain('POSIX')
+    expect(await runTool(ctx, agent, 'str_replace_editor', { command: 'view', path: 'notes.txt' }))
+      .toBe('inherited:str_replace_editor')
+  })
+
+  it('shadows prompt sections the preset registered in the standing scope', async () => {
+    const root = await makeRoot()
+    const ctx = await mountComposition(root)
+    const { agent, standing } = await mintPresetAgent(ctx, 'standard-prompt', root, [
+      'read', 'grep', 'glob', 'pwsh',
+    ])
+    standing.ctx.systemPrompt.section({ name: 'tool:read', order: 100, text: 'PRESET-READ-GUIDANCE' })
+    standing.ctx.systemPrompt.section({ name: 'tool:pwsh', order: 105, text: 'PRESET-PWSH-GUIDANCE' })
+    ctx.emit('agent/created', { agent })
+
+    const prompt = JSON.stringify(await ctx.systemPrompt.assemble({ scope: agent }))
+    expect(prompt).not.toContain('PRESET-READ-GUIDANCE')
+    expect(prompt).not.toContain('PRESET-PWSH-GUIDANCE')
+    expect(prompt).toContain('next_start_line')
+    expect(prompt).toContain('lifecycle status of a background Bash job')
+  })
+
+  it('hides an isolated preset-scoped bash_status when bash is unavailable', async () => {
+    const root = await makeRoot()
+    const ctx = await mountComposition(root)
+    const { agent } = await mintPresetAgent(ctx, 'status-only', root, ['bash_status', 'str_replace_editor'])
+    ctx.emit('agent/created', { agent })
+
+    expect(visibleNames(ctx, agent)).toEqual(['str_replace_editor'])
+    expect(JSON.stringify(await ctx.systemPrompt.assemble({ scope: agent })))
+      .not.toContain('lifecycle status of a background Bash job')
+  })
+
+  it('leaves a preset carrying no replaceable name untouched', async () => {
+    const root = await makeRoot()
+    const ctx = await mountComposition(root)
+    const { agent } = await mintPresetAgent(ctx, 'no-overlap', root, ['todo', 'write'])
+    ctx.emit('agent/created', { agent })
+
+    expect(visibleNames(ctx, agent)).toEqual(['todo', 'write'])
+  })
+})
+
 describe('multi-workspace engine pool', () => {
   it('shares one engine between two agents on the same cwd', async () => {
     const root = await makeRoot()
@@ -850,7 +954,7 @@ describe('DSH native contracts', () => {
     expect(JSON.stringify(result.content)).not.toContain('iVBORw0KGgo')
   })
 
-  it('defers a durable PDF image into Code Mode context', async () => {
+  it('delivers a durable PDF image under nested execution without raw base64', async () => {
     const root = await makeRoot()
     await copyFile(samplePdf, join(root, 'doc.pdf'))
     const ctx = await mountComposition(root)
@@ -874,9 +978,11 @@ describe('DSH native contracts', () => {
       { parent: Symbol('code-mode') },
     )
     expect(result.isError).toBe(false)
-    expect(result.additionalContexts).toHaveLength(1)
-    expect(JSON.stringify(result.additionalContexts)).not.toContain('iVBORw0KGgo')
-    expect(result.additionalContexts?.[0]?.source).toEqual({ kind: 'plugin', plugin: 'agentshim' })
+    const blocks = result.content as Array<{ type: string; text?: string; attachment?: { attachmentId: string } }>
+    const image = blocks.find(block => block.type === 'image')
+    expect(image?.type).toBe('image')
+    expect(typeof image?.attachment?.attachmentId).toBe('string')
+    expect(JSON.stringify(result.content)).not.toContain('iVBORw0KGgo')
   })
 
   interface SandboxStub {

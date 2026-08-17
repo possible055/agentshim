@@ -170,6 +170,10 @@ jobs:
         run: cargo check --locked -p agentshim --all-features --tests
       - name: Test bench-internals profiled paths
         run: cargo test --locked -p agentshim --features bench-internals --lib -- profiled
+      - name: Lint engine packages
+        run: cargo clippy --locked -p agentshim-core -p agentshim-napi --all-targets --all-features -- -D warnings
+      - name: Test engine packages default features
+        run: cargo test --locked -p agentshim-core -p agentshim-napi --tests
       - name: Lint derivative packages
         if: steps.validation-scope.outputs.scope == 'full'
         run: cargo clippy --locked -p agentshim-pdf-read -p agentshim-gigatoken --all-targets --all-features -- -D warnings

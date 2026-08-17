@@ -1,8 +1,55 @@
+import { createRequire } from 'node:module'
 import type { Context } from '@deepseek-ai/cordis'
 import { createUserMessage, HarnessError } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+
+const require = createRequire(import.meta.url)
+
+let cachedDshVersion: string | null | undefined = undefined
+
+/**
+ * Read the installed @deepseek-ai/dsh-tools (or @deepseek-ai/dsh-agent) version from its manifest.
+ */
+export function getDshPackageVersion(): string | undefined {
+  if (cachedDshVersion !== undefined) return cachedDshVersion ?? undefined
+  try {
+    const pkg = require('@deepseek-ai/dsh-tools/package.json') as { version?: string }
+    cachedDshVersion = typeof pkg?.version === 'string' ? pkg.version : null
+  } catch {
+    try {
+      const pkg = require('@deepseek-ai/dsh-agent/package.json') as { version?: string }
+      cachedDshVersion = typeof pkg?.version === 'string' ? pkg.version : null
+    } catch {
+      cachedDshVersion = null
+    }
+  }
+  return cachedDshVersion ?? undefined
+}
+
+/**
+ * Determine whether the current DSH host runtime requires manual context deferral
+ * for nested image results in Code Mode (DSH 0.1.0-rc.6 and earlier).
+ * In DSH 0.1.0-rc.7+, Code Mode automatically forwards nested image content blocks.
+ */
+export function requiresManualCodeModeImageDeferral(ctx: Context, exec: ToolRunContext): boolean {
+  if (exec.parent === undefined) return false
+
+  // 1. Feature detection: DSH rc.7+ provides `AttachmentStore.saveImages`.
+  const attachments = ctx.get('attachments') as { saveImages?: unknown } | undefined
+  if (attachments !== undefined) {
+    return typeof attachments.saveImages !== 'function'
+  }
+
+  // 2. Package version inspection fallback if attachments is not mounted
+  const version = getDshPackageVersion()
+  if (version !== undefined) {
+    return version === '0.1.0-rc.6' || version.startsWith('0.0.') || version.startsWith('0.1.0-rc.1') || version.startsWith('0.1.0-rc.2') || version.startsWith('0.1.0-rc.3') || version.startsWith('0.1.0-rc.5')
+  }
+
+  return false
+}
 
 /** One native image block before DSH attachment materialization. */
 export interface RawImageBlock {
@@ -45,10 +92,9 @@ function strictBase64Decode(data: string): Uint8Array {
 /**
  * Convert native blocks into DSH content: text passes through in
  * order, images become durable attachments referenced by ImageBlocks (no
- * base64 reaches the canonical value or the session log). A nested Code Mode
- * call additionally defers the blocks so the image enters the next model
- * request. Every gate and preflight runs before the first image persists, so
- * a failure never publishes a partial tool result or session reference.
+ * base64 reaches the canonical value or the session log). Every gate and
+ * preflight runs before the first image persists, so a failure never
+ * publishes a partial tool result or session reference.
  */
 export async function materializeContent(
   ctx: Context,
@@ -87,9 +133,22 @@ export async function materializeContent(
     data: decoded[index] as Uint8Array,
     mediaType: block.mimeType as Parameters<typeof attachments.saveImage>[0]['mediaType'],
   }))
-  for (const input of inputs) {
-    await attachments.validateImage(input)
+
+  let savedRefs: readonly ImageAttachmentRef[]
+  const batchSave = (attachments as { saveImages?: (items: typeof inputs) => Promise<readonly ImageAttachmentRef[]> }).saveImages
+  if (typeof batchSave === 'function') {
+    savedRefs = await batchSave.call(attachments, inputs)
+  } else {
+    for (const input of inputs) {
+      await attachments.validateImage(input)
+    }
+    const refs: ImageAttachmentRef[] = []
+    for (const input of inputs) {
+      refs.push(await attachments.saveImage(input))
+    }
+    savedRefs = refs
   }
+
   const blocks: ContentBlock[] = []
   let imageIndex = 0
   for (const block of content) {
@@ -97,16 +156,17 @@ export async function materializeContent(
       blocks.push({ type: 'text', text: block.text })
       continue
     }
-    const input = inputs[imageIndex] as Parameters<typeof attachments.saveImage>[0]
+    blocks.push({ type: 'image', attachment: savedRefs[imageIndex] as ImageAttachmentRef })
     imageIndex += 1
-    blocks.push({ type: 'image', attachment: await attachments.saveImage(input) })
   }
-  if (exec.parent !== undefined) {
+
+  if (requiresManualCodeModeImageDeferral(ctx, exec)) {
     exec.deferContext(createUserMessage({
       content: blocks,
       source: { kind: 'plugin', plugin: 'agentshim' },
     }))
   }
+
   return blocks
 }
 
