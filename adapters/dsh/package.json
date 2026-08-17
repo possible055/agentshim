@@ -33,7 +33,6 @@
     "typecheck": "tsc -p tsconfig.json",
     "lint": "oxlint src tests",
     "test": "vitest run",
-    "test:package-smoke": "vitest run tests/package-smoke.e2e.ts",
     "build": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
     "verify:cutover": "node scripts/verify-cutover.mjs",
     "prepack": "pnpm run build"
