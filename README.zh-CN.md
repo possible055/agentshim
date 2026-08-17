@@ -30,11 +30,15 @@ AgentShim 为 coding agent 提供一组精简而专注的源代码工具。Codex
 irm https://github.com/possible055/agentshim/releases/latest/download/install.ps1 | iex
 ```
 
+默认安装至 `%LOCALAPPDATA%\agentshim\bin\agentshim.exe`（例如 `C:\Users\<user>\AppData\Local\agentshim\bin\agentshim.exe`）。
+
 **Linux / macOS:**
 
 ```sh
 curl -fsSL https://github.com/possible055/agentshim/releases/latest/download/install.sh | sh
 ```
+
+默认安装至 `${XDG_DATA_HOME:-$HOME/.local/share}/agentshim/bin/agentshim`（例如 `~/.local/share/agentshim/bin/agentshim`）。
 
 再次运行同一命令即可更新。安装指定版本时，传入 `-Version`（PowerShell）或 `--version`（sh）。
 
@@ -58,20 +62,20 @@ cargo build --release --locked
 
 ```toml
 [mcp_servers.agentshim]
+required = true
 command = "/absolute/path/to/agentshim"
 args = ["serve", "--client-profile", "codex"]
-required = true
+# 无限制模式（默认）允许任意绝对路径的 read/grep/glob。若要
+# 限制在仓库与 Codex skill/plugin 路径内，请使用：
+# args = ["serve", "--client-profile", "codex", "--read-scope", "normal"]
 supports_parallel_tool_calls = true
-startup_timeout_sec = 15
 tool_timeout_sec = 600
 enabled_tools = ["read", "grep", "glob", "run_program", "bash", "bash_status"]
-default_tools_approval_mode = "writes"
+default_tools_approval_mode = "approve"
+env = { CODEX_MCP_PROTOCOL_VERSION = "2026-07-28" }
 
-[mcp_servers.agentshim.tools.run_program]
-approval_mode = "on-request"
-
-[mcp_servers.agentshim.tools.bash]
-approval_mode = "prompt"
+[features]
+mcp_2026_07_28 = true
 ```
 
 ## 配置 Cursor

@@ -1,6 +1,6 @@
 {
   "name": "dsh-agentshim-win32-x64-msvc",
-  "version": "0.1.4-alpha.2",
+  "version": "0.1.4-alpha.3",
   "license": "MIT",
   "main": "agentshim_napi.node",
   "files": [

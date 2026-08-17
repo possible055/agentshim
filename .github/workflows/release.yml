@@ -704,6 +704,28 @@ jobs:
             printf 'unexpected platform npm packages:\n%s\n' "$actual" >&2
             exit 1
           fi
+      - name: Publish platform npm packages
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_DIST_TAG: ${{ needs.preflight.outputs.npm_dist_tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          for plat in darwin-arm64 linux-arm64-gnu linux-x64-gnu win32-x64-msvc; do
+            pkg_name="dsh-agentshim-$plat"
+            tgz="./npm-dist/dsh-agentshim-$plat-$VERSION.tgz"
+            if [[ ! -f "$tgz" ]]; then
+              echo "platform package tarball $tgz not found" >&2
+              exit 1
+            fi
+            if npm view "$pkg_name@$VERSION" >/dev/null 2>&1; then
+              echo "platform package $pkg_name@$VERSION already published; skipping"
+              continue
+            fi
+            echo "publishing platform package $tgz with tag $NPM_DIST_TAG"
+            npm publish "$tgz" --access public --tag "$NPM_DIST_TAG"
+          done
       - name: Build and pack root dsh-agentshim package
         shell: bash
         run: |
@@ -718,30 +740,11 @@ jobs:
           VERSION: ${{ needs.preflight.outputs.version }}
         run: |
           set -euo pipefail
-          root_tgz="npm-dist/dsh-agentshim-$VERSION.tgz"
+          root_tgz="./npm-dist/dsh-agentshim-$VERSION.tgz"
           if [[ ! -f "$root_tgz" ]]; then
             echo "root package tarball $root_tgz not found" >&2
             exit 1
           fi
-      - name: Publish platform npm packages
-        shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_DIST_TAG: ${{ needs.preflight.outputs.npm_dist_tag }}
-          VERSION: ${{ needs.preflight.outputs.version }}
-        run: |
-          set -euo pipefail
-          for tgz in npm-dist/dsh-agentshim-*.tgz; do
-            base="$(basename "$tgz" .tgz)"
-            # base is e.g. dsh-agentshim-darwin-arm64-0.1.4-alpha.2
-            pkg_name="${base%%-$VERSION}"
-            if npm view "$pkg_name@$VERSION" >/dev/null 2>&1; then
-              echo "platform package $pkg_name@$VERSION already published; skipping"
-              continue
-            fi
-            echo "publishing platform package $tgz with tag $NPM_DIST_TAG"
-            npm publish "$tgz" --access public --tag "$NPM_DIST_TAG"
-          done
       - name: Publish root dsh-agentshim package
         shell: bash
         env:
@@ -754,5 +757,5 @@ jobs:
             echo "root package dsh-agentshim@$VERSION already published; skipping"
             exit 0
           fi
-          echo "publishing root package dsh-agentshim-$VERSION.tgz with tag $NPM_DIST_TAG"
-          npm publish "npm-dist/dsh-agentshim-$VERSION.tgz" --access public --tag "$NPM_DIST_TAG"
+          echo "publishing root package ./npm-dist/dsh-agentshim-$VERSION.tgz with tag $NPM_DIST_TAG"
+          npm publish "./npm-dist/dsh-agentshim-$VERSION.tgz" --access public --tag "$NPM_DIST_TAG"

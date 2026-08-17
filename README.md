@@ -30,11 +30,15 @@ AgentShim gives coding agents a small, focused set of tools for working with sou
 irm https://github.com/possible055/agentshim/releases/latest/download/install.ps1 | iex
 ```
 
+Installs to `%LOCALAPPDATA%\agentshim\bin\agentshim.exe` (e.g. `C:\Users\<user>\AppData\Local\agentshim\bin\agentshim.exe`).
+
 **Linux / macOS:**
 
 ```sh
 curl -fsSL https://github.com/possible055/agentshim/releases/latest/download/install.sh | sh
 ```
+
+Installs to `${XDG_DATA_HOME:-$HOME/.local/share}/agentshim/bin/agentshim` (e.g. `~/.local/share/agentshim/bin/agentshim`).
 
 Re-run the same command to update. Install a specific version with `-Version` (PowerShell) or `--version` (sh).
 
@@ -58,20 +62,20 @@ Copy the matching example into `~/.codex/config.toml` (user-level) or a project'
 
 ```toml
 [mcp_servers.agentshim]
+required = true
 command = "/absolute/path/to/agentshim"
 args = ["serve", "--client-profile", "codex"]
-required = true
+# Unrestricted mode (default) allows any absolute read/grep/glob path. To
+# restrict to repository and Codex skill/plugin paths, use:
+# args = ["serve", "--client-profile", "codex", "--read-scope", "normal"]
 supports_parallel_tool_calls = true
-startup_timeout_sec = 15
 tool_timeout_sec = 600
 enabled_tools = ["read", "grep", "glob", "run_program", "bash", "bash_status"]
-default_tools_approval_mode = "writes"
+default_tools_approval_mode = "approve"
+env = { CODEX_MCP_PROTOCOL_VERSION = "2026-07-28" }
 
-[mcp_servers.agentshim.tools.run_program]
-approval_mode = "on-request"
-
-[mcp_servers.agentshim.tools.bash]
-approval_mode = "prompt"
+[features]
+mcp_2026_07_28 = true
 ```
 
 ## Configure Cursor

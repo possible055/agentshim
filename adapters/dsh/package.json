@@ -1,7 +1,7 @@
 {
   "name": "dsh-agentshim",
   "description": "DSH native tool plugin backed by agentshim-core",
-  "version": "0.1.4-alpha.2",
+  "version": "0.1.4-alpha.3",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
@@ -42,10 +42,10 @@
     "@deepseek-ai/schemastery": "^3.18.1"
   },
   "optionalDependencies": {
-    "dsh-agentshim-darwin-arm64": "workspace:0.1.4-alpha.2",
-    "dsh-agentshim-linux-arm64-gnu": "workspace:0.1.4-alpha.2",
-    "dsh-agentshim-linux-x64-gnu": "workspace:0.1.4-alpha.2",
-    "dsh-agentshim-win32-x64-msvc": "workspace:0.1.4-alpha.2"
+    "dsh-agentshim-darwin-arm64": "workspace:0.1.4-alpha.3",
+    "dsh-agentshim-linux-arm64-gnu": "workspace:0.1.4-alpha.3",
+    "dsh-agentshim-linux-x64-gnu": "workspace:0.1.4-alpha.3",
+    "dsh-agentshim-win32-x64-msvc": "workspace:0.1.4-alpha.3"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

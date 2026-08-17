@@ -11,11 +11,11 @@ resolver = "3"
 
 [package]
 name = "agentshim"
-version = "0.1.4-alpha.2"
+version = "0.1.4-alpha.3"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
-description = "Capability-aware repository tools for coding agents"
+description = "High-performance, capability-aware repository tools and process execution for coding agents"
 autotests = true
 
 [dependencies]
