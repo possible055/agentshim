@@ -1,4 +1,5 @@
 import { createRequire as nodeCreateRequire } from 'node:module'
+import { randomUUID } from 'node:crypto'
 import { scrubbedParentEnv } from '@deepseek-ai/dsh-subprocess'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { TOOL_ABORTED } from '@deepseek-ai/dsh-tools'
@@ -10,7 +11,7 @@ export interface NativeFailure {
   readonly code: string
   readonly message: string
   readonly retryable: boolean
-  readonly details?: string
+  readonly details?: unknown
 }
 
 export type NativeResult<T> =
@@ -20,7 +21,16 @@ export type NativeResult<T> =
 export function nativeFailureError(failure: NativeFailure): HarnessError {
   const error = new HarnessError(failure.message, failure.code === 'AGENTSHIM_CANCELLED' ? TOOL_ABORTED : failure.code)
   if (failure.code === 'AGENTSHIM_CANCELLED') error.name = 'AbortError'
+  ;(error as HarnessError & { details?: unknown }).details = failure.details
   return error
+}
+
+function unwrapNativeResult<T>(result: NativeResult<T>): T {
+  if (result.failure !== undefined) throw nativeFailureError(result.failure)
+  if (result.value === undefined) {
+    throw new HarnessError('native engine returned an empty success result', 'AGENTSHIM_NATIVE_CONTRACT_INVALID')
+  }
+  return result.value
 }
 
 export interface NativeImage {
@@ -28,10 +38,16 @@ export interface NativeImage {
   readonly mimeType: string
 }
 
+export interface NativeContinuation {
+  readonly kind: 'next_start_line' | 'next_offset' | 'next_artifact_offset' | 'pdf_cursor'
+  readonly value: string
+}
+
 export interface NativeToolText {
   readonly text: string
   readonly complete: boolean
   readonly images: readonly NativeImage[]
+  readonly continuation?: NativeContinuation
 }
 
 export interface NativeReadArgs {
@@ -91,11 +107,21 @@ export interface NativeArtifactInfo {
   readonly stream: string
 }
 
+export interface NativeProcessStream {
+  readonly text: string
+  readonly totalBytes: number
+  readonly shownBytes: number
+  readonly omittedBytes: number
+  readonly artifact?: NativeArtifactInfo
+}
+
 export interface NativeProcessOutcome {
   readonly text: string
   readonly childNonzero: boolean
   /** Core exit label ("0", "42", "signal 9"); absent when the process never settled. */
   readonly exitCode?: string
+  readonly stdout: NativeProcessStream
+  readonly stderr: NativeProcessStream
   readonly artifacts: NativeArtifactInfo[]
   readonly limitExceeded: boolean
   readonly failure?: NativeFailure
@@ -138,6 +164,33 @@ export interface NativeBashArgs {
   readonly msysArgumentConversion?: 'enabled' | 'disabled'
 }
 
+export function nativeRunProgramArgs(args: Record<string, unknown>): NativeRunProgramArgs {
+  const env: Record<string, string> = {}
+  if (args.env !== undefined && typeof args.env === 'object') {
+    for (const [key, value] of Object.entries(args.env as Record<string, unknown>)) {
+      if (typeof value === 'string') env[key] = value
+    }
+  }
+  return {
+    program: args.program as string,
+    args: Array.isArray(args.args) ? (args.args as string[]) : [],
+    ...(args.cwd === undefined ? {} : { cwd: args.cwd as string }),
+    ...(Object.keys(env).length === 0 ? {} : { env }),
+    ...(Array.isArray(args.unset_env) ? { unsetEnv: args.unset_env as string[] } : {}),
+    ...(args.stdin === undefined ? {} : { stdin: args.stdin as string }),
+    ...(args.timeout_ms === undefined ? {} : { timeoutMs: args.timeout_ms as number }),
+  }
+}
+
+export function nativeBashArgs(wire: Record<string, unknown>): NativeBashArgs {
+  return {
+    command: wire.command as string,
+    ...(wire.cwd === undefined ? {} : { cwd: wire.cwd as string }),
+    ...(wire.timeout_ms === undefined ? {} : { timeoutMs: wire.timeout_ms as number }),
+    ...(wire.msys_argument_conversion === undefined ? {} : { msysArgumentConversion: wire.msys_argument_conversion as 'enabled' | 'disabled' }),
+  }
+}
+
 export interface NativeArtifactPublished {
   readonly path: string
   readonly bytes: number
@@ -161,20 +214,197 @@ export interface NativeJobHandle {
   dispose(): Promise<void>
 }
 
+interface RawNativeJobHandle {
+  cancel(reason: string): NativeResult<boolean>
+  readOutput(): NativeResult<string>
+  done(): Promise<NativeResult<NativeJobOutcome>>
+  dispose(): Promise<NativeResult<true>>
+}
+
+interface RawNativeEngine {
+  beginCall(callId: string): NativeResult<boolean>
+  cancelCall(callId: string): NativeResult<boolean>
+  releaseCall(callId: string): NativeResult<boolean>
+  readText(callId: string, args: NativeReadArgs): Promise<NativeResult<NativeToolText>>
+  grepText(callId: string, args: NativeGrepArgs): Promise<NativeResult<NativeToolText>>
+  globText(callId: string, args: NativeGlobArgs): Promise<NativeResult<NativeToolText>>
+  prepareRunProgram(callId: string, args: NativeRunProgramArgs): NativeResult<NativePreparedProcess>
+  prepareBash(callId: string, args: NativeBashArgs): NativeResult<NativePreparedProcess>
+  spawnPrepared(callId: string, handle: string, wrappedArgv?: readonly string[], attribution?: NativeSandboxAttribution): Promise<NativeResult<NativeProcessOutcome>>
+  startBackgroundPrepared(callId: string, handle: string, wrappedArgv?: readonly string[]): NativeResult<RawNativeJobHandle>
+  close(): Promise<NativeResult<boolean>>
+}
+
 export interface NativeEngine {
-  readText(args: NativeReadArgs): Promise<NativeToolText>
-  grepText(args: NativeGrepArgs): Promise<NativeToolText>
-  globText(args: NativeGlobArgs): Promise<NativeToolText>
-  prepareRunProgram(args: NativeRunProgramArgs): NativePreparedProcess
-  prepareBash(args: NativeBashArgs): NativePreparedProcess
+  readText(args: NativeReadArgs, signal?: AbortSignal): Promise<NativeToolText>
+  grepText(args: NativeGrepArgs, signal?: AbortSignal): Promise<NativeToolText>
+  globText(args: NativeGlobArgs, signal?: AbortSignal): Promise<NativeToolText>
+  prepareRunProgram(args: NativeRunProgramArgs, signal?: AbortSignal): NativePreparedProcess
+  prepareBash(args: NativeBashArgs, signal?: AbortSignal): NativePreparedProcess
   spawnPrepared(handle: string, wrappedArgv?: readonly string[], attribution?: NativeSandboxAttribution): Promise<NativeProcessOutcome>
   startBackgroundPrepared(handle: string, wrappedArgv?: readonly string[]): NativeJobHandle
+  discardPrepared(handle: string): void
   close(): Promise<void>
 }
 
 interface NativeModule {
   readonly apiVersion: () => number
+  readonly Engine: new (root: string, options?: NativeEngineOptions) => RawNativeEngine
+}
+
+interface LoadedNativeModule {
+  readonly apiVersion: () => number
   readonly Engine: new (root: string, options?: NativeEngineOptions) => NativeEngine
+}
+
+class NativeJobHandleAdapter implements NativeJobHandle {
+  constructor(private readonly raw: RawNativeJobHandle) {}
+
+  cancel(reason: string): void {
+    unwrapNativeResult(this.raw.cancel(reason))
+  }
+
+  readOutput(): string {
+    return unwrapNativeResult(this.raw.readOutput())
+  }
+
+  async done(): Promise<NativeJobOutcome> {
+    return unwrapNativeResult(await this.raw.done())
+  }
+
+  async dispose(): Promise<void> {
+    unwrapNativeResult(await this.raw.dispose())
+  }
+}
+
+class NativeEngineAdapter implements NativeEngine {
+  private readonly pending = new Map<string, { callId: string; signal: AbortSignal | undefined; onAbort: () => void }>()
+
+  constructor(private readonly raw: RawNativeEngine) {}
+
+  private begin(signal?: AbortSignal): { callId: string; signal: AbortSignal | undefined; onAbort: () => void } {
+    const callId = randomUUID()
+    unwrapNativeResult(this.raw.beginCall(callId))
+    const onAbort = () => {
+      unwrapNativeResult(this.raw.cancelCall(callId))
+    }
+    if (signal?.aborted === true) onAbort()
+    else signal?.addEventListener('abort', onAbort, { once: true })
+    return { callId, signal, onAbort }
+  }
+
+  private release(lease: { callId: string; signal: AbortSignal | undefined; onAbort: () => void }): void {
+    lease.signal?.removeEventListener('abort', lease.onAbort)
+    unwrapNativeResult(this.raw.releaseCall(lease.callId))
+  }
+
+  private discardLease(lease: { callId: string; signal: AbortSignal | undefined; onAbort: () => void }): void {
+    try {
+      unwrapNativeResult(this.raw.cancelCall(lease.callId))
+    } finally {
+      this.release(lease)
+    }
+  }
+
+  async readText(args: NativeReadArgs, signal?: AbortSignal): Promise<NativeToolText> {
+    const lease = this.begin(signal)
+    try {
+      return unwrapNativeResult(await this.raw.readText(lease.callId, args))
+    } finally {
+      this.release(lease)
+    }
+  }
+
+  async grepText(args: NativeGrepArgs, signal?: AbortSignal): Promise<NativeToolText> {
+    const lease = this.begin(signal)
+    try {
+      return unwrapNativeResult(await this.raw.grepText(lease.callId, args))
+    } finally {
+      this.release(lease)
+    }
+  }
+
+  async globText(args: NativeGlobArgs, signal?: AbortSignal): Promise<NativeToolText> {
+    const lease = this.begin(signal)
+    try {
+      return unwrapNativeResult(await this.raw.globText(lease.callId, args))
+    } finally {
+      this.release(lease)
+    }
+  }
+
+  prepareRunProgram(args: NativeRunProgramArgs, signal?: AbortSignal): NativePreparedProcess {
+    const lease = this.begin(signal)
+    try {
+      const prepared = unwrapNativeResult(this.raw.prepareRunProgram(lease.callId, args))
+      this.pending.set(prepared.handle, lease)
+      return prepared
+    } catch (error) {
+      this.discardLease(lease)
+      throw error
+    }
+  }
+
+  prepareBash(args: NativeBashArgs, signal?: AbortSignal): NativePreparedProcess {
+    const lease = this.begin(signal)
+    try {
+      const prepared = unwrapNativeResult(this.raw.prepareBash(lease.callId, args))
+      this.pending.set(prepared.handle, lease)
+      return prepared
+    } catch (error) {
+      this.discardLease(lease)
+      throw error
+    }
+  }
+
+  async spawnPrepared(
+    handle: string,
+    wrappedArgv?: readonly string[],
+    attribution?: NativeSandboxAttribution,
+  ): Promise<NativeProcessOutcome> {
+    const lease = this.pending.get(handle)
+    if (lease === undefined) {
+      throw new HarnessError('prepared handle is unknown or already spawned', 'AGENTSHIM_PREPARED_HANDLE_INVALID')
+    }
+    this.pending.delete(handle)
+    try {
+      return unwrapNativeResult(await this.raw.spawnPrepared(lease.callId, handle, wrappedArgv, attribution))
+    } finally {
+      this.release(lease)
+    }
+  }
+
+  startBackgroundPrepared(handle: string, wrappedArgv?: readonly string[]): NativeJobHandle {
+    const lease = this.pending.get(handle)
+    if (lease === undefined) {
+      throw new HarnessError('prepared handle is unknown or already started', 'AGENTSHIM_PREPARED_HANDLE_INVALID')
+    }
+    this.pending.delete(handle)
+    try {
+      const raw = unwrapNativeResult(this.raw.startBackgroundPrepared(lease.callId, handle, wrappedArgv))
+      this.release(lease)
+      return new NativeJobHandleAdapter(raw)
+    } catch (error) {
+      this.release(lease)
+      throw error
+    }
+  }
+
+  discardPrepared(handle: string): void {
+    const lease = this.pending.get(handle)
+    if (lease === undefined) return
+    this.pending.delete(handle)
+    this.discardLease(lease)
+  }
+
+  async close(): Promise<void> {
+    try {
+      unwrapNativeResult(await this.raw.close())
+    } finally {
+      for (const lease of this.pending.values()) lease.signal?.removeEventListener('abort', lease.onAbort)
+      this.pending.clear()
+    }
+  }
 }
 
 /** Platform packages are the only supported native distribution channels. */
@@ -220,8 +450,19 @@ export type NativeLoadFailure =
   | { readonly reason: 'addon-unavailable'; readonly detail: string }
 
 export type NativeLoadResult =
-  | { readonly engine: NativeModule; readonly failure?: undefined }
+  | { readonly engine: LoadedNativeModule; readonly failure?: undefined }
   | { readonly engine?: undefined; readonly failure: NativeLoadFailure }
+
+export function nativeLoadFailureError(failure: NativeLoadFailure): HarnessError {
+  const code = failure.reason === 'unsupported-platform'
+    ? 'AGENTSHIM_NATIVE_PLATFORM_UNSUPPORTED'
+    : failure.reason === 'api-version-mismatch'
+      ? 'AGENTSHIM_NATIVE_API_MISMATCH'
+      : 'AGENTSHIM_NATIVE_ADDON_UNAVAILABLE'
+  const error = new HarnessError(failure.detail, code)
+  ;(error as HarnessError & { details?: unknown }).details = { reason: failure.reason }
+  return error
+}
 
 /** Load and validate the exact native engine API for this platform. */
 export function loadNativeAddon(): NativeLoadResult {
@@ -257,7 +498,17 @@ export function loadNativeAddon(): NativeLoadResult {
   if (typeof addon.Engine !== 'function') {
     return { failure: { reason: 'api-version-mismatch', detail: 'native addon does not export the Engine capability' } }
   }
-  return { engine: addon }
+  const NativeEngine = class extends NativeEngineAdapter {
+    constructor(root: string, options?: NativeEngineOptions) {
+      super(new addon.Engine(root, options))
+    }
+  }
+  return {
+    engine: {
+      apiVersion: addon.apiVersion,
+      Engine: NativeEngine,
+    },
+  }
 }
 
 /** Build the Engine's explicit child environment: scrubbed parent plus config overrides. */

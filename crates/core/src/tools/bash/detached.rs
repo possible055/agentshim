@@ -1,11 +1,10 @@
 use std::{
     collections::VecDeque,
     ffi::OsStr,
-    fs::{File, OpenOptions},
-    io::{self, Read},
+    fs::File,
+    io,
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex},
-    thread::JoinHandle,
     time::{Duration, Instant},
 };
 
@@ -16,11 +15,7 @@ use crate::{
         bash::status::{
             JobSnapshot, JobState, MAX_TAIL_BYTES, RawLogSnapshot, snapshot_tail, validate_job_id,
         },
-        exec::{
-            ProcessError,
-            capture::DRAIN_CHUNK_BYTES,
-            spawn::{CLEANUP_DEADLINE, CaptureSink},
-        },
+        exec::{ProcessError, spawn::CLEANUP_DEADLINE},
     },
 };
 
@@ -68,8 +63,6 @@ struct ActiveJob {
     log_key: String,
     log_path: PathBuf,
     log_reader: Arc<File>,
-    server_owned_log: bool,
-    remote_drain: Option<RemoteDrain>,
     phase: ActivePhase,
     primary_exit: Option<String>,
 }
@@ -101,15 +94,6 @@ struct TerminalJob {
     primary_exit: Option<String>,
     final_log: RawLogSnapshot,
     log_reader: Arc<File>,
-    server_owned_log: bool,
-}
-
-impl Drop for TerminalJob {
-    fn drop(&mut self) {
-        if self.server_owned_log {
-            let _ = std::fs::remove_file(&self.log_path);
-        }
-    }
 }
 
 #[derive(Default)]
@@ -192,8 +176,6 @@ impl DetachedTrees {
         log_path: PathBuf,
         log_reader: Arc<File>,
         reserved_key: Option<String>,
-        server_owned_log: bool,
-        remote_drain: Option<RemoteDrain>,
     ) -> Result<(), DetachedTree> {
         let mut state = self.lock();
         if state.state != RosterState::Accepting {
@@ -212,8 +194,6 @@ impl DetachedTrees {
             log_key: reserved_key.unwrap_or_default(),
             log_path,
             log_reader,
-            server_owned_log,
-            remote_drain,
             phase: ActivePhase::Running(tree),
             primary_exit: None,
         });
@@ -351,7 +331,6 @@ impl DetachedTrees {
                     log_reader: Arc::clone(&job.log_reader),
                     primary_exit: job.primary_exit.clone(),
                     tree,
-                    remote_drain: job.remote_drain.take(),
                 };
                 tracing::info!(target: "agentshim", event = "detached_terminate_accepted", phase = "lifecycle", outcome = "accepted", pid = job.pid);
                 self.changed.notify_all();
@@ -379,7 +358,6 @@ impl DetachedTrees {
                     log_reader: Arc::clone(&job.log_reader),
                     primary_exit: job.primary_exit.clone(),
                     tree,
-                    remote_drain: job.remote_drain.take(),
                 });
             }
         }
@@ -425,12 +403,7 @@ impl DetachedTrees {
             if let Some(exit) = observation.primary_exit {
                 job.primary_exit = Some(exit);
             }
-            if observation.tree_running
-                || job
-                    .remote_drain
-                    .as_ref()
-                    .is_some_and(|drain| !drain.is_done())
-            {
+            if observation.tree_running {
                 return RefreshOutcome::Stable;
             }
             let phase = std::mem::replace(&mut job.phase, ActivePhase::Finalizing);
@@ -441,14 +414,10 @@ impl DetachedTrees {
             Some(FinalizeWork {
                 job_id: job.job_id.clone(),
                 log_reader: Arc::clone(&job.log_reader),
-                remote_drain: job.remote_drain.take(),
             })
         };
         if let Some(work) = finalize {
-            let log = work.remote_drain.map_or_else(
-                || self.snapshot_log(&work.log_reader, MAX_TAIL_BYTES),
-                RemoteDrain::finish,
-            );
+            let log = self.snapshot_log(&work.log_reader, MAX_TAIL_BYTES);
             self.finish_terminal(&work.job_id, TerminalState::Completed, log, None);
         }
         RefreshOutcome::Stable
@@ -487,7 +456,6 @@ impl DetachedTrees {
             primary_exit: active.primary_exit,
             final_log,
             log_reader: active.log_reader,
-            server_owned_log: active.server_owned_log,
         };
         let snapshot = terminal_snapshot(&terminal, None);
         if state.terminal.len() == TERMINAL_RETENTION {
@@ -685,7 +653,6 @@ enum SnapshotSource {
 struct FinalizeWork {
     job_id: String,
     log_reader: Arc<File>,
-    remote_drain: Option<RemoteDrain>,
 }
 
 pub enum TerminateStart {
@@ -700,7 +667,6 @@ pub struct TerminationWork {
     log_reader: Arc<File>,
     primary_exit: Option<String>,
     tree: DetachedTree,
-    remote_drain: Option<RemoteDrain>,
 }
 
 impl TerminationWork {
@@ -730,10 +696,7 @@ impl TerminationWork {
         {
             self.primary_exit = observation.primary_exit;
         }
-        let final_log = self.remote_drain.map_or_else(
-            || self.trees.snapshot_log(&self.log_reader, MAX_TAIL_BYTES),
-            RemoteDrain::finish,
-        );
+        let final_log = self.trees.snapshot_log(&self.log_reader, MAX_TAIL_BYTES);
         let state = terminal_state.model_state().label();
         let snapshot =
             self.trees
@@ -860,7 +823,6 @@ impl DetachedAdmission {
         tree: DetachedTree,
         log_path: PathBuf,
         log_reader: Arc<File>,
-        server_owned_log: bool,
     ) -> Result<(), DetachedTree> {
         match self.trees.commit(
             self.job_id.clone(),
@@ -868,36 +830,11 @@ impl DetachedAdmission {
             log_path,
             log_reader,
             self.reserved_key.clone(),
-            server_owned_log,
-            None,
         ) {
             Ok(()) => {
                 self.settled = true;
                 #[cfg(any(test, feature = "test-hooks"))]
                 self.trees.run_after_commit_hook();
-                Ok(())
-            }
-            Err(tree) => Err(tree),
-        }
-    }
-
-    pub fn retain_remote(
-        mut self,
-        tree: DetachedTree,
-        log_reader: Arc<File>,
-        remote_drain: RemoteDrain,
-    ) -> Result<(), DetachedTree> {
-        match self.trees.commit(
-            self.job_id.clone(),
-            tree,
-            PathBuf::from("remote-capture"),
-            log_reader,
-            self.reserved_key.clone(),
-            false,
-            Some(remote_drain),
-        ) {
-            Ok(()) => {
-                self.settled = true;
                 Ok(())
             }
             Err(tree) => Err(tree),
@@ -960,109 +897,4 @@ pub fn open_log(root: &RepositoryRoot, path: &ResolvedPath) -> Result<DetachedLo
     })?;
     let reader = Arc::new(writer.try_clone().map_err(ProcessError::Io)?);
     Ok(DetachedLog { writer, reader })
-}
-
-pub fn server_log_path(job_id: &str) -> PathBuf {
-    std::env::temp_dir()
-        .join("agentshim-background-capture")
-        .join(format!("{job_id}.log"))
-}
-
-pub fn open_server_log(path: &Path) -> Result<DetachedLog, ProcessError> {
-    let directory = path
-        .parent()
-        .ok_or_else(|| ProcessError::Io(io::Error::other("server log has no parent")))?;
-    std::fs::create_dir_all(directory).map_err(ProcessError::Io)?;
-    let writer = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(ProcessError::Io)?;
-    let reader = Arc::new(writer.try_clone().map_err(ProcessError::Io)?);
-    Ok(DetachedLog { writer, reader })
-}
-
-struct RemoteDrainState {
-    done: bool,
-    total: u64,
-    error: Option<String>,
-}
-
-pub struct RemoteDrain {
-    state: Arc<Mutex<RemoteDrainState>>,
-    handle: Option<JoinHandle<()>>,
-}
-
-impl RemoteDrain {
-    fn is_done(&self) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .done
-    }
-
-    fn finish(mut self) -> RawLogSnapshot {
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        RawLogSnapshot {
-            total: state.total,
-            start: state.total,
-            bytes: Vec::new(),
-            error: state.error.clone(),
-        }
-    }
-}
-
-pub fn start_remote_drain(mut reader: File, sink: Arc<dyn CaptureSink>) -> RemoteDrain {
-    let state = Arc::new(Mutex::new(RemoteDrainState {
-        done: false,
-        total: 0,
-        error: None,
-    }));
-    let thread_state = Arc::clone(&state);
-    let handle = std::thread::spawn(move || {
-        let mut buffer = vec![0_u8; DRAIN_CHUNK_BYTES];
-        let result = loop {
-            match reader.read(&mut buffer) {
-                Ok(0) => break Ok(()),
-                Ok(read) => {
-                    if let Err(error) = sink.append(0, &buffer[..read]) {
-                        break Err(error);
-                    }
-                    let mut state = thread_state
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    state.total = state
-                        .total
-                        .saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
-                }
-                Err(error) => break Err(error),
-            }
-        };
-        let error = result.as_ref().err().map(ToString::to_string);
-        let _ = sink.complete(result.is_ok(), error.as_deref());
-        let mut state = thread_state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.error = error;
-        state.done = true;
-    });
-    RemoteDrain {
-        state,
-        handle: Some(handle),
-    }
-}
-
-pub fn empty_log_reader() -> Result<Arc<File>, ProcessError> {
-    #[cfg(windows)]
-    let file = File::open("NUL")?;
-    #[cfg(unix)]
-    let file = File::open("/dev/null")?;
-    Ok(Arc::new(file))
 }

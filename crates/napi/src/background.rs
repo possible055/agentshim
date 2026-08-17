@@ -17,7 +17,7 @@ use agentshim_core::tools::exec::spawn::{CaptureSink, ExecPlan, Streams};
 
 use crate::capture::{ArtifactRecord, CAPTURE_IO_FAILED_CODE, CallCapture, should_publish};
 use crate::engine::EngineState;
-use crate::process::NativeFailure;
+use crate::process::{NativeFailure, NativeVoidResult, process_failure};
 
 /// Live preview buffer ceiling: the adapter's `readOutput()` drains a rolling
 /// 1 MiB window of recent text; the raw capture artifact is always lossless.
@@ -49,6 +49,24 @@ pub struct NativeJobOutcome {
     pub exit_code: Option<String>,
     pub limit_exceeded: bool,
     pub artifacts: Vec<ArtifactPublished>,
+    pub failure: Option<NativeFailure>,
+}
+
+#[napi(object, object_from_js = false)]
+pub struct NativeJobHandleResult {
+    pub value: Option<EngineJobHandle>,
+    pub failure: Option<NativeFailure>,
+}
+
+#[napi(object)]
+pub struct NativeStringResult {
+    pub value: Option<String>,
+    pub failure: Option<NativeFailure>,
+}
+
+#[napi(object)]
+pub struct NativeJobOutcomeResult {
+    pub value: Option<NativeJobOutcome>,
     pub failure: Option<NativeFailure>,
 }
 
@@ -183,7 +201,12 @@ fn finish_job(job: &BackgroundJob, capture_error: Option<String>) {
     let records = match job.capture.publish(complete) {
         Ok(records) => records,
         Err(error) => {
-            let detail = format!("{CAPTURE_IO_FAILED_CODE}: {error}");
+            let code = if limit_exceeded {
+                crate::capture::CAPTURE_LIMIT_EXCEEDED_CODE
+            } else {
+                CAPTURE_IO_FAILED_CODE
+            };
+            let detail = format!("{code}: {error}");
             if let Ok(mut live) = job.live.lock() {
                 live.push(&format!("\n[agentshim job failed: {detail}]\n"));
             }
@@ -194,10 +217,13 @@ fn finish_job(job: &BackgroundJob, capture_error: Option<String>) {
                 limit_exceeded,
                 artifacts: Vec::new(),
                 failure: Some(NativeFailure {
-                    code: CAPTURE_IO_FAILED_CODE.to_owned(),
+                    code: code.to_owned(),
                     message: error.to_string(),
-                    retryable: true,
-                    details: None,
+                    retryable: !limit_exceeded,
+                    details: Some(serde_json::json!({
+                        "kind": "capture_publish",
+                        "limitBytes": job.capture.max_bytes,
+                    })),
                 }),
             });
             return;
@@ -299,30 +325,31 @@ fn finish_published_job(
         )
     };
 
+    let failure = if limit_exceeded {
+        Some(NativeFailure {
+            code: crate::capture::CAPTURE_LIMIT_EXCEEDED_CODE.to_owned(),
+            message: "capture limit exceeded".to_owned(),
+            retryable: false,
+            details: Some(serde_json::json!({
+                "kind": "capture",
+                "limitBytes": job.capture.max_bytes,
+            })),
+        })
+    } else {
+        capture_error.map(|message| NativeFailure {
+            code: CAPTURE_IO_FAILED_CODE.to_owned(),
+            message,
+            retryable: true,
+            details: Some(serde_json::json!({ "kind": "capture" })),
+        })
+    };
     job.settle(NativeJobOutcome {
         status: status.to_owned(),
         detail,
         exit_code,
         limit_exceeded,
         artifacts,
-        failure: capture_error.map_or_else(
-            || {
-                limit_exceeded.then(|| NativeFailure {
-                    code: crate::capture::CAPTURE_LIMIT_EXCEEDED_CODE.to_owned(),
-                    message: "capture limit exceeded".to_owned(),
-                    retryable: false,
-                    details: None,
-                })
-            },
-            |message| {
-                Some(NativeFailure {
-                    code: CAPTURE_IO_FAILED_CODE.to_owned(),
-                    message,
-                    retryable: true,
-                    details: None,
-                })
-            },
-        ),
+        failure,
     });
 }
 
@@ -340,46 +367,87 @@ impl EngineJobHandle {
     /// Synchronous, idempotent cancellation: routes to the process tree's
     /// terminate and lets the drain thread settle `done`.
     #[napi]
-    pub fn cancel(&self, reason: String) -> Result<()> {
+    pub fn cancel(&self, reason: String) -> Result<NativeVoidResult> {
         self.job.cancel_from_engine();
         let _ = reason;
-        Ok(())
+        Ok(NativeVoidResult {
+            value: true,
+            failure: None,
+        })
     }
 
     /// Drain the 1 MiB live preview buffer; returns the accumulated text with an
     /// omission marker prefix when bytes were dropped from the view.
     #[napi]
-    pub fn read_output(&self) -> Result<String> {
-        let mut live = self
-            .job
-            .live
-            .lock()
-            .map_err(|_| Error::new(napi::Status::GenericFailure, "live buffer poisoned"))?;
-        Ok(live.drain())
+    pub fn read_output(&self) -> Result<NativeStringResult> {
+        match self.job.live.lock() {
+            Ok(mut live) => Ok(NativeStringResult {
+                value: Some(live.drain()),
+                failure: None,
+            }),
+            Err(_) => Ok(NativeStringResult {
+                value: None,
+                failure: Some(NativeFailure {
+                    code: "AGENTSHIM_BACKGROUND_BUFFER_FAILED".to_owned(),
+                    message: "background live buffer is unavailable".to_owned(),
+                    retryable: true,
+                    details: Some(serde_json::json!({ "kind": "live_buffer" })),
+                }),
+            }),
+        }
     }
 
     /// Resolves when the process tree settles; never rejects. Native failures
     /// arrive as `{ status: 'failed' }`.
-    #[napi(ts_return_type = "Promise<NativeJobOutcome>")]
-    pub async fn done(&self) -> Result<NativeJobOutcome> {
+    #[napi(ts_return_type = "Promise<NativeJobOutcomeResult>")]
+    pub async fn done(&self) -> Result<NativeJobOutcomeResult> {
         let mut rx = self.job.done_tx.subscribe();
         if let Some(outcome) = rx.borrow().clone() {
-            return Ok(outcome);
+            return Ok(NativeJobOutcomeResult {
+                value: Some(outcome),
+                failure: None,
+            });
         }
-        rx.changed()
-            .await
-            .map_err(|_| Error::new(napi::Status::GenericFailure, "done channel closed"))?;
-        rx.borrow()
-            .clone()
-            .ok_or_else(|| Error::new(napi::Status::GenericFailure, "done settled without outcome"))
+        if rx.changed().await.is_err() {
+            return Ok(NativeJobOutcomeResult {
+                value: None,
+                failure: Some(NativeFailure {
+                    code: "AGENTSHIM_BACKGROUND_DONE_CHANNEL_FAILED".to_owned(),
+                    message: "background job completion channel closed".to_owned(),
+                    retryable: true,
+                    details: Some(serde_json::json!({ "kind": "done_channel" })),
+                }),
+            });
+        }
+        match rx.borrow().clone() {
+            Some(outcome) => Ok(NativeJobOutcomeResult {
+                value: Some(outcome),
+                failure: None,
+            }),
+            None => Ok(NativeJobOutcomeResult {
+                value: None,
+                failure: Some(NativeFailure {
+                    code: "AGENTSHIM_BACKGROUND_OUTCOME_MISSING".to_owned(),
+                    message: "background job settled without an outcome".to_owned(),
+                    retryable: true,
+                    details: Some(serde_json::json!({ "kind": "outcome" })),
+                }),
+            }),
+        }
     }
 
     /// Cancel if not already settled and join the drain thread. Safe to call
     /// multiple times; the handle is inert after disposal.
     #[napi]
-    pub async fn dispose(&self) -> Result<()> {
+    pub async fn dispose(&self) -> Result<NativeVoidResult> {
         if !self.job.settled.load(Ordering::SeqCst) {
-            self.cancel("handle disposed".to_owned())?;
+            let cancelled = self.cancel("handle disposed".to_owned())?;
+            if let Some(failure) = cancelled.failure {
+                return Ok(NativeVoidResult {
+                    value: false,
+                    failure: Some(failure),
+                });
+            }
         }
         let handle = {
             let mut guard = self
@@ -395,7 +463,10 @@ impl EngineJobHandle {
             .await
             .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))?;
         }
-        Ok(())
+        Ok(NativeVoidResult {
+            value: true,
+            failure: None,
+        })
     }
 }
 
@@ -415,11 +486,16 @@ impl Drop for EngineJobHandle {
 
 pub(crate) fn start_background_prepared(
     state: &EngineState,
+    call_id: String,
     handle: String,
     wrapped_argv: Option<&[String]>,
-) -> Result<EngineJobHandle> {
+) -> std::result::Result<EngineJobHandle, NativeFailure> {
     if state.shutdown.is_cancelled() {
-        return Err(Error::new(napi::Status::GenericFailure, "engine is closed"));
+        return Err(NativeFailure::engine_closed());
+    }
+    let cancellation = state.call_token(&call_id)?;
+    if cancellation.is_cancelled() {
+        return Err(NativeFailure::cancelled("background_prepare"));
     }
     let prepared = state.take_bash(&handle)?;
     let PreparedBackgroundBash {
@@ -449,9 +525,14 @@ pub(crate) fn start_background_prepared(
         state.capture_max_bytes,
     )
     .map_err(|error| {
-        Error::new(
-            napi::Status::GenericFailure,
-            format!("{CAPTURE_IO_FAILED_CODE}: {error}"),
+        NativeFailure::new(
+            CAPTURE_IO_FAILED_CODE,
+            error.to_string(),
+            true,
+            Some(serde_json::json!({
+                "kind": "capture_create",
+                "limitBytes": state.capture_max_bytes,
+            })),
         )
     })?;
     let capture = Arc::new(capture);
@@ -460,9 +541,15 @@ pub(crate) fn start_background_prepared(
         Ok(spawned) => spawned,
         Err(error) => {
             capture.discard();
-            return Err(Error::new(napi::Status::GenericFailure, error.to_string()));
+            return Err(process_failure(&error));
         }
     };
+    if cancellation.is_cancelled() {
+        let mut tree = tree;
+        let _ = tree.terminate_and_wait(Instant::now() + SETTLE_DEADLINE);
+        capture.discard();
+        return Err(NativeFailure::cancelled("background_spawn"));
+    }
 
     let (done_tx, _done_rx) = tokio::sync::watch::channel(None);
     let job = Arc::new(BackgroundJob {
@@ -508,7 +595,7 @@ fn build_background_plan(
     prepared: agentshim_core::tools::bash::PreparedBash,
     wrapped_argv: Option<&[String]>,
     state: &EngineState,
-) -> Result<PreparedBackgroundBash> {
+) -> std::result::Result<PreparedBackgroundBash, NativeFailure> {
     let agentshim_core::tools::bash::PreparedBash {
         mut resolved,
         cwd,
@@ -521,7 +608,7 @@ fn build_background_plan(
             .first()
             .map_or_else(|| resolved.executable.clone(), std::path::PathBuf::from);
         let launcher = agentshim_core::tools::exec::resolve::launcher_for(&command)
-            .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))?;
+            .map_err(|error| process_failure(&error))?;
         resolved = agentshim_core::tools::exec::resolve::ResolvedProgram {
             absolute: command.clone(),
             executable: command,

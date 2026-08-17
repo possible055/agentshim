@@ -4,7 +4,8 @@ import type { JobId, JobOutcome } from '@deepseek-ai/dsh-jobs'
 import { TOOL_ABORTED } from '@deepseek-ai/dsh-tools'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { ProcessPolicy } from './policy.ts'
-import type { NativeBashArgs, NativeEngine } from './native.ts'
+import { nativeBashArgs } from './native.ts'
+import type { NativeEngine } from './native.ts'
 
 const JOB_OUTPUT_LIMIT_BYTES = 64 * 1024
 
@@ -41,15 +42,6 @@ export interface BackgroundBashInput {
   readonly wire: Record<string, unknown>
 }
 
-function nativeBashArgs(wire: Record<string, unknown>): NativeBashArgs {
-  return {
-    command: wire.command as string,
-    ...(wire.cwd === undefined ? {} : { cwd: wire.cwd as string }),
-    ...(wire.timeout_ms === undefined ? {} : { timeoutMs: wire.timeout_ms as number }),
-    ...(wire.msys_argument_conversion === undefined ? {} : { msysArgumentConversion: wire.msys_argument_conversion as 'enabled' | 'disabled' }),
-  }
-}
-
 /**
  * Prepare and confine before entering the DSH jobs registry, but do not spawn
  * until the registry's synchronous `run()` hook executes after its preflight.
@@ -64,18 +56,19 @@ export async function startBackgroundBashNative(
 ): Promise<JobId> {
   const jobs = ctx.get('jobs')
   if (jobs === undefined) {
-    throw new Error('background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs')
+    throw new HarnessError('background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs', 'AGENTSHIM_BACKGROUND_UNAVAILABLE')
   }
   if (exec.signal.aborted) throw abortedError()
-  const prepared = engine.prepareBash(nativeBashArgs(input.wire))
-  const decision = await policy.wrapArgv('bash', prepared.argv, input.wire, exec)
-  if (decision.mode !== 'danger-full-access' && decision.wrappedArgv === undefined) {
-    throw new HarnessError('sandbox confinement returned no wrapped argv', 'SANDBOX_UNAVAILABLE')
-  }
-  if (exec.signal.aborted) throw abortedError()
-  const wrappedArgv = decision.wrappedArgv === undefined ? undefined : [...decision.wrappedArgv]
+  const prepared = engine.prepareBash(nativeBashArgs(input.wire), exec.signal)
+  try {
+    const decision = await policy.wrapArgv('bash', prepared.argv, input.wire, exec)
+    if (decision.mode !== 'danger-full-access' && decision.wrappedArgv === undefined) {
+      throw new HarnessError('sandbox confinement returned no wrapped argv', 'SANDBOX_UNAVAILABLE')
+    }
+    if (exec.signal.aborted) throw abortedError()
+    const wrappedArgv = decision.wrappedArgv === undefined ? undefined : [...decision.wrappedArgv]
 
-  return jobs.start({
+    return await jobs.start({
     kind: 'bash',
     label: input.command,
     outputLimitBytes: JOB_OUTPUT_LIMIT_BYTES,
@@ -105,5 +98,9 @@ export async function startBackgroundBashNative(
         readOutput: () => handle.readOutput(),
       })
     },
-  })
+    })
+  } catch (error) {
+    engine.discardPrepared(prepared.handle)
+    throw error
+  }
 }

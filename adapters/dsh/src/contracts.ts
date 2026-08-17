@@ -7,7 +7,7 @@ export type PublicToolName = (typeof PUBLIC_TOOL_NAMES)[number]
 
 export const readParameters = {
   path: { type: 'string', required: true, description: 'Platform-native path to one file.' },
-  artifact_offset: { type: 'integer', description: 'Byte offset for a published binary artifact page.' },
+  artifact_offset: { type: 'integer', description: 'Byte offset for reading binary content.' },
   encoding: { type: 'string', description: 'Optional WHATWG encoding label.' },
   line_count: { type: 'integer', description: 'Maximum lines to return, from 1 through 2000.' },
   pages: { type: 'string', description: 'PDF page or inclusive page range, such as "3" or "1-5".' },
@@ -56,15 +56,15 @@ export const runProgramParameters = {
 
 export const bashParameters = {
   command: { type: 'string', required: true, description: 'POSIX bash command line.' },
-  description: { type: 'string', required: true, description: 'Short active-voice description shown in the UI.' },
+  description: { type: 'string', required: true, description: 'Short description of the command purpose.' },
   timeoutMs: { type: 'number', description: 'Positive foreground timeout in milliseconds.' },
   workdir: { type: 'string', description: 'Working directory; relative paths resolve against the workspace.' },
-  run_in_background: { type: 'boolean', description: 'Run as a DSH background job.' },
-  msys_argument_conversion: { type: 'string', enum: ['default', 'disabled'], description: 'Windows Git Bash argument-conversion mode.' },
+  run_in_background: { type: 'boolean', description: 'Run as a background job.' },
+  msys_argument_conversion: { type: 'string', enum: ['default', 'disabled'], description: 'Windows only: Git Bash argument conversion mode.' },
 } as const satisfies ParameterSchemaSpec
 
 export const bashStatusParameters = {
-  job_id: { type: 'string', required: true, description: 'DSH background job id returned by bash.' },
+  job_id: { type: 'string', required: true, description: 'Background job ID returned by bash.' },
 } as const satisfies ParameterSchemaSpec
 
 export const escalationParameters = {

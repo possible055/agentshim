@@ -4,12 +4,12 @@ use rmcp::model::{CallToolRequestParams, CallToolResponse, CallToolResult, Conte
 use serde_json::json;
 
 use super::{
-    AgentShim, ToolAdmission, ToolAdmissionFailure, blocking_response,
-    blocking_response_for_profile, diagnostic_tool_error, pdf_busy, pdf_timeout,
+    AgentShim, ToolAdmission, ToolAdmissionFailure, diagnostic_tool_error, pdf_busy, pdf_timeout,
     queue_timeout_message, shell_delegate, tool_error,
 };
 use crate::{
-    output::MODEL_BYTE_LIMIT, profile::ClientProfile, server::response::finalize_tool_response,
+    output::MODEL_BYTE_LIMIT,
+    server::response::{blocking_response_for_test, finalize_tool_response},
 };
 
 fn pdf_fixture() -> Vec<u8> {
@@ -301,14 +301,16 @@ fn successful_tool_responses_omit_structured_content() {
     let gate = crate::output::OutputTokenGate::load_shared().expect("token gate");
     let cancellation = tokio_util::sync::CancellationToken::new();
     let budget = crate::output::CallOutputBudget::standalone();
-    let CallToolResponse::Complete(result) = blocking_response::<crate::tools::exec::ProcessError>(
-        "run_program",
-        3,
-        Ok(Ok(output)),
-        &gate,
-        &cancellation,
-        &budget,
-    ) else {
+    let CallToolResponse::Complete(result) =
+        blocking_response_for_test::<crate::tools::exec::ProcessError>(
+            "run_program",
+            3,
+            Ok(Ok(output)),
+            &gate,
+            &cancellation,
+            &budget,
+        )
+    else {
         panic!("tool response must be complete");
     };
 
@@ -323,14 +325,13 @@ fn successful_tool_responses_omit_structured_content() {
         .with_structured(json!({ "transport": "private" }));
     let cursor_budget = crate::output::CallOutputBudget::standalone();
     let CallToolResponse::Complete(cursor_result) =
-        blocking_response_for_profile::<crate::tools::exec::ProcessError>(
+        blocking_response_for_test::<crate::tools::exec::ProcessError>(
             "run_program",
             3,
             Ok(Ok(cursor_output)),
-            Some(&gate),
+            &gate,
             &cancellation,
             &cursor_budget,
-            ClientProfile::Cursor,
         )
     else {
         panic!("cursor response must be complete");
@@ -343,7 +344,7 @@ fn final_verifier_replaces_an_unbounded_model_payload() {
     let fixture = tempfile::tempdir().expect("fixture");
     let server = AgentShim::from_path(fixture.path()).expect("server");
     let budget = crate::output::CallOutputBudget::standalone();
-    let verified = blocking_response::<crate::tools::exec::ProcessError>(
+    let verified = blocking_response_for_test::<crate::tools::exec::ProcessError>(
         "run_program",
         3,
         Ok(Ok(crate::tools::ToolOutput::new(" x".repeat(10_000)))),

@@ -9,7 +9,6 @@ pub fn detach_request(command: &str, log_path: &str) -> BashRequest {
         timeout_ms: None,
         detach: true,
         log_path: Some(log_path.to_owned()),
-        server_capture: false,
         msys_argument_conversion: MsysArgumentConversion::Default,
     }
 }
@@ -27,27 +26,6 @@ fn spawn_detached(
         &locator,
         Some(admission),
         &detach_request(command, log_path),
-        Duration::ZERO,
-        &CancellationToken::new(),
-    )
-    .map(|output| output.text)
-}
-
-fn spawn_server_captured(
-    root: &Arc<RepositoryRoot>,
-    trees: &DetachedTrees,
-    command: &str,
-) -> Result<String, ProcessError> {
-    let admission = trees.admit()?;
-    let locator = BashLocator::capture();
-    let mut request = detach_request(command, "unused.log");
-    request.log_path = None;
-    request.server_capture = true;
-    execute_output(
-        root,
-        &locator,
-        Some(admission),
-        &request,
         Duration::ZERO,
         &CancellationToken::new(),
     )
@@ -150,45 +128,6 @@ fn status_reports_running_log_and_primary_exit_then_retains_completion() {
     let repeated = trees.status(&job_id, 0).expect("retained status");
     assert_eq!(repeated.state, status::JobState::Completed);
     assert!(repeated.log.bytes.is_empty());
-}
-
-#[test]
-fn server_capture_cursor_returns_exact_deltas_and_is_removed_with_the_roster() {
-    if !bash_is_available() {
-        return;
-    }
-    let fixture = tempfile::tempdir().expect("fixture");
-    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
-    let trees = trees();
-    let response = spawn_server_captured(&root, &trees, "printf 'abcdefghijkl'")
-        .expect("server-captured bash");
-    let job_id = response_job_id(&response);
-    let log_path = job_registry::server_log_path(&job_id);
-
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let snapshot = trees.status_cursor(&job_id, 0, 0).expect("status");
-        if snapshot.state == status::JobState::Completed {
-            break;
-        }
-        assert!(Instant::now() < deadline, "job did not complete");
-        std::thread::sleep(Duration::from_millis(10));
-    }
-
-    let first = trees.status_cursor(&job_id, 0, 5).expect("first delta");
-    assert_eq!(first.log.start, 0);
-    assert_eq!(first.log.bytes, b"abcde");
-    assert_eq!(first.log.total, 12);
-    let second = trees.status_cursor(&job_id, 5, 5).expect("second delta");
-    assert_eq!(second.log.start, 5);
-    assert_eq!(second.log.bytes, b"fghij");
-    let final_delta = trees.status_cursor(&job_id, 10, 5).expect("final delta");
-    assert_eq!(final_delta.log.start, 10);
-    assert_eq!(final_delta.log.bytes, b"kl");
-    assert!(log_path.exists());
-
-    drop(trees);
-    assert!(!log_path.exists(), "server-owned capture must be removed");
 }
 
 #[cfg(windows)]

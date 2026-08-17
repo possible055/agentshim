@@ -9,7 +9,14 @@ mod capture;
 mod classify;
 mod engine;
 mod process;
-mod spike;
+
+/// Module API version; hosts must exact-match before using any Engine capability.
+pub const API_VERSION: u32 = 3;
+
+#[napi_derive::napi]
+pub fn api_version() -> u32 {
+    API_VERSION
+}
 
 pub use background::{ArtifactPublished, EngineJobHandle, NativeJobOutcome};
 pub use classify::{RunnerFailureRule, SandboxAttribution};
@@ -17,4 +24,3 @@ pub use engine::{
     Engine, EngineOptions, EnvEntry, GlobArgs, GrepArgs, NativeImage, ReadArgs, ToolText,
 };
 pub use process::{ArtifactInfo, BashArgs, NativeFailure, ProcessArgs, ProcessOutcome};
-pub use spike::{API_VERSION, api_version, spike_background_panic, spike_panic};

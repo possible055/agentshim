@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-use napi::{Error, Result, bindgen_prelude::spawn_blocking};
+use napi::{Error, bindgen_prelude::spawn_blocking};
 use napi_derive::napi;
 
 use crate::capture::{
@@ -69,6 +69,7 @@ impl PreparedHandles {
 }
 
 #[napi(object)]
+#[derive(Clone)]
 pub struct ArtifactInfo {
     pub path: String,
     pub bytes: f64,
@@ -78,11 +79,235 @@ pub struct ArtifactInfo {
 
 #[napi(object)]
 #[derive(Clone)]
+pub struct ProcessStreamOutcome {
+    pub text: String,
+    pub total_bytes: f64,
+    pub shown_bytes: f64,
+    pub omitted_bytes: f64,
+    pub artifact: Option<ArtifactInfo>,
+}
+
+#[napi(object)]
+#[derive(Clone)]
 pub struct NativeFailure {
     pub code: String,
     pub message: String,
     pub retryable: bool,
-    pub details: Option<String>,
+    pub details: Option<serde_json::Value>,
+}
+
+pub struct NativeResult<T> {
+    pub value: Option<T>,
+    pub failure: Option<NativeFailure>,
+}
+
+#[napi(object)]
+pub struct NativePreparedProcessResult {
+    pub value: Option<PreparedProcess>,
+    pub failure: Option<NativeFailure>,
+}
+
+#[napi(object)]
+pub struct NativeProcessOutcomeResult {
+    pub value: Option<ProcessOutcome>,
+    pub failure: Option<NativeFailure>,
+}
+
+#[napi(object)]
+pub struct NativeVoidResult {
+    pub value: bool,
+    pub failure: Option<NativeFailure>,
+}
+
+impl NativeFailure {
+    pub(crate) fn new(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        retryable: bool,
+        details: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            retryable,
+            details,
+        }
+    }
+
+    pub(crate) fn invalid(message: impl Into<String>) -> Self {
+        Self::new(
+            "INVALID_ARGS",
+            message,
+            false,
+            Some(serde_json::json!({ "kind": "validation" })),
+        )
+    }
+
+    pub(crate) fn cancelled(phase: &'static str) -> Self {
+        Self::new(
+            "AGENTSHIM_CANCELLED",
+            "native call was cancelled",
+            false,
+            Some(serde_json::json!({ "phase": phase })),
+        )
+    }
+
+    pub(crate) fn engine_closed() -> Self {
+        Self::new(
+            "AGENTSHIM_ENGINE_CLOSED",
+            "native engine is closed",
+            false,
+            Some(serde_json::json!({ "kind": "lifecycle" })),
+        )
+    }
+}
+
+pub(crate) fn napi_failure(operation: &'static str, error: Error) -> NativeFailure {
+    NativeFailure::new(
+        match operation {
+            "read" => "AGENTSHIM_READ_FAILED",
+            "grep" => "AGENTSHIM_GREP_FAILED",
+            "glob" => "AGENTSHIM_GLOB_FAILED",
+            "close" => "AGENTSHIM_TEARDOWN_FAILED",
+            "background" => "AGENTSHIM_BACKGROUND_FAILED",
+            "call" => "AGENTSHIM_ENGINE_CLOSED",
+            "prepare" => "AGENTSHIM_PREPARE_FAILED",
+            "spawn" => "AGENTSHIM_SPAWN_FAILED",
+            _ => "AGENTSHIM_NATIVE_FAILED",
+        },
+        error.to_string(),
+        true,
+        Some(serde_json::json!({ "operation": operation })),
+    )
+}
+
+pub(crate) fn process_failure(error: &agentshim_core::tools::exec::ProcessError) -> NativeFailure {
+    use agentshim_core::tools::exec::{CaptureFailureKind, ProcessError};
+
+    match error {
+        ProcessError::Validation(message) => NativeFailure::new(
+            "INVALID_ARGS",
+            message.clone(),
+            false,
+            Some(serde_json::json!({ "kind": "validation" })),
+        ),
+        ProcessError::Resolve(message) => NativeFailure::new(
+            "AGENTSHIM_PROCESS_RESOLVE_FAILED",
+            message.clone(),
+            false,
+            Some(serde_json::json!({ "kind": "resolve" })),
+        ),
+        ProcessError::Unavailable(message) => NativeFailure::new(
+            "AGENTSHIM_PROCESS_UNAVAILABLE",
+            message.clone(),
+            false,
+            Some(serde_json::json!({ "kind": "unavailable" })),
+        ),
+        ProcessError::Io(error) => NativeFailure::new(
+            "AGENTSHIM_PROCESS_IO",
+            error.to_string(),
+            true,
+            Some(serde_json::json!({
+                "kind": "io",
+                "ioKind": format!("{:?}", error.kind()),
+            })),
+        ),
+        ProcessError::Capture { kind, message } => {
+            let failure_kind = match kind {
+                CaptureFailureKind::LimitExceeded => "limit_exceeded",
+                CaptureFailureKind::Io => "io",
+                CaptureFailureKind::Protocol => "protocol",
+            };
+            NativeFailure::new(
+                match kind {
+                    CaptureFailureKind::LimitExceeded => CAPTURE_LIMIT_EXCEEDED_CODE,
+                    CaptureFailureKind::Io | CaptureFailureKind::Protocol => CAPTURE_IO_FAILED_CODE,
+                },
+                message.clone(),
+                !matches!(kind, CaptureFailureKind::LimitExceeded),
+                Some(serde_json::json!({ "kind": failure_kind })),
+            )
+        }
+        ProcessError::ResourceBusy(message) => NativeFailure::new(
+            "AGENTSHIM_RESOURCE_BUSY",
+            message.clone(),
+            true,
+            Some(serde_json::json!({ "kind": "resource" })),
+        ),
+        ProcessError::Timeout {
+            timeout_ms,
+            report,
+            details,
+        } => NativeFailure::new(
+            "AGENTSHIM_TIMEOUT",
+            report.clone(),
+            true,
+            Some(serde_json::json!({
+                "kind": "timeout",
+                "timeoutMs": timeout_ms,
+                "report": report,
+                "process": serde_json::to_value(details.as_ref()).unwrap_or(serde_json::Value::Null),
+            })),
+        ),
+        ProcessError::TimeoutBeforeSpawn { timeout_ms } => NativeFailure::new(
+            "AGENTSHIM_TIMEOUT",
+            "native call timed out before spawn",
+            true,
+            Some(serde_json::json!({
+                "kind": "timeout_before_spawn",
+                "timeoutMs": timeout_ms,
+                "terminationOutcome": "not_started",
+                "containmentScope": agentshim_core::tools::exec::containment_scope(),
+            })),
+        ),
+        ProcessError::Cancelled => NativeFailure::cancelled("process"),
+        ProcessError::OutcomeUncertain => NativeFailure::new(
+            "AGENTSHIM_OUTCOME_UNCERTAIN",
+            "process cleanup did not complete before its deadline",
+            true,
+            Some(serde_json::json!({ "kind": "teardown" })),
+        ),
+        ProcessError::Output(error) => NativeFailure::new(
+            "AGENTSHIM_OUTPUT_FAILED",
+            error.to_string(),
+            false,
+            Some(serde_json::json!({ "kind": "output" })),
+        ),
+    }
+}
+
+impl<T> NativeResult<T> {
+    pub(crate) fn success(value: T) -> Self {
+        Self {
+            value: Some(value),
+            failure: None,
+        }
+    }
+
+    pub(crate) fn failure(failure: NativeFailure) -> Self {
+        Self {
+            value: None,
+            failure: Some(failure),
+        }
+    }
+}
+
+pub(crate) fn prepared_result(
+    result: NativeResult<PreparedProcess>,
+) -> NativePreparedProcessResult {
+    NativePreparedProcessResult {
+        value: result.value,
+        failure: result.failure,
+    }
+}
+
+pub(crate) fn process_outcome_result(
+    result: NativeResult<ProcessOutcome>,
+) -> NativeProcessOutcomeResult {
+    NativeProcessOutcomeResult {
+        value: result.value,
+        failure: result.failure,
+    }
 }
 
 #[napi(object)]
@@ -93,6 +318,8 @@ pub struct ProcessOutcome {
     /// Core exit label ("0", "42", "signal 9"); absent when the process never
     /// settled (launch failure, timeout).
     pub exit_code: Option<String>,
+    pub stdout: ProcessStreamOutcome,
+    pub stderr: ProcessStreamOutcome,
     pub artifacts: Vec<ArtifactInfo>,
     pub limit_exceeded: bool,
     pub failure: Option<NativeFailure>,
@@ -132,9 +359,62 @@ pub(crate) fn register_artifacts(state: &EngineState, records: &[ArtifactRecord]
 /// Exit label and bounded stderr preview a completed core process output
 /// carries in its bridge structured content — the same evidence the MCP bridge
 /// classified on, so native classification sees identical inputs.
-fn outcome_facts(output: &agentshim_core::tools::ToolOutput) -> (Option<String>, String) {
+fn stream_fact(
+    output: Option<&agentshim_core::tools::ToolOutput>,
+    stream: &str,
+    artifacts: &[ArtifactInfo],
+) -> ProcessStreamOutcome {
+    let value = output
+        .and_then(|output| output.structured.as_ref())
+        .and_then(|structured| structured.pointer(&format!("/process/{stream}")));
+    let artifact = artifacts
+        .iter()
+        .find(|artifact| {
+            artifact.stream == stream
+                || artifact.stream == "output" && matches!(stream, "stdout" | "stderr")
+        })
+        .cloned();
+    ProcessStreamOutcome {
+        text: value
+            .and_then(|value| value.get("text"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        total_bytes: value
+            .and_then(|value| value.get("totalBytes"))
+            .and_then(serde_json::Value::as_u64)
+            .map_or_else(
+                || artifact.as_ref().map_or(0.0, |artifact| artifact.bytes),
+                |bytes| bytes as f64,
+            ),
+        shown_bytes: value
+            .and_then(|value| value.get("shownBytes"))
+            .and_then(serde_json::Value::as_u64)
+            .map_or(0.0, |bytes| bytes as f64),
+        omitted_bytes: value
+            .and_then(|value| value.get("omittedBytes"))
+            .and_then(serde_json::Value::as_u64)
+            .map_or(0.0, |bytes| bytes as f64),
+        artifact,
+    }
+}
+
+fn outcome_facts(
+    output: &agentshim_core::tools::ToolOutput,
+    artifacts: &[ArtifactInfo],
+) -> (
+    Option<String>,
+    String,
+    ProcessStreamOutcome,
+    ProcessStreamOutcome,
+) {
     let Some(structured) = &output.structured else {
-        return (None, String::new());
+        return (
+            None,
+            String::new(),
+            stream_fact(None, "stdout", artifacts),
+            stream_fact(None, "stderr", artifacts),
+        );
     };
     let exit = structured
         .pointer("/process/exitCode")
@@ -144,7 +424,12 @@ fn outcome_facts(output: &agentshim_core::tools::ToolOutput) -> (Option<String>,
         .pointer("/process/stderr/text")
         .and_then(serde_json::Value::as_str)
         .map_or_else(String::new, str::to_owned);
-    (exit, stderr)
+    (
+        exit,
+        stderr,
+        stream_fact(Some(output), "stdout", artifacts),
+        stream_fact(Some(output), "stderr", artifacts),
+    )
 }
 
 fn settle_outcome(
@@ -155,14 +440,20 @@ fn settle_outcome(
         agentshim_core::tools::ToolOutput,
         agentshim_core::tools::exec::ProcessError,
     >,
-) -> Result<ProcessOutcome> {
+) -> NativeResult<ProcessOutcome> {
     let complete = !capture.exceeded() && result.is_ok();
-    let records = capture.publish(complete).map_err(|error| {
-        Error::new(
-            napi::Status::GenericFailure,
-            format!("{CAPTURE_IO_FAILED_CODE}: {error}"),
-        )
-    })?;
+    let records = match capture.publish(complete) {
+        Ok(records) => records,
+        Err(error) => {
+            capture.discard();
+            return NativeResult::failure(NativeFailure::new(
+                CAPTURE_IO_FAILED_CODE,
+                error.to_string(),
+                true,
+                Some(serde_json::json!({ "kind": "capture_publish" })),
+            ));
+        }
+    };
     let publish = should_publish(&records, complete);
     let artifacts = if publish {
         register_artifacts(state, &records);
@@ -173,7 +464,7 @@ fn settle_outcome(
     };
     match result {
         Ok(output) => {
-            let (exit_code, stderr) = outcome_facts(&output);
+            let (exit_code, stderr, stdout, stderr_stream) = outcome_facts(&output, &artifacts);
             let classification = attribution.map_or(
                 Classification {
                     denied: false,
@@ -181,10 +472,12 @@ fn settle_outcome(
                 },
                 |attribution| classify(exit_code.as_deref(), &stderr, attribution),
             );
-            Ok(ProcessOutcome {
+            NativeResult::success(ProcessOutcome {
                 text: output.text,
                 child_nonzero: output.child_nonzero,
                 exit_code,
+                stdout,
+                stderr: stderr_stream,
                 artifacts,
                 limit_exceeded: false,
                 failure: None,
@@ -193,13 +486,6 @@ fn settle_outcome(
             })
         }
         Err(error) => {
-            let code = if capture.exceeded() {
-                CAPTURE_LIMIT_EXCEEDED_CODE.to_owned()
-            } else if capture.io_failure().is_some() {
-                CAPTURE_IO_FAILED_CODE.to_owned()
-            } else {
-                process_error_code(&error).to_owned()
-            };
             let classification = attribution.map_or(
                 Classification {
                     denied: false,
@@ -207,18 +493,35 @@ fn settle_outcome(
                 },
                 |attribution| classify(None, &error.to_string(), attribution),
             );
-            Ok(ProcessOutcome {
+            let failure = if capture.exceeded() {
+                NativeFailure::new(
+                    CAPTURE_LIMIT_EXCEEDED_CODE,
+                    "capture limit exceeded",
+                    false,
+                    Some(serde_json::json!({
+                        "kind": "capture",
+                        "limitBytes": capture.max_bytes,
+                    })),
+                )
+            } else if let Some(message) = capture.io_failure() {
+                NativeFailure::new(
+                    CAPTURE_IO_FAILED_CODE,
+                    message,
+                    true,
+                    Some(serde_json::json!({ "kind": "capture" })),
+                )
+            } else {
+                process_failure(&error)
+            };
+            NativeResult::success(ProcessOutcome {
                 text: error.to_string(),
                 child_nonzero: true,
                 exit_code: None,
+                stdout: stream_fact(None, "stdout", &artifacts),
+                stderr: stream_fact(None, "stderr", &artifacts),
                 artifacts,
                 limit_exceeded: capture.exceeded(),
-                failure: Some(NativeFailure {
-                    retryable: process_error_retryable(&error),
-                    message: error.to_string(),
-                    code,
-                    details: None,
-                }),
+                failure: Some(failure),
                 denied: classification.denied,
                 runner_failed: classification.runner_failed,
             })
@@ -226,58 +529,20 @@ fn settle_outcome(
     }
 }
 
-fn process_error_code(error: &agentshim_core::tools::exec::ProcessError) -> &'static str {
-    use agentshim_core::tools::exec::{CaptureFailureKind, ProcessError};
-
-    match error {
-        ProcessError::Validation(_) => "INVALID_ARGS",
-        ProcessError::Resolve(_) | ProcessError::Unavailable(_) => "AGENTSHIM_PROCESS_UNAVAILABLE",
-        ProcessError::Io(_) => "AGENTSHIM_PROCESS_IO",
-        ProcessError::Capture { kind, .. } => match kind {
-            CaptureFailureKind::LimitExceeded => CAPTURE_LIMIT_EXCEEDED_CODE,
-            CaptureFailureKind::Io | CaptureFailureKind::Protocol => CAPTURE_IO_FAILED_CODE,
-        },
-        ProcessError::ResourceBusy(_) => "AGENTSHIM_RESOURCE_BUSY",
-        ProcessError::Timeout { .. } | ProcessError::TimeoutBeforeSpawn { .. } => {
-            "AGENTSHIM_TIMEOUT"
-        }
-        ProcessError::Cancelled => "AGENTSHIM_CANCELLED",
-        ProcessError::OutcomeUncertain => "AGENTSHIM_OUTCOME_UNCERTAIN",
-        ProcessError::Output(_) => "AGENTSHIM_OUTPUT_FAILED",
-    }
-}
-
-fn process_error_retryable(error: &agentshim_core::tools::exec::ProcessError) -> bool {
-    use agentshim_core::tools::exec::ProcessError;
-
-    matches!(
-        error,
-        ProcessError::Io(_)
-            | ProcessError::Capture { .. }
-            | ProcessError::ResourceBusy(_)
-            | ProcessError::Timeout { .. }
-            | ProcessError::TimeoutBeforeSpawn { .. }
-            | ProcessError::OutcomeUncertain
-    )
-}
-
 enum Either {
     RunProgram(agentshim_core::tools::run_program::PreparedRunProgram),
     Bash(agentshim_core::tools::bash::PreparedBash),
-}
-
-fn process_error(error: agentshim_core::tools::exec::ProcessError) -> Error {
-    Error::new(napi::Status::GenericFailure, error.to_string())
 }
 
 /// Run one process call under a private durable capture: the capture object stays
 /// concrete so its totals, ceiling, and artifacts survive the spawn unchanged.
 pub(crate) async fn run_with_capture<R>(
     state: Arc<EngineState>,
+    cancellation: tokio_util::sync::CancellationToken,
     streams: &'static [&'static str],
     attribution: Option<SandboxAttribution>,
     run: R,
-) -> Result<ProcessOutcome>
+) -> NativeResult<ProcessOutcome>
 where
     R: FnOnce(
             &EngineState,
@@ -288,46 +553,63 @@ where
         > + Send
         + 'static,
 {
-    let _active = state.enter_call()?;
-    spawn_blocking(move || {
+    if cancellation.is_cancelled() {
+        return NativeResult::failure(NativeFailure::cancelled("spawn"));
+    }
+    let result = spawn_blocking(move || {
         let call_key = uuid::Uuid::new_v4().simple().to_string();
-        let capture = CallCapture::create(
+        let capture = match CallCapture::create(
             &state.capture_root,
             &state.session_key,
             &call_key,
             streams,
             state.capture_max_bytes,
-        )
-        .map_err(|error| {
-            Error::new(
-                napi::Status::GenericFailure,
-                format!("{CAPTURE_IO_FAILED_CODE}: {error}"),
-            )
-        })?;
+        ) {
+            Ok(capture) => capture,
+            Err(error) => {
+                return NativeResult::failure(NativeFailure::new(
+                    CAPTURE_IO_FAILED_CODE,
+                    error.to_string(),
+                    true,
+                    Some(serde_json::json!({ "kind": "capture_create" })),
+                ));
+            }
+        };
         let sink: Arc<CallCapture> = Arc::new(capture);
         let dyn_sink: Arc<dyn agentshim_core::tools::exec::spawn::CaptureSink> =
             Arc::clone(&sink) as Arc<dyn agentshim_core::tools::exec::spawn::CaptureSink>;
         let result = run(&state, Some(&dyn_sink));
         settle_outcome(&state, sink.as_ref(), attribution.as_ref(), result)
     })
-    .await
-    .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))?
+    .await;
+    match result {
+        Ok(result) => result,
+        Err(error) => NativeResult::failure(NativeFailure::new(
+            "AGENTSHIM_NATIVE_THREAD_FAILED",
+            error.to_string(),
+            true,
+            Some(serde_json::json!({ "kind": "native_thread" })),
+        )),
+    }
 }
 
 impl EngineState {
     fn take_run_program(
         &self,
         handle: &str,
-    ) -> Result<agentshim_core::tools::run_program::PreparedRunProgram> {
+    ) -> std::result::Result<agentshim_core::tools::run_program::PreparedRunProgram, NativeFailure>
+    {
         let mut prepared = self
             .prepared
             .run_program
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         prepared.remove(handle).ok_or_else(|| {
-            Error::new(
-                napi::Status::GenericFailure,
+            NativeFailure::new(
+                "AGENTSHIM_PREPARED_HANDLE_INVALID",
                 "prepared handle is unknown or already spawned",
+                false,
+                Some(serde_json::json!({ "kind": "prepared_handle" })),
             )
         })
     }
@@ -335,21 +617,30 @@ impl EngineState {
     pub(crate) fn take_bash(
         &self,
         handle: &str,
-    ) -> Result<agentshim_core::tools::bash::PreparedBash> {
+    ) -> std::result::Result<agentshim_core::tools::bash::PreparedBash, NativeFailure> {
         let mut prepared = self
             .prepared
             .bash
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         prepared.remove(handle).ok_or_else(|| {
-            Error::new(
-                napi::Status::GenericFailure,
+            NativeFailure::new(
+                "AGENTSHIM_PREPARED_HANDLE_INVALID",
                 "prepared handle is unknown or already spawned",
+                false,
+                Some(serde_json::json!({ "kind": "prepared_handle" })),
             )
         })
     }
 
-    pub(crate) fn prepare_run_program(&self, args: ProcessArgs) -> Result<PreparedProcess> {
+    pub(crate) fn prepare_run_program(
+        &self,
+        args: ProcessArgs,
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> NativeResult<PreparedProcess> {
+        if cancellation.is_cancelled() {
+            return NativeResult::failure(NativeFailure::cancelled("prepare"));
+        }
         let mut env = BTreeMap::new();
         for (key, value) in args.env.unwrap_or_default() {
             env.insert(key, value);
@@ -369,40 +660,51 @@ impl EngineState {
                 .timeout_ms(self.timeout_ceiling_ms)
                 .min(self.timeout_ceiling_ms),
         );
-        let mut prepared = agentshim_core::tools::run_program::prepare_run_program(
+        let mut prepared = match agentshim_core::tools::run_program::prepare_run_program(
             &self.root,
             &resolver,
             &request,
             timeout,
             self.timeout_ceiling_ms,
-        )
-        .map_err(process_error)?;
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => return NativeResult::failure(process_failure(&error)),
+        };
         prepared.environment.base = Some(self.env.clone());
         let handle = uuid::Uuid::new_v4().simple().to_string();
         let mut final_argv = vec![prepared.resolved.executable.to_string_lossy().into_owned()];
         final_argv.extend(prepared.args.iter().cloned());
+        if cancellation.is_cancelled() {
+            return NativeResult::failure(NativeFailure::cancelled("prepare"));
+        }
         self.prepared
             .run_program
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(handle.clone(), prepared);
-        Ok(PreparedProcess {
+        NativeResult::success(PreparedProcess {
             handle,
             argv: final_argv,
         })
     }
 
-    pub(crate) fn prepare_bash(&self, args: BashArgs) -> Result<PreparedProcess> {
+    pub(crate) fn prepare_bash(
+        &self,
+        args: BashArgs,
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> NativeResult<PreparedProcess> {
+        if cancellation.is_cancelled() {
+            return NativeResult::failure(NativeFailure::cancelled("prepare"));
+        }
         let msys = match args.msys_argument_conversion.as_deref() {
             None | Some("enabled" | "default") => {
                 agentshim_core::tools::bash::MsysArgumentConversion::Default
             }
             Some("disabled") => agentshim_core::tools::bash::MsysArgumentConversion::Disabled,
             Some(other) => {
-                return Err(Error::new(
-                    napi::Status::InvalidArg,
-                    format!("msys_argument_conversion must be enabled or disabled, got {other}"),
-                ));
+                return NativeResult::failure(NativeFailure::invalid(format!(
+                    "msys_argument_conversion must be enabled or disabled, got {other}"
+                )));
             }
         };
         let request = agentshim_core::tools::bash::BashRequest {
@@ -411,7 +713,6 @@ impl EngineState {
             timeout_ms: args.timeout_ms.map(u64::from),
             detach: false,
             log_path: None,
-            server_capture: false,
             msys_argument_conversion: msys,
         };
         let timeout = Duration::from_millis(
@@ -419,25 +720,30 @@ impl EngineState {
                 .timeout_ms(self.timeout_ceiling_ms)
                 .min(self.timeout_ceiling_ms),
         );
-        let mut prepared = agentshim_core::tools::bash::prepare_bash_foreground(
+        let mut prepared = match agentshim_core::tools::bash::prepare_bash_foreground(
             &self.root,
             &self.locator,
             &request,
             timeout,
             self.timeout_ceiling_ms,
-            &tokio_util::sync::CancellationToken::new(),
-        )
-        .map_err(process_error)?;
+            cancellation,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => return NativeResult::failure(process_failure(&error)),
+        };
         prepared.environment.base = Some(self.env.clone());
         let handle = uuid::Uuid::new_v4().simple().to_string();
         let mut final_argv = vec![prepared.resolved.executable.to_string_lossy().into_owned()];
         final_argv.extend(prepared.args.iter().cloned());
+        if cancellation.is_cancelled() {
+            return NativeResult::failure(NativeFailure::cancelled("prepare"));
+        }
         self.prepared
             .bash
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(handle.clone(), prepared);
-        Ok(PreparedProcess {
+        NativeResult::success(PreparedProcess {
             handle,
             argv: final_argv,
         })
@@ -445,12 +751,16 @@ impl EngineState {
 
     pub(crate) async fn spawn_prepared(
         self: &Arc<Self>,
+        call_id: String,
         handle: String,
         wrapped_argv: Option<&[String]>,
         attribution: Option<SandboxAttribution>,
-    ) -> Result<ProcessOutcome> {
+    ) -> NativeResult<ProcessOutcome> {
         let wrapped_argv = wrapped_argv.map(<[String]>::to_vec);
-        let cancellation = self.shutdown.child_token();
+        let cancellation = match self.call_token(&call_id) {
+            Ok(token) => token,
+            Err(failure) => return NativeResult::failure(failure),
+        };
         let state = Arc::clone(self);
         // The handle is consumed before spawning: a lost or double spawn can never
         // produce two process trees from one approval decision.
@@ -462,7 +772,7 @@ impl EngineState {
                     let bash = state.take_bash(&handle);
                     match bash {
                         Ok(prepared) => Either::Bash(prepared),
-                        Err(_) => return Err(run_error),
+                        Err(_) => return NativeResult::failure(run_error),
                     }
                 }
             }
@@ -471,8 +781,10 @@ impl EngineState {
             Either::Bash(_) => &["output"],
             Either::RunProgram(_) => &["stdout", "stderr"],
         };
+        let run_cancellation = cancellation.clone();
         run_with_capture(
             state,
+            cancellation,
             streams,
             attribution,
             move |state, sink| match prepared {
@@ -480,7 +792,7 @@ impl EngineState {
                     agentshim_core::tools::run_program::execute_prepared_run_program(
                         prepared,
                         wrapped_argv.as_deref(),
-                        &cancellation,
+                        &run_cancellation,
                         &state.budget,
                         sink,
                     )
@@ -488,102 +800,12 @@ impl EngineState {
                 Either::Bash(prepared) => agentshim_core::tools::bash::execute_prepared_bash(
                     prepared,
                     wrapped_argv.as_deref(),
-                    &cancellation,
+                    &run_cancellation,
                     &state.budget,
                     sink,
                 ),
             },
         )
-        .await
-    }
-
-    pub(crate) async fn run_program_outcome(
-        self: &Arc<Self>,
-        args: ProcessArgs,
-    ) -> Result<ProcessOutcome> {
-        let mut env = BTreeMap::new();
-        for (key, value) in args.env.unwrap_or_default() {
-            env.insert(key, value);
-        }
-        let request = agentshim_core::tools::run_program::ProcessRequest {
-            program: args.program,
-            args: args.args,
-            cwd: args.cwd,
-            env,
-            unset_env: args.unset_env.unwrap_or_default(),
-            stdin: args.stdin,
-            timeout_ms: args.timeout_ms.map(u64::from),
-        };
-        let ceiling = self.timeout_ceiling_ms;
-        let resolver = agentshim_core::tools::exec::resolve::ProcessResolver::capture();
-        let timeout = Duration::from_millis(request.timeout_ms(ceiling).min(ceiling));
-        let cancellation = self.shutdown.child_token();
-        let state = Arc::clone(self);
-        run_with_capture(state, &["stdout", "stderr"], None, move |state, sink| {
-            let mut prepared = agentshim_core::tools::run_program::prepare_run_program(
-                &state.root,
-                &resolver,
-                &request,
-                timeout,
-                state.timeout_ceiling_ms,
-            )?;
-            prepared.environment.base = Some(state.env.clone());
-            agentshim_core::tools::run_program::execute_prepared_run_program(
-                prepared,
-                None,
-                &cancellation,
-                &state.budget,
-                sink,
-            )
-        })
-        .await
-    }
-
-    pub(crate) async fn bash_outcome(self: &Arc<Self>, args: BashArgs) -> Result<ProcessOutcome> {
-        let msys = match args.msys_argument_conversion.as_deref() {
-            None => agentshim_core::tools::bash::MsysArgumentConversion::default(),
-            Some("enabled" | "default") => {
-                agentshim_core::tools::bash::MsysArgumentConversion::Default
-            }
-            Some("disabled") => agentshim_core::tools::bash::MsysArgumentConversion::Disabled,
-            Some(other) => {
-                return Err(Error::new(
-                    napi::Status::InvalidArg,
-                    format!("msys_argument_conversion must be enabled or disabled, got {other}"),
-                ));
-            }
-        };
-        let request = agentshim_core::tools::bash::BashRequest {
-            command: args.command,
-            cwd: args.cwd,
-            timeout_ms: args.timeout_ms.map(u64::from),
-            detach: false,
-            log_path: None,
-            server_capture: false,
-            msys_argument_conversion: msys,
-        };
-        let ceiling = self.timeout_ceiling_ms;
-        let timeout = Duration::from_millis(request.timeout_ms(ceiling).min(ceiling));
-        let cancellation = self.shutdown.child_token();
-        let state = Arc::clone(self);
-        run_with_capture(state, &["output"], None, move |state, sink| {
-            let mut prepared = agentshim_core::tools::bash::prepare_bash_foreground(
-                &state.root,
-                &state.locator,
-                &request,
-                timeout,
-                state.timeout_ceiling_ms,
-                &cancellation,
-            )?;
-            prepared.environment.base = Some(state.env.clone());
-            agentshim_core::tools::bash::execute_prepared_bash(
-                prepared,
-                None,
-                &cancellation,
-                &state.budget,
-                sink,
-            )
-        })
         .await
     }
 }

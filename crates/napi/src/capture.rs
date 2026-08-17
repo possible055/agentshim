@@ -34,7 +34,7 @@ pub(crate) struct CallCapture {
     streams: Vec<(String, Mutex<File>)>,
     totals: Vec<AtomicU64>,
     written: AtomicU64,
-    max_bytes: u64,
+    pub(crate) max_bytes: u64,
     exceeded: AtomicBool,
     io_failed: Mutex<Option<String>>,
 }

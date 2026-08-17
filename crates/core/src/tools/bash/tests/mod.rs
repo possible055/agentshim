@@ -54,7 +54,6 @@ fn request(command: &str) -> BashRequest {
         timeout_ms: Some(20_000),
         detach: false,
         log_path: None,
-        server_capture: false,
         msys_argument_conversion: MsysArgumentConversion::Default,
     }
 }

@@ -267,8 +267,8 @@ describe('agent scope replacement', () => {
     expect(prompt).toContain('next_offset')
     expect(prompt).not.toContain('INHERITED-READ-GUIDANCE')
     expect(prompt).not.toContain('INHERITED-PWSH-GUIDANCE')
-    expect(prompt).toContain('Each Bash call is fresh')
-    expect(prompt).toContain('non-consuming lifecycle snapshot')
+    expect(prompt).toContain('run_in_background=true')
+    expect(prompt).toContain('lifecycle status of a background Bash job')
   })
 
   it('adds bash_status beside bash on a minimal catalog and leaves the editor', async () => {
@@ -303,8 +303,8 @@ describe('agent scope replacement', () => {
 
     const assembly = await ctx.systemPrompt.assemble({ scope: agent })
     const prompt = JSON.stringify(assembly)
-    expect(prompt).toContain('Each Bash call is fresh')
-    expect(prompt).toContain('non-consuming lifecycle snapshot')
+    expect(prompt).toContain('run_in_background=true')
+    expect(prompt).toContain('lifecycle status of a background Bash job')
     expect(prompt).not.toContain('next_start_line')
     expect(prompt).not.toContain('Prefer run_program')
   })
@@ -318,7 +318,7 @@ describe('agent scope replacement', () => {
 
     expect(visibleNames(ctx, agent)).toEqual(['str_replace_editor'])
     const assembly = await ctx.systemPrompt.assemble({ scope: agent })
-    expect(JSON.stringify(assembly)).not.toContain('non-consuming lifecycle snapshot')
+    expect(JSON.stringify(assembly)).not.toContain('lifecycle status of a background Bash job')
   })
 
   it('leaves an agent whose cwd is not the plugin root completely untouched', async () => {
@@ -931,7 +931,10 @@ describe('DSH native contracts', () => {
       const root = await makeRoot()
       await expect(mountComposition(root, {}, async inner => {
         await mountSandboxServices(inner, 'read-only', root)
-      })).rejects.toThrow(/native engine activation failed \(addon-unavailable\)/)
+      })).rejects.toMatchObject({
+        code: 'AGENTSHIM_NATIVE_ADDON_UNAVAILABLE',
+        details: { reason: 'addon-unavailable' },
+      })
     } finally {
       if (previous !== undefined) process.env.AGENTSHIM_DSH_NATIVE_DLL = previous
     }

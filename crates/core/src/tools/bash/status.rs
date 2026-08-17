@@ -13,7 +13,6 @@ use crate::tools::{
 
 pub const DEFAULT_TAIL_BYTES: usize = 8 * 1024;
 pub const MAX_TAIL_BYTES: usize = 16 * 1024;
-pub const MAX_SERVER_CAPTURE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -341,8 +340,8 @@ fn render(snapshot: &JobSnapshot, tail_bytes: usize) -> ToolOutput {
             "nextCursor": next_cursor,
             "chunk": chunk,
             "invalidUtf8Bytes": invalid,
-            "capture": if snapshot.log_path == PathBuf::from("remote-capture") { "remote-spool" } else { "server-spool" },
-            "truncated": snapshot.log_path != PathBuf::from("remote-capture") && snapshot.log.total > MAX_SERVER_CAPTURE_BYTES,
+            "capture": "repository-log",
+            "truncated": false,
             "error": snapshot.log.error,
         }
     }))
@@ -420,30 +419,5 @@ mod tests {
         assert_eq!(live.bytes, b"a");
         let terminal = snapshot_from(&file, 0, 2, true);
         assert_eq!(terminal.bytes, [b'a', 0xc3]);
-    }
-
-    #[test]
-    fn structured_status_marks_a_server_capture_that_exceeds_its_ceiling() {
-        let snapshot = JobSnapshot {
-            job_id: format!("bash-{}", uuid::Uuid::new_v4()),
-            state: JobState::Running,
-            pid: 1,
-            runtime: Duration::ZERO,
-            primary_exit: None,
-            log_path: PathBuf::from("capture.log"),
-            log: RawLogSnapshot {
-                total: MAX_SERVER_CAPTURE_BYTES + 1,
-                start: 0,
-                bytes: Vec::new(),
-                error: None,
-            },
-            outcome: None,
-        };
-
-        let output = render(&snapshot, 0);
-        assert_eq!(
-            output.structured.expect("structured status")["job"]["truncated"],
-            true
-        );
     }
 }

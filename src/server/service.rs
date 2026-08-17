@@ -42,7 +42,7 @@ use super::{
 #[cfg(test)]
 use super::{
     dispatch::ToolAdmission,
-    response::{blocking_response, blocking_response_for_profile, pdf_busy, pdf_timeout},
+    response::{pdf_busy, pdf_timeout},
 };
 
 pub const SERVER_INSTRUCTIONS: &str = "Local repository and Codex extension tools for reading source files, searching contents, finding paths, running one program with literal arguments, and running POSIX bash command lines with instance-bound managed detached-job status and termination.";
@@ -343,7 +343,7 @@ impl AgentShim {
     fn discovery_result_for(read_scope: ReadScope) -> DiscoverResult {
         DiscoverResult::from_server_info(
             SUPPORTED_PROTOCOLS.to_vec(),
-            Self::server_info(read_scope, None),
+            Self::server_info(read_scope),
         )
     }
 
@@ -354,14 +354,7 @@ impl AgentShim {
 
     #[must_use]
     pub fn tools_result_for(read_scope: ReadScope) -> ListToolsResult {
-        Self::tools_result_for_profile(read_scope, crate::ClientProfile::Codex)
-    }
-
-    fn tools_result_for_profile(
-        read_scope: ReadScope,
-        client_profile: crate::ClientProfile,
-    ) -> ListToolsResult {
-        ListToolsResult::with_all_items(tool_catalog(read_scope, client_profile).to_vec())
+        ListToolsResult::with_all_items(tool_catalog(read_scope).to_vec())
             .with_ttl_ms(TOOLS_CACHE_TTL_MS)
             .with_cache_scope(CacheScope::Private)
     }
@@ -376,10 +369,7 @@ impl AgentShim {
         (protocol, client.name, client.version)
     }
 
-    fn server_info(
-        read_scope: ReadScope,
-        _client_profile: Option<crate::ClientProfile>,
-    ) -> ServerInfo {
+    fn server_info(read_scope: ReadScope) -> ServerInfo {
         let instructions = match read_scope {
             ReadScope::Normal => SERVER_INSTRUCTIONS,
             ReadScope::Unrestricted => UNRESTRICTED_SERVER_INSTRUCTIONS,
@@ -393,7 +383,7 @@ impl AgentShim {
 
 impl ServerHandler for AgentShim {
     fn get_info(&self) -> ServerInfo {
-        Self::server_info(self.read_scope(), Some(self.client_profile))
+        Self::server_info(self.read_scope())
     }
 
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
@@ -407,10 +397,7 @@ impl ServerHandler for AgentShim {
     ) -> Result<InitializeResult, McpError> {
         tracing::info!(target: "agentshim", event = "initialize", phase = "protocol", protocol = %request.protocol_version, client_name = %request.client_info.name, client_version = %request.client_info.version);
         context.peer.set_peer_info(request);
-        Ok(Self::server_info(
-            self.read_scope(),
-            Some(self.client_profile),
-        ))
+        Ok(Self::server_info(self.read_scope()))
     }
 
     async fn discover(
@@ -429,7 +416,7 @@ impl ServerHandler for AgentShim {
     ) -> Result<ListToolsResult, McpError> {
         let (protocol, client_name, client_version) = Self::request_identity(&context);
         let has_cursor = request.is_some_and(|request| request.cursor.is_some());
-        let result = Self::tools_result_for_profile(self.read_scope(), self.client_profile);
+        let result = Self::tools_result_for(self.read_scope());
         if let Some(correlation) = context.extensions.get::<ToolsListCorrelation>() {
             tracing::info!(
                 target: "agentshim",
@@ -470,7 +457,7 @@ impl ServerHandler for AgentShim {
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        tool_catalog(self.read_scope(), self.client_profile)
+        tool_catalog(self.read_scope())
             .iter()
             .find(|tool| tool.name == name)
             .cloned()

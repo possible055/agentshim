@@ -78,8 +78,6 @@ pub struct BashRequest {
     pub detach: bool,
     pub log_path: Option<String>,
     #[serde(default)]
-    pub server_capture: bool,
-    #[serde(default)]
     pub msys_argument_conversion: MsysArgumentConversion,
 }
 
@@ -125,12 +123,8 @@ impl BashRequest {
             return Err(invalid("command and cwd must not contain NUL"));
         }
         if self.detach {
-            let capture_targets =
-                usize::from(self.server_capture) + usize::from(self.log_path.is_some());
-            if capture_targets != 1 {
-                return Err(invalid(
-                    "detach requires exactly one of log_path or server_capture=true",
-                ));
+            if self.log_path.is_none() {
+                return Err(invalid("detach requires a log_path inside the repository"));
             }
             if self.timeout_ms.is_some() {
                 return Err(invalid(
@@ -149,11 +143,6 @@ impl BashRequest {
         }
         if self.log_path.is_some() {
             return Err(invalid("log_path is only accepted when detach is true"));
-        }
-        if self.server_capture {
-            return Err(invalid(
-                "server_capture is only accepted when detach is true",
-            ));
         }
         if !(1..=timeout_ceiling_ms).contains(&self.timeout_ms(timeout_ceiling_ms)) {
             return Err(invalid(format!(
@@ -345,7 +334,6 @@ pub fn execute_output_with_capture(
             &launch,
             cancellation,
             output_budget,
-            capture_sink.cloned(),
         );
     }
     let timeout = deadline
@@ -509,21 +497,11 @@ struct DetachedLaunch<'a> {
     environment: &'a EnvironmentPlan,
 }
 
-struct ServerLogCleanup(Option<PathBuf>);
-
-impl Drop for ServerLogCleanup {
-    fn drop(&mut self) {
-        if let Some(path) = &self.0 {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
 /// A detached tree binds its lifetime to the server instance rather than to this call, so the
 /// response reports only what the agent needs to find it again: the pid and the log file.
 #[allow(
     clippy::too_many_lines,
-    reason = "all detached capture variants share one committed launch transaction"
+    reason = "detached launch admission and commit share one transaction"
 )]
 fn run_detached(
     root: &Arc<RepositoryRoot>,
@@ -532,7 +510,6 @@ fn run_detached(
     launch: &DetachedLaunch<'_>,
     cancellation: &CancellationToken,
     output_budget: &dyn crate::output::CallBudget,
-    capture_sink: Option<Arc<dyn spawn::CaptureSink>>,
 ) -> Result<ToolOutput, ProcessError> {
     let DetachedLaunch {
         resolved,
@@ -540,51 +517,14 @@ fn run_detached(
         args,
         environment,
     } = *launch;
-    if let Some(sink) = capture_sink {
-        verify_detached_response(
-            &detached_response(admission.job_id(), u32::MAX, Path::new("remote-capture")),
-            cancellation,
-            output_budget,
-        )?;
-        if cancellation.is_cancelled() {
-            return Err(ProcessError::Cancelled);
-        }
-        let plan = ExecPlan {
-            resolved,
-            cwd,
-            args,
-            environment,
-            stdin: None,
-            streams: Streams::Merged,
-            timeout: Duration::ZERO,
-            capture_page_bytes: output_budget.page_bytes(),
-        };
-        let (tree, reader) = crate::platform::process::spawn_detached_capture(&plan, environment)?;
-        let pid = tree.pid();
-        let output = detached_response(admission.job_id(), pid, Path::new("remote-capture"));
-        let rollback_deadline = admission.rollback_deadline();
-        let drain = detached::start_remote_drain(reader, sink);
-        let log_reader = detached::empty_log_reader()?;
-        if let Err(tree) = admission.retain_remote(tree, log_reader, drain) {
-            let mut tree = tree;
-            tree.terminate_and_wait(rollback_deadline)?;
-            return Err(ProcessError::Cancelled);
-        }
-        return Ok(output);
-    }
-    let (log_path, resolved_log, server_owned) = if request.server_capture {
-        (detached::server_log_path(admission.job_id()), None, true)
-    } else {
-        let requested = request
-            .log_path
-            .as_deref()
-            .ok_or_else(|| invalid("detach requires a log_path inside the repository"))?;
-        let resolved_log = root
-            .resolve(std::path::Path::new(requested))
-            .map_err(|error| invalid(format!("invalid log_path: {error}")))?;
-        let path = resolved_log.absolute().to_owned();
-        (path, Some(resolved_log), false)
-    };
+    let requested = request
+        .log_path
+        .as_deref()
+        .ok_or_else(|| invalid("detach requires a log_path inside the repository"))?;
+    let resolved_log = root
+        .resolve(std::path::Path::new(requested))
+        .map_err(|error| invalid(format!("invalid log_path: {error}")))?;
+    let log_path = resolved_log.absolute().to_owned();
     verify_detached_response(
         &detached_response(admission.job_id(), u32::MAX, &log_path),
         cancellation,
@@ -596,17 +536,7 @@ fn run_detached(
     if cancellation.is_cancelled() {
         return Err(ProcessError::Cancelled);
     }
-    let log = if server_owned {
-        detached::open_server_log(&log_path)?
-    } else {
-        detached::open_log(
-            root,
-            resolved_log
-                .as_ref()
-                .expect("repository log retains its resolved capability"),
-        )?
-    };
-    let mut server_log_cleanup = ServerLogCleanup(server_owned.then(|| log_path.clone()));
+    let log = detached::open_log(root, &resolved_log)?;
     #[cfg(test)]
     admission.after_open();
     if cancellation.is_cancelled() {
@@ -635,22 +565,20 @@ fn run_detached(
     // call. A tree that executed user code must never be adopted by a stopped roster, so a
     // rejection is rolled back here with a bounded, verified termination.
     let rollback_deadline = admission.rollback_deadline();
-    let rejected = if let Err(error) =
-        verify_detached_response(&output, cancellation, output_budget)
-    {
-        Some((tree, error))
-    } else if cancellation.is_cancelled() {
-        Some((tree, ProcessError::Cancelled))
-    } else if let Err(tree) = admission.retain(tree, log_path.clone(), log.reader, server_owned) {
-        Some((tree, ProcessError::Cancelled))
-    } else {
-        None
-    };
+    let rejected =
+        if let Err(error) = verify_detached_response(&output, cancellation, output_budget) {
+            Some((tree, error))
+        } else if cancellation.is_cancelled() {
+            Some((tree, ProcessError::Cancelled))
+        } else if let Err(tree) = admission.retain(tree, log_path.clone(), log.reader) {
+            Some((tree, ProcessError::Cancelled))
+        } else {
+            None
+        };
     if let Some((mut tree, error)) = rejected {
         tree.terminate_and_wait(rollback_deadline)?;
         return Err(error);
     }
-    server_log_cleanup.0 = None;
     Ok(output)
 }
 

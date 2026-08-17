@@ -9,7 +9,7 @@ import { assertExecutionWorld, sameExecutionPath } from './policy.ts'
 import { buildToolDefinitions, promptSections, RESTRICT_CANDIDATES } from './tools.ts'
 import { PUBLIC_TOOL_NAMES } from './contracts.ts'
 import { BackgroundJobManager } from './jobs.ts'
-import { loadNativeAddon, nativeEngineEnv } from './native.ts'
+import { loadNativeAddon, nativeEngineEnv, nativeLoadFailureError } from './native.ts'
 import {
   DEFAULT_CAPTURE_MAX_BYTES,
   MAX_CAPTURE_MAX_BYTES,
@@ -166,7 +166,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const jobs = new BackgroundJobManager()
   const loaded = loadNativeAddon()
   if (loaded.engine === undefined) {
-    throw new Error(`dsh-agentshim: native engine activation failed (${loaded.failure.reason}): ${loaded.failure.detail}`)
+    throw nativeLoadFailureError(loaded.failure)
   }
   const native = new loaded.engine.Engine(resolved.root, {
     env: nativeEngineEnv(config.env),

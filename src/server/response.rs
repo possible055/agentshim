@@ -464,7 +464,7 @@ pub(super) fn diagnostic_tool_error<E: DiagnosticError + ?Sized>(error: &E) -> C
 }
 
 #[cfg(test)]
-pub(super) fn blocking_response<E: DiagnosticError>(
+pub(super) fn blocking_response_for_test<E: DiagnosticError>(
     tool: &str,
     run_ms: u64,
     result: Result<Result<crate::tools::ToolOutput, E>, tokio::task::JoinError>,
@@ -472,25 +472,23 @@ pub(super) fn blocking_response<E: DiagnosticError>(
     cancellation: &CancellationToken,
     output_budget: &CallOutputBudget,
 ) -> CallToolResponse {
-    blocking_response_for_profile(
+    blocking_response(
         tool,
         run_ms,
         result,
         Some(output_token_gate),
         cancellation,
         output_budget,
-        crate::ClientProfile::Codex,
     )
 }
 
-pub(super) fn blocking_response_for_profile<E: DiagnosticError>(
+pub(super) fn blocking_response<E: DiagnosticError>(
     tool: &str,
     run_ms: u64,
     result: Result<Result<crate::tools::ToolOutput, E>, tokio::task::JoinError>,
     output_token_gate: Option<&crate::output::OutputTokenGate>,
     cancellation: &CancellationToken,
     output_budget: &CallOutputBudget,
-    _client_profile: crate::ClientProfile,
 ) -> CallToolResponse {
     match result {
         Ok(Ok(output)) => {

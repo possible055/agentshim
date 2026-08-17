@@ -35,15 +35,18 @@ import {
 import { startBackgroundBashNative } from './jobs.ts'
 import type { BackgroundJobManager } from './jobs.ts'
 import type {
-  NativeBashArgs,
   NativeEngine,
   NativeGlobArgs,
   NativeGrepArgs,
   NativeReadArgs,
-  NativeRunProgramArgs,
   NativeSandboxAttribution,
+  NativeProcessStream,
 } from './native.ts'
-import { nativeFailureError } from './native.ts'
+import {
+  nativeBashArgs,
+  nativeFailureError,
+  nativeRunProgramArgs,
+} from './native.ts'
 
 export interface ToolDependencies {
   readonly ctx: Context
@@ -142,30 +145,20 @@ function presentTerminalResult(_args: unknown, result: { content: ContentBlock[]
   }
 }
 
-function nativeRunProgramArgs(args: Record<string, unknown>): NativeRunProgramArgs {
-  const env: Record<string, string> = {}
-  if (args.env !== undefined && typeof args.env === 'object') {
-    for (const [key, value] of Object.entries(args.env as Record<string, unknown>)) {
-      if (typeof value === 'string') env[key] = value
-    }
-  }
+function processStream(stream: NativeProcessStream) {
   return {
-    program: args.program as string,
-    args: Array.isArray(args.args) ? (args.args as string[]) : [],
-    ...(args.cwd === undefined ? {} : { cwd: args.cwd as string }),
-    ...(Object.keys(env).length === 0 ? {} : { env }),
-    ...(Array.isArray(args.unset_env) ? { unsetEnv: args.unset_env as string[] } : {}),
-    ...(args.stdin === undefined ? {} : { stdin: args.stdin as string }),
-    ...(args.timeout_ms === undefined ? {} : { timeoutMs: args.timeout_ms as number }),
-  }
-}
-
-function nativeBashArgs(wire: Record<string, unknown>): NativeBashArgs {
-  return {
-    command: wire.command as string,
-    ...(wire.cwd === undefined ? {} : { cwd: wire.cwd as string }),
-    ...(wire.timeout_ms === undefined ? {} : { timeoutMs: wire.timeout_ms as number }),
-    ...(wire.msys_argument_conversion === undefined ? {} : { msysArgumentConversion: wire.msys_argument_conversion as 'enabled' | 'disabled' }),
+    text: stream.text,
+    totalBytes: stream.totalBytes,
+    shownBytes: stream.shownBytes,
+    omittedBytes: stream.omittedBytes,
+    ...(stream.artifact === undefined ? {} : {
+      artifact: {
+        path: stream.artifact.path,
+        bytes: stream.artifact.bytes,
+        complete: stream.artifact.complete,
+        mediaType: 'application/octet-stream' as const,
+      },
+    }),
   }
 }
 
@@ -208,54 +201,49 @@ async function executeProcessNative(
 ) {
   const engine = deps.native
   const prepared = name === 'run_program'
-    ? engine.prepareRunProgram(nativeRunProgramArgs(args))
-    : engine.prepareBash(nativeBashArgs(args))
-  const decision = await policy.wrapArgv(name, prepared.argv, args, exec)
-  if (decision.mode !== 'danger-full-access' && decision.wrappedArgv === undefined) {
-    throw new HarnessError('sandbox confinement returned no wrapped argv', 'SANDBOX_UNAVAILABLE')
-  }
-  if (exec.signal.aborted) {
-    throw new HarnessError('tool call aborted before spawn', 'AGENTSHIM_CANCELLED')
-  }
-  const outcome = await engine.spawnPrepared(
-    prepared.handle,
-    decision.wrappedArgv === undefined ? undefined : [...decision.wrappedArgv],
-    nativeAttribution(decision.attribution),
-  )
-  if (outcome.failure !== undefined) {
-    if (outcome.runnerFailed) {
-      throw new HarnessError(`sandbox runner failed before the command ran: ${outcome.text}`, 'SANDBOX_UNAVAILABLE')
+    ? engine.prepareRunProgram(nativeRunProgramArgs(args), exec.signal)
+    : engine.prepareBash(nativeBashArgs(args), exec.signal)
+  try {
+    const decision = await policy.wrapArgv(name, prepared.argv, args, exec)
+    if (decision.mode !== 'danger-full-access' && decision.wrappedArgv === undefined) {
+      throw new HarnessError('sandbox confinement returned no wrapped argv', 'SANDBOX_UNAVAILABLE')
     }
-    throw nativeFailureError(outcome.failure)
+    if (exec.signal.aborted) {
+      throw new HarnessError('tool call aborted before spawn', 'AGENTSHIM_CANCELLED')
+    }
+    const outcome = await engine.spawnPrepared(
+      prepared.handle,
+      decision.wrappedArgv === undefined ? undefined : [...decision.wrappedArgv],
+      nativeAttribution(decision.attribution),
+    )
+    if (outcome.failure !== undefined) {
+      if (outcome.runnerFailed) {
+        throw new HarnessError(`sandbox runner failed before the command ran: ${outcome.text}`, 'SANDBOX_UNAVAILABLE')
+      }
+      throw nativeFailureError(outcome.failure)
+    }
+    const notices = outcome.artifacts
+      .map(artifact => `Full raw ${artifact.stream}: ${artifact.path} (${artifact.bytes} bytes${artifact.complete ? '' : ', incomplete'})`)
+    const text = [outcome.text, ...notices].join('\n')
+    return {
+      kind: 'foreground' as const,
+      text,
+      exitCode: outcome.exitCode ?? (outcome.childNonzero ? '1' : '0'),
+      stdout: processStream(outcome.stdout),
+      stderr: processStream(outcome.stderr),
+      ...(decision.attribution === undefined ? {} : {
+        sandbox: {
+          mode: decision.attribution.mode,
+          ...(decision.attribution.enforcement === undefined ? {} : { enforcement: decision.attribution.enforcement }),
+          denied: outcome.denied,
+          runnerFailed: outcome.runnerFailed,
+        },
+      }),
+    }
+  } catch (error) {
+    engine.discardPrepared(prepared.handle)
+    throw error
   }
-  const notices = outcome.artifacts
-    .map(artifact => `Full raw ${artifact.stream}: ${artifact.path} (${artifact.bytes} bytes${artifact.complete ? '' : ', incomplete'})`)
-  const text = [outcome.text, ...notices].join('\n')
-  return {
-    kind: 'foreground' as const,
-    text,
-    exitCode: outcome.exitCode ?? (outcome.childNonzero ? '1' : '0'),
-    stdout: { text: '', totalBytes: 0, shownBytes: 0, omittedBytes: 0 },
-    stderr: { text: '', totalBytes: 0, shownBytes: 0, omittedBytes: 0 },
-    ...(decision.attribution === undefined ? {} : {
-      sandbox: {
-        mode: decision.attribution.mode,
-        ...(decision.attribution.enforcement === undefined ? {} : { enforcement: decision.attribution.enforcement }),
-        denied: outcome.denied,
-        runnerFailed: outcome.runnerFailed,
-      },
-    }),
-  }
-}
-
-async function executeProcess(
-  deps: ToolDependencies,
-  policy: ProcessPolicy,
-  name: 'run_program' | 'bash',
-  args: Record<string, unknown>,
-  exec: ToolRunContext,
-) {
-  return executeProcessNative(deps, policy, name, args, exec)
 }
 
 function validateReadArgs(args: Record<string, unknown> & { path: string; line_count?: number; start_line?: number; pages?: string; pdf_cursor?: string; artifact_offset?: number }): void {
@@ -311,7 +299,7 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
 
   const read = defineTool({
     name: 'read',
-    description: 'Read one local file as numbered lines, including an exact published process artifact path, or render PDF text and images. Native text pages are bounded to 50,000 bytes and continuations are explicit.',
+    description: 'Read one file as numbered lines, or render PDF text and images. Returns partial continuation lines if output exceeds limits.',
     parameters: readParameters,
     output: { schema: readOutputSchema, render: (_args, value) => renderRead(value) },
     timeoutMs: deps.config.toolCallTimeoutMs,
@@ -319,7 +307,7 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
     async execute(args, exec) {
       validateReadArgs(args)
       const observation = await beginReadObservation(deps.ctx, exec, deps.config.root, args.path)
-      const native = await deps.native.readText(nativeReadArgs(args))
+      const native = await deps.native.readText(nativeReadArgs(args), exec.signal)
       const content = [
         { type: 'text' as const, text: native.text },
         ...native.images.map(image => ({ type: 'image' as const, data: image.data, mimeType: image.mimeType })),
@@ -333,14 +321,14 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
 
   const grep = defineTool({
     name: 'grep',
-    description: 'Search local file contents, including one exact published process artifact path, with Rust regular expressions or fixed strings. Native result pages are bounded to 50,000 bytes with explicit continuation.',
+    description: 'Search file contents using regular expressions or fixed strings. Returns partial continuation offsets if output exceeds limits.',
     parameters: grepParameters,
     output: { schema: textOutputSchema('grep'), render: (_args, value) => textBlock(value.text) },
     timeoutMs: deps.config.toolCallTimeoutMs,
     isConcurrencySafe: () => true,
-    async execute(args, _exec) {
+    async execute(args, exec) {
       validateGrepArgs(args)
-      const native = await deps.native.grepText(nativeGrepArgs(args))
+      const native = await deps.native.grepText(nativeGrepArgs(args), exec.signal)
       return { kind: 'grep' as const, text: native.text }
     },
     presentCall: presentSearchCall('Grep'),
@@ -348,14 +336,14 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
 
   const glob = defineTool({
     name: 'glob',
-    description: 'Find local filesystem paths with a glob pattern. Native result pages are bounded to 50,000 bytes with explicit continuation; private capture roots are never enumerable.',
+    description: 'Find filesystem paths matching a glob pattern. Returns partial continuation offsets if output exceeds limits.',
     parameters: globParameters,
     output: { schema: textOutputSchema('glob'), render: (_args, value) => textBlock(value.text) },
     timeoutMs: deps.config.toolCallTimeoutMs,
     isConcurrencySafe: () => true,
-    async execute(args, _exec) {
+    async execute(args, exec) {
       validateGlobArgs(args)
-      const native = await deps.native.globText(nativeGlobArgs(args))
+      const native = await deps.native.globText(nativeGlobArgs(args), exec.signal)
       return { kind: 'glob' as const, text: native.text }
     },
     presentCall: presentSearchCall('Glob'),
@@ -363,7 +351,7 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
 
   const runProgram = defineTool({
     name: 'run_program',
-    description: 'Run one local program with literal arguments. Model text is a 50,000-byte head/tail preview; larger or non-text output is preserved at the returned raw artifact path. File effects follow the per-call DSH sandbox policy.',
+    description: 'Run a local program directly with literal arguments without a shell. Use bash if shell composition is required.',
     parameters: processParameters,
     output: { schema: processOutputSchema, render: (_args, value) => textBlock(value.text) },
     timeoutMs: deps.config.toolCallTimeoutMs,
@@ -372,7 +360,7 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
       assertNonEmpty(args.program, 'program')
       assertPositive(args.timeout_ms, 'timeout_ms')
       assertStringRecord(args.env, 'env')
-      return executeProcess(deps, processPolicy, 'run_program', args, exec)
+      return executeProcessNative(deps, processPolicy, 'run_program', args, exec)
     },
     presentCall: presentRunProgramCall,
     presentResult: presentTerminalResult,
@@ -380,7 +368,7 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
 
   const bash = defineTool({
     name: 'bash',
-    description: 'Run a fresh non-interactive POSIX Bash command. Model text is a 50,000-byte head/tail preview and complete larger or non-text output is preserved as a raw artifact. Set run_in_background for a DSH-owned job.',
+    description: 'Run a non-interactive POSIX Bash command line. Set run_in_background=true for background jobs.',
     parameters: shellParameters,
     output: { schema: bashOutputSchema, render: (_args, value) => value.kind === 'background' ? textBlock(`started background job ${value.jobId}`) : textBlock(value.text) },
     timeoutMs: deps.config.toolCallTimeoutMs,
@@ -411,7 +399,7 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
         ...commonWire,
         ...(args.timeoutMs === undefined ? {} : { timeout_ms: args.timeoutMs }),
       }
-      return executeProcess(deps, processPolicy, 'bash', wire, exec)
+      return executeProcessNative(deps, processPolicy, 'bash', wire, exec)
     },
     presentCall: presentBashCall,
     presentResult: presentTerminalResult,
@@ -419,7 +407,7 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
 
   const bashStatus = defineTool({
     name: 'bash_status',
-    description: 'Return the non-consuming DSH lifecycle snapshot for a background Bash job. Available only together with bash.',
+    description: 'Get the status snapshot for a background Bash job.',
     parameters: bashStatusParameters,
     output: {
       schema: bashStatusOutputSchema,
@@ -437,7 +425,7 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
       assertNonEmpty(args.job_id, 'job_id')
       const jobs = deps.ctx.get('jobs')
       if (jobs === undefined) {
-        throw new Error('background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs')
+        throw new HarnessError('background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs', 'AGENTSHIM_BACKGROUND_UNAVAILABLE')
       }
       const snapshot = jobs.get(JobId(args.job_id), exec.agent)
       return {
@@ -457,12 +445,12 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
 
 export function promptSections(): ReadonlyArray<{ readonly name: string; readonly order: number; readonly text: string }> {
   return [
-    { name: 'tool:read', order: 100, text: 'Continue truncated reads with the exact continuation argument returned by AgentShim, such as next_start_line passed as start_line.' },
-    { name: 'tool:glob', order: 103, text: 'Continue a truncated glob result with its next_offset rather than restarting.' },
-    { name: 'tool:grep', order: 104, text: 'Continue a truncated grep result with its next_offset rather than restarting.' },
-    { name: 'tool:run_program', order: 104.5, text: 'Prefer run_program for one executable with literal argv; use bash only for shell composition.' },
-    { name: 'tool:bash', order: 105, text: 'Each Bash call is fresh. Use run_in_background for long work, then job_output and job_kill with the returned DSH job id.' },
-    { name: 'tool:bash_status', order: 105.5, text: 'Use bash_status for a non-consuming lifecycle snapshot of a DSH Bash job; use job_output to consume output and job_kill to stop it.' },
+    { name: 'tool:read', order: 100, text: 'Continue truncated reads by passing next_start_line as start_line.' },
+    { name: 'tool:glob', order: 103, text: 'Continue truncated glob results by passing next_offset as offset.' },
+    { name: 'tool:grep', order: 104, text: 'Continue truncated grep results by passing next_offset as offset.' },
+    { name: 'tool:run_program', order: 104.5, text: 'Prefer run_program for single executables with literal arguments; use bash only when shell composition is required.' },
+    { name: 'tool:bash', order: 105, text: 'Use run_in_background=true for long-running work.' },
+    { name: 'tool:bash_status', order: 105.5, text: 'Use bash_status to check the lifecycle status of a background Bash job.' },
   ]
 }
 

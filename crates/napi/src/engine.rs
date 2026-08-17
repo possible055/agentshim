@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     io::{Read as _, Seek as _, SeekFrom},
     sync::{
         Arc,
@@ -13,11 +14,13 @@ use napi::{Error, Result, bindgen_prelude::spawn_blocking};
 use napi_derive::napi;
 use tokio_util::sync::CancellationToken;
 
-use crate::background::{EngineJobHandle, start_background_prepared};
+use crate::background::{NativeJobHandleResult, start_background_prepared};
 use crate::budget::NativeCallBudget;
 use crate::capture::ArtifactRecord;
 use crate::process::{
-    BashArgs, PreparedProcess, ProcessArgs, ProcessOutcome, clamp_capture_ceiling,
+    BashArgs, NativePreparedProcessResult, NativeProcessOutcomeResult, NativeResult,
+    NativeVoidResult, ProcessArgs, clamp_capture_ceiling, napi_failure, prepared_result,
+    process_outcome_result,
 };
 
 /// One environment entry for the Engine's child process configuration.
@@ -59,6 +62,19 @@ pub struct ToolText {
     pub text: String,
     pub complete: bool,
     pub images: Vec<NativeImage>,
+    pub continuation: Option<NativeContinuation>,
+}
+
+#[napi(object)]
+pub struct NativeContinuation {
+    pub kind: String,
+    pub value: String,
+}
+
+#[napi(object)]
+pub struct NativeToolTextResult {
+    pub value: Option<ToolText>,
+    pub failure: Option<crate::process::NativeFailure>,
 }
 
 #[napi(object)]
@@ -115,18 +131,9 @@ pub(crate) struct EngineState {
     pub(crate) artifacts: Arc<std::sync::Mutex<Vec<ArtifactRecord>>>,
     pub(crate) prepared: crate::process::PreparedHandles,
     pub(crate) active_calls: Arc<AtomicUsize>,
+    pub(crate) calls: std::sync::Mutex<HashMap<String, CancellationToken>>,
     pub(crate) backgrounds:
         std::sync::Mutex<Vec<std::sync::Weak<crate::background::BackgroundJob>>>,
-}
-
-pub(crate) struct ActiveCall {
-    count: Arc<AtomicUsize>,
-}
-
-impl Drop for ActiveCall {
-    fn drop(&mut self) {
-        self.count.fetch_sub(1, Ordering::SeqCst);
-    }
 }
 
 #[napi]
@@ -251,57 +258,139 @@ impl Engine {
                 artifacts: Arc::new(std::sync::Mutex::new(Vec::new())),
                 prepared: crate::process::PreparedHandles::new(),
                 active_calls: Arc::new(AtomicUsize::new(0)),
+                calls: std::sync::Mutex::new(HashMap::new()),
                 backgrounds: std::sync::Mutex::new(Vec::new()),
             }))),
         })
     }
 
+    #[napi]
+    pub fn begin_call(&self, call_id: String) -> Result<NativeVoidResult> {
+        let state = match self.state() {
+            Ok(state) => state,
+            Err(error) => {
+                return Ok(NativeVoidResult {
+                    value: false,
+                    failure: Some(napi_failure("call", error)),
+                });
+            }
+        };
+        Ok(void_result(state.begin_call(&call_id)))
+    }
+
+    #[napi]
+    pub fn cancel_call(&self, call_id: String) -> Result<NativeVoidResult> {
+        let state = match self.state() {
+            Ok(state) => state,
+            Err(error) => {
+                return Ok(NativeVoidResult {
+                    value: false,
+                    failure: Some(napi_failure("call", error)),
+                });
+            }
+        };
+        Ok(void_result(state.cancel_call(&call_id)))
+    }
+
+    #[napi]
+    pub fn release_call(&self, call_id: String) -> Result<NativeVoidResult> {
+        let state = match self.state() {
+            Ok(state) => state,
+            Err(error) => {
+                return Ok(NativeVoidResult {
+                    value: false,
+                    failure: Some(napi_failure("call", error)),
+                });
+            }
+        };
+        Ok(void_result(state.release_call(&call_id)))
+    }
+
     /// Resolve one `run_program` launch to its final argv without spawning, so
     /// the host can wrap that argv in a sandbox before spawning.
     #[napi]
-    pub fn prepare_run_program(&self, args: ProcessArgs) -> Result<PreparedProcess> {
-        let state = self.state()?;
-        state.prepare_run_program(args)
+    pub fn prepare_run_program(
+        &self,
+        call_id: String,
+        args: ProcessArgs,
+    ) -> Result<NativePreparedProcessResult> {
+        let state = match self.state() {
+            Ok(state) => state,
+            Err(error) => {
+                return Ok(NativePreparedProcessResult {
+                    value: None,
+                    failure: Some(napi_failure("prepare", error)),
+                });
+            }
+        };
+        let cancellation = match state.call_token(&call_id) {
+            Ok(token) => token,
+            Err(failure) => {
+                return Ok(NativePreparedProcessResult {
+                    value: None,
+                    failure: Some(failure),
+                });
+            }
+        };
+        Ok(prepared_result(
+            state.prepare_run_program(args, &cancellation),
+        ))
     }
 
     /// Resolve one foreground bash launch to its final argv without spawning.
     #[napi]
-    pub fn prepare_bash(&self, args: BashArgs) -> Result<PreparedProcess> {
-        let state = self.state()?;
-        state.prepare_bash(args)
+    pub fn prepare_bash(
+        &self,
+        call_id: String,
+        args: BashArgs,
+    ) -> Result<NativePreparedProcessResult> {
+        let state = match self.state() {
+            Ok(state) => state,
+            Err(error) => {
+                return Ok(NativePreparedProcessResult {
+                    value: None,
+                    failure: Some(napi_failure("prepare", error)),
+                });
+            }
+        };
+        let cancellation = match state.call_token(&call_id) {
+            Ok(token) => token,
+            Err(failure) => {
+                return Ok(NativePreparedProcessResult {
+                    value: None,
+                    failure: Some(failure),
+                });
+            }
+        };
+        Ok(prepared_result(state.prepare_bash(args, &cancellation)))
     }
 
     /// Spawn one prepared launch. `wrapped_argv` replaces the prepared argv
     /// wholesale when a sandbox wrapped it; `None` runs the resolved argv as-is.
     /// `attribution` classifies the settled outcome against the sandbox
     /// backend's denial dialect and runner-failure rules.
-    #[napi(ts_return_type = "Promise<ProcessOutcome>")]
+    #[napi(ts_return_type = "Promise<NativeProcessOutcomeResult>")]
     pub async fn spawn_prepared(
         &self,
+        call_id: String,
         handle: String,
         wrapped_argv: Option<Vec<String>>,
         attribution: Option<crate::classify::SandboxAttribution>,
-    ) -> Result<ProcessOutcome> {
-        let state = self.state()?;
-        state
-            .spawn_prepared(handle, wrapped_argv.as_deref(), attribution)
-            .await
-    }
-
-    /// One foreground `run_program` with a bounded model preview and durable
-    /// capture artifacts; the model never receives raw capture bytes.
-    #[napi(ts_return_type = "Promise<ProcessOutcome>")]
-    pub async fn run_program_text(&self, args: ProcessArgs) -> Result<ProcessOutcome> {
-        let state = self.state()?;
-        state.run_program_outcome(args).await
-    }
-
-    /// One foreground bash command with the same preview, artifact, and
-    /// termination guarantees as `run_program_text`.
-    #[napi(ts_return_type = "Promise<ProcessOutcome>")]
-    pub async fn bash_text(&self, args: BashArgs) -> Result<ProcessOutcome> {
-        let state = self.state()?;
-        state.bash_outcome(args).await
+    ) -> Result<NativeProcessOutcomeResult> {
+        let state = match self.state() {
+            Ok(state) => state,
+            Err(error) => {
+                return Ok(NativeProcessOutcomeResult {
+                    value: None,
+                    failure: Some(napi_failure("spawn", error)),
+                });
+            }
+        };
+        Ok(process_outcome_result(
+            state
+                .spawn_prepared(call_id, handle, wrapped_argv.as_deref(), attribution)
+                .await,
+        ))
     }
 
     fn pdf_mode(value: Option<&str>) -> Result<Option<agentshim_core::tools::read::PdfMode>> {
@@ -319,21 +408,35 @@ impl Engine {
 
     /// One real core read, computed on the blocking pool against this Engine's
     /// repository capability and page budget.
-    #[napi(ts_return_type = "Promise<ToolText>")]
-    pub async fn read_text(&self, args: ReadArgs) -> Result<ToolText> {
-        let state = self.state()?;
-        let _active = state.enter_call()?;
-        let cancellation = state.shutdown.clone();
+    #[napi(ts_return_type = "Promise<NativeToolTextResult>")]
+    pub async fn read_text(&self, call_id: String, args: ReadArgs) -> Result<NativeToolTextResult> {
+        match self.read_text_inner(call_id, args).await {
+            Ok(value) => Ok(NativeToolTextResult {
+                value: Some(value),
+                failure: None,
+            }),
+            Err(error) => Ok(NativeToolTextResult {
+                value: None,
+                failure: Some(error),
+            }),
+        }
+    }
+
+    async fn read_text_inner(
+        &self,
+        call_id: String,
+        args: ReadArgs,
+    ) -> std::result::Result<ToolText, crate::process::NativeFailure> {
+        let state = self.state().map_err(|error| napi_failure("read", error))?;
+        let cancellation = state.call_token(&call_id)?;
         let artifact = state.artifact(&args.path);
         if artifact.is_none() && state.is_capture_path(&args.path) {
-            return Err(Error::new(
-                napi::Status::InvalidArg,
+            return Err(crate::process::NativeFailure::invalid(
                 "capture files require an exact artifact capability from this Engine",
             ));
         }
         if args.artifact_offset.is_some() && artifact.is_none() {
-            return Err(Error::new(
-                napi::Status::InvalidArg,
+            return Err(crate::process::NativeFailure::invalid(
                 "artifactOffset applies only to a published native artifact",
             ));
         }
@@ -347,7 +450,14 @@ impl Engine {
                 state
                     .access
                     .with_exact_grant(&record.path)
-                    .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))?,
+                    .map_err(|error| {
+                        crate::process::NativeFailure::new(
+                            "AGENTSHIM_READ_PATH_FAILED",
+                            error.to_string(),
+                            false,
+                            Some(serde_json::json!({ "kind": "path" })),
+                        )
+                    })?,
             )
         } else {
             Arc::clone(&state.access)
@@ -357,7 +467,8 @@ impl Engine {
             start_line: args.start_line.map(|line| line as usize),
             line_count: args.line_count.map(|count| count as usize),
             encoding: args.encoding,
-            pdf_mode: Self::pdf_mode(args.pdf_mode.as_deref())?,
+            pdf_mode: Self::pdf_mode(args.pdf_mode.as_deref())
+                .map_err(|error| napi_failure("read", error))?,
             pages: args.pages,
             pdf_cursor: args.pdf_cursor,
         };
@@ -369,7 +480,7 @@ impl Engine {
                 &cancellation,
                 read_tool::PdfMemoryBudgets::from_config(&state.resources.config()),
             )
-            .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))?;
+            .map_err(read_failure)?;
             let outcome = read_tool::execute_prepared_with_budget(
                 &access,
                 &request,
@@ -377,17 +488,24 @@ impl Engine {
                 &cancellation,
                 &state.budget,
             )
-            .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))?;
+            .map_err(read_failure)?;
             match outcome {
                 read_tool::Attempt::Stable(output) => Ok(output),
-                read_tool::Attempt::Changed => Err(Error::new(
-                    napi::Status::GenericFailure,
-                    "file changed during read",
+                read_tool::Attempt::Changed => Err(read_failure(
+                    agentshim_core::tools::read::ReadError::Changed,
                 )),
             }
         })
         .await
-        .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))??;
+        .map_err(|error| {
+            crate::process::NativeFailure::new(
+                "AGENTSHIM_NATIVE_THREAD_FAILED",
+                error.to_string(),
+                true,
+                Some(serde_json::json!({ "kind": "native_thread", "operation": "read" })),
+            )
+        })??;
+        let continuation = continuation_from_text(&output.text);
         Ok(ToolText {
             text: output.text,
             complete: true,
@@ -399,16 +517,37 @@ impl Engine {
                     mime_type: image.mime_type.to_owned(),
                 })
                 .collect(),
+            continuation,
         })
     }
 
     /// One real core grep against this Engine's repository and page budget.
-    #[napi(ts_return_type = "Promise<ToolText>")]
-    pub async fn grep_text(&self, args: GrepArgs) -> Result<ToolText> {
+    #[napi(ts_return_type = "Promise<NativeToolTextResult>")]
+    pub async fn grep_text(&self, call_id: String, args: GrepArgs) -> Result<NativeToolTextResult> {
+        match self.grep_text_inner(call_id, args).await {
+            Ok(value) => Ok(NativeToolTextResult {
+                value: Some(value),
+                failure: None,
+            }),
+            Err(error) => Ok(NativeToolTextResult {
+                value: None,
+                failure: Some(error),
+            }),
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "native grep keeps reservation and blocking execution in one call"
+    )]
+    async fn grep_text_inner(
+        &self,
+        call_id: String,
+        args: GrepArgs,
+    ) -> std::result::Result<ToolText, crate::process::NativeFailure> {
         use agentshim_core::tools::grep;
-        let state = self.state()?;
-        let _active = state.enter_call()?;
-        let cancellation = state.shutdown.clone();
+        let state = self.state().map_err(|error| napi_failure("grep", error))?;
+        let cancellation = state.call_token(&call_id)?;
         let artifact = args.path.as_deref().and_then(|path| state.artifact(path));
         if artifact.is_none()
             && args
@@ -416,21 +555,18 @@ impl Engine {
                 .as_deref()
                 .is_some_and(|path| state.is_capture_path(path))
         {
-            return Err(Error::new(
-                napi::Status::InvalidArg,
+            return Err(crate::process::NativeFailure::invalid(
                 "capture files require an exact artifact capability from this Engine",
             ));
         }
         if let Some(record) = artifact.as_ref() {
             if args.glob.is_some() {
-                return Err(Error::new(
-                    napi::Status::InvalidArg,
+                return Err(crate::process::NativeFailure::invalid(
                     "artifact grep requires one exact file path and no glob",
                 ));
             }
             if !record.valid_text {
-                return Err(Error::new(
-                    napi::Status::InvalidArg,
+                return Err(crate::process::NativeFailure::invalid(
                     "binary artifact cannot be searched as text; retry read with artifactOffset",
                 ));
             }
@@ -440,13 +576,22 @@ impl Engine {
                 state
                     .access
                     .with_exact_grant(&record.path)
-                    .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))?,
+                    .map_err(|error| {
+                        crate::process::NativeFailure::new(
+                            "AGENTSHIM_GREP_PATH_FAILED",
+                            error.to_string(),
+                            false,
+                            Some(serde_json::json!({ "kind": "path" })),
+                        )
+                    })?,
             )
         } else {
             Arc::clone(&state.access)
         };
-        let mode = parse_grep_mode(args.mode.as_deref())?;
-        let case = parse_grep_case(args.case.as_deref())?;
+        let mode =
+            parse_grep_mode(args.mode.as_deref()).map_err(|error| napi_failure("grep", error))?;
+        let case =
+            parse_grep_case(args.case.as_deref()).map_err(|error| napi_failure("grep", error))?;
         let request = grep::GrepRequest {
             pattern: args.pattern,
             path: args.path,
@@ -467,10 +612,16 @@ impl Engine {
             .reserve_memory(charge, &cancellation)
             .await
             .map_err(|_| {
-                Error::new(
-                    napi::Status::GenericFailure,
-                    "grep memory reservation failed",
-                )
+                if cancellation.is_cancelled() {
+                    crate::process::NativeFailure::cancelled("grep")
+                } else {
+                    crate::process::NativeFailure::new(
+                        "AGENTSHIM_RESOURCE_BUSY",
+                        "grep memory reservation failed",
+                        true,
+                        Some(serde_json::json!({ "kind": "resource", "resource": "grep_memory" })),
+                    )
+                }
             })?;
         let reservation = agentshim_core::runtime::MemoryReservation::from_initial(
             state.resources.clone(),
@@ -486,32 +637,56 @@ impl Engine {
                 reservation,
                 &state.budget,
             )
-            .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))
+            .map_err(grep_failure)
             .map(|output| output.text)
         })
         .await
-        .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))??;
+        .map_err(|error| {
+            crate::process::NativeFailure::new(
+                "AGENTSHIM_NATIVE_THREAD_FAILED",
+                error.to_string(),
+                true,
+                Some(serde_json::json!({ "kind": "native_thread", "operation": "grep" })),
+            )
+        })??;
+        let continuation = continuation_from_text(&text);
         Ok(ToolText {
             text,
             complete: true,
             images: Vec::new(),
+            continuation,
         })
     }
 
     /// One real core glob against this Engine's repository and page budget.
-    #[napi(ts_return_type = "Promise<ToolText>")]
-    pub async fn glob_text(&self, args: GlobArgs) -> Result<ToolText> {
+    #[napi(ts_return_type = "Promise<NativeToolTextResult>")]
+    pub async fn glob_text(&self, call_id: String, args: GlobArgs) -> Result<NativeToolTextResult> {
+        match self.glob_text_inner(call_id, args).await {
+            Ok(value) => Ok(NativeToolTextResult {
+                value: Some(value),
+                failure: None,
+            }),
+            Err(error) => Ok(NativeToolTextResult {
+                value: None,
+                failure: Some(error),
+            }),
+        }
+    }
+
+    async fn glob_text_inner(
+        &self,
+        call_id: String,
+        args: GlobArgs,
+    ) -> std::result::Result<ToolText, crate::process::NativeFailure> {
         use agentshim_core::tools::glob;
-        let state = self.state()?;
-        let _active = state.enter_call()?;
-        let cancellation = state.shutdown.clone();
+        let state = self.state().map_err(|error| napi_failure("glob", error))?;
+        let cancellation = state.call_token(&call_id)?;
         if args
             .path
             .as_deref()
             .is_some_and(|path| state.is_capture_path(path))
         {
-            return Err(Error::new(
-                napi::Status::InvalidArg,
+            return Err(crate::process::NativeFailure::invalid(
                 "glob cannot enumerate the capture root",
             ));
         }
@@ -521,10 +696,9 @@ impl Engine {
             Some("directory") => Some(agentshim_core::tools::glob::GlobEntryType::Directory),
             Some("any") => Some(agentshim_core::tools::glob::GlobEntryType::Any),
             Some(other) => {
-                return Err(Error::new(
-                    napi::Status::InvalidArg,
-                    format!("type must be file, directory, or any, got {other}"),
-                ));
+                return Err(crate::process::NativeFailure::invalid(format!(
+                    "type must be file, directory, or any, got {other}"
+                )));
             }
         };
         let request = glob::GlobRequest {
@@ -541,10 +715,16 @@ impl Engine {
             .reserve_memory(charge, &cancellation)
             .await
             .map_err(|_| {
-                Error::new(
-                    napi::Status::GenericFailure,
-                    "glob memory reservation failed",
-                )
+                if cancellation.is_cancelled() {
+                    crate::process::NativeFailure::cancelled("glob")
+                } else {
+                    crate::process::NativeFailure::new(
+                        "AGENTSHIM_RESOURCE_BUSY",
+                        "glob memory reservation failed",
+                        true,
+                        Some(serde_json::json!({ "kind": "resource", "resource": "glob_memory" })),
+                    )
+                }
             })?;
         let reservation = agentshim_core::runtime::MemoryReservation::from_initial(
             state.resources.clone(),
@@ -562,15 +742,24 @@ impl Engine {
                 reservation,
                 &state.budget,
             )
-            .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))
+            .map_err(glob_failure)
             .map(|output| filter_capture_glob_lines(&output.text, &repository_root, &capture_root))
         })
         .await
-        .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))??;
+        .map_err(|error| {
+            crate::process::NativeFailure::new(
+                "AGENTSHIM_NATIVE_THREAD_FAILED",
+                error.to_string(),
+                true,
+                Some(serde_json::json!({ "kind": "native_thread", "operation": "glob" })),
+            )
+        })??;
+        let continuation = continuation_from_text(&text);
         Ok(ToolText {
             text,
             complete: true,
             images: Vec::new(),
+            continuation,
         })
     }
 
@@ -582,17 +771,48 @@ impl Engine {
     #[napi]
     pub fn start_background_prepared(
         &self,
+        call_id: String,
         handle: String,
         wrapped_argv: Option<Vec<String>>,
-    ) -> Result<EngineJobHandle> {
-        let state = self.state()?;
-        start_background_prepared(&state, handle, wrapped_argv.as_deref())
+    ) -> Result<NativeJobHandleResult> {
+        let state = match self.state() {
+            Ok(state) => state,
+            Err(error) => {
+                return Ok(NativeJobHandleResult {
+                    value: None,
+                    failure: Some(napi_failure("background", error)),
+                });
+            }
+        };
+        match start_background_prepared(&state, call_id, handle, wrapped_argv.as_deref()) {
+            Ok(value) => Ok(NativeJobHandleResult {
+                value: Some(value),
+                failure: None,
+            }),
+            Err(failure) => Ok(NativeJobHandleResult {
+                value: None,
+                failure: Some(failure),
+            }),
+        }
     }
 
     /// Stop admission, cancel foreground and background work, and await settlement.
     /// Async, idempotent, and safe to call from any Engine state.
-    #[napi(ts_return_type = "Promise<void>")]
-    pub async fn close(&self) -> Result<()> {
+    #[napi(ts_return_type = "Promise<NativeVoidResult>")]
+    pub async fn close(&self) -> Result<NativeVoidResult> {
+        match self.close_inner().await {
+            Ok(()) => Ok(NativeVoidResult {
+                value: true,
+                failure: None,
+            }),
+            Err(error) => Ok(NativeVoidResult {
+                value: false,
+                failure: Some(napi_failure("close", error)),
+            }),
+        }
+    }
+
+    async fn close_inner(&self) -> Result<()> {
         let mut settled = true;
         if let Ok(state) = self.state() {
             state.shutdown.cancel();
@@ -648,18 +868,77 @@ impl Engine {
 }
 
 impl EngineState {
-    pub(crate) fn enter_call(&self) -> Result<ActiveCall> {
-        if self.shutdown.is_cancelled() {
-            return Err(Error::new(napi::Status::GenericFailure, "engine is closed"));
+    pub(crate) fn begin_call(&self, call_id: &str) -> NativeResult<()> {
+        if call_id.is_empty() {
+            return NativeResult::failure(crate::process::NativeFailure::invalid(
+                "native call id must not be empty",
+            ));
         }
+        if self.shutdown.is_cancelled() {
+            return NativeResult::failure(crate::process::NativeFailure::engine_closed());
+        }
+        let mut calls = self
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if calls.contains_key(call_id) {
+            return NativeResult::failure(crate::process::NativeFailure::new(
+                "AGENTSHIM_CALL_ALREADY_ACTIVE",
+                "native call id is already active",
+                false,
+                Some(serde_json::json!({ "callId": call_id })),
+            ));
+        }
+        calls.insert(call_id.to_owned(), self.shutdown.child_token());
         self.active_calls.fetch_add(1, Ordering::SeqCst);
-        if self.shutdown.is_cancelled() {
-            self.active_calls.fetch_sub(1, Ordering::SeqCst);
-            return Err(Error::new(napi::Status::GenericFailure, "engine is closed"));
+        NativeResult::success(())
+    }
+
+    pub(crate) fn call_token(
+        &self,
+        call_id: &str,
+    ) -> std::result::Result<CancellationToken, crate::process::NativeFailure> {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(call_id)
+            .cloned()
+            .ok_or_else(|| {
+                crate::process::NativeFailure::new(
+                    "AGENTSHIM_CALL_INVALID",
+                    "native call id is not active",
+                    false,
+                    Some(serde_json::json!({ "callId": call_id })),
+                )
+            })
+    }
+
+    pub(crate) fn cancel_call(&self, call_id: &str) -> NativeResult<bool> {
+        let token = self
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(call_id)
+            .cloned();
+        if let Some(token) = token {
+            token.cancel();
+            NativeResult::success(true)
+        } else {
+            NativeResult::success(false)
         }
-        Ok(ActiveCall {
-            count: Arc::clone(&self.active_calls),
-        })
+    }
+
+    pub(crate) fn release_call(&self, call_id: &str) -> NativeResult<bool> {
+        let removed = self
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(call_id)
+            .is_some();
+        if removed {
+            self.active_calls.fetch_sub(1, Ordering::SeqCst);
+        }
+        NativeResult::success(removed)
     }
 
     pub(crate) fn artifact(&self, requested: &str) -> Option<ArtifactRecord> {
@@ -684,27 +963,37 @@ impl EngineState {
         std::fs::canonicalize(absolute).is_ok_and(|path| path.starts_with(&self.capture_root))
     }
 
-    fn read_artifact_page(&self, record: &ArtifactRecord, offset: Option<f64>) -> Result<ToolText> {
+    fn read_artifact_page(
+        &self,
+        record: &ArtifactRecord,
+        offset: Option<f64>,
+    ) -> std::result::Result<ToolText, crate::process::NativeFailure> {
         let offset = offset.unwrap_or(0.0);
         if !offset.is_finite() || offset < 0.0 || offset.fract() != 0.0 {
-            return Err(Error::new(
-                napi::Status::InvalidArg,
+            return Err(crate::process::NativeFailure::invalid(
                 "artifactOffset must be a non-negative integer",
             ));
         }
         let offset = offset as u64;
         if offset > record.bytes {
-            return Err(Error::new(
-                napi::Status::InvalidArg,
+            return Err(crate::process::NativeFailure::invalid(
                 "artifactOffset is beyond the artifact snapshot",
             ));
         }
-        let metadata = std::fs::symlink_metadata(&record.path)
-            .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))?;
+        let metadata = std::fs::symlink_metadata(&record.path).map_err(|error| {
+            crate::process::NativeFailure::new(
+                "AGENTSHIM_READ_IO_FAILED",
+                error.to_string(),
+                true,
+                Some(serde_json::json!({ "kind": "io", "operation": "artifact_metadata" })),
+            )
+        })?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(Error::new(
-                napi::Status::GenericFailure,
+            return Err(crate::process::NativeFailure::new(
+                "AGENTSHIM_READ_TARGET_INVALID",
                 "published artifact is no longer a regular file",
+                false,
+                Some(serde_json::json!({ "kind": "artifact" })),
             ));
         }
         let wrapper_bytes = 512_usize;
@@ -712,13 +1001,31 @@ impl EngineState {
         let raw_budget = encoded_budget / 4 * 3;
         let remaining = record.bytes.saturating_sub(offset);
         let to_read = remaining.min(raw_budget as u64) as usize;
-        let mut file = std::fs::File::open(&record.path)
-            .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))?;
-        file.seek(SeekFrom::Start(offset))
-            .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))?;
+        let mut file = std::fs::File::open(&record.path).map_err(|error| {
+            crate::process::NativeFailure::new(
+                "AGENTSHIM_READ_IO_FAILED",
+                error.to_string(),
+                true,
+                Some(serde_json::json!({ "kind": "io", "operation": "artifact_open" })),
+            )
+        })?;
+        file.seek(SeekFrom::Start(offset)).map_err(|error| {
+            crate::process::NativeFailure::new(
+                "AGENTSHIM_READ_IO_FAILED",
+                error.to_string(),
+                true,
+                Some(serde_json::json!({ "kind": "io", "operation": "artifact_seek" })),
+            )
+        })?;
         let mut bytes = vec![0_u8; to_read];
-        file.read_exact(&mut bytes)
-            .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))?;
+        file.read_exact(&mut bytes).map_err(|error| {
+            crate::process::NativeFailure::new(
+                "AGENTSHIM_READ_IO_FAILED",
+                error.to_string(),
+                true,
+                Some(serde_json::json!({ "kind": "io", "operation": "artifact_read" })),
+            )
+        })?;
         let next = offset.saturating_add(to_read as u64);
         let mut text = format!(
             "Artifact: {}\nByte range: {offset}..{next} of {}\nEncoding: base64\nOutput:\n{}",
@@ -731,10 +1038,12 @@ impl EngineState {
             write!(text, "\nPartial: next_artifact_offset={next}.")
                 .expect("writing to a String cannot fail");
         }
+        let continuation = continuation_from_text(&text);
         Ok(ToolText {
             text,
             complete: next == record.bytes,
             images: Vec::new(),
+            continuation,
         })
     }
 
@@ -751,6 +1060,177 @@ impl EngineState {
             .iter()
             .filter_map(std::sync::Weak::upgrade)
             .collect()
+    }
+}
+
+fn void_result<T>(result: NativeResult<T>) -> NativeVoidResult {
+    let failure = result.failure;
+    NativeVoidResult {
+        value: failure.is_none(),
+        failure,
+    }
+}
+
+fn read_failure(error: agentshim_core::tools::read::ReadError) -> crate::process::NativeFailure {
+    use agentshim_core::tools::read::ReadError;
+
+    match error {
+        ReadError::Validation(message) => crate::process::NativeFailure::new(
+            "INVALID_ARGS",
+            message,
+            false,
+            Some(serde_json::json!({ "kind": "validation" })),
+        ),
+        ReadError::ResourceLimit {
+            message,
+            resource,
+            limit_bytes,
+            observed_bytes,
+        } => crate::process::NativeFailure::new(
+            "AGENTSHIM_READ_RESOURCE_LIMIT",
+            message,
+            false,
+            Some(serde_json::json!({
+                "kind": "resource",
+                "resource": resource,
+                "limitBytes": limit_bytes,
+                "observedBytes": observed_bytes,
+            })),
+        ),
+        ReadError::Cancelled => crate::process::NativeFailure::cancelled("read"),
+        ReadError::Changed => crate::process::NativeFailure::new(
+            "AGENTSHIM_FILE_CHANGED",
+            "file changed during read",
+            true,
+            Some(serde_json::json!({ "kind": "consistency" })),
+        ),
+        error @ (ReadError::Directory | ReadError::NotRegular | ReadError::Binary) => {
+            crate::process::NativeFailure::new(
+                "AGENTSHIM_READ_TARGET_INVALID",
+                error.to_string(),
+                false,
+                Some(serde_json::json!({ "kind": "target" })),
+            )
+        }
+        ReadError::PdfImageRequired { pages, cursor } => crate::process::NativeFailure::new(
+            "AGENTSHIM_PDF_IMAGE_REQUIRED",
+            "selected PDF pages require image mode",
+            false,
+            Some(serde_json::json!({ "kind": "pdf", "pages": pages, "cursor": cursor })),
+        ),
+        ReadError::Path(error) => crate::process::NativeFailure::new(
+            "AGENTSHIM_READ_PATH_FAILED",
+            error.to_string(),
+            false,
+            Some(serde_json::json!({ "kind": "path" })),
+        ),
+        ReadError::Io(error) => crate::process::NativeFailure::new(
+            "AGENTSHIM_READ_IO_FAILED",
+            error.to_string(),
+            true,
+            Some(serde_json::json!({ "kind": "io", "ioKind": format!("{:?}", error.kind()) })),
+        ),
+        other => crate::process::NativeFailure::new(
+            "AGENTSHIM_READ_FAILED",
+            other.to_string(),
+            true,
+            Some(serde_json::json!({ "kind": "read" })),
+        ),
+    }
+}
+
+fn grep_failure(error: agentshim_core::tools::grep::GrepError) -> crate::process::NativeFailure {
+    use agentshim_core::tools::grep::GrepError;
+
+    match error {
+        GrepError::Validation(message) => crate::process::NativeFailure::new(
+            "INVALID_ARGS",
+            message,
+            false,
+            Some(serde_json::json!({ "kind": "validation" })),
+        ),
+        GrepError::Regex(message) | GrepError::Glob(message) => crate::process::NativeFailure::new(
+            "AGENTSHIM_GREP_PATTERN_INVALID",
+            message,
+            false,
+            Some(serde_json::json!({ "kind": "pattern" })),
+        ),
+        error @ GrepError::CandidateMemory => crate::process::NativeFailure::new(
+            "AGENTSHIM_GREP_RESOURCE_LIMIT",
+            error.to_string(),
+            false,
+            Some(serde_json::json!({ "kind": "resource", "resource": "candidate_memory" })),
+        ),
+        error @ GrepError::MemoryBusy => crate::process::NativeFailure::new(
+            "AGENTSHIM_RESOURCE_BUSY",
+            error.to_string(),
+            true,
+            Some(serde_json::json!({ "kind": "resource", "resource": "grep_memory" })),
+        ),
+        GrepError::Cancelled => crate::process::NativeFailure::cancelled("grep"),
+        GrepError::Path(error) => crate::process::NativeFailure::new(
+            "AGENTSHIM_GREP_PATH_FAILED",
+            error.to_string(),
+            false,
+            Some(serde_json::json!({ "kind": "path" })),
+        ),
+        GrepError::Io(error) => crate::process::NativeFailure::new(
+            "AGENTSHIM_GREP_IO_FAILED",
+            error.to_string(),
+            true,
+            Some(serde_json::json!({ "kind": "io", "ioKind": format!("{:?}", error.kind()) })),
+        ),
+        other => crate::process::NativeFailure::new(
+            "AGENTSHIM_GREP_FAILED",
+            other.to_string(),
+            true,
+            Some(serde_json::json!({ "kind": "grep" })),
+        ),
+    }
+}
+
+fn glob_failure(error: agentshim_core::tools::glob::GlobError) -> crate::process::NativeFailure {
+    use agentshim_core::tools::glob::GlobError;
+
+    match error {
+        GlobError::Validation(message) | GlobError::Pattern(message) => {
+            crate::process::NativeFailure::new(
+                "INVALID_ARGS",
+                message,
+                false,
+                Some(serde_json::json!({ "kind": "pattern" })),
+            )
+        }
+        error @ GlobError::Memory => crate::process::NativeFailure::new(
+            "AGENTSHIM_GLOB_RESOURCE_LIMIT",
+            error.to_string(),
+            false,
+            Some(serde_json::json!({ "kind": "resource", "resource": "glob_memory" })),
+        ),
+        error @ GlobError::MemoryBusy => crate::process::NativeFailure::new(
+            "AGENTSHIM_RESOURCE_BUSY",
+            error.to_string(),
+            true,
+            Some(serde_json::json!({ "kind": "resource", "resource": "glob_memory" })),
+        ),
+        GlobError::Path(error) => crate::process::NativeFailure::new(
+            "AGENTSHIM_GLOB_PATH_FAILED",
+            error.to_string(),
+            false,
+            Some(serde_json::json!({ "kind": "path" })),
+        ),
+        GlobError::Io(error) => crate::process::NativeFailure::new(
+            "AGENTSHIM_GLOB_IO_FAILED",
+            error.to_string(),
+            true,
+            Some(serde_json::json!({ "kind": "io", "ioKind": format!("{:?}", error.kind()) })),
+        ),
+        other => crate::process::NativeFailure::new(
+            "AGENTSHIM_GLOB_FAILED",
+            other.to_string(),
+            true,
+            Some(serde_json::json!({ "kind": "glob" })),
+        ),
     }
 }
 
@@ -807,4 +1287,32 @@ fn filter_capture_glob_lines(
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn continuation_from_text(text: &str) -> Option<NativeContinuation> {
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("Partial:") || line.starts_with("Retry:"))?;
+    for (kind, marker) in [
+        ("next_start_line", "next_start_line="),
+        ("next_offset", "next_offset="),
+        ("next_artifact_offset", "next_artifact_offset="),
+    ] {
+        if let Some(value) = line
+            .strip_prefix("Partial:")
+            .and_then(|line| line.trim_start().strip_prefix(marker))
+        {
+            return Some(NativeContinuation {
+                kind: kind.to_owned(),
+                value: value.split('.').next()?.to_owned(),
+            });
+        }
+    }
+    let marker = "pdf_cursor=\"";
+    let start = line.find(marker).map(|index| index + marker.len())?;
+    let end = line[start..].find('"')?;
+    Some(NativeContinuation {
+        kind: "pdf_cursor".to_owned(),
+        value: line[start..start + end].to_owned(),
+    })
 }

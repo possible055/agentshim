@@ -103,7 +103,17 @@ describe('native addon loading', () => {
     expect(prepared.argv.length).toBeGreaterThan(1)
     const outcome = await engine.spawnPrepared(prepared.handle)
     expect(outcome.text).toContain('two-stage-native')
+    expect(outcome.stdout.text).toContain('two-stage-native')
+    expect(outcome.stdout.totalBytes).toBeGreaterThan(0)
     expect(outcome.failure).toBeUndefined()
+
+    const bashPrepared = engine.prepareBash({ command: 'printf "bash-native"' })
+    const bashOutcome = await engine.spawnPrepared(bashPrepared.handle)
+    expect(bashOutcome.stdout.text).toContain('bash-native')
+    expect(bashOutcome.stderr.text).toContain('bash-native')
+    expect(bashOutcome.stdout.totalBytes).toBeGreaterThan(0)
+    expect(bashOutcome.stderr.totalBytes).toBeGreaterThan(0)
+
     await expect(engine.spawnPrepared(prepared.handle)).rejects.toThrow(/unknown|already/i)
 
     await engine.close()
@@ -307,5 +317,45 @@ describe('native addon loading', () => {
 
     await handle.dispose()
     await engine.close()
+  })
+
+  it.skipIf(stagedAddon === undefined)('maps structured native failures and relays foreground cancellation', async () => {
+    process.env.AGENTSHIM_DSH_NATIVE_DLL = stagedAddon!
+    const result = loadNativeAddon()
+    if (result.engine === undefined) throw new Error('unreachable')
+    const root = await mkdtemp(join(tmpdir(), 'agentshim-native-errors-'))
+    const engine = new result.engine.Engine(root, { env: nativeEngineEnv({}) })
+
+    await expect(engine.readText({ path: '../missing.txt' })).rejects.toMatchObject({
+      code: 'AGENTSHIM_READ_PATH_FAILED',
+      details: { kind: 'path' },
+    })
+
+    const controller = new AbortController()
+    const prepared = engine.prepareRunProgram({
+      program: process.execPath,
+      args: ['-e', 'setInterval(() => process.stdout.write("x"), 10)'],
+    }, controller.signal)
+    controller.abort()
+    await expect(engine.spawnPrepared(prepared.handle)).rejects.toMatchObject({
+      code: 'ABORTED',
+      name: 'AbortError',
+    })
+
+    const timeoutPrepared = engine.prepareRunProgram({
+      program: process.execPath,
+      args: ['-e', 'setTimeout(() => {}, 5_000)'],
+      timeoutMs: 100,
+    })
+    const timeoutOutcome = await engine.spawnPrepared(timeoutPrepared.handle)
+    expect(timeoutOutcome.failure).toMatchObject({
+      code: 'AGENTSHIM_TIMEOUT',
+      details: { kind: 'timeout' },
+    })
+
+    await engine.close()
+    await expect(engine.readText({ path: 'anything.txt' })).rejects.toMatchObject({
+      code: 'AGENTSHIM_ENGINE_CLOSED',
+    })
   })
 })

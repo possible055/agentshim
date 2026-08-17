@@ -28,7 +28,7 @@ use crate::tools::{
 
 use super::{
     response::{
-        PdfAdmission, blocking_response_for_profile, cancellation_class, classified_tool_error,
+        PdfAdmission, blocking_response, cancellation_class, classified_tool_error,
         diagnostic_tool_error, duration_ms, parse_request, pdf_busy, pdf_timeout, queue_timeout,
         relayed_cancellation, requests_detach, resource_busy, resource_busy_with_message,
     },
@@ -282,14 +282,13 @@ impl AgentShim {
         // data is copied again into content blocks and again by the JSON serialiser, and
         // that is the single largest allocation on the whole path. Releasing the
         // reservation before it happens would leave the biggest number off the books.
-        let response = blocking_response_for_profile(
+        let response = blocking_response(
             "read",
             duration_ms(running.elapsed()),
             result,
             self.output_token_gate.as_deref(),
             &cancellation,
             output_budget,
-            self.client_profile(),
         );
         cancellation_relay.abort();
         drop(pdf_admission);
@@ -377,14 +376,13 @@ impl AgentShim {
             })
         })
         .await;
-        let response = blocking_response_for_profile(
+        let response = blocking_response(
             "glob",
             duration_ms(running.elapsed()),
             result,
             self.output_token_gate.as_deref(),
             &response_cancellation,
             output_budget,
-            self.client_profile(),
         );
         cancellation_relay.abort();
         response
@@ -450,14 +448,13 @@ impl AgentShim {
             })
         })
         .await;
-        let response = blocking_response_for_profile(
+        let response = blocking_response(
             "grep",
             duration_ms(running.elapsed()),
             result,
             self.output_token_gate.as_deref(),
             &response_cancellation,
             output_budget,
-            self.client_profile(),
         );
         cancellation_relay.abort();
         response
@@ -543,14 +540,13 @@ impl AgentShim {
             })
         })
         .await;
-        let response = blocking_response_for_profile(
+        let response = blocking_response(
             "run_program",
             duration_ms(running.elapsed()),
             result,
             self.output_token_gate.as_deref(),
             &response_cancellation,
             output_budget,
-            self.client_profile(),
         );
         cancellation_relay.abort();
         response
@@ -608,14 +604,13 @@ impl AgentShim {
                     }
                     Err(error) => Ok(Err(error)),
                 };
-                blocking_response_for_profile(
+                blocking_response(
                     "bash",
                     duration_ms(started.elapsed()),
                     result,
                     self.output_token_gate.as_deref(),
                     request_cancellation,
                     output_budget,
-                    self.client_profile(),
                 )
             }
         }
@@ -755,7 +750,7 @@ impl AgentShim {
         })
         .await;
         let committed_response_cancellation = CancellationToken::new();
-        let response = blocking_response_for_profile(
+        let response = blocking_response(
             "bash",
             duration_ms(running.elapsed()),
             result,
@@ -766,7 +761,6 @@ impl AgentShim {
                 &response_cancellation
             },
             output_budget,
-            self.client_profile(),
         );
         cancellation_relay.abort();
         response
@@ -840,14 +834,13 @@ impl AgentShim {
             rendered
         })
         .await;
-        blocking_response_for_profile(
+        blocking_response(
             "bash_status",
             duration_ms(started.elapsed()),
             result,
             self.output_token_gate.as_deref(),
             request_cancellation,
             output_budget,
-            self.client_profile(),
         )
     }
     pub(super) async fn dispatch_tool(
