@@ -10,7 +10,7 @@
 - One supported platform: Windows x64 MSVC, macOS ARM64, Linux x64 glibc, or Linux ARM64 glibc.
 - Background Bash requires `ctx.jobs` and a job controller.
 
-An unsupported platform, a missing optional native package, a load failure, or an addon API version other than `3` rejects plugin activation.
+An unsupported platform, a missing optional native package, a load failure, or an addon API version other than `4` rejects plugin activation.
 
 ## Install
 
@@ -81,11 +81,12 @@ pnpm typecheck
 pnpm lint
 pnpm test
 pnpm build
-pnpm pack
+pnpm test:release-packages
+pnpm test:packed
 pnpm verify:cutover
 ```
 
-Tests stage the locally built library through `AGENTSHIM_DSH_NATIVE_DLL`. Production activation only accepts the exact platform package.
+Source/native tests may stage the locally built library through `AGENTSHIM_DSH_NATIVE_DLL`. The packed smoke does not: it fresh-packs and installs the entry plus the current platform package in a temporary consumer, then executes a native read through the package export. Existing `.tgz` files in this directory are never used as development or release evidence.
 
 ## Remove
 

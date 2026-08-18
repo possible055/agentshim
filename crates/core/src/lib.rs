@@ -2,6 +2,7 @@
 //! ceiling arrives as an explicit per-instance parameter.
 
 pub mod encoding;
+mod engine;
 pub mod output;
 pub mod path;
 pub mod platform;
@@ -9,3 +10,8 @@ pub mod runtime;
 pub mod sorting;
 pub mod tools;
 pub mod traversal;
+
+pub use engine::{
+    AuxiliaryError, OperationContext, PreparedBash, PreparedRunProgram, ProcessEnvironment,
+    ToolEngine,
+};

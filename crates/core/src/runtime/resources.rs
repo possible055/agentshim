@@ -11,8 +11,8 @@ use super::{
     file_work::FileWorkPool,
 };
 
-#[derive(Clone, Debug)]
-pub struct RuntimeResources {
+#[derive(Debug)]
+pub struct RuntimeCapacity {
     config: RuntimeConfig,
     read_only_calls: Arc<Semaphore>,
     worker_lanes: Arc<Semaphore>,
@@ -23,23 +23,39 @@ pub struct RuntimeResources {
     #[cfg(any(test, feature = "test-hooks"))]
     pdf_gate_acquisitions: Arc<std::sync::atomic::AtomicUsize>,
     file_work: Arc<FileWorkPool>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RuntimeResources {
+    capacity: Arc<RuntimeCapacity>,
     shutdown: CancellationToken,
 }
 
 pub struct MemoryReservation {
-    resources: RuntimeResources,
+    capacity: Arc<RuntimeCapacity>,
     permits: Vec<OwnedSemaphorePermit>,
     reserved_bytes: usize,
 }
 
+#[derive(Debug)]
+pub(crate) struct OutputLease {
+    _permits: Vec<OwnedSemaphorePermit>,
+}
+
+impl OutputLease {
+    pub(crate) fn new(permits: Vec<OwnedSemaphorePermit>) -> Self {
+        Self { _permits: permits }
+    }
+}
+
 impl MemoryReservation {
-    pub fn from_initial(
-        resources: RuntimeResources,
+    pub(crate) fn from_initial(
+        resources: &RuntimeResources,
         permit: OwnedSemaphorePermit,
         reserved_bytes: usize,
     ) -> Self {
         Self {
-            resources,
+            capacity: Arc::clone(&resources.capacity),
             permits: vec![permit],
             reserved_bytes: rounded_memory_bytes(reserved_bytes),
         }
@@ -51,7 +67,7 @@ impl MemoryReservation {
             return true;
         }
         let additional = target - self.reserved_bytes;
-        let Some(permit) = self.resources.try_reserve_memory(additional) else {
+        let Some(permit) = self.capacity.try_reserve_memory(additional) else {
             return false;
         };
         self.permits.push(permit);
@@ -60,7 +76,7 @@ impl MemoryReservation {
     }
 }
 
-impl RuntimeResources {
+impl RuntimeCapacity {
     #[must_use]
     pub fn new(config: RuntimeConfig) -> Self {
         Self {
@@ -74,7 +90,6 @@ impl RuntimeResources {
             #[cfg(any(test, feature = "test-hooks"))]
             pdf_gate_acquisitions: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             file_work: Arc::new(FileWorkPool::new(config.worker_lanes)),
-            shutdown: CancellationToken::new(),
         }
     }
 
@@ -83,12 +98,47 @@ impl RuntimeResources {
         self.config
     }
 
+    fn try_reserve_memory(&self, bytes: usize) -> Option<OwnedSemaphorePermit> {
+        let permits = bytes
+            .div_ceil(MEMORY_PERMIT_BYTES)
+            .clamp(1, self.config.memory_bytes / MEMORY_PERMIT_BYTES);
+        let permits = u32::try_from(permits).ok()?;
+        self.memory.clone().try_acquire_many_owned(permits).ok()
+    }
+}
+
+impl RuntimeResources {
+    #[must_use]
+    pub fn new(config: RuntimeConfig) -> Self {
+        Self::with_shutdown(config, CancellationToken::new())
+    }
+
+    #[must_use]
+    pub fn with_shutdown(config: RuntimeConfig, shutdown: CancellationToken) -> Self {
+        Self::from_capacity(Arc::new(RuntimeCapacity::new(config)), shutdown)
+    }
+
+    #[must_use]
+    pub fn from_capacity(capacity: Arc<RuntimeCapacity>, shutdown: CancellationToken) -> Self {
+        Self { capacity, shutdown }
+    }
+
+    #[must_use]
+    pub fn capacity(&self) -> Arc<RuntimeCapacity> {
+        Arc::clone(&self.capacity)
+    }
+
+    #[must_use]
+    pub fn config(&self) -> RuntimeConfig {
+        self.capacity.config()
+    }
+
     #[must_use]
     pub fn shutdown_token(&self) -> CancellationToken {
         self.shutdown.clone()
     }
 
-    /// Cancel the global shutdown token: the single irreversible
+    /// Cancel this engine's shutdown token: the single irreversible
     /// `Accepting -> Stopping` linearization point for process ownership.
     pub fn cancel_shutdown(&self) {
         self.shutdown.cancel();
@@ -100,8 +150,8 @@ impl RuntimeResources {
     /// killed mid-call.
     #[must_use]
     pub fn has_in_flight_calls(&self) -> bool {
-        self.read_only_calls.available_permits() < MAX_READ_ONLY_CALLS
-            || self.process_calls.available_permits() < self.config.process_calls
+        self.capacity.read_only_calls.available_permits() < MAX_READ_ONLY_CALLS
+            || self.capacity.process_calls.available_permits() < self.config().process_calls
     }
 
     /// Blocking quiescence barrier for foreground process owners: returns once every
@@ -109,58 +159,64 @@ impl RuntimeResources {
     /// the shutdown token — cancelling it is what started the shutdown — and acquires
     /// rather than closes the semaphore, so admission keeps working while it drains.
     pub fn wait_for_process_quiescence(&self, deadline: std::time::Instant) -> bool {
-        let permits =
-            u32::try_from(self.config.process_calls).expect("process capacity fits u32 permits");
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                let acquisition = async {
-                    self.process_calls
-                        .clone()
-                        .acquire_many_owned(permits)
-                        .await
-                        .is_ok()
-                };
-                let bounded =
-                    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), acquisition);
-                handle.block_on(bounded).unwrap_or(false)
-            }
-            Err(_) => loop {
-                if self
-                    .process_calls
-                    .clone()
-                    .try_acquire_many_owned(permits)
-                    .is_ok()
-                {
-                    return true;
-                }
-                if std::time::Instant::now() >= deadline {
-                    return false;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            },
-        }
+        wait_for_permits(
+            &self.capacity.process_calls,
+            self.config().process_calls,
+            deadline,
+        )
+    }
+
+    pub fn wait_for_quiescence(&self, deadline: std::time::Instant) -> bool {
+        self.wait_for_process_quiescence(deadline)
+            && wait_for_permits(
+                &self.capacity.read_only_calls,
+                MAX_READ_ONLY_CALLS,
+                deadline,
+            )
     }
 
     #[must_use]
-    pub fn file_work_pool(&self) -> Arc<FileWorkPool> {
-        Arc::clone(&self.file_work)
+    pub(crate) fn file_work_pool(&self) -> Arc<FileWorkPool> {
+        Arc::clone(&self.capacity.file_work)
     }
 
-    pub fn try_admit_read_only(&self) -> Option<OwnedSemaphorePermit> {
-        self.read_only_calls.clone().try_acquire_owned().ok()
-    }
-
-    /// Admission is fail-fast and double-checked around the permit: after the global
-    /// shutdown token fires, no caller may hold — or newly acquire — a foreground slot.
-    pub fn try_admit_process(&self) -> Option<OwnedSemaphorePermit> {
+    pub(crate) fn try_admit_read_only(&self) -> Option<OwnedSemaphorePermit> {
         if self.shutdown.is_cancelled() {
             return None;
         }
-        let permit = self.process_calls.clone().try_acquire_owned().ok()?;
+        let permit = self
+            .capacity
+            .read_only_calls
+            .clone()
+            .try_acquire_owned()
+            .ok()?;
         if self.shutdown.is_cancelled() {
             return None;
         }
         Some(permit)
+    }
+
+    /// Admission is fail-fast and double-checked around the permit: after the engine
+    /// shutdown token fires, no caller may hold — or newly acquire — a foreground slot.
+    pub(crate) fn try_admit_process(&self) -> Option<OwnedSemaphorePermit> {
+        if self.shutdown.is_cancelled() {
+            return None;
+        }
+        let permit = self
+            .capacity
+            .process_calls
+            .clone()
+            .try_acquire_owned()
+            .ok()?;
+        if self.shutdown.is_cancelled() {
+            return None;
+        }
+        Some(permit)
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn try_admit_process_for_test(&self) -> Option<OwnedSemaphorePermit> {
+        self.try_admit_process()
     }
 
     /// Acquire one shared blocking/search lane.
@@ -168,17 +224,17 @@ impl RuntimeResources {
     /// # Errors
     ///
     /// Returns [`AcquireError::Cancelled`] when either cancellation token fires.
-    pub async fn acquire_worker(
+    pub(crate) async fn acquire_worker(
         &self,
         request: &CancellationToken,
     ) -> Result<OwnedSemaphorePermit, AcquireError> {
-        acquire(&self.worker_lanes, request, &self.shutdown, 1).await
+        acquire(&self.capacity.worker_lanes, request, &self.shutdown, 1).await
     }
 
     #[must_use]
     #[cfg(any(test, feature = "bench-internals"))]
     pub fn try_acquire_worker(&self) -> Option<OwnedSemaphorePermit> {
-        self.worker_lanes.clone().try_acquire_owned().ok()
+        self.capacity.worker_lanes.clone().try_acquire_owned().ok()
     }
 
     /// Acquire one open-file slot.
@@ -186,16 +242,16 @@ impl RuntimeResources {
     /// # Errors
     ///
     /// Returns [`AcquireError::Cancelled`] when either cancellation token fires.
-    pub async fn acquire_open_file(
+    pub(crate) async fn acquire_open_file(
         &self,
         request: &CancellationToken,
     ) -> Result<OwnedSemaphorePermit, AcquireError> {
-        acquire(&self.open_files, request, &self.shutdown, 1).await
+        acquire(&self.capacity.open_files, request, &self.shutdown, 1).await
     }
 
     #[must_use]
-    pub fn try_acquire_open_file(&self) -> Option<OwnedSemaphorePermit> {
-        self.open_files.clone().try_acquire_owned().ok()
+    pub(crate) fn try_acquire_open_file(&self) -> Option<OwnedSemaphorePermit> {
+        self.capacity.open_files.clone().try_acquire_owned().ok()
     }
 
     /// Reserve best-effort in-memory working space, rounded up to KiB permits.
@@ -204,16 +260,16 @@ impl RuntimeResources {
     ///
     /// Requests above the configured target reserve at most the target and continue; callers
     /// choose an equivalent fallback when a try-only reservation is unavailable.
-    pub async fn reserve_memory(
+    pub(crate) async fn reserve_memory(
         &self,
         bytes: usize,
         request: &CancellationToken,
     ) -> Result<OwnedSemaphorePermit, AcquireError> {
         let permits = bytes
             .div_ceil(MEMORY_PERMIT_BYTES)
-            .clamp(1, self.config.memory_bytes / MEMORY_PERMIT_BYTES);
+            .clamp(1, self.config().memory_bytes / MEMORY_PERMIT_BYTES);
         let permits = u32::try_from(permits).expect("soft memory target fits u32 permits");
-        acquire(&self.memory, request, &self.shutdown, permits).await
+        acquire(&self.capacity.memory, request, &self.shutdown, permits).await
     }
 
     /// Acquire the single PDF work slot, waiting at most [`PDF_GATE_WAIT`].
@@ -224,16 +280,17 @@ impl RuntimeResources {
     /// immediately — which is just a spin.
     ///
     /// Returns `None` on timeout, cancellation, or shutdown.
-    pub async fn acquire_pdf_gate(
+    pub(crate) async fn acquire_pdf_gate(
         &self,
         request: &CancellationToken,
     ) -> Option<OwnedSemaphorePermit> {
         #[cfg(any(test, feature = "test-hooks"))]
-        self.pdf_gate_acquisitions
+        self.capacity
+            .pdf_gate_acquisitions
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         tokio::time::timeout(
             PDF_GATE_WAIT,
-            acquire(&self.pdf_calls, request, &self.shutdown, 1),
+            acquire(&self.capacity.pdf_calls, request, &self.shutdown, 1),
         )
         .await
         .ok()?
@@ -243,38 +300,36 @@ impl RuntimeResources {
     #[must_use]
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn try_acquire_pdf_gate(&self) -> Option<OwnedSemaphorePermit> {
-        self.pdf_calls.clone().try_acquire_owned().ok()
+        self.capacity.pdf_calls.clone().try_acquire_owned().ok()
     }
 
     /// Free slots on the PDF gate. Used to assert that no path leaks the permit.
     #[must_use]
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn available_pdf_slots(&self) -> usize {
-        self.pdf_calls.available_permits()
+        self.capacity.pdf_calls.available_permits()
     }
 
     #[must_use]
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn pdf_gate_acquisitions(&self) -> usize {
-        self.pdf_gate_acquisitions
+        self.capacity
+            .pdf_gate_acquisitions
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
 impl RuntimeResources {
     #[must_use]
-    pub fn try_reserve_memory(&self, bytes: usize) -> Option<OwnedSemaphorePermit> {
-        let permits = bytes
-            .div_ceil(MEMORY_PERMIT_BYTES)
-            .clamp(1, self.config.memory_bytes / MEMORY_PERMIT_BYTES);
-        let permits = u32::try_from(permits).ok()?;
-        self.memory.clone().try_acquire_many_owned(permits).ok()
+    pub(crate) fn try_reserve_memory(&self, bytes: usize) -> Option<OwnedSemaphorePermit> {
+        self.capacity.try_reserve_memory(bytes)
     }
 
     #[must_use]
-    #[cfg(test)]
-    pub fn available_memory_bytes(&self) -> usize {
-        self.memory
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) fn available_memory_bytes(&self) -> usize {
+        self.capacity
+            .memory
             .available_permits()
             .saturating_mul(MEMORY_PERMIT_BYTES)
     }
@@ -282,6 +337,23 @@ impl RuntimeResources {
 
 fn rounded_memory_bytes(bytes: usize) -> usize {
     bytes.div_ceil(MEMORY_PERMIT_BYTES) * MEMORY_PERMIT_BYTES
+}
+
+fn wait_for_permits(
+    semaphore: &Arc<Semaphore>,
+    permits: usize,
+    deadline: std::time::Instant,
+) -> bool {
+    let permits = u32::try_from(permits).expect("runtime capacity fits u32 permits");
+    loop {
+        if semaphore.clone().try_acquire_many_owned(permits).is_ok() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]

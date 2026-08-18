@@ -60,12 +60,6 @@ if [ "$allow_dirty" -eq 0 ]; then
     fi
 fi
 
-current_version=$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)"[[:space:]]*$/\1/p' "$manifest_path" | sed -n '1p')
-if [ -z "$current_version" ]; then
-    echo "Cargo.toml does not contain a package version" >&2
-    exit 1
-fi
-
 semver_compare() {
     awk -v current="$1" -v candidate="$2" '
         function parse(value, prefix,    plus, core_pre, dash, core, pre, parts, i, identifiers) {
@@ -134,23 +128,42 @@ semver_compare() {
         }
         BEGIN {
             if (!parse(current, "left") || !parse(candidate, "right")) exit 2
-            result = compare()
-            if (result >= 0) exit 3
-            exit 0
+            print compare()
         }
     '
 }
 
-if semver_compare "$current_version" "$version"; then
-    :
-else
-    result=$?
-    if [ "$result" -eq 2 ]; then
-        echo "VERSION and the current version must be valid SemVer values" >&2
-    else
-        echo "version $version must be greater than the current version $current_version" >&2
-    fi
+if ! semver_compare "$version" "$version" >/dev/null; then
+    echo "VERSION must be a valid SemVer value" >&2
     exit 1
+fi
+
+if ! remote_tags=$(git -C "$repository" ls-remote --refs --tags origin 'refs/tags/v*'); then
+    echo "could not inspect release tags on origin" >&2
+    exit 1
+fi
+
+highest_released_version=""
+for tag_ref in $(printf '%s\n' "$remote_tags" | sed -n 's/^[^[:space:]]*[[:space:]]refs\/tags\/v//p'); do
+    if ! comparison=$(semver_compare "$tag_ref" "$tag_ref"); then
+        continue
+    fi
+    if [ -z "$highest_released_version" ]; then
+        highest_released_version=$tag_ref
+        continue
+    fi
+    comparison=$(semver_compare "$tag_ref" "$highest_released_version")
+    if [ "$comparison" -gt 0 ]; then
+        highest_released_version=$tag_ref
+    fi
+done
+
+if [ -n "$highest_released_version" ]; then
+    comparison=$(semver_compare "$version" "$highest_released_version")
+    if [ "$comparison" -le 0 ]; then
+        echo "version $version must be greater than the highest release tag v$highest_released_version on origin" >&2
+        exit 1
+    fi
 fi
 
 lock_before=""

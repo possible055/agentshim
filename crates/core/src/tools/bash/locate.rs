@@ -77,10 +77,9 @@ impl BashLocator {
     /// Like [`capture`], but an explicit caller-supplied override wins over the
     /// ambient `AGENTSHIM_BASH`. Passing `None` falls back to the ambient value,
     /// keeping [`capture`] behavior identical; a caller that already merged its
-    /// own environment (e.g. the DSH napi Engine, which receives a scrubbed
-    /// child env separately from the host process env) passes its resolved
-    /// override here so plugin config is honored even when the host process
-    /// never saw it.
+    /// own environment separately from the host process environment passes its
+    /// resolved override here so instance configuration is honored even when
+    /// the host process never saw it.
     #[must_use]
     pub fn capture_with_override(override_path: Option<OsString>) -> Self {
         let inherited_path = std::env::var_os("PATH").unwrap_or_default();

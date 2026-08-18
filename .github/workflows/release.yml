@@ -434,14 +434,20 @@ jobs:
           node -e '
             const addon = require("./adapters/dsh/npm/${{ matrix.npm_platform }}/agentshim_napi.node");
             const api = addon.apiVersion();
-            if (api !== 3) { throw new Error("apiVersion " + api + " !== 3"); }
+            if (api !== 4) { throw new Error("apiVersion " + api + " !== 4"); }
+            if (typeof addon.NativeHostRuntime !== "function") { throw new Error("NativeHostRuntime export is missing"); }
             console.log("addon apiVersion=" + api);
           '
       - name: Load and verify native addon (Windows)
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
-          node -e "const addon = require('./adapters/dsh/npm/${{ matrix.npm_platform }}/agentshim_napi.node'); const api = addon.apiVersion(); if (api !== 3) { throw new Error('apiVersion ' + api + ' !== 3'); } console.log('addon apiVersion=' + api);"
+          node -e "const addon = require('./adapters/dsh/npm/${{ matrix.npm_platform }}/agentshim_napi.node'); const api = addon.apiVersion(); if (api !== 4) { throw new Error('apiVersion ' + api + ' !== 4'); } if (typeof addon.NativeHostRuntime !== 'function') { throw new Error('NativeHostRuntime export is missing'); } console.log('addon apiVersion=' + api);"
+      - name: Record npm platform package provenance
+        run: >-
+          node adapters/dsh/scripts/release-packages.mjs record
+          --archive "dist/npm/dsh-agentshim-${{ matrix.npm_platform }}-${{ needs.preflight.outputs.version }}.tgz"
+          --commit "${{ needs.preflight.outputs.commit_sha }}"
       - name: Test Windows installer
         if: matrix.platform == 'windows'
         shell: pwsh
@@ -461,7 +467,9 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: npm-platform-${{ matrix.npm_platform }}
-          path: dist/npm/*.tgz
+          path: |
+            dist/npm/*.tgz
+            dist/npm/*.tgz.provenance.json
           if-no-files-found: error
           retention-days: 7
 
@@ -694,16 +702,50 @@ jobs:
           set -euo pipefail
           expected="$(printf '%s\n' \
             "dsh-agentshim-darwin-arm64-$VERSION.tgz" \
+            "dsh-agentshim-darwin-arm64-$VERSION.tgz.provenance.json" \
             "dsh-agentshim-linux-arm64-gnu-$VERSION.tgz" \
+            "dsh-agentshim-linux-arm64-gnu-$VERSION.tgz.provenance.json" \
             "dsh-agentshim-linux-x64-gnu-$VERSION.tgz" \
-            "dsh-agentshim-win32-x64-msvc-$VERSION.tgz" |
+            "dsh-agentshim-linux-x64-gnu-$VERSION.tgz.provenance.json" \
+            "dsh-agentshim-win32-x64-msvc-$VERSION.tgz" \
+            "dsh-agentshim-win32-x64-msvc-$VERSION.tgz.provenance.json" |
             LC_ALL=C sort
           )"
-          actual="$(find npm-dist -maxdepth 1 -type f -name '*.tgz' -printf '%f\n' | LC_ALL=C sort)"
+          actual="$(find npm-dist -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)"
           if [[ "$actual" != "$expected" ]]; then
             printf 'unexpected platform npm packages:\n%s\n' "$actual" >&2
             exit 1
           fi
+      - name: Build and pack root dsh-agentshim package
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm --dir adapters/dsh install --frozen-lockfile
+          pnpm --dir adapters/dsh build
+          pnpm --dir adapters/dsh verify:cutover
+          pnpm --config.ignore-scripts=true --dir adapters/dsh pack --pack-destination "$PWD/npm-dist"
+      - name: Record root npm package provenance
+        shell: bash
+        env:
+          COMMIT_SHA: ${{ needs.preflight.outputs.commit_sha }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          node adapters/dsh/scripts/release-packages.mjs record \
+            --archive "npm-dist/dsh-agentshim-$VERSION.tgz" \
+            --commit "$COMMIT_SHA"
+      - name: Validate actual npm package manifests and provenance
+        shell: bash
+        env:
+          COMMIT_SHA: ${{ needs.preflight.outputs.commit_sha }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          node adapters/dsh/scripts/release-packages.mjs verify \
+            --directory npm-dist \
+            --version "$VERSION" \
+            --commit "$COMMIT_SHA" \
+            --native-api 4
       - name: Publish platform npm packages
         shell: bash
         env:
@@ -726,25 +768,6 @@ jobs:
             echo "publishing platform package $tgz with tag $NPM_DIST_TAG"
             npm publish "$tgz" --access public --tag "$NPM_DIST_TAG"
           done
-      - name: Build and pack root dsh-agentshim package
-        shell: bash
-        run: |
-          set -euo pipefail
-          pnpm --dir adapters/dsh install --frozen-lockfile
-          pnpm --dir adapters/dsh build
-          pnpm --dir adapters/dsh verify:cutover
-          pnpm --dir adapters/dsh pack --pack-destination "$PWD/npm-dist"
-      - name: Validate root package
-        shell: bash
-        env:
-          VERSION: ${{ needs.preflight.outputs.version }}
-        run: |
-          set -euo pipefail
-          root_tgz="./npm-dist/dsh-agentshim-$VERSION.tgz"
-          if [[ ! -f "$root_tgz" ]]; then
-            echo "root package tarball $root_tgz not found" >&2
-            exit 1
-          fi
       - name: Publish root dsh-agentshim package
         shell: bash
         env:

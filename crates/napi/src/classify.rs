@@ -80,7 +80,7 @@ fn denial(exit: Option<&str>, stderr: &str, signatures: &[String]) -> bool {
 
 /// Classify one settled spawn against the confinement attribution. `exit` is
 /// `None` when the process never settled (launch failure, timeout); rules
-/// without an exit-code gate may still match, matching the bridge-era contract.
+/// without an exit-code gate may still match the DSH sandbox attribution contract.
 pub(crate) fn classify(
     exit: Option<&str>,
     stderr: &str,

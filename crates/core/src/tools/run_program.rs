@@ -9,12 +9,12 @@ use crate::{
     tools::{
         ToolOutput,
         exec::{
-            ProcessError, ProcessResolver, ProcessStreamSummary, ProcessTimeoutDetails,
+            ProcessError, ProcessStreamSummary, ProcessTimeoutDetails,
             capture::{
                 Capture, RenderedCapture, diagnostic_path, project_captures,
                 push_capture_diagnostics, push_capture_section, push_output_line,
             },
-            resolve::{Launcher, ResolvedProgram, launcher_for},
+            resolve::{Launcher, ProcessResolver, ResolvedProgram, launcher_for},
             spawn::{
                 self, EnvironmentPlan, ExecFailure, ExecPlan, Streams, default_timeout_within,
             },
@@ -170,6 +170,23 @@ fn validate_environment(key: &str, value: &str) -> Result<(), ProcessError> {
     Ok(())
 }
 
+pub(crate) fn validate_base_environment(entries: &[(String, String)]) -> Result<(), ProcessError> {
+    let mut seen: Vec<&str> = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        validate_environment(key, value)?;
+        if seen
+            .iter()
+            .any(|existing| environment_keys_equal(existing, key))
+        {
+            return Err(invalid(format!(
+                "base environment contains duplicate key {key:?} under platform comparison rules"
+            )));
+        }
+        seen.push(key);
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 fn environment_keys_equal(left: &str, right: &str) -> bool {
     use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
@@ -251,18 +268,18 @@ pub fn execute_output_with_budget(
 /// One resolved foreground `run_program` launch: final executable, argv, working
 /// directory, environment plan, and timeout, ready to spawn directly or through a
 /// sandbox-wrapped argv.
-#[derive(Clone, Debug)]
-pub struct PreparedRunProgram {
-    pub resolved: ResolvedProgram,
-    pub cwd: PathBuf,
-    pub args: Vec<String>,
-    pub environment: EnvironmentPlan,
-    pub stdin: Option<String>,
-    pub timeout: Duration,
-    pub request_timeout_ms: u64,
+#[derive(Debug)]
+pub(crate) struct PreparedRunProgram {
+    pub(crate) resolved: ResolvedProgram,
+    pub(crate) cwd: PathBuf,
+    pub(crate) args: Vec<String>,
+    pub(crate) environment: EnvironmentPlan,
+    pub(crate) stdin: Option<String>,
+    pub(crate) deadline: std::time::Instant,
+    pub(crate) request_timeout_ms: u64,
 }
 
-pub fn prepare_run_program(
+pub(crate) fn prepare_run_program(
     root: &Arc<RepositoryRoot>,
     resolver: &ProcessResolver,
     request: &ProcessRequest,
@@ -278,19 +295,13 @@ pub fn prepare_run_program(
     ensure_before_spawn(deadline, request.timeout_ms(timeout_ceiling_ms))?;
     let program = resolver.resolve(&request.program, &cwd)?;
     ensure_before_spawn(deadline, request.timeout_ms(timeout_ceiling_ms))?;
-    let timeout = deadline
-        .checked_duration_since(std::time::Instant::now())
-        .filter(|remaining| !remaining.is_zero())
-        .ok_or(ProcessError::TimeoutBeforeSpawn {
-            timeout_ms: request.timeout_ms(timeout_ceiling_ms),
-        })?;
     Ok(PreparedRunProgram {
         resolved: program,
         cwd,
         args: request.args.clone(),
         environment: request.environment(),
         stdin: request.stdin.clone(),
-        timeout,
+        deadline,
         request_timeout_ms: request.timeout_ms(timeout_ceiling_ms),
     })
 }
@@ -298,7 +309,7 @@ pub fn prepare_run_program(
 /// Spawn one prepared foreground launch. `wrapped_argv` replaces the resolved argv
 /// wholesale when a sandbox wrapped it; the engine keeps tree ownership, pipes,
 /// timeout, capture ceiling, and cancellation either way.
-pub fn execute_prepared_run_program(
+pub(crate) fn execute_prepared_run_program(
     prepared: PreparedRunProgram,
     wrapped_argv: Option<&[String]>,
     cancellation: &CancellationToken,
@@ -311,12 +322,18 @@ pub fn execute_prepared_run_program(
         args,
         environment,
         stdin,
-        timeout,
+        deadline,
         request_timeout_ms,
     } = prepared;
     if cancellation.is_cancelled() {
         return Err(ProcessError::Cancelled);
     }
+    let timeout = deadline
+        .checked_duration_since(std::time::Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or(ProcessError::TimeoutBeforeSpawn {
+            timeout_ms: request_timeout_ms,
+        })?;
     let mut resolved = resolved;
     if let Some(argv) = wrapped_argv {
         let command = argv
@@ -383,7 +400,8 @@ pub fn execute_prepared_run_program(
     clippy::too_many_arguments,
     reason = "the execution entry mirrors the bash entry: bounds, budget, and optional capture"
 )]
-pub fn execute_output_with_capture(
+#[cfg(any(test, feature = "bench-internals"))]
+pub(crate) fn execute_output_with_capture(
     root: &Arc<RepositoryRoot>,
     resolver: &ProcessResolver,
     request: &ProcessRequest,
@@ -563,7 +581,9 @@ fn normalize_burst_render_error(
     error: ProcessError,
     output_budget: &dyn crate::output::CallBudget,
 ) -> ProcessError {
-    if output_budget.ceiling() < crate::output::CALL_OUTPUT_TOKEN_LIMIT
+    if output_budget
+        .token_gate()
+        .is_some_and(|token_gate| token_gate.ceiling() < crate::output::CALL_OUTPUT_TOKEN_LIMIT)
         && matches!(
             error,
             ProcessError::Output(crate::output::OutputError::RequiredContentTooLarge)
@@ -672,14 +692,16 @@ fn timeout_output_fits_budget(
                     output_budget.page_bytes(),
                 )
                 .bytes
-                && matches!(
-                    output_budget.project_result(
-                        &output.text,
-                        Some(&structured),
-                        true,
-                        cancellation
-                    ),
-                    crate::output::ProjectionDecision::Fits(_)
-                )
+                && output_budget.token_gate().is_none_or(|token_gate| {
+                    matches!(
+                        token_gate.project_result(
+                            &output.text,
+                            Some(&structured),
+                            true,
+                            cancellation
+                        ),
+                        crate::output::ProjectionDecision::Fits(_)
+                    )
+                })
         })
 }

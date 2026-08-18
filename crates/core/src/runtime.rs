@@ -1,11 +1,11 @@
 mod config;
 mod file_work;
-mod resources;
+pub(crate) mod resources;
 
 pub use config::*;
 pub use file_work::*;
-pub use resources::MemoryReservation;
-pub use resources::{AcquireError, RuntimeResources};
+pub(crate) use resources::MemoryReservation;
+pub use resources::{AcquireError, RuntimeCapacity, RuntimeResources};
 
 #[cfg(test)]
 #[path = "runtime/tests.rs"]

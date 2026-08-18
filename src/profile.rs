@@ -50,8 +50,8 @@ impl Display for ClientProfile {
 
 /// Gate the idle watchdog by client profile: only the codex profile — whose host is
 /// known to leave conversation servers running — arms it. `RuntimeConfig::from_env()`
-/// already parsed and validated the value; this runs in `build()` where the profile is
-/// known.
+/// already parsed and validated the value; this runs in `build()` after all builder
+/// overrides and the final profile are known.
 pub(crate) fn resolve_idle_timeout_from(
     value: Option<Duration>,
     profile: ClientProfile,
@@ -63,9 +63,9 @@ pub(crate) fn resolve_idle_timeout_from(
 }
 
 /// Resolve the effective tool-timeout shelf: use the environment override when set,
-/// otherwise fall back to the client-profile default. Called from `build()` after the
-/// profile is known, because `RuntimeConfig::from_env()` predates the profile selection
-/// and always uses `DEFAULT_TOOL_TIMEOUT_SHELF`.
+/// otherwise fall back to the client-profile default. Called when the builder selects the
+/// profile, because `RuntimeConfig::from_env()` predates that selection and always uses
+/// `DEFAULT_TOOL_TIMEOUT_SHELF`.
 pub(crate) fn resolve_tool_timeout_shelf(profile: ClientProfile) -> Duration {
     resolve_tool_timeout_shelf_from(env::var_os("AGENTSHIM_TOOL_TIMEOUT_SHELF"), profile)
 }

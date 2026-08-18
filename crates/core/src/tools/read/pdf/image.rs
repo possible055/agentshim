@@ -21,9 +21,10 @@ pub fn read_pdf_images(
     const IMAGE_TOKENS: usize = 1_844 + 32;
     const CAPTION_RESERVE: usize = 256;
     let page_allowance = output_budget
-        .ceiling()
-        .saturating_sub(128 + CAPTION_RESERVE)
-        / IMAGE_TOKENS;
+        .token_gate()
+        .map_or(pages.len(), |token_gate| {
+            token_gate.ceiling().saturating_sub(128 + CAPTION_RESERVE) / IMAGE_TOKENS
+        });
     if page_allowance == 0 {
         return Err(crate::output::OutputError::BurstLimit.into());
     }

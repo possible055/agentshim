@@ -8,7 +8,7 @@ use std::{
     },
 };
 
-use agentshim_core::tools::exec::spawn::CaptureSink;
+use agentshim_core::tools::exec::CaptureSink;
 
 pub const MIN_CAPTURE_MAX_BYTES: u64 = 1024 * 1024;
 pub const MAX_CAPTURE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
@@ -182,7 +182,11 @@ impl CaptureSink for CallCapture {
 }
 
 /// Decide whether a completed capture needs a durable artifact at all.
-pub(crate) fn should_publish(records: &[ArtifactRecord], complete: bool) -> bool {
+pub(crate) fn should_publish(
+    records: &[ArtifactRecord],
+    complete: bool,
+    inline_output_bytes: u64,
+) -> bool {
     if !complete {
         return true;
     }
@@ -190,7 +194,7 @@ pub(crate) fn should_publish(records: &[ArtifactRecord], complete: bool) -> bool
     if total == 0 {
         return false;
     }
-    if total > crate::budget::DEFAULT_PAGE_BUDGET_BYTES as u64 {
+    if total > inline_output_bytes {
         return true;
     }
     records

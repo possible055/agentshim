@@ -65,5 +65,6 @@ jobs:
           AGENTSHIM_REAL_E2E: '1'
           AGENTSHIM_LONG_E2E: ${{ runner.os == 'Linux' && '1' || '0' }}
       - run: pnpm --dir adapters/dsh build
-      - run: pnpm --dir adapters/dsh pack
+      - run: pnpm --dir adapters/dsh test:release-packages
+      - run: pnpm --dir adapters/dsh test:packed
       - run: pnpm --dir adapters/dsh verify:cutover

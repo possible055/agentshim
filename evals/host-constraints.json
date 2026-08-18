@@ -1,0 +1,28 @@
+{
+  "timeoutCeilingMs": 590000,
+  "cases": [
+    { "id": "read-required-path", "tool": "read", "rule": "required", "field": "path", "args": {} },
+    { "id": "read-non-empty-path", "tool": "read", "rule": "non_empty", "field": "path", "args": { "path": "" } },
+    { "id": "read-line-count-minimum", "tool": "read", "rule": "range", "field": "line_count", "args": { "path": "fixture.txt", "line_count": 0 } },
+    { "id": "read-line-count-maximum", "tool": "read", "rule": "range", "field": "line_count", "args": { "path": "fixture.txt", "line_count": 2001 } },
+    { "id": "read-unknown-key", "tool": "read", "rule": "unknown", "field": "extra", "args": { "path": "fixture.txt", "extra": true } },
+
+    { "id": "grep-required-pattern", "tool": "grep", "rule": "required", "field": "pattern", "args": {} },
+    { "id": "grep-context-maximum", "tool": "grep", "rule": "range", "field": "context_lines", "args": { "pattern": "needle", "context_lines": 21 } },
+    { "id": "grep-limit-minimum", "tool": "grep", "rule": "range", "field": "limit", "args": { "pattern": "needle", "limit": 0 } },
+    { "id": "grep-encoding-conflict", "tool": "grep", "rule": "cross_field", "field": "encoding", "args": { "pattern": "needle", "encoding": "utf-8", "fallback_encoding": "utf-8" } },
+    { "id": "grep-unknown-key", "tool": "grep", "rule": "unknown", "field": "extra", "args": { "pattern": "needle", "extra": true } },
+
+    { "id": "glob-required-pattern", "tool": "glob", "rule": "required", "field": "pattern", "args": {} },
+    { "id": "glob-non-empty-pattern", "tool": "glob", "rule": "non_empty", "field": "pattern", "args": { "pattern": "" } },
+    { "id": "glob-limit-maximum", "tool": "glob", "rule": "range", "field": "limit", "args": { "pattern": "*", "limit": 1001 } },
+    { "id": "glob-unknown-key", "tool": "glob", "rule": "unknown", "field": "extra", "args": { "pattern": "*", "extra": true } },
+
+    { "id": "run-program-required-program", "tool": "run_program", "rule": "required", "field": "program", "args": {} },
+    { "id": "run-program-non-empty-program", "tool": "run_program", "rule": "non_empty", "field": "program", "args": { "program": "" } },
+    { "id": "run-program-timeout-minimum", "tool": "run_program", "rule": "timeout", "field": "timeout_ms", "args": { "program": "node", "timeout_ms": 0 } },
+    { "id": "run-program-timeout-maximum", "tool": "run_program", "rule": "timeout", "field": "timeout_ms", "args": { "program": "node", "timeout_ms": 590001 } },
+    { "id": "run-program-environment-conflict", "tool": "run_program", "rule": "cross_field", "field": "env", "args": { "program": "node", "env": { "SAME": "1" }, "unset_env": ["SAME"] } },
+    { "id": "run-program-unknown-key", "tool": "run_program", "rule": "unknown", "field": "extra", "args": { "program": "node", "extra": true } }
+  ]
+}

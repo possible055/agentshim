@@ -116,6 +116,12 @@ pub enum GlobError {
     Memory,
     #[error("glob could not grow within the shared memory capacity; retry later")]
     MemoryBusy,
+    #[error("glob resource {0} is busy")]
+    ResourceBusy(&'static str),
+    #[error("glob cancelled")]
+    Cancelled,
+    #[error("glob worker failed: {0}")]
+    Worker(String),
     #[error(transparent)]
     Path(#[from] PathError),
     #[error(transparent)]

@@ -7,16 +7,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use napi::{Error, Result, bindgen_prelude::spawn_blocking};
+use napi::{Env, Error, Result, Unknown, bindgen_prelude::spawn_blocking};
 use napi_derive::napi;
 use tokio_util::sync::CancellationToken;
 
-use agentshim_core::output::CallBudget;
-use agentshim_core::platform::process::{DetachedTree, spawn_detached_capture};
-use agentshim_core::tools::exec::spawn::{CaptureSink, ExecPlan, Streams};
+use agentshim_core::platform::process::DetachedTree;
+use agentshim_core::tools::exec::CaptureSink;
 
 use crate::capture::{ArtifactRecord, CAPTURE_IO_FAILED_CODE, CallCapture, should_publish};
-use crate::engine::EngineState;
+use crate::engine::{EngineState, detached_native_work, native_promise};
 use crate::process::{NativeFailure, NativeVoidResult, process_failure};
 
 /// Live preview buffer ceiling: the adapter's `readOutput()` drains a rolling
@@ -120,6 +119,7 @@ pub(crate) struct BackgroundJob {
     thread_done: AtomicBool,
     shutdown: CancellationToken,
     artifacts: Arc<Mutex<Vec<ArtifactRecord>>>,
+    inline_output_bytes: u64,
     done_tx: tokio::sync::watch::Sender<Option<NativeJobOutcome>>,
 }
 
@@ -279,7 +279,7 @@ fn finish_published_job(
     records: Vec<ArtifactRecord>,
 ) {
     let cancelled = job.cancelled.load(Ordering::SeqCst);
-    let publish = should_publish(&records, complete);
+    let publish = should_publish(&records, complete, job.inline_output_bytes);
     let artifacts: Vec<ArtifactPublished> = if publish {
         if let Ok(mut table) = job.artifacts.lock() {
             table.extend(records.iter().cloned());
@@ -400,16 +400,23 @@ impl EngineJobHandle {
     /// Resolves when the process tree settles; never rejects. Native failures
     /// arrive as `{ status: 'failed' }`.
     #[napi(ts_return_type = "Promise<NativeJobOutcomeResult>")]
-    pub async fn done(&self) -> Result<NativeJobOutcomeResult> {
-        let mut rx = self.job.done_tx.subscribe();
+    pub fn done(&self, env: Env) -> Result<Unknown<'static>> {
+        let job = Arc::clone(&self.job);
+        native_promise(env, detached_native_work(), async move {
+            Ok(Self::done_inner(job).await)
+        })
+    }
+
+    async fn done_inner(job: Arc<BackgroundJob>) -> NativeJobOutcomeResult {
+        let mut rx = job.done_tx.subscribe();
         if let Some(outcome) = rx.borrow().clone() {
-            return Ok(NativeJobOutcomeResult {
+            return NativeJobOutcomeResult {
                 value: Some(outcome),
                 failure: None,
-            });
+            };
         }
         if rx.changed().await.is_err() {
-            return Ok(NativeJobOutcomeResult {
+            return NativeJobOutcomeResult {
                 value: None,
                 failure: Some(NativeFailure {
                     code: "AGENTSHIM_BACKGROUND_DONE_CHANNEL_FAILED".to_owned(),
@@ -417,14 +424,14 @@ impl EngineJobHandle {
                     retryable: true,
                     details: Some(serde_json::json!({ "kind": "done_channel" })),
                 }),
-            });
+            };
         }
         match rx.borrow().clone() {
-            Some(outcome) => Ok(NativeJobOutcomeResult {
+            Some(outcome) => NativeJobOutcomeResult {
                 value: Some(outcome),
                 failure: None,
-            }),
-            None => Ok(NativeJobOutcomeResult {
+            },
+            None => NativeJobOutcomeResult {
                 value: None,
                 failure: Some(NativeFailure {
                     code: "AGENTSHIM_BACKGROUND_OUTCOME_MISSING".to_owned(),
@@ -432,21 +439,22 @@ impl EngineJobHandle {
                     retryable: true,
                     details: Some(serde_json::json!({ "kind": "outcome" })),
                 }),
-            }),
+            },
         }
     }
 
     /// Cancel if not already settled and join the drain thread. Safe to call
     /// multiple times; the handle is inert after disposal.
-    #[napi]
-    pub async fn dispose(&self) -> Result<NativeVoidResult> {
+    #[napi(ts_return_type = "Promise<NativeVoidResult>")]
+    pub fn dispose(&self, env: Env) -> Result<Unknown<'static>> {
         if !self.job.settled.load(Ordering::SeqCst) {
             let cancelled = self.cancel("handle disposed".to_owned())?;
             if let Some(failure) = cancelled.failure {
-                return Ok(NativeVoidResult {
+                let result = NativeVoidResult {
                     value: false,
                     failure: Some(failure),
-                });
+                };
+                return native_promise(env, detached_native_work(), async move { Ok(result) });
             }
         }
         let handle = {
@@ -456,16 +464,18 @@ impl EngineJobHandle {
                 .map_err(|_| Error::new(napi::Status::GenericFailure, "drain handle poisoned"))?;
             guard.take()
         };
-        if let Some(handle) = handle {
-            spawn_blocking(move || {
-                let _ = handle.join();
+        native_promise(env, detached_native_work(), async move {
+            if let Some(handle) = handle {
+                spawn_blocking(move || {
+                    let _ = handle.join();
+                })
+                .await
+                .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))?;
+            }
+            Ok(NativeVoidResult {
+                value: true,
+                failure: None,
             })
-            .await
-            .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))?;
-        }
-        Ok(NativeVoidResult {
-            value: true,
-            failure: None,
         })
     }
 }
@@ -498,23 +508,10 @@ pub(crate) fn start_background_prepared(
         return Err(NativeFailure::cancelled("background_prepare"));
     }
     let prepared = state.take_bash(&handle)?;
-    let PreparedBackgroundBash {
-        resolved,
-        cwd,
-        args,
-        environment,
-    } = build_background_plan(prepared, wrapped_argv, state)?;
-
-    let plan = ExecPlan {
-        resolved: &resolved,
-        cwd: &cwd,
-        args: &args,
-        environment: &environment,
-        stdin: None,
-        streams: Streams::Merged,
-        timeout: Duration::from_secs(0),
-        capture_page_bytes: state.budget.page_bytes(),
-    };
+    let context = agentshim_core::OperationContext::new(
+        cancellation.clone(),
+        Arc::new(state.output_limits.clone()),
+    );
 
     let call_key = uuid::Uuid::new_v4().simple().to_string();
     let capture = CallCapture::create(
@@ -537,13 +534,17 @@ pub(crate) fn start_background_prepared(
     })?;
     let capture = Arc::new(capture);
 
-    let (tree, reader) = match spawn_detached_capture(&plan, &environment) {
-        Ok(spawned) => spawned,
-        Err(error) => {
-            capture.discard();
-            return Err(process_failure(&error));
-        }
-    };
+    let (tree, reader) =
+        match state
+            .tool_engine
+            .spawn_background_bash(prepared, wrapped_argv, &context)
+        {
+            Ok(spawned) => spawned,
+            Err(error) => {
+                capture.discard();
+                return Err(process_failure(&error));
+            }
+        };
     if cancellation.is_cancelled() {
         let mut tree = tree;
         let _ = tree.terminate_and_wait(Instant::now() + SETTLE_DEADLINE);
@@ -561,6 +562,7 @@ pub(crate) fn start_background_prepared(
         thread_done: AtomicBool::new(false),
         shutdown: state.shutdown.child_token(),
         artifacts: Arc::clone(&state.artifacts),
+        inline_output_bytes: state.output_limits.capture_publish_bytes(),
         done_tx,
     });
     {
@@ -581,56 +583,5 @@ pub(crate) fn start_background_prepared(
     Ok(EngineJobHandle {
         job,
         drain_thread: Mutex::new(Some(drain_thread)),
-    })
-}
-
-struct PreparedBackgroundBash {
-    resolved: agentshim_core::tools::exec::resolve::ResolvedProgram,
-    cwd: std::path::PathBuf,
-    args: Vec<String>,
-    environment: agentshim_core::tools::exec::spawn::EnvironmentPlan,
-}
-
-fn build_background_plan(
-    prepared: agentshim_core::tools::bash::PreparedBash,
-    wrapped_argv: Option<&[String]>,
-    state: &EngineState,
-) -> std::result::Result<PreparedBackgroundBash, NativeFailure> {
-    let agentshim_core::tools::bash::PreparedBash {
-        mut resolved,
-        cwd,
-        args,
-        mut environment,
-        ..
-    } = prepared;
-    if let Some(argv) = wrapped_argv {
-        let command = argv
-            .first()
-            .map_or_else(|| resolved.executable.clone(), std::path::PathBuf::from);
-        let launcher = agentshim_core::tools::exec::resolve::launcher_for(&command)
-            .map_err(|error| process_failure(&error))?;
-        resolved = agentshim_core::tools::exec::resolve::ResolvedProgram {
-            absolute: command.clone(),
-            executable: command,
-            launcher,
-        };
-        let final_args = if argv.len() > 1 {
-            argv[1..].to_vec()
-        } else {
-            Vec::new()
-        };
-        return Ok(PreparedBackgroundBash {
-            resolved,
-            cwd,
-            args: final_args,
-            environment,
-        });
-    }
-    environment.base = Some(state.env.clone());
-    Ok(PreparedBackgroundBash {
-        resolved,
-        cwd,
-        args,
-        environment,
     })
 }

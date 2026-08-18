@@ -318,18 +318,9 @@ pub enum ProjectionDecision {
     Cancelled,
 }
 
-/// Per-call output budget supplied by the embedding host.
-///
-/// The engine treats the host-provided budget as opaque.
-/// Implementations must be deterministic for the lifetime of one call.
-pub trait CallBudget: Send + Sync {
-    /// Hard byte ceiling for one tool response's model-visible text.
-    fn page_bytes(&self) -> usize;
-
-    /// Byte ceiling for the fully encoded tool result as it leaves the host.
-    fn wire_bytes(&self) -> usize;
-
-    /// Token allowance for this call; `usize::MAX` when the host does not gate tokens.
+/// Optional per-call token projection supplied by a token-gating host.
+pub trait TokenGate: Send + Sync {
+    /// Token allowance for this call.
     fn ceiling(&self) -> usize;
 
     /// Project the token cost of a tool response against the call allowance.
@@ -348,6 +339,21 @@ pub trait CallBudget: Send + Sync {
         is_error: bool,
         cancellation: &CancellationToken,
     ) -> ProjectionDecision;
+}
+
+/// Per-call byte budget supplied by the embedding host.
+///
+/// The engine treats the host-provided budget as opaque.
+/// Implementations must be deterministic for the lifetime of one call.
+pub trait CallBudget: Send + Sync {
+    /// Hard byte ceiling for one tool response's model-visible text.
+    fn page_bytes(&self) -> usize;
+
+    /// Byte ceiling for the fully encoded tool result as it leaves the host.
+    fn wire_bytes(&self) -> usize;
+
+    /// Token projection when this host enforces a token allowance.
+    fn token_gate(&self) -> Option<&dyn TokenGate>;
 }
 
 /// Deterministic byte-derived budget for core tests and benches. Projected tokens use
@@ -395,15 +401,7 @@ impl TestCallBudget {
 }
 
 #[cfg(any(test, feature = "bench-internals"))]
-impl CallBudget for TestCallBudget {
-    fn page_bytes(&self) -> usize {
-        self.page_bytes
-    }
-
-    fn wire_bytes(&self) -> usize {
-        self.wire_bytes
-    }
-
+impl TokenGate for TestCallBudget {
     fn ceiling(&self) -> usize {
         self.ceiling
     }
@@ -444,6 +442,21 @@ impl CallBudget for TestCallBudget {
         } else {
             ProjectionDecision::Exceeded
         }
+    }
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+impl CallBudget for TestCallBudget {
+    fn page_bytes(&self) -> usize {
+        self.page_bytes
+    }
+
+    fn wire_bytes(&self) -> usize {
+        self.wire_bytes
+    }
+
+    fn token_gate(&self) -> Option<&dyn TokenGate> {
+        Some(self)
     }
 }
 

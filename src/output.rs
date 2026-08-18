@@ -1,7 +1,4 @@
-use std::{
-    env,
-    sync::{Arc, OnceLock},
-};
+use std::{env, sync::Arc};
 
 use rmcp::model::{CallToolResult, ContentBlock};
 use tokio_util::sync::CancellationToken;
@@ -27,7 +24,8 @@ pub use agentshim_core::output::{
 
 #[derive(Clone)]
 pub(crate) struct CallOutputBudget {
-    model: Option<ModelOutputBudget>,
+    output_bytes: usize,
+    model: ModelOutputBudget,
 }
 
 #[derive(Clone)]
@@ -37,22 +35,25 @@ struct ModelOutputBudget {
 }
 
 impl CallOutputBudget {
-    pub(crate) fn new(token_gate: Arc<OutputTokenGate>, ticket: BurstTicket) -> Self {
+    pub(crate) fn new(
+        output_bytes: usize,
+        token_gate: Arc<OutputTokenGate>,
+        ticket: BurstTicket,
+    ) -> Self {
         Self {
-            model: Some(ModelOutputBudget { token_gate, ticket }),
+            output_bytes,
+            model: ModelOutputBudget { token_gate, ticket },
         }
     }
 
-    pub(crate) fn standalone() -> Self {
+    pub(crate) fn standalone(output_bytes: usize) -> Self {
         let token_gate = OutputTokenGate::load_shared().expect("embedded tokenizer ranks");
         let gate = BurstOutputGate::new(CALL_OUTPUT_TOKEN_LIMIT);
-        Self::new(token_gate, gate.begin_call())
+        Self::new(output_bytes, token_gate, gate.begin_call())
     }
 
     pub(crate) fn ceiling(&self) -> usize {
-        self.model.as_ref().map_or(usize::MAX, |model| {
-            model.ticket.allowance().min(CALL_OUTPUT_TOKEN_LIMIT)
-        })
+        self.model.ticket.allowance().min(CALL_OUTPUT_TOKEN_LIMIT)
     }
 
     /// Project one fully assembled MCP result; the neutral engine budget sees the same
@@ -63,70 +64,63 @@ impl CallOutputBudget {
         ceiling: usize,
         cancellation: &CancellationToken,
     ) -> ProjectionDecision {
-        self.model.as_ref().map_or(
-            ProjectionDecision::Fits(ProjectedTokenCost {
-                tokens: 0,
-                exact: true,
-            }),
-            |model| {
-                model
-                    .token_gate
-                    .project_result(result, ceiling, cancellation)
-            },
-        )
+        self.model
+            .token_gate
+            .project_result(result, ceiling, cancellation)
     }
 
-    #[cfg(test)]
     pub(crate) fn project_tool_output(
         &self,
         text: &str,
         image_count: usize,
         cancellation: &CancellationToken,
     ) -> ProjectionDecision {
-        self.model.as_ref().map_or(
-            ProjectionDecision::Fits(ProjectedTokenCost {
-                tokens: 0,
-                exact: true,
-            }),
-            |model| {
-                model.token_gate.project_tool_output(
-                    text,
-                    image_count,
-                    self.ceiling(),
-                    cancellation,
-                )
-            },
-        )
+        self.model
+            .token_gate
+            .project_tool_output(text, image_count, self.ceiling(), cancellation)
     }
 
     pub(crate) fn cache_response_cost(&self, cost: ProjectedTokenCost) {
-        if let Some(model) = &self.model {
-            model.ticket.cache_response_cost(cost.tokens);
-        }
+        self.model.ticket.cache_response_cost(cost.tokens);
     }
 
     pub(crate) fn cached_response_cost(&self) -> Option<usize> {
-        self.model
-            .as_ref()
-            .map_or(Some(0), |model| model.ticket.cached_response_cost())
+        self.model.ticket.cached_response_cost()
     }
 
     pub(crate) fn finish(&self, actual_tokens: usize, limited: bool) {
-        if let Some(model) = &self.model {
-            model.ticket.finish(actual_tokens, limited);
-        }
+        self.model.ticket.finish(actual_tokens, limited);
+    }
+
+    pub(crate) fn bounded_diagnostic(&self, text: &str) -> String {
+        agentshim_core::output::bounded_diagnostic_within(text, self.output_bytes)
+    }
+
+    pub(crate) fn tool_result_fits(
+        &self,
+        text: &str,
+        structured: Option<&serde_json::Value>,
+        is_error: bool,
+    ) -> bool {
+        tool_result_encoded_len(text, structured, is_error) <= self.output_bytes
     }
 }
 
 impl agentshim_core::output::CallBudget for CallOutputBudget {
     fn page_bytes(&self) -> usize {
-        effective_byte_limit()
+        self.output_bytes
     }
 
     fn wire_bytes(&self) -> usize {
-        wire_byte_limit()
+        self.output_bytes
     }
 
+    fn token_gate(&self) -> Option<&dyn agentshim_core::output::TokenGate> {
+        Some(self)
+    }
+}
+
+impl agentshim_core::output::TokenGate for CallOutputBudget {
     fn ceiling(&self) -> usize {
         Self::ceiling(self)
     }
@@ -137,20 +131,7 @@ impl agentshim_core::output::CallBudget for CallOutputBudget {
         image_count: usize,
         cancellation: &CancellationToken,
     ) -> ProjectionDecision {
-        self.model.as_ref().map_or(
-            ProjectionDecision::Fits(ProjectedTokenCost {
-                tokens: 0,
-                exact: true,
-            }),
-            |model| {
-                model.token_gate.project_tool_output(
-                    text,
-                    image_count,
-                    self.ceiling(),
-                    cancellation,
-                )
-            },
-        )
+        Self::project_tool_output(self, text, image_count, cancellation)
     }
 
     fn project_result(
@@ -160,25 +141,19 @@ impl agentshim_core::output::CallBudget for CallOutputBudget {
         is_error: bool,
         cancellation: &CancellationToken,
     ) -> ProjectionDecision {
-        let Some(model) = &self.model else {
-            return ProjectionDecision::Fits(ProjectedTokenCost {
-                tokens: 0,
-                exact: true,
-            });
-        };
         let mut result = if is_error {
             CallToolResult::error(vec![ContentBlock::text(text)])
         } else {
             CallToolResult::success(vec![ContentBlock::text(text)])
         };
         result.structured_content = structured.cloned();
-        model
+        self.model
             .token_gate
             .project_result(&result, self.ceiling(), cancellation)
     }
 }
 
-/// Resolve the configured output ceiling once per process.
+/// Resolve the configured output ceiling from the current environment.
 ///
 /// # Errors
 ///
@@ -189,24 +164,7 @@ pub fn configured_byte_limit() -> std::io::Result<usize> {
 }
 
 #[must_use]
-pub fn effective_byte_limit() -> usize {
-    static LIMIT: OnceLock<usize> = OnceLock::new();
-    *LIMIT.get_or_init(|| configured_byte_limit().unwrap_or(MODEL_BYTE_LIMIT))
-}
-
-pub(crate) fn wire_byte_limit() -> usize {
-    effective_byte_limit()
-}
-
-pub(crate) fn tool_result_fits_budget(
-    text: &str,
-    structured: Option<&serde_json::Value>,
-    is_error: bool,
-) -> bool {
-    tool_result_encoded_len(text, structured, is_error) <= wire_byte_limit()
-}
-
-#[must_use]
 pub fn bounded_diagnostic(text: &str) -> String {
-    agentshim_core::output::bounded_diagnostic_within(text, effective_byte_limit())
+    let output_bytes = configured_byte_limit().unwrap_or(MODEL_BYTE_LIMIT);
+    agentshim_core::output::bounded_diagnostic_within(text, output_bytes)
 }

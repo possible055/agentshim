@@ -4,12 +4,9 @@ use rmcp::ErrorData as McpError;
 use rmcp::model::{CallToolResponse, CallToolResult, ContentBlock, JsonObject};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
 
-use crate::output::{
-    CallOutputBudget, MAX_CONTROL_RESPONSE_TOKENS, ProjectionDecision, bounded_diagnostic,
-};
+use crate::output::{CallOutputBudget, MAX_CONTROL_RESPONSE_TOKENS, ProjectionDecision};
 
 pub(super) fn finalize_tool_response(
     tool: &str,
@@ -35,7 +32,7 @@ pub(super) fn finalize_tool_response(
         ProjectionDecision::Exceeded => {
             let completed_side_effect =
                 matches!(tool, "run_program" | "bash") && result.is_error != Some(true);
-            let replacement = burst_limit_response(completed_side_effect);
+            let replacement = burst_limit_response(budget, completed_side_effect);
             let CallToolResponse::Complete(replacement_result) = &replacement else {
                 unreachable!("burst limit response is complete")
             };
@@ -56,6 +53,7 @@ pub(super) fn finalize_tool_response(
         ProjectionDecision::Cancelled => {
             budget.finish(0, true);
             Ok(tool_error(
+                budget,
                 "client_cancellation",
                 false,
                 "tool output verification was cancelled",
@@ -65,9 +63,13 @@ pub(super) fn finalize_tool_response(
     }
 }
 
-fn burst_limit_response(completed_side_effect: bool) -> CallToolResponse {
+fn burst_limit_response(
+    budget: &CallOutputBudget,
+    completed_side_effect: bool,
+) -> CallToolResponse {
     if completed_side_effect {
         return tool_error(
+            budget,
             "output_budget",
             false,
             "tool execution completed but its output exceeded the current burst budget; do not retry",
@@ -78,6 +80,7 @@ fn burst_limit_response(completed_side_effect: bool) -> CallToolResponse {
         );
     }
     tool_error(
+        budget,
         "output_budget",
         true,
         "tool output exceeded the current burst budget; retry after the burst resets",
@@ -105,6 +108,7 @@ pub(super) fn requests_detach(arguments: Option<&JsonObject>) -> bool {
 }
 
 pub(super) fn tool_error(
+    budget: &CallOutputBudget,
     code: &'static str,
     retryable: bool,
     message: impl Into<String>,
@@ -115,22 +119,23 @@ pub(super) fn tool_error(
         bound_detail_strings(details);
     }
     let (message, structured) =
-        bounded_error_payload(code, retryable, &message.into(), details.as_ref());
+        bounded_error_payload(budget, code, retryable, &message.into(), details.as_ref());
     let mut result = CallToolResult::error(vec![ContentBlock::text(message)]);
     result.structured_content = Some(structured);
     result.into()
 }
 
 fn bounded_error_payload(
+    budget: &CallOutputBudget,
     code: &'static str,
     retryable: bool,
     message: &str,
     details: Option<&Value>,
 ) -> (String, Value) {
-    let bounded = bounded_diagnostic(message);
+    let bounded = budget.bounded_diagnostic(message);
     let cancellation = CancellationToken::new();
     let structured = crate::output::tool_error_structure(code, retryable, &bounded, details);
-    if error_payload_fits(code, retryable, &bounded, details, &cancellation) {
+    if error_payload_fits(budget, code, retryable, &bounded, details, &cancellation) {
         return (bounded, structured);
     }
     let marker = "...[truncated]";
@@ -146,7 +151,7 @@ fn bounded_error_payload(
         let midpoint = low + (high - low) / 2;
         let end = boundaries[midpoint];
         let candidate = format!("{}{marker}", &bounded[..end]);
-        if error_payload_fits(code, retryable, &candidate, details, &cancellation) {
+        if error_payload_fits(budget, code, retryable, &candidate, details, &cancellation) {
             best = candidate;
             low = midpoint + 1;
         } else {
@@ -154,19 +159,16 @@ fn bounded_error_payload(
         }
     }
     let structured = crate::output::tool_error_structure(code, retryable, &best, details);
-    if error_payload_fits(code, retryable, &best, details, &cancellation) {
+    if error_payload_fits(budget, code, retryable, &best, details, &cancellation) {
         return (best, structured);
     }
     let structured = crate::output::tool_error_structure(code, retryable, marker, None);
-    debug_assert!(crate::output::tool_result_fits_budget(
-        marker,
-        Some(&structured),
-        true
-    ));
+    debug_assert!(budget.tool_result_fits(marker, Some(&structured), true));
     (marker.to_owned(), structured)
 }
 
 fn error_payload_fits(
+    budget: &CallOutputBudget,
     code: &'static str,
     retryable: bool,
     message: &str,
@@ -174,7 +176,7 @@ fn error_payload_fits(
     cancellation: &CancellationToken,
 ) -> bool {
     let structured = crate::output::tool_error_structure(code, retryable, message, details);
-    crate::output::tool_result_fits_budget(message, Some(&structured), true)
+    budget.tool_result_fits(message, Some(&structured), true)
         && crate::output::structured_result_fits_model_budget(&structured, cancellation)
 }
 
@@ -226,6 +228,9 @@ impl DiagnosticError for crate::tools::read::ReadError {
             | ReadError::Directory
             | ReadError::NotRegular => "path",
             ReadError::Cancelled => "client_cancellation",
+            ReadError::ResourceBusy { .. } => "resource_busy",
+            ReadError::ResourceTimeout { .. } => "resource_timeout",
+            ReadError::Worker(_) => "worker_panic",
             ReadError::Output(crate::output::OutputError::BurstLimit) => "output_budget",
             ReadError::Output(_) => "output_invariant",
             ReadError::ResourceLimit { .. } => "resource_limit",
@@ -300,6 +305,23 @@ impl DiagnosticError for crate::tools::read::ReadError {
                 "reason": "burst_limit",
                 "retry_after_ms": 2000
             })),
+            ReadError::ResourceBusy {
+                resource,
+                retry_after,
+            } => {
+                let mut details = json!({ "permit": resource });
+                if let Some(retry_after) = retry_after {
+                    details["retry_after_ms"] =
+                        json!(u64::try_from(retry_after.as_millis()).unwrap_or(u64::MAX));
+                }
+                Some(details)
+            }
+            ReadError::ResourceTimeout { limit, elapsed } => Some(json!({
+                "limit_ms": u64::try_from(limit.as_millis()).unwrap_or(u64::MAX),
+                "elapsed_ms": u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                "work_stopped": true,
+                "partial_output": false
+            })),
             _ => None,
         }
     }
@@ -311,10 +333,12 @@ impl DiagnosticError for crate::tools::glob::GlobError {
         match self {
             GlobError::Validation(_) | GlobError::Pattern(_) => "validation",
             GlobError::Path(_) => "path",
+            GlobError::Cancelled => "client_cancellation",
+            GlobError::ResourceBusy(_) | GlobError::MemoryBusy => "resource_busy",
+            GlobError::Worker(_) => "worker_panic",
             GlobError::Output(crate::output::OutputError::BurstLimit) => "output_budget",
             GlobError::Output(_) => "output_invariant",
             GlobError::Memory => "resource_limit",
-            GlobError::MemoryBusy => "resource_busy",
             GlobError::Traversal(_) | GlobError::Io(_) => "io",
         }
     }
@@ -331,11 +355,15 @@ impl DiagnosticError for crate::tools::glob::GlobError {
     }
 
     fn details(&self) -> Option<Value> {
-        matches!(
-            self,
-            crate::tools::glob::GlobError::Output(crate::output::OutputError::BurstLimit)
-        )
-        .then(|| json!({ "reason": "burst_limit", "retry_after_ms": 2000 }))
+        match self {
+            crate::tools::glob::GlobError::Output(crate::output::OutputError::BurstLimit) => {
+                Some(json!({ "reason": "burst_limit", "retry_after_ms": 2000 }))
+            }
+            crate::tools::glob::GlobError::ResourceBusy(resource) => {
+                Some(json!({ "resource": resource }))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -346,10 +374,11 @@ impl DiagnosticError for crate::tools::grep::GrepError {
             GrepError::Validation(_) | GrepError::Regex(_) | GrepError::Glob(_) => "validation",
             GrepError::Path(_) => "path",
             GrepError::Cancelled => "client_cancellation",
+            GrepError::ResourceBusy(_) | GrepError::MemoryBusy => "resource_busy",
+            GrepError::Worker(_) => "worker_panic",
             GrepError::Output(crate::output::OutputError::BurstLimit) => "output_budget",
             GrepError::Output(_) => "output_invariant",
             GrepError::CandidateMemory => "resource_limit",
-            GrepError::MemoryBusy => "resource_busy",
             GrepError::PoolPoison => "resource_timeout",
             GrepError::Unsearchable(_) | GrepError::Traversal(_) | GrepError::Io(_) => "io",
         }
@@ -374,11 +403,15 @@ impl DiagnosticError for crate::tools::grep::GrepError {
     }
 
     fn details(&self) -> Option<Value> {
-        matches!(
-            self,
-            crate::tools::grep::GrepError::Output(crate::output::OutputError::BurstLimit)
-        )
-        .then(|| json!({ "reason": "burst_limit", "retry_after_ms": 2000 }))
+        match self {
+            crate::tools::grep::GrepError::Output(crate::output::OutputError::BurstLimit) => {
+                Some(json!({ "reason": "burst_limit", "retry_after_ms": 2000 }))
+            }
+            crate::tools::grep::GrepError::ResourceBusy(resource) => {
+                Some(json!({ "resource": resource }))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -400,6 +433,7 @@ impl DiagnosticError for crate::tools::exec::ProcessError {
             }
             ProcessError::Cancelled => "client_cancellation",
             ProcessError::OutcomeUncertain => "outcome_uncertain",
+            ProcessError::Worker(_) => "worker_panic",
             ProcessError::Output(crate::output::OutputError::BurstLimit) => "output_budget",
             ProcessError::Output(_) => "output_invariant",
         }
@@ -443,19 +477,24 @@ impl DiagnosticError for crate::tools::exec::ProcessError {
 }
 
 pub(super) fn classified_tool_error(
+    budget: &CallOutputBudget,
     error_class: &'static str,
     message: impl Into<String>,
 ) -> CallToolResponse {
     tracing::error!(target: "agentshim", event = "tool_error", phase = "response", outcome = "error", error_class);
     let retryable = matches!(error_class, "io" | "resource_timeout" | "resource_busy");
-    tool_error(error_class, retryable, message, None)
+    tool_error(budget, error_class, retryable, message, None)
 }
 
-pub(super) fn diagnostic_tool_error<E: DiagnosticError + ?Sized>(error: &E) -> CallToolResponse {
+pub(super) fn diagnostic_tool_error<E: DiagnosticError + ?Sized>(
+    budget: &CallOutputBudget,
+    error: &E,
+) -> CallToolResponse {
     let error_class = error.error_class();
     let details = error.details();
     tracing::error!(target: "agentshim", event = "tool_error", phase = "response", outcome = "error", error_class);
     tool_error(
+        budget,
         error_class,
         error.retryable(),
         error.to_string(),
@@ -476,7 +515,7 @@ pub(super) fn blocking_response_for_test<E: DiagnosticError>(
         tool,
         run_ms,
         result,
-        Some(output_token_gate),
+        output_token_gate,
         cancellation,
         output_budget,
     )
@@ -486,7 +525,7 @@ pub(super) fn blocking_response<E: DiagnosticError>(
     tool: &str,
     run_ms: u64,
     result: Result<Result<crate::tools::ToolOutput, E>, tokio::task::JoinError>,
-    output_token_gate: Option<&crate::output::OutputTokenGate>,
+    output_token_gate: &crate::output::OutputTokenGate,
     cancellation: &CancellationToken,
     output_budget: &CallOutputBudget,
 ) -> CallToolResponse {
@@ -520,19 +559,18 @@ pub(super) fn blocking_response<E: DiagnosticError>(
                 tracing::trace!(target: "agentshim", token_gate_path = "verified_renderer");
                 return result.into();
             }
-            match output_token_gate
-                .expect("non-native response fallback has a token gate")
-                .evaluate_result(&result, cancellation)
-            {
+            match output_token_gate.evaluate_result(&result, cancellation) {
                 crate::output::GateDecision::FitsByBytes
                 | crate::output::GateDecision::FitsExactly(_) => result.into(),
                 crate::output::GateDecision::Exceeded => tool_error(
+                    output_budget,
                     "output_budget",
                     false,
                     "tool output exceeded the model token budget",
                     None,
                 ),
                 crate::output::GateDecision::Cancelled => tool_error(
+                    output_budget,
                     "client_cancellation",
                     false,
                     "tool output verification was cancelled",
@@ -540,64 +578,25 @@ pub(super) fn blocking_response<E: DiagnosticError>(
                 ),
             }
         }
-        Ok(Err(error)) => diagnostic_tool_error(&error),
-        Err(error) => {
-            classified_tool_error("worker_panic", format!("{tool} worker failed: {error}"))
-        }
-    }
-}
-
-/// The PDF gate and the mode reservation, held together for one call.
-///
-/// Both are released by dropping this, which is what makes every early return, timeout,
-/// cancellation, and error path leak-free without a bespoke cleanup branch each.
-pub(super) struct PdfAdmission {
-    pub(super) _gate: OwnedSemaphorePermit,
-    pub(super) _memory: OwnedSemaphorePermit,
-}
-
-/// `resource_busy` without a delay hint invites an immediate retry, which is just a spin.
-pub(super) fn pdf_busy(permit: &'static str) -> CallToolResponse {
-    let retry_after_ms = u64::try_from(crate::runtime::PDF_GATE_WAIT.as_millis()).unwrap_or(300);
-    tracing::warn!(target: "agentshim", event = "tool_error", phase = "admission", outcome = "error", error_class = "resource_busy", permit);
-    tool_error(
-        "resource_busy",
-        true,
-        format!("read PDF {permit} capacity is busy; retry the request later"),
-        Some(&json!({
-            "permit": permit,
-            "retry_after_ms": retry_after_ms
-        })),
-    )
-}
-
-pub(super) fn pdf_timeout(limit: Duration, elapsed: Duration) -> CallToolResponse {
-    tracing::warn!(target: "agentshim", event = "tool_error", phase = "execution", outcome = "error", error_class = "resource_timeout");
-    tool_error(
-        "resource_timeout",
-        true,
-        format!(
-            "PDF read exceeded its {} ms mode runtime limit",
-            limit.as_millis()
+        Ok(Err(error)) => diagnostic_tool_error(output_budget, &error),
+        Err(error) => classified_tool_error(
+            output_budget,
+            "worker_panic",
+            format!("{tool} worker failed: {error}"),
         ),
-        Some(&json!({
-            "limit_ms": u64::try_from(limit.as_millis()).unwrap_or(u64::MAX),
-            "elapsed_ms": u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
-            "work_stopped": true,
-            "partial_output": false
-        })),
-    )
-}
-
-pub(super) fn queue_timeout(tool: &str, timeout_ms: u64) -> CallToolResponse {
-    classified_tool_error("resource_timeout", queue_timeout_message(tool, timeout_ms))
+    }
 }
 
 /// Admission runs before the per-call tracing span exists, so the tool and the admission class
 /// are logged explicitly here; without them a saturated server cannot be told apart from a
 /// saturated read-only pool in diagnostics.
-pub(super) fn resource_busy(tool: &str, admission: &'static str) -> CallToolResponse {
+pub(super) fn resource_busy(
+    budget: &CallOutputBudget,
+    tool: &str,
+    admission: &'static str,
+) -> CallToolResponse {
     resource_busy_with_message(
+        budget,
         tool,
         admission,
         format!("{tool} {admission} capacity is busy; retry the request later"),
@@ -605,13 +604,14 @@ pub(super) fn resource_busy(tool: &str, admission: &'static str) -> CallToolResp
 }
 
 pub(super) fn resource_busy_with_message(
+    budget: &CallOutputBudget,
     tool: &str,
     admission: &'static str,
     message: impl Into<String>,
 ) -> CallToolResponse {
     tracing::error!(target: "agentshim", event = "tool_error", phase = "request", outcome = "error", error_class = "resource_busy", tool, admission);
     let retryable = true;
-    tool_error("resource_busy", retryable, message, None)
+    tool_error(budget, "resource_busy", retryable, message, None)
 }
 
 pub(super) fn cancellation_class(
@@ -627,31 +627,4 @@ pub(super) fn cancellation_class(
 
 pub(super) fn duration_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-}
-
-pub(super) fn queue_timeout_message(tool: &str, timeout_ms: u64) -> String {
-    format!(
-        "{tool} timed out after {timeout_ms} ms while waiting for process capacity; no child was started"
-    )
-}
-
-pub(super) fn relayed_cancellation(
-    request: &CancellationToken,
-    shutdown: CancellationToken,
-) -> (CancellationToken, tokio::task::JoinHandle<()>) {
-    let cancellation = CancellationToken::new();
-    let signal = cancellation.clone();
-    let request = request.clone();
-    let relay = tokio::spawn(async move {
-        tokio::select! {
-            () = request.cancelled() => {
-                tracing::warn!(target: "agentshim", event = "tool_cancelled", phase = "execution", error_class = "client_cancellation");
-            }
-            () = shutdown.cancelled() => {
-                tracing::warn!(target: "agentshim", event = "tool_cancelled", phase = "execution", error_class = "shutdown");
-            }
-        }
-        signal.cancel();
-    });
-    (cancellation, relay)
 }

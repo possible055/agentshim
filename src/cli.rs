@@ -261,7 +261,7 @@ pub(super) async fn run(config: RuntimeLimits, command: CliCommand) -> Result<()
                 }
             }
         }
-        CliCommand::Doctor(options) => run_doctor(config, &options)?,
+        CliCommand::Doctor(options) => run_doctor(config, &options).await?,
         CliCommand::Version => {
             println!("agentshim {}", env!("CARGO_PKG_VERSION"));
         }
@@ -311,14 +311,14 @@ fn spawn_idle_watchdog(
     })
 }
 
-fn run_doctor(config: RuntimeLimits, options: &ServeOptions) -> Result<(), Box<dyn Error>> {
+async fn run_doctor(config: RuntimeLimits, options: &ServeOptions) -> Result<(), Box<dyn Error>> {
     let service = AgentShim::builder(std::env::current_dir()?)?
         .runtime_limits(config)
         .read_scope(options.read_scope)
         .client_profile(options.client_profile)
         .build()?;
     service.verify_root()?;
-    service.verify_process_runtime()?;
+    service.verify_process_runtime().await?;
     println!("agentshim doctor: ok");
     println!("root: {}", service.root_path().display());
     println!("protocol: 2026-07-28");

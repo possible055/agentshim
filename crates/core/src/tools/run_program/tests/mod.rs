@@ -13,9 +13,9 @@ use crate::{
     tools::{
         ToolOutput,
         exec::{
-            ProcessError, ProcessResolver,
+            ProcessError,
             capture::{Capture, capture_bytes_per_stream},
-            resolve::{Launcher, ResolvedProgram},
+            resolve::{Launcher, ProcessResolver, ResolvedProgram},
         },
     },
 };

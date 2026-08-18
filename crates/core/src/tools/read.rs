@@ -11,7 +11,7 @@ use crate::encoding::DecodeError;
 pub use fingerprint::FileFingerprint;
 #[cfg(feature = "bench-internals")]
 pub use fingerprint::{FingerprintMetrics, fingerprint_metrics, reset_fingerprint_metrics};
-pub use prepared::{
+pub(crate) use prepared::{
     Attempt, PdfMemoryBudgets, PreparedRead, execute_prepared_with_budget, prepare,
 };
 pub use request::PdfMode;

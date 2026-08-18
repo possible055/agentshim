@@ -1,6 +1,6 @@
 import { realpathSync } from 'node:fs'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
-import type { NativeEngine, NativeEngineOptions } from './native.ts'
+import type { NativeEngine, NativeHostRuntime } from './native.ts'
 
 export function canonicalOrUndefined(path: string): string | undefined {
   try {
@@ -20,19 +20,27 @@ export interface AcquiredEngine {
   readonly root: string
 }
 
-export type NativeEngineConstructor = new (root: string, options?: NativeEngineOptions) => NativeEngine
+export interface EngineCloseFailure {
+  readonly root: string
+  readonly phase: 'preflight' | 'release' | 'dispose'
+  readonly error: unknown
+}
 
 export class EnginePool {
   private readonly entries = new Map<string, EnginePoolEntry>()
   private readonly refCounts = new Map<string, number>()
-  private readonly pendingCloses: Array<Promise<unknown>> = []
+  private readonly pendingCloses = new Set<Promise<void>>()
+  private disposed = false
 
   constructor(
-    private readonly engineClass: NativeEngineConstructor,
-    private readonly options: NativeEngineOptions,
+    private readonly host: NativeHostRuntime,
+    private readonly reportCloseFailure: (failure: EngineCloseFailure) => void,
   ) {}
 
   acquire(cwd: string): AcquiredEngine {
+    if (this.disposed) {
+      throw new HarnessError('dsh-agentshim: native engine pool is disposed', 'AGENTSHIM_ENGINE_CLOSED')
+    }
     const canonical = canonicalOrUndefined(cwd)
     if (canonical === undefined) {
       throw new HarnessError(
@@ -42,11 +50,11 @@ export class EnginePool {
     }
     let entry = this.entries.get(canonical)
     if (entry === undefined) {
-      const engine = new this.engineClass(canonical, this.options)
+      const engine = this.host.openEngine(canonical)
       try {
         engine.verifyBash()
       } catch (error) {
-        this.pendingCloses.push(engine.close().catch(() => {}))
+        this.trackClose({ engine, root: canonical }, 'preflight')
         throw error
       }
       entry = { engine, root: canonical }
@@ -64,7 +72,7 @@ export class EnginePool {
       const entry = this.entries.get(root)
       if (entry !== undefined) {
         this.entries.delete(root)
-        this.pendingCloses.push(entry.engine.close().catch(() => {}))
+        this.trackClose(entry, 'release')
       }
     } else {
       this.refCounts.set(root, count - 1)
@@ -72,13 +80,29 @@ export class EnginePool {
   }
 
   async dispose(): Promise<void> {
+    if (this.disposed) {
+      await Promise.allSettled(this.pendingCloses)
+      return
+    }
+    this.disposed = true
     const entries = [...this.entries.values()]
     this.entries.clear()
     this.refCounts.clear()
-    await Promise.allSettled([
-      ...entries.map(entry => entry.engine.close()),
-      ...this.pendingCloses,
-    ])
-    this.pendingCloses.length = 0
+    for (const entry of entries) this.trackClose(entry, 'dispose')
+    await Promise.allSettled(this.pendingCloses)
+  }
+
+  private trackClose(entry: EnginePoolEntry, phase: EngineCloseFailure['phase']): void {
+    let tracked!: Promise<void>
+    tracked = entry.engine.close()
+      .catch((error: unknown) => {
+        try {
+          this.reportCloseFailure({ root: entry.root, phase, error })
+        } catch {
+          // A diagnostic sink must not turn one close failure into an unhandled rejection.
+        }
+      })
+      .finally(() => this.pendingCloses.delete(tracked))
+    this.pendingCloses.add(tracked)
   }
 }

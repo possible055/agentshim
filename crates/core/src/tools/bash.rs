@@ -31,8 +31,9 @@ use crate::{
 };
 
 pub mod detached;
-pub mod locate;
+pub(crate) mod locate;
 pub mod status;
+pub use locate::BASH_OVERRIDE_ENV;
 #[cfg(test)]
 mod tests;
 
@@ -271,7 +272,7 @@ pub fn execute_output_with_budget(
     clippy::too_many_lines,
     reason = "foreground and detached Bash share one validated launch plan"
 )]
-pub fn execute_output_with_capture(
+pub(crate) fn execute_output_with_capture(
     root: &Arc<RepositoryRoot>,
     locator: &BashLocator,
     detached_admission: Option<DetachedAdmission>,
@@ -336,18 +337,13 @@ pub fn execute_output_with_capture(
             output_budget,
         );
     }
-    let timeout = deadline
-        .and_then(|deadline| deadline.checked_duration_since(std::time::Instant::now()))
-        .filter(|remaining| !remaining.is_zero())
-        .ok_or(ProcessError::TimeoutBeforeSpawn {
-            timeout_ms: request.timeout_ms(timeout_ceiling_ms),
-        })?;
+    let deadline = deadline.expect("foreground bash always has a deadline");
     let prepared = PreparedBash {
         resolved,
         cwd,
         args,
         environment,
-        timeout,
+        deadline,
         request_timeout_ms: request.timeout_ms(timeout_ceiling_ms),
         msys_retry_available: msys_retry_available(request),
     };
@@ -356,20 +352,20 @@ pub fn execute_output_with_capture(
 
 /// One resolved foreground bash launch: the probed bash executable, its `-c`
 /// argv, working directory, locale environment, and timeout.
-#[derive(Clone, Debug)]
-pub struct PreparedBash {
-    pub resolved: ResolvedProgram,
-    pub cwd: PathBuf,
-    pub args: Vec<String>,
-    pub environment: EnvironmentPlan,
-    pub timeout: Duration,
-    pub request_timeout_ms: u64,
-    pub msys_retry_available: bool,
+#[derive(Debug)]
+pub(crate) struct PreparedBash {
+    pub(crate) resolved: ResolvedProgram,
+    pub(crate) cwd: PathBuf,
+    pub(crate) args: Vec<String>,
+    pub(crate) environment: EnvironmentPlan,
+    pub(crate) deadline: std::time::Instant,
+    pub(crate) request_timeout_ms: u64,
+    pub(crate) msys_retry_available: bool,
 }
 
 /// Resolve the probed bash and validate one foreground command launch without
 /// spawning it, so a host can wrap the final argv in a sandbox first.
-pub fn prepare_bash_foreground(
+pub(crate) fn prepare_bash_foreground(
     root: &Arc<RepositoryRoot>,
     locator: &BashLocator,
     request: &BashRequest,
@@ -377,14 +373,17 @@ pub fn prepare_bash_foreground(
     timeout_ceiling_ms: u64,
     cancellation: &CancellationToken,
 ) -> Result<PreparedBash, ProcessError> {
+    let deadline = std::time::Instant::now() + timeout;
     request.validate(timeout_ceiling_ms)?;
-    let runtime = locator.resolve(cancellation).map_err(|error| match error {
-        LocateError::Cancelled => ProcessError::Cancelled,
-        LocateError::TimedOut => ProcessError::TimeoutBeforeSpawn {
-            timeout_ms: request.timeout_ms(timeout_ceiling_ms),
-        },
-        LocateError::Unavailable(message) => ProcessError::Unavailable(message.to_string()),
-    })?;
+    let runtime = locator
+        .resolve_before(cancellation, deadline)
+        .map_err(|error| match error {
+            LocateError::Cancelled => ProcessError::Cancelled,
+            LocateError::TimedOut => ProcessError::TimeoutBeforeSpawn {
+                timeout_ms: request.timeout_ms(timeout_ceiling_ms),
+            },
+            LocateError::Unavailable(message) => ProcessError::Unavailable(message.to_string()),
+        })?;
     let cwd = spawn::resolve_cwd(root, request.cwd.as_deref()).map_err(invalid)?;
     let resolved = ResolvedProgram {
         absolute: runtime.executable.clone(),
@@ -396,7 +395,7 @@ pub fn prepare_bash_foreground(
         cwd,
         args: bash_args(&request.command),
         environment: bash_environment(&runtime, request.msys_argument_conversion),
-        timeout,
+        deadline,
         request_timeout_ms: request.timeout_ms(timeout_ceiling_ms),
         msys_retry_available: msys_retry_available(request),
     })
@@ -404,7 +403,7 @@ pub fn prepare_bash_foreground(
 
 /// Spawn one prepared foreground bash launch, merged streams, with the same
 /// tree ownership, timeout, capture ceiling, and cancellation as other hosts.
-pub fn execute_prepared_bash(
+pub(crate) fn execute_prepared_bash(
     prepared: PreparedBash,
     wrapped_argv: Option<&[String]>,
     cancellation: &CancellationToken,
@@ -416,13 +415,19 @@ pub fn execute_prepared_bash(
         cwd,
         args,
         environment,
-        timeout,
+        deadline,
         request_timeout_ms,
         msys_retry_available,
     } = prepared;
     if cancellation.is_cancelled() {
         return Err(ProcessError::Cancelled);
     }
+    let timeout = deadline
+        .checked_duration_since(std::time::Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or(ProcessError::TimeoutBeforeSpawn {
+            timeout_ms: request_timeout_ms,
+        })?;
     if let Some(argv) = wrapped_argv {
         let command = argv
             .first()
@@ -773,15 +778,17 @@ fn render_timeout(
                             output_budget.page_bytes(),
                         )
                         .bytes
-                        && matches!(
-                            output_budget.project_result(
-                                &render.text,
-                                Some(&structured),
-                                true,
-                                cancellation
-                            ),
-                            crate::output::ProjectionDecision::Fits(_)
-                        )
+                        && output_budget.token_gate().is_none_or(|token_gate| {
+                            matches!(
+                                token_gate.project_result(
+                                    &render.text,
+                                    Some(&structured),
+                                    true,
+                                    cancellation
+                                ),
+                                crate::output::ProjectionDecision::Fits(_)
+                            )
+                        })
                 })
         },
     )
@@ -792,7 +799,9 @@ fn normalize_burst_render_error(
     error: ProcessError,
     output_budget: &dyn crate::output::CallBudget,
 ) -> ProcessError {
-    if output_budget.ceiling() < crate::output::CALL_OUTPUT_TOKEN_LIMIT
+    if output_budget
+        .token_gate()
+        .is_some_and(|token_gate| token_gate.ceiling() < crate::output::CALL_OUTPUT_TOKEN_LIMIT)
         && matches!(
             error,
             ProcessError::Output(crate::output::OutputError::RequiredContentTooLarge)

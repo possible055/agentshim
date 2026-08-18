@@ -1,28 +1,22 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Value, json};
 
 use crate::path::ReadScope;
-use crate::server::service::{default_timeout_ms, max_timeout_ms};
-
-pub(super) fn tool_catalog(read_scope: ReadScope) -> &'static [Tool; 6] {
-    static NORMAL_TOOLS: OnceLock<[Tool; 6]> = OnceLock::new();
-    static UNRESTRICTED_TOOLS: OnceLock<[Tool; 6]> = OnceLock::new();
-    let tools = match read_scope {
-        ReadScope::Normal => &NORMAL_TOOLS,
-        ReadScope::Unrestricted => &UNRESTRICTED_TOOLS,
-    };
-    tools.get_or_init(|| {
-        [
-            read_tool(read_scope),
-            grep_tool(read_scope),
-            glob_tool(read_scope),
-            run_program_tool(),
-            bash_tool(),
-            bash_status_tool(),
-        ]
-    })
+pub(super) fn tool_catalog(
+    read_scope: ReadScope,
+    max_timeout_ms: u64,
+    default_timeout_ms: u64,
+) -> [Tool; 6] {
+    [
+        read_tool(read_scope),
+        grep_tool(read_scope),
+        glob_tool(read_scope),
+        run_program_tool(max_timeout_ms, default_timeout_ms),
+        bash_tool(max_timeout_ms, default_timeout_ms),
+        bash_status_tool(),
+    ]
 }
 
 fn read_tool(read_scope: ReadScope) -> Tool {
@@ -238,9 +232,7 @@ fn glob_tool(read_scope: ReadScope) -> Tool {
     .with_annotations(read_only_annotations())
 }
 
-fn run_program_tool() -> Tool {
-    let max = max_timeout_ms();
-    let default = default_timeout_ms();
+fn run_program_tool(max: u64, default: u64) -> Tool {
     Tool::new(
         "run_program",
         "Run a local executable directly with literal arguments without a shell. Arguments are passed literally without shell expansion or quoting. Use bash instead if pipelines, redirection, or shell composition are required.",
@@ -301,9 +293,7 @@ fn run_program_tool() -> Tool {
     )
 }
 
-fn bash_tool() -> Tool {
-    let max = max_timeout_ms();
-    let default = default_timeout_ms();
+fn bash_tool(max: u64, default: u64) -> Tool {
     Tool::new(
         "bash",
         "Run a POSIX bash command line non-interactively and return merged stdout/stderr with the exit code. Write POSIX bash (never PowerShell) on all platforms. For long-running commands, set detach=true with a log_path to run in the background and monitor via bash_status.",

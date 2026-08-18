@@ -25,16 +25,15 @@ pub use profile::ClientProfile;
 ///
 /// Returns the operator-facing explanation when no usable GNU bash was found.
 pub fn bash_report() -> Result<(std::path::PathBuf, String), String> {
-    tools::bash::locate::BashLocator::capture()
-        .resolve(&tokio_util::sync::CancellationToken::new())
-        .map(|runtime| (runtime.executable.clone(), runtime.locale.clone()))
-        .map_err(|error| match error {
-            tools::bash::locate::LocateError::Cancelled => {
-                "bash discovery was cancelled".to_owned()
-            }
-            tools::bash::locate::LocateError::TimedOut => "bash discovery timed out".to_owned(),
-            tools::bash::locate::LocateError::Unavailable(message) => message.to_string(),
-        })
+    let root = std::env::current_dir()
+        .map_err(|error| error.to_string())
+        .and_then(|path| path::RepositoryRoot::open(path).map_err(|error| error.to_string()))?;
+    let engine = agentshim_core::ToolEngine::new(
+        std::sync::Arc::new(root),
+        ReadScope::default(),
+        runtime::RuntimeResources::new(runtime::RuntimeConfig::for_host_defaults()),
+    );
+    engine.bash_runtime().map_err(|error| error.to_string())
 }
 pub use runtime::{
     DEFAULT_PROCESS_CALLS, MAX_CONFIGURED_PROCESS_CALLS, MAX_READ_ONLY_CALLS,

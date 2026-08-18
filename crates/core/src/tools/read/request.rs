@@ -151,6 +151,18 @@ pub enum ReadError {
     Changed,
     #[error("read cancelled")]
     Cancelled,
+    #[error("read resource {resource} is busy")]
+    ResourceBusy {
+        resource: &'static str,
+        retry_after: Option<std::time::Duration>,
+    },
+    #[error("PDF read exceeded its mode runtime limit")]
+    ResourceTimeout {
+        limit: std::time::Duration,
+        elapsed: std::time::Duration,
+    },
+    #[error("read worker failed: {0}")]
+    Worker(String),
     #[error(transparent)]
     Decode(#[from] DecodeError),
     #[error(transparent)]

@@ -79,16 +79,6 @@ function Compare-SemVer {
     return 0
 }
 
-function Get-PackageVersion {
-    param([Parameter(Mandatory)][string]$Content)
-
-    $match = [regex]::Match($Content, '(?m)^version\s*=\s*"([^"]+)"\s*$')
-    if (-not $match.Success) {
-        throw "Cargo.toml does not contain a package version."
-    }
-    return $match.Groups[1].Value
-}
-
 function Set-PackageVersion {
     param(
         [Parameter(Mandatory)][string]$Content,
@@ -158,12 +148,38 @@ if (-not $AllowDirty) {
     }
 }
 
-$manifestBefore = [IO.File]::ReadAllText($manifestPath)
-$currentVersion = Get-PackageVersion -Content $manifestBefore
-$currentSemVer = ConvertTo-SemVer -Value $currentVersion
 $requestedSemVer = ConvertTo-SemVer -Value $Version
-if ((Compare-SemVer -Left $requestedSemVer -Right $currentSemVer) -le 0) {
-    throw "Version $Version must be greater than the current version $currentVersion."
+
+$remoteTagLines = @(& git -C $repository ls-remote --refs --tags origin "refs/tags/v*")
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not inspect release tags on origin."
+}
+
+$highestReleasedVersion = $null
+$highestReleasedSemVer = $null
+foreach ($line in $remoteTagLines) {
+    $match = [regex]::Match($line, "\trefs/tags/v(?<version>.+)$")
+    if (-not $match.Success) {
+        continue
+    }
+
+    $tagVersion = $match.Groups["version"].Value
+    try {
+        $tagSemVer = ConvertTo-SemVer -Value $tagVersion
+    } catch {
+        continue
+    }
+
+    if ($null -eq $highestReleasedSemVer -or
+        (Compare-SemVer -Left $tagSemVer -Right $highestReleasedSemVer) -gt 0) {
+        $highestReleasedVersion = $tagVersion
+        $highestReleasedSemVer = $tagSemVer
+    }
+}
+
+if ($null -ne $highestReleasedSemVer -and
+    (Compare-SemVer -Left $requestedSemVer -Right $highestReleasedSemVer) -le 0) {
+    throw "Version $Version must be greater than the highest release tag v$highestReleasedVersion on origin."
 }
 
 $lockBefore = $null

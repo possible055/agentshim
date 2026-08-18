@@ -376,7 +376,7 @@ mod tests {
         let initial = resources
             .try_reserve_memory(1024)
             .expect("initial reservation");
-        let reservation = MemoryReservation::from_initial(resources.clone(), initial, 1024);
+        let reservation = MemoryReservation::from_initial(&resources, initial, 1024);
         let pressure = resources
             .try_reserve_memory(MIN_TOOL_MEMORY_BYTES - 1024)
             .expect("competing reservation");

@@ -353,6 +353,11 @@ impl GrepRequest {
                 "limit must be from 1 to 1000".to_owned(),
             ));
         }
+        if self.encoding.is_some() && self.fallback_encoding.is_some() {
+            return Err(GrepError::Validation(
+                "encoding and fallback_encoding are mutually exclusive".to_owned(),
+            ));
+        }
         self.encoding_labels()?;
         Ok(())
     }
@@ -428,6 +433,10 @@ pub enum GrepError {
     Unsearchable(crate::output::SkipReason),
     #[error("grep cancelled")]
     Cancelled,
+    #[error("grep resource {0} is busy")]
+    ResourceBusy(&'static str),
+    #[error("grep worker failed: {0}")]
+    Worker(String),
     #[error(transparent)]
     Path(#[from] PathError),
     #[error(transparent)]
@@ -490,7 +499,7 @@ pub fn execute_with_memory_budget(
     let initial = resources
         .try_reserve_memory(initial_bytes)
         .ok_or_else(|| io::Error::other("test base memory permit unavailable"))?;
-    let memory = MemoryReservation::from_initial(resources.clone(), initial, initial_bytes);
+    let memory = MemoryReservation::from_initial(&resources, initial, initial_bytes);
     execute_inner(
         access,
         request,

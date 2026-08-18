@@ -30,7 +30,7 @@ export function getDshPackageVersion(): string | undefined {
 
 /**
  * Determine whether the current DSH host runtime requires manual context deferral
- * for nested image results in Code Mode (DSH 0.1.0-rc.6 and earlier).
+ * for nested image results in Code Mode (DSH 0.1.0-rc.6).
  * In DSH 0.1.0-rc.7+, Code Mode automatically forwards nested image content blocks.
  */
 export function requiresManualCodeModeImageDeferral(ctx: Context, exec: ToolRunContext): boolean {
@@ -42,13 +42,9 @@ export function requiresManualCodeModeImageDeferral(ctx: Context, exec: ToolRunC
     return typeof attachments.saveImages !== 'function'
   }
 
-  // 2. Package version inspection fallback if attachments is not mounted
+  // 2. Exact legacy fallback when the attachment capability is not mounted.
   const version = getDshPackageVersion()
-  if (version !== undefined) {
-    return version === '0.1.0-rc.6' || version.startsWith('0.0.') || version.startsWith('0.1.0-rc.1') || version.startsWith('0.1.0-rc.2') || version.startsWith('0.1.0-rc.3') || version.startsWith('0.1.0-rc.5')
-  }
-
-  return false
+  return version === '0.1.0-rc.6'
 }
 
 /** One native image block before DSH attachment materialization. */

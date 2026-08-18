@@ -1,7 +1,7 @@
-//! Native engine for in-process `AgentShim` hosts.
+//! Native binding for the in-process DSH plugin.
 //!
-//! Per-instance repository and process engine with explicit configuration,
-//! durable capture artifacts, managed background jobs, and bounded teardown.
+//! One plugin-owned host runtime shares capacity across per-cwd repository engines while
+//! retaining explicit configuration, durable capture, managed jobs, and bounded teardown.
 
 mod background;
 mod budget;
@@ -11,7 +11,7 @@ mod engine;
 mod process;
 
 /// Module API version; hosts must exact-match before using any Engine capability.
-pub const API_VERSION: u32 = 3;
+pub const API_VERSION: u32 = 4;
 
 #[napi_derive::napi]
 pub fn api_version() -> u32 {
@@ -21,6 +21,7 @@ pub fn api_version() -> u32 {
 pub use background::{ArtifactPublished, EngineJobHandle, NativeJobOutcome};
 pub use classify::{RunnerFailureRule, SandboxAttribution};
 pub use engine::{
-    Engine, EngineOptions, EnvEntry, GlobArgs, GrepArgs, NativeImage, ReadArgs, ToolText,
+    Engine, EnvEntry, GlobArgs, GrepArgs, NativeHostOptions, NativeHostRuntime, NativeImage,
+    ReadArgs, ToolText,
 };
 pub use process::{ArtifactInfo, BashArgs, NativeFailure, ProcessArgs, ProcessOutcome};

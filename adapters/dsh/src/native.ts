@@ -5,7 +5,7 @@ import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { TOOL_ABORTED } from '@deepseek-ai/dsh-tools'
 
 /** Native API contract version; activation refuses mismatched addons. */
-export const REQUIRED_NATIVE_API_VERSION = 3
+export const REQUIRED_NATIVE_API_VERSION = 4
 
 export interface NativeFailure {
   readonly code: string
@@ -38,16 +38,9 @@ export interface NativeImage {
   readonly mimeType: string
 }
 
-export interface NativeContinuation {
-  readonly kind: 'next_start_line' | 'next_offset' | 'next_artifact_offset' | 'pdf_cursor'
-  readonly value: string
-}
-
 export interface NativeToolText {
   readonly text: string
-  readonly complete: boolean
   readonly images: readonly NativeImage[]
-  readonly continuation?: NativeContinuation
 }
 
 export interface NativeReadArgs {
@@ -85,7 +78,7 @@ export interface NativeGlobArgs {
   readonly limit?: number
 }
 
-export interface NativeEngineOptions {
+export interface NativeHostOptions {
   readonly pageBudgetBytes?: number
   readonly readScope?: 'normal' | 'unrestricted'
   readonly toolTimeoutShelfMs?: number
@@ -123,7 +116,6 @@ export interface NativeProcessOutcome {
   readonly stdout: NativeProcessStream
   readonly stderr: NativeProcessStream
   readonly artifacts: NativeArtifactInfo[]
-  readonly limitExceeded: boolean
   readonly failure?: NativeFailure
   readonly denied: boolean
   readonly runnerFailed: boolean
@@ -236,6 +228,10 @@ interface RawNativeEngine {
   close(): Promise<NativeResult<boolean>>
 }
 
+interface RawNativeHostRuntime {
+  openEngine(root: string): RawNativeEngine
+}
+
 export interface NativeEngine {
   verifyBash(): void
   readText(args: NativeReadArgs, signal?: AbortSignal): Promise<NativeToolText>
@@ -249,14 +245,18 @@ export interface NativeEngine {
   close(): Promise<void>
 }
 
+export interface NativeHostRuntime {
+  openEngine(root: string): NativeEngine
+}
+
 interface NativeModule {
   readonly apiVersion: () => number
-  readonly Engine: new (root: string, options?: NativeEngineOptions) => RawNativeEngine
+  readonly NativeHostRuntime: new (options?: NativeHostOptions) => RawNativeHostRuntime
 }
 
 interface LoadedNativeModule {
   readonly apiVersion: () => number
-  readonly Engine: new (root: string, options?: NativeEngineOptions) => NativeEngine
+  readonly NativeHostRuntime: new (options?: NativeHostOptions) => NativeHostRuntime
 }
 
 class NativeJobHandleAdapter implements NativeJobHandle {
@@ -413,6 +413,14 @@ class NativeEngineAdapter implements NativeEngine {
   }
 }
 
+class NativeHostRuntimeAdapter implements NativeHostRuntime {
+  constructor(private readonly raw: RawNativeHostRuntime) {}
+
+  openEngine(root: string): NativeEngine {
+    return new NativeEngineAdapter(this.raw.openEngine(root))
+  }
+}
+
 /** Platform packages are the only supported native distribution channels. */
 const PLATFORM_PACKAGES: Readonly<Record<string, string>> = {
   'win32-x64-msvc': 'dsh-agentshim-win32-x64-msvc',
@@ -501,18 +509,18 @@ export function loadNativeAddon(): NativeLoadResult {
       },
     }
   }
-  if (typeof addon.Engine !== 'function') {
-    return { failure: { reason: 'api-version-mismatch', detail: 'native addon does not export the Engine capability' } }
+  if (typeof addon.NativeHostRuntime !== 'function') {
+    return { failure: { reason: 'api-version-mismatch', detail: 'native addon does not export the NativeHostRuntime capability' } }
   }
-  const NativeEngine = class extends NativeEngineAdapter {
-    constructor(root: string, options?: NativeEngineOptions) {
-      super(new addon.Engine(root, options))
+  const NativeHostRuntime = class extends NativeHostRuntimeAdapter {
+    constructor(options?: NativeHostOptions) {
+      super(new addon.NativeHostRuntime(options))
     }
   }
   return {
     engine: {
       apiVersion: addon.apiVersion,
-      Engine: NativeEngine,
+      NativeHostRuntime,
     },
   }
 }

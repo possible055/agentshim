@@ -30,6 +30,16 @@ const builtNativeDll = fileURLToPath(new URL(
 ))
 const samplePdf = fileURLToPath(new URL('./fixtures/sample.pdf', import.meta.url))
 const callSignal = new AbortController().signal
+const sharedConstraints = JSON.parse(await readFile(
+  fileURLToPath(new URL('../../../evals/host-constraints.json', import.meta.url)),
+  'utf8',
+)) as {
+  readonly cases: ReadonlyArray<{
+    readonly id: string
+    readonly tool: string
+    readonly args: Record<string, unknown>
+  }>
+}
 
 const stagedNativeAddon = await (async (): Promise<string | undefined> => {
   try {
@@ -258,31 +268,27 @@ describe('agent scope replacement', () => {
     expect(python).not.toContain('-> Any')
   })
 
-  it('rejects schema and manual argument violations before reaching native execution', async () => {
+  it('rejects shared and adapter-only argument violations through production validation', async () => {
     const root = await makeRoot()
     const ctx = await mountComposition(root)
     const { agent } = await mintStandardAgent(ctx, 'invalid-args', root)
-    const cases: Array<[string, Record<string, unknown>]> = [
-      ['read', {}],
-      ['read', { path: 7 }],
-      ['bash', { command: 'true', description: 'Run a command', msys_argument_conversion: 'invalid' }],
-      ['run_program', { program: 'node', stdin: 7 }],
-      ['read', { path: 'notes.txt', extra: true }],
-      ['read', { path: 'notes.txt', line_count: 0 }],
-      ['bash', { command: ' ', description: 'Run a command' }],
-      ['grep', { pattern: 'needle', encoding: 'utf8', fallback_encoding: 'utf8' }],
-      ['run_program', { program: 'node', env: { INVALID: 7 } }],
+    const adapterOnlyCases: ReadonlyArray<{ readonly id: string; readonly tool: string; readonly args: Record<string, unknown> }> = [
+      { id: 'read-path-type', tool: 'read', args: { path: 7 } },
+      { id: 'bash-enum', tool: 'bash', args: { command: 'true', description: 'Run a command', msys_argument_conversion: 'invalid' } },
+      { id: 'run-program-stdin-type', tool: 'run_program', args: { program: 'node', stdin: 7 } },
+      { id: 'bash-non-empty-command', tool: 'bash', args: { command: ' ', description: 'Run a command' } },
+      { id: 'run-program-env-type', tool: 'run_program', args: { program: 'node', env: { INVALID: 7 } } },
     ]
 
-    for (const [name, args] of cases) {
+    for (const { id, tool, args } of [...sharedConstraints.cases, ...adapterOnlyCases]) {
       const result = await ctx.tools.execute({
         signal: callSignal,
-        callId: CallId(`invalid-${name}`),
-        name,
+        callId: CallId(`invalid-${id}`),
+        name: tool,
         arguments: args,
         agent,
       })
-      expect(result.isError, `${name}: ${JSON.stringify(args)}`).toBe(true)
+      expect(result.isError, `${id}: ${JSON.stringify(args)}`).toBe(true)
       expect(result.error?.info).toMatchObject({ code: 'INVALID_ARGS' })
     }
   })
@@ -628,10 +634,13 @@ describe('preset-scoped catalog (web surface topology)', () => {
   it('leaves a preset carrying no replaceable name untouched', async () => {
     const root = await makeRoot()
     const ctx = await mountComposition(root)
-    const { agent } = await mintPresetAgent(ctx, 'no-overlap', root, ['todo', 'write'])
+    const warn = vi.spyOn(ctx.logger, 'warn')
+    const missing = join(tmpdir(), `agentshim-no-overlap-${Math.random()}`)
+    const { agent } = await mintPresetAgent(ctx, 'no-overlap', missing, ['todo', 'write'])
     ctx.emit('agent/created', { agent })
 
     expect(visibleNames(ctx, agent)).toEqual(['todo', 'write'])
+    expect(warn).not.toHaveBeenCalled()
   })
 })
 

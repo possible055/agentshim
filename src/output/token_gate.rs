@@ -18,6 +18,9 @@ pub(crate) const TOOL_CONTENT_TOKEN_LIMIT: usize =
     MODEL_OUTPUT_TOKEN_LIMIT - CLIENT_WRAPPER_TOKEN_RESERVE;
 const COUNTER_WORKERS: usize = 2;
 const POOL_CANCELLATION_POLL: Duration = Duration::from_millis(5);
+// The shared gate contains only the immutable tokenizer prototype and its reusable
+// counters. Timeout, byte limit, read scope, client profile, and catalog state stay
+// on each AgentShim instance.
 static SHARED_GATE: OnceLock<Arc<OutputTokenGate>> = OnceLock::new();
 static SHARED_GATE_INIT: Mutex<()> = Mutex::new(());
 
@@ -641,6 +644,7 @@ mod tests {
                                 .len(),
                         );
                         let budget = crate::output::CallOutputBudget::new(
+                            crate::output::MODEL_BYTE_LIMIT,
                             std::sync::Arc::clone(&token_gate),
                             burst_gate.begin_call(),
                         );

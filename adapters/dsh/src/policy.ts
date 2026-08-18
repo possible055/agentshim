@@ -15,10 +15,6 @@ import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 export const ESCALATION_PERMISSION_FIELD = 'sandbox_permissions'
 export const ESCALATION_JUSTIFICATION_FIELD = 'justification'
 
-export function sameExecutionPath(left: string, right: string): boolean {
-  return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right
-}
-
 export function assertLocalFileSystem(ctx: Context): void {
   if (!(ctx.fs instanceof LocalFileSystem)) {
     throw new HarnessError('dsh-agentshim: ctx.fs is no longer the local filesystem provider', 'AGENTSHIM_EXECUTION_WORLD_MISMATCH')

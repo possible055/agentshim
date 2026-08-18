@@ -1,7 +1,8 @@
 {
   "name": "dsh-agentshim",
   "description": "DSH native tool plugin backed by agentshim-core",
-  "version": "0.1.4-alpha.5",
+  "version": "0.1.4-alpha.6",
+  "agentshimNativeApi": 4,
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
@@ -31,9 +32,11 @@
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
-    "lint": "oxlint src tests",
+    "lint": "oxlint src tests scripts",
     "test": "vitest run",
     "build": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "test:packed": "node scripts/test-packed.mjs",
+    "test:release-packages": "node scripts/test-release-packages.mjs",
     "verify:cutover": "node scripts/verify-cutover.mjs",
     "prepack": "pnpm run build"
   },
@@ -41,10 +44,10 @@
     "@deepseek-ai/schemastery": "^3.18.1"
   },
   "optionalDependencies": {
-    "dsh-agentshim-darwin-arm64": "workspace:0.1.4-alpha.5",
-    "dsh-agentshim-linux-arm64-gnu": "workspace:0.1.4-alpha.5",
-    "dsh-agentshim-linux-x64-gnu": "workspace:0.1.4-alpha.5",
-    "dsh-agentshim-win32-x64-msvc": "workspace:0.1.4-alpha.5"
+    "dsh-agentshim-darwin-arm64": "workspace:0.1.4-alpha.6",
+    "dsh-agentshim-linux-arm64-gnu": "workspace:0.1.4-alpha.6",
+    "dsh-agentshim-linux-x64-gnu": "workspace:0.1.4-alpha.6",
+    "dsh-agentshim-win32-x64-msvc": "workspace:0.1.4-alpha.6"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

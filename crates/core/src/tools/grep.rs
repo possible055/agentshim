@@ -20,7 +20,7 @@ pub use request::{
     execute_with_traversal, execute_with_variant,
 };
 pub use request::{GrepError, GrepRequest};
-pub use request::{base_memory_charge, execute_output_with_budget};
+pub(crate) use request::{base_memory_charge, execute_output_with_budget};
 #[cfg(feature = "bench-internals")]
 pub use request::{
     execute_profiled, execute_profiled_with_traversal, execute_profiled_with_variant,

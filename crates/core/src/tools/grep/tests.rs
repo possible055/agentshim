@@ -397,7 +397,7 @@ mod tests {
         let output = execute(&root, &query, 1, &cancellation).expect("bounded dense grep");
 
         assert!(matches!(
-            crate::output::CallBudget::project_tool_output(
+            crate::output::TokenGate::project_tool_output(
                 &crate::output::TestCallBudget::default(),
                 &output,
                 0,
@@ -561,7 +561,7 @@ mod tests {
         let initial = resources
             .try_reserve_memory(1024)
             .expect("initial reservation");
-        let reservation = MemoryReservation::from_initial(resources.clone(), initial, 1024);
+        let reservation = MemoryReservation::from_initial(&resources, initial, 1024);
         let pressure = resources
             .try_reserve_memory(MIN_TOOL_MEMORY_BYTES - 1024)
             .expect("competing reservation");
@@ -597,11 +597,8 @@ mod tests {
         let initial = resources
             .try_reserve_memory(policy.base_reservation_bytes())
             .expect("base reservation");
-        let reservation = MemoryReservation::from_initial(
-            resources.clone(),
-            initial,
-            policy.base_reservation_bytes(),
-        );
+        let reservation =
+            MemoryReservation::from_initial(&resources, initial, policy.base_reservation_bytes());
         let mut collection =
             CandidateCollection::new(CandidatePolicy::SoftTarget, policy, Some(reservation));
         collection.admit(candidate).expect("candidate admission");

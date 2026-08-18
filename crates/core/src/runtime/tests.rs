@@ -383,8 +383,7 @@ mod tests {
         let initial = resources
             .try_reserve_memory(1024 * 1024)
             .expect("initial reservation");
-        let mut reservation =
-            MemoryReservation::from_initial(resources.clone(), initial, 1024 * 1024);
+        let mut reservation = MemoryReservation::from_initial(&resources, initial, 1024 * 1024);
         let pressure = resources
             .try_reserve_memory(MIN_TOOL_MEMORY_BYTES - 1024 * 1024)
             .expect("competing reservation");
@@ -399,7 +398,7 @@ mod tests {
                 .try_reserve_memory(1024 * 1024)
                 .expect("panic reservation");
             let _reservation =
-                MemoryReservation::from_initial(panic_resources, initial, 1024 * 1024);
+                MemoryReservation::from_initial(&panic_resources, initial, 1024 * 1024);
             panic!("injected reservation panic");
         }));
         assert!(panic.is_err());

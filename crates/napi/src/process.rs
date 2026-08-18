@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc};
 
 use napi::{Error, bindgen_prelude::spawn_blocking};
 use napi_derive::napi;
@@ -40,12 +40,9 @@ pub struct PreparedProcess {
 /// Prepared foreground launches awaiting a sandbox decision. Each handle is
 /// single-use: spawning or dropping the engine consumes it.
 pub(crate) struct PreparedHandles {
-    run_program: std::sync::Mutex<
-        std::collections::HashMap<String, agentshim_core::tools::run_program::PreparedRunProgram>,
-    >,
-    bash: std::sync::Mutex<
-        std::collections::HashMap<String, agentshim_core::tools::bash::PreparedBash>,
-    >,
+    run_program:
+        std::sync::Mutex<std::collections::HashMap<String, agentshim_core::PreparedRunProgram>>,
+    bash: std::sync::Mutex<std::collections::HashMap<String, agentshim_core::PreparedBash>>,
 }
 
 impl PreparedHandles {
@@ -267,6 +264,12 @@ pub(crate) fn process_failure(error: &agentshim_core::tools::exec::ProcessError)
             true,
             Some(serde_json::json!({ "kind": "teardown" })),
         ),
+        ProcessError::Worker(message) => NativeFailure::new(
+            "AGENTSHIM_NATIVE_THREAD_FAILED",
+            message.clone(),
+            true,
+            Some(serde_json::json!({ "kind": "native_thread" })),
+        ),
         ProcessError::Output(error) => NativeFailure::new(
             "AGENTSHIM_OUTPUT_FAILED",
             error.to_string(),
@@ -321,7 +324,6 @@ pub struct ProcessOutcome {
     pub stdout: ProcessStreamOutcome,
     pub stderr: ProcessStreamOutcome,
     pub artifacts: Vec<ArtifactInfo>,
-    pub limit_exceeded: bool,
     pub failure: Option<NativeFailure>,
     /// Sandbox classification of this spawn against the passed attribution;
     /// both stay false when no attribution was supplied.
@@ -454,7 +456,11 @@ fn settle_outcome(
             ));
         }
     };
-    let publish = should_publish(&records, complete);
+    let publish = should_publish(
+        &records,
+        complete,
+        state.output_limits.capture_publish_bytes(),
+    );
     let artifacts = if publish {
         register_artifacts(state, &records);
         artifact_infos(&records)
@@ -479,7 +485,6 @@ fn settle_outcome(
                 stdout,
                 stderr: stderr_stream,
                 artifacts,
-                limit_exceeded: false,
                 failure: None,
                 denied: classification.denied,
                 runner_failed: classification.runner_failed,
@@ -520,7 +525,6 @@ fn settle_outcome(
                 stdout: stream_fact(None, "stdout", &artifacts),
                 stderr: stream_fact(None, "stderr", &artifacts),
                 artifacts,
-                limit_exceeded: capture.exceeded(),
                 failure: Some(failure),
                 denied: classification.denied,
                 runner_failed: classification.runner_failed,
@@ -530,59 +534,60 @@ fn settle_outcome(
 }
 
 enum Either {
-    RunProgram(agentshim_core::tools::run_program::PreparedRunProgram),
-    Bash(agentshim_core::tools::bash::PreparedBash),
+    RunProgram(agentshim_core::PreparedRunProgram),
+    Bash(agentshim_core::PreparedBash),
 }
 
-/// Run one process call under a private durable capture: the capture object stays
-/// concrete so its totals, ceiling, and artifacts survive the spawn unchanged.
-pub(crate) async fn run_with_capture<R>(
-    state: Arc<EngineState>,
-    cancellation: tokio_util::sync::CancellationToken,
+async fn create_capture(
+    state: &EngineState,
     streams: &'static [&'static str],
-    attribution: Option<SandboxAttribution>,
-    run: R,
-) -> NativeResult<ProcessOutcome>
-where
-    R: FnOnce(
-            &EngineState,
-            Option<&Arc<dyn agentshim_core::tools::exec::spawn::CaptureSink>>,
-        ) -> std::result::Result<
-            agentshim_core::tools::ToolOutput,
-            agentshim_core::tools::exec::ProcessError,
-        > + Send
-        + 'static,
-{
-    if cancellation.is_cancelled() {
-        return NativeResult::failure(NativeFailure::cancelled("spawn"));
-    }
-    let result = spawn_blocking(move || {
+) -> std::result::Result<Arc<CallCapture>, NativeFailure> {
+    let capture_root = state.capture_root.clone();
+    let session_key = state.session_key.clone();
+    let capture_max_bytes = state.capture_max_bytes;
+    spawn_blocking(move || {
         let call_key = uuid::Uuid::new_v4().simple().to_string();
-        let capture = match CallCapture::create(
-            &state.capture_root,
-            &state.session_key,
+        match CallCapture::create(
+            &capture_root,
+            &session_key,
             &call_key,
             streams,
-            state.capture_max_bytes,
+            capture_max_bytes,
         ) {
-            Ok(capture) => capture,
-            Err(error) => {
-                return NativeResult::failure(NativeFailure::new(
-                    CAPTURE_IO_FAILED_CODE,
-                    error.to_string(),
-                    true,
-                    Some(serde_json::json!({ "kind": "capture_create" })),
-                ));
-            }
-        };
-        let sink: Arc<CallCapture> = Arc::new(capture);
-        let dyn_sink: Arc<dyn agentshim_core::tools::exec::spawn::CaptureSink> =
-            Arc::clone(&sink) as Arc<dyn agentshim_core::tools::exec::spawn::CaptureSink>;
-        let result = run(&state, Some(&dyn_sink));
-        settle_outcome(&state, sink.as_ref(), attribution.as_ref(), result)
+            Ok(capture) => Ok(Arc::new(capture)),
+            Err(error) => Err(NativeFailure::new(
+                CAPTURE_IO_FAILED_CODE,
+                error.to_string(),
+                true,
+                Some(serde_json::json!({ "kind": "capture_create" })),
+            )),
+        }
     })
-    .await;
-    match result {
+    .await
+    .map_err(|error| {
+        NativeFailure::new(
+            "AGENTSHIM_NATIVE_THREAD_FAILED",
+            error.to_string(),
+            true,
+            Some(serde_json::json!({ "kind": "native_thread" })),
+        )
+    })?
+}
+
+async fn settle_capture(
+    state: Arc<EngineState>,
+    capture: Arc<CallCapture>,
+    attribution: Option<SandboxAttribution>,
+    result: std::result::Result<
+        agentshim_core::tools::ToolOutput,
+        agentshim_core::tools::exec::ProcessError,
+    >,
+) -> NativeResult<ProcessOutcome> {
+    match spawn_blocking(move || {
+        settle_outcome(&state, capture.as_ref(), attribution.as_ref(), result)
+    })
+    .await
+    {
         Ok(result) => result,
         Err(error) => NativeResult::failure(NativeFailure::new(
             "AGENTSHIM_NATIVE_THREAD_FAILED",
@@ -597,8 +602,7 @@ impl EngineState {
     fn take_run_program(
         &self,
         handle: &str,
-    ) -> std::result::Result<agentshim_core::tools::run_program::PreparedRunProgram, NativeFailure>
-    {
+    ) -> std::result::Result<agentshim_core::PreparedRunProgram, NativeFailure> {
         let mut prepared = self
             .prepared
             .run_program
@@ -617,7 +621,7 @@ impl EngineState {
     pub(crate) fn take_bash(
         &self,
         handle: &str,
-    ) -> std::result::Result<agentshim_core::tools::bash::PreparedBash, NativeFailure> {
+    ) -> std::result::Result<agentshim_core::PreparedBash, NativeFailure> {
         let mut prepared = self
             .prepared
             .bash
@@ -654,26 +658,20 @@ impl EngineState {
             stdin: args.stdin,
             timeout_ms: args.timeout_ms.map(u64::from),
         };
-        let resolver = agentshim_core::tools::exec::resolve::ProcessResolver::capture();
-        let timeout = Duration::from_millis(
-            request
-                .timeout_ms(self.timeout_ceiling_ms)
-                .min(self.timeout_ceiling_ms),
+        let context = agentshim_core::OperationContext::new(
+            cancellation.clone(),
+            Arc::new(self.output_limits.clone()),
         );
-        let mut prepared = match agentshim_core::tools::run_program::prepare_run_program(
-            &self.root,
-            &resolver,
-            &request,
-            timeout,
-            self.timeout_ceiling_ms,
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => return NativeResult::failure(process_failure(&error)),
-        };
-        prepared.environment.base = Some(self.env.clone());
+        let prepared =
+            match self
+                .tool_engine
+                .prepare_run_program(&request, self.timeout_ceiling_ms, &context)
+            {
+                Ok(prepared) => prepared,
+                Err(error) => return NativeResult::failure(process_failure(&error)),
+            };
         let handle = uuid::Uuid::new_v4().simple().to_string();
-        let mut final_argv = vec![prepared.resolved.executable.to_string_lossy().into_owned()];
-        final_argv.extend(prepared.args.iter().cloned());
+        let final_argv = prepared.argv();
         if cancellation.is_cancelled() {
             return NativeResult::failure(NativeFailure::cancelled("prepare"));
         }
@@ -715,26 +713,20 @@ impl EngineState {
             log_path: None,
             msys_argument_conversion: msys,
         };
-        let timeout = Duration::from_millis(
-            request
-                .timeout_ms(self.timeout_ceiling_ms)
-                .min(self.timeout_ceiling_ms),
+        let context = agentshim_core::OperationContext::new(
+            cancellation.clone(),
+            Arc::new(self.output_limits.clone()),
         );
-        let mut prepared = match agentshim_core::tools::bash::prepare_bash_foreground(
-            &self.root,
-            &self.locator,
-            &request,
-            timeout,
-            self.timeout_ceiling_ms,
-            cancellation,
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => return NativeResult::failure(process_failure(&error)),
-        };
-        prepared.environment.base = Some(self.env.clone());
+        let prepared =
+            match self
+                .tool_engine
+                .prepare_bash(&request, self.timeout_ceiling_ms, &context)
+            {
+                Ok(prepared) => prepared,
+                Err(error) => return NativeResult::failure(process_failure(&error)),
+            };
         let handle = uuid::Uuid::new_v4().simple().to_string();
-        let mut final_argv = vec![prepared.resolved.executable.to_string_lossy().into_owned()];
-        final_argv.extend(prepared.args.iter().cloned());
+        let final_argv = prepared.argv();
         if cancellation.is_cancelled() {
             return NativeResult::failure(NativeFailure::cancelled("prepare"));
         }
@@ -781,31 +773,32 @@ impl EngineState {
             Either::Bash(_) => &["output"],
             Either::RunProgram(_) => &["stdout", "stderr"],
         };
-        let run_cancellation = cancellation.clone();
-        run_with_capture(
-            state,
+        if cancellation.is_cancelled() {
+            return NativeResult::failure(NativeFailure::cancelled("spawn"));
+        }
+        let capture = match create_capture(&state, streams).await {
+            Ok(capture) => capture,
+            Err(failure) => return NativeResult::failure(failure),
+        };
+        let sink = Arc::clone(&capture) as Arc<dyn agentshim_core::tools::exec::CaptureSink>;
+        let context = agentshim_core::OperationContext::new(
             cancellation,
-            streams,
-            attribution,
-            move |state, sink| match prepared {
-                Either::RunProgram(prepared) => {
-                    agentshim_core::tools::run_program::execute_prepared_run_program(
-                        prepared,
-                        wrapped_argv.as_deref(),
-                        &run_cancellation,
-                        &state.budget,
-                        sink,
-                    )
-                }
-                Either::Bash(prepared) => agentshim_core::tools::bash::execute_prepared_bash(
-                    prepared,
-                    wrapped_argv.as_deref(),
-                    &run_cancellation,
-                    &state.budget,
-                    sink,
-                ),
-            },
-        )
-        .await
+            Arc::new(state.output_limits.clone()),
+        );
+        let result = match prepared {
+            Either::RunProgram(prepared) => {
+                state
+                    .tool_engine
+                    .spawn_run_program(prepared, wrapped_argv, context, Some(sink))
+                    .await
+            }
+            Either::Bash(prepared) => {
+                state
+                    .tool_engine
+                    .spawn_bash(prepared, wrapped_argv, context, Some(sink))
+                    .await
+            }
+        };
+        settle_capture(state, capture, attribution, result).await
     }
 }

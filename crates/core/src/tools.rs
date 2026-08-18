@@ -20,6 +20,7 @@ pub struct ToolOutput {
     pub child_nonzero: bool,
     pub structured: Option<serde_json::Value>,
     projected_cost: Cell<Option<crate::output::ProjectedTokenCost>>,
+    retained_resources: Option<crate::runtime::resources::OutputLease>,
 }
 
 impl ToolOutput {
@@ -30,6 +31,7 @@ impl ToolOutput {
             child_nonzero: false,
             structured: None,
             projected_cost: Cell::new(None),
+            retained_resources: None,
         }
     }
 
@@ -40,6 +42,7 @@ impl ToolOutput {
             child_nonzero,
             structured: None,
             projected_cost: Cell::new(None),
+            retained_resources: None,
         }
     }
 
@@ -50,6 +53,7 @@ impl ToolOutput {
             child_nonzero: false,
             structured: None,
             projected_cost: Cell::new(None),
+            retained_resources: None,
         }
     }
 
@@ -82,10 +86,13 @@ impl ToolOutput {
         budget: &dyn crate::output::CallBudget,
         cancellation: &tokio_util::sync::CancellationToken,
     ) -> bool {
+        let Some(token_gate) = budget.token_gate() else {
+            return !cancellation.is_cancelled();
+        };
         if let Some(cost) = self.projected_cost.get() {
-            return cost.tokens <= budget.ceiling() && !cancellation.is_cancelled();
+            return cost.tokens <= token_gate.ceiling() && !cancellation.is_cancelled();
         }
-        match budget.project_tool_output(&self.text, self.images.len(), cancellation) {
+        match token_gate.project_tool_output(&self.text, self.images.len(), cancellation) {
             crate::output::ProjectionDecision::Fits(cost) => {
                 self.projected_cost.set(Some(cost));
                 true
@@ -116,6 +123,14 @@ impl ToolOutput {
 
     pub fn projected_cost(&self) -> Option<crate::output::ProjectedTokenCost> {
         self.projected_cost.get()
+    }
+
+    pub(crate) fn retain_resources(
+        mut self,
+        resources: crate::runtime::resources::OutputLease,
+    ) -> Self {
+        self.retained_resources = Some(resources);
+        self
     }
 }
 

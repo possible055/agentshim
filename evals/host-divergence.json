@@ -1,0 +1,41 @@
+{
+  "bash": {
+    "mcp": {
+      "owner": "server-detached-tree",
+      "variants": [
+        {
+          "fields": ["command", "cwd", "detach", "log_path", "msys_argument_conversion", "timeout_ms"],
+          "required": ["command"]
+        },
+        {
+          "fields": ["action", "job_id"],
+          "required": ["action", "job_id"]
+        }
+      ]
+    },
+    "dsh": {
+      "owner": "dsh-jobs",
+      "fields": ["command", "description", "msys_argument_conversion", "run_in_background", "timeoutMs", "workdir"],
+      "required": ["command", "description"]
+    },
+    "intentionalDifferences": [
+      "MCP exposes detach, log_path, and terminate on bash; DSH exposes run_in_background and delegates lifecycle to ctx.jobs.",
+      "DSH requires a model-facing description and uses workdir/timeoutMs names; MCP uses cwd/timeout_ms."
+    ]
+  },
+  "bash_status": {
+    "mcp": {
+      "owner": "server-detached-tree",
+      "fields": ["job_id", "tail_bytes"],
+      "required": ["job_id"]
+    },
+    "dsh": {
+      "owner": "dsh-jobs",
+      "fields": ["job_id"],
+      "required": ["job_id"]
+    },
+    "intentionalDifferences": [
+      "MCP reads a bounded retained log tail from its detached registry; DSH returns a non-consuming ctx.jobs lifecycle snapshot."
+    ]
+  }
+}

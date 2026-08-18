@@ -9,7 +9,7 @@ import { buildToolDefinitions, promptSections, RESTRICT_CANDIDATES } from './too
 import { PUBLIC_TOOL_NAMES } from './contracts.ts'
 import { BackgroundJobManager } from './jobs.ts'
 import { loadNativeAddon, nativeEngineEnv, nativeLoadFailureError } from './native.ts'
-import type { NativeEngine, NativeEngineOptions } from './native.ts'
+import type { NativeEngine, NativeHostOptions } from './native.ts'
 import { EnginePool } from './engine-pool.ts'
 import {
   DEFAULT_CAPTURE_MAX_BYTES,
@@ -104,6 +104,14 @@ function installAgentTools(
 
   function install(agent: Agent): void {
     if (installed.has(agent)) return
+    const present = RESTRICT_CANDIDATES.filter(name => agent.ctx.tools.get(name, agent) !== undefined)
+    const replacements = replacementNames(present)
+    if (replacements.length === 0 && !present.includes('pwsh') && !present.includes('bash_status')) {
+      ctx.logger.info(
+        `dsh-agentshim: agent ${agent.id} resolves none of ${RESTRICT_CANDIDATES.join(', ')}; leaving its catalog untouched`,
+      )
+      return
+    }
     const cwd = agent.session.header.cwd
     if (cwd === undefined) return
 
@@ -126,15 +134,6 @@ function installAgentTools(
       // model-facing tools into a standing mount that is this agent's scope
       // PARENT, so a scope-less read finds nothing and every preset-composed
       // agent would silently keep its inherited tools.
-      const present = RESTRICT_CANDIDATES.filter(name => agent.ctx.tools.get(name, agent) !== undefined)
-      const replacements = replacementNames(present)
-      if (replacements.length === 0 && !present.includes('pwsh') && !present.includes('bash_status')) {
-        ctx.logger.info(
-          `dsh-agentshim: agent ${agent.id} resolves none of ${RESTRICT_CANDIDATES.join(', ')}; leaving its catalog untouched`,
-        )
-        pool.release(root)
-        return
-      }
       if (present.length > 0) disposers.push(agent.ctx.tools.restrict({ deny: [...present] }))
       for (const name of replacements) {
         const definition = definitions.get(name)
@@ -189,16 +188,20 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   if (loaded.engine === undefined) {
     throw nativeLoadFailureError(loaded.failure)
   }
-  const engineOptions: NativeEngineOptions = {
+  const hostOptions: NativeHostOptions = {
     env: nativeEngineEnv(config.env),
     readScope: resolved.readScope,
-    pageBudgetBytes: 50_000,
     toolTimeoutShelfMs: resolved.toolCallTimeoutMs,
     captureRoot: resolved.captureRoot,
     captureMaxBytes: resolved.captureMaxBytes,
     captureCleanup: resolved.captureCleanup,
   }
-  const pool = new EnginePool(loaded.engine.Engine, engineOptions)
+  const nativeHost = new loaded.engine.NativeHostRuntime(hostOptions)
+  const pool = new EnginePool(nativeHost, ({ root, phase, error }) => {
+    ctx.logger.warn(
+      `dsh-agentshim: native engine close failed for ${root} during ${phase}: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  })
   ctx.effect(() => async () => {
     await jobs.dispose()
     await pool.dispose()

@@ -4,7 +4,6 @@ import { execFile } from 'node:child_process'
 import { chmod, lstat, mkdir, readdir, rm } from 'node:fs/promises'
 import { promisify } from 'node:util'
 
-export const INLINE_OUTPUT_BYTES = 50_000
 export const DEFAULT_CAPTURE_MAX_BYTES = 64 * 1024 * 1024
 export const MIN_CAPTURE_MAX_BYTES = 1024 * 1024
 export const MAX_CAPTURE_MAX_BYTES = 1024 * 1024 * 1024

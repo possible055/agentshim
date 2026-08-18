@@ -1,13 +1,16 @@
 use serde::Serialize;
 
 pub mod capture;
-pub mod resolve;
-pub mod spawn;
+pub(crate) mod resolve;
+pub(crate) mod spawn;
 
 #[cfg(test)]
 mod tests;
 
-pub use resolve::ProcessResolver;
+pub use spawn::{
+    CLEANUP_DEADLINE, CaptureSink, DEFAULT_TIMEOUT_MS, default_max_timeout_ms,
+    max_timeout_ms_from_shelf,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProcessError {
@@ -40,6 +43,8 @@ pub enum ProcessError {
     Cancelled,
     #[error("process cleanup did not complete before its deadline; outcome uncertain")]
     OutcomeUncertain,
+    #[error("process worker failed: {0}")]
+    Worker(String),
     #[error(transparent)]
     Output(#[from] crate::output::OutputError),
 }
