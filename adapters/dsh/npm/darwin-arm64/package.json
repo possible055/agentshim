@@ -1,6 +1,6 @@
 {
   "name": "dsh-agentshim-darwin-arm64",
-  "version": "0.1.4-alpha.6",
+  "version": "0.1.4",
   "agentshimNativeApi": 4,
   "license": "MIT",
   "main": "agentshim_napi.node",
