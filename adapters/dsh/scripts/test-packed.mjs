@@ -84,7 +84,7 @@ try {
       [platformManifest.name]: `file:${platformArchive.replaceAll('\\', '/')}`,
     },
   }, null, 2)}\n`)
-  run('pnpm', ['install', '--offline', '--ignore-scripts', '--no-optional', '--no-frozen-lockfile'], { cwd: consumer })
+  run('pnpm', ['install', '--prefer-offline', '--ignore-scripts', '--no-optional', '--no-frozen-lockfile'], { cwd: consumer })
 
   const fixtureRoot = join(temporaryRoot, 'fixture')
   await mkdir(fixtureRoot)
