@@ -2,7 +2,7 @@
   "name": "dsh-agentshim",
   "description": "DSH native tool plugin backed by agentshim-core",
   "version": "0.1.4",
-  "agentshimNativeApi": 4,
+  "agentshimNativeApi": 5,
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",

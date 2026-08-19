@@ -26,7 +26,7 @@ fn spawn_detached(
         &locator,
         Some(admission),
         &detach_request(command, log_path),
-        Duration::ZERO,
+        Duration::from_millis(crate::tools::exec::DEFAULT_TIMEOUT_MS),
         &CancellationToken::new(),
     )
     .map(|output| output.text)
@@ -176,26 +176,129 @@ fn terminate_is_tree_owned_idempotent_and_unknown_ids_are_rejected() {
     .expect("detached bash");
     let job_id = response_job_id(&response);
 
-    let snapshot = match trees.begin_terminate(&job_id).expect("terminate") {
-        job_registry::TerminateStart::Accepted(work) => work.run(),
-        job_registry::TerminateStart::Immediate(_) => {
+    let snapshot = match trees
+        .begin_stop(&job_id, job_registry::StopCause::Explicit)
+        .expect("terminate")
+    {
+        job_registry::StopStart::Accepted(work) => work.run(),
+        job_registry::StopStart::Immediate(_) => {
             panic!("running job must yield cleanup owner")
         }
     };
     assert_eq!(snapshot.state, status::JobState::Terminated);
     assert_eq!(trees.live_count(), 0);
-    match trees.begin_terminate(&job_id).expect("repeated terminate") {
-        job_registry::TerminateStart::Immediate(snapshot) => {
+    match trees
+        .begin_stop(&job_id, job_registry::StopCause::Explicit)
+        .expect("repeated terminate")
+    {
+        job_registry::StopStart::Immediate(snapshot) => {
             assert_eq!(snapshot.state, status::JobState::Terminated);
             assert_eq!(snapshot.outcome, Some("already_terminal"));
         }
-        job_registry::TerminateStart::Accepted(_) => panic!("terminal job cannot be killed twice"),
+        job_registry::StopStart::Accepted(_) => panic!("terminal job cannot be killed twice"),
     }
     let unknown = format!("bash-{}", uuid::Uuid::new_v4());
     assert!(matches!(
         trees.status(&unknown, 0),
         Err(ProcessError::Validation(_))
     ));
+}
+
+#[test]
+fn timeout_stop_is_distinct_and_dropped_owner_converges_to_terminal() {
+    if !bash_is_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("fixture");
+    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+    let trees = job_registry::DetachedTrees::new(2);
+
+    let timed =
+        spawn_detached(&root, &trees, "sleep 30 & sleep 30", "timed.log").expect("timed job");
+    let timed_id = response_job_id(&timed);
+    let timed = match trees
+        .begin_stop(&timed_id, job_registry::StopCause::Timeout)
+        .expect("timeout stop")
+    {
+        job_registry::StopStart::Accepted(work) => work.run(),
+        job_registry::StopStart::Immediate(_) => panic!("running job must yield timeout owner"),
+    };
+    assert_eq!(timed.state, status::JobState::TimedOut);
+    assert_eq!(timed.cause, Some("timeout"));
+
+    let dropped =
+        spawn_detached(&root, &trees, "sleep 30", "dropped.log").expect("dropped owner job");
+    let dropped_id = response_job_id(&dropped);
+    let work = match trees
+        .begin_stop(&dropped_id, job_registry::StopCause::Explicit)
+        .expect("explicit stop")
+    {
+        job_registry::StopStart::Accepted(work) => work,
+        job_registry::StopStart::Immediate(_) => panic!("running job must yield explicit owner"),
+    };
+    drop(work);
+    let dropped = trees.status(&dropped_id, 0).expect("terminal status");
+    assert_eq!(dropped.state, status::JobState::OutcomeUncertain);
+    assert_eq!(dropped.cause, Some("explicit"));
+    assert_eq!(trees.live_count(), 0);
+}
+
+#[test]
+fn timeout_terminate_and_shutdown_share_one_first_wins_owner() {
+    if !bash_is_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("fixture");
+    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+    let trees = job_registry::DetachedTrees::new(1);
+    let response =
+        spawn_detached(&root, &trees, "sleep 30 & sleep 30", "race.log").expect("race job");
+    let job_id = response_job_id(&response);
+    let barrier = Arc::new(std::sync::Barrier::new(4));
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let mut workers = Vec::new();
+    for cause in [
+        job_registry::StopCause::Timeout,
+        job_registry::StopCause::Explicit,
+    ] {
+        let worker_trees = trees.clone();
+        let worker_id = job_id.clone();
+        let worker_barrier = Arc::clone(&barrier);
+        let worker_accepted = Arc::clone(&accepted);
+        workers.push(std::thread::spawn(move || {
+            worker_barrier.wait();
+            if let job_registry::StopStart::Accepted(work) = worker_trees
+                .begin_stop(&worker_id, cause)
+                .expect("race stop")
+            {
+                worker_accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                work.run();
+            }
+        }));
+    }
+    let shutdown_trees = trees.clone();
+    let shutdown_barrier = Arc::clone(&barrier);
+    let shutdown_accepted = Arc::clone(&accepted);
+    workers.push(std::thread::spawn(move || {
+        shutdown_barrier.wait();
+        for work in shutdown_trees.begin_shutdown(Instant::now() + Duration::from_secs(5)) {
+            shutdown_accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            work.run();
+        }
+    }));
+    barrier.wait();
+    for worker in workers {
+        worker.join().expect("race worker");
+    }
+
+    assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let terminal = trees.status(&job_id, 0).expect("terminal status");
+    assert!(matches!(
+        terminal.state,
+        status::JobState::Terminated | status::JobState::TimedOut
+    ));
+    assert_eq!(trees.live_count(), 0);
 }
 
 #[test]
@@ -250,7 +353,7 @@ fn detached_windows_bash_receives_the_disabled_argument_conversion_environment()
         &BashLocator::capture(),
         Some(admission),
         &request,
-        Duration::ZERO,
+        Duration::from_millis(crate::tools::exec::DEFAULT_TIMEOUT_MS),
         &CancellationToken::new(),
     )
     .expect("detached bash");
@@ -600,7 +703,7 @@ fn exhausted_response_budget_refuses_before_log_open_or_spawn() {
         &BashLocator::capture(),
         Some(admission),
         &detach_request("printf spawned > marker", "budget.log"),
-        Duration::ZERO,
+        Duration::from_millis(crate::tools::exec::DEFAULT_TIMEOUT_MS),
         &CancellationToken::new(),
         &budget,
     )
@@ -741,9 +844,12 @@ fn log_failure_preserves_lifecycle_and_termination_failure_is_retained() {
     assert_eq!(trees.live_count(), 1);
 
     trees.fail_next_termination();
-    let terminal = match trees.begin_terminate(&job_id).expect("terminate") {
-        job_registry::TerminateStart::Accepted(work) => work.run(),
-        job_registry::TerminateStart::Immediate(_) => panic!("running job must yield owner"),
+    let terminal = match trees
+        .begin_stop(&job_id, job_registry::StopCause::Explicit)
+        .expect("terminate")
+    {
+        job_registry::StopStart::Accepted(work) => work.run(),
+        job_registry::StopStart::Immediate(_) => panic!("running job must yield owner"),
     };
     assert_eq!(terminal.state, status::JobState::OutcomeUncertain);
     assert_eq!(trees.live_count(), 0);
@@ -768,9 +874,12 @@ fn shutdown_retains_uncertain_pid_from_an_existing_termination_owner() {
         spawn_detached(&root, &trees, "sleep 30", "shutdown-owner.log").expect("detached bash");
     let job_id = response_job_id(&response);
     trees.fail_next_termination();
-    let work = match trees.begin_terminate(&job_id).expect("terminate") {
-        job_registry::TerminateStart::Accepted(work) => work,
-        job_registry::TerminateStart::Immediate(_) => panic!("running job must yield owner"),
+    let work = match trees
+        .begin_stop(&job_id, job_registry::StopCause::Explicit)
+        .expect("terminate")
+    {
+        job_registry::StopStart::Accepted(work) => work,
+        job_registry::StopStart::Immediate(_) => panic!("running job must yield owner"),
     };
     let pid = work.pid();
 
@@ -822,7 +931,7 @@ fn shutdown_racing_a_detached_call_rolls_back_the_late_commit() {
                 "while :; do printf x >> late-marker; sleep 0.1; done",
                 "late.log",
             ),
-            Duration::ZERO,
+            Duration::from_millis(crate::tools::exec::DEFAULT_TIMEOUT_MS),
             &CancellationToken::new(),
         )
     });

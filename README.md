@@ -162,7 +162,7 @@ Terminate the complete server-owned tree through `bash` itself:
 { "action": "terminate", "job_id": "bash-550e8400-e29b-41d4-a716-446655440000" }
 ```
 
-Up to 16 detached trees may be active. The instance retains the latest 32 terminal records, each with at most 16 KiB of final log tail; IDs do not survive reconnect or restart, and there is no list API. The full log remains available through `read(log_path)` and terminal eviction never deletes it.
+Up to 16 detached trees may be active. `timeout_ms` is measured from successful process-tree spawn; omitted values use `AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX`, while explicit values may only shorten it. Deadline expiry actively terminates the complete tree and records `timed_out`. The instance retains the latest 32 terminal records, each with at most 16 KiB of final log tail; IDs do not survive reconnect or restart, and there is no list API. The full log remains available through `read(log_path)` and terminal eviction never deletes it.
 
 ### Windows Bash argument conversion
 
@@ -198,6 +198,7 @@ The response tells you how far it got and how to continue. A document that mixes
 | `CODEX_MCP_PROTOCOL_VERSION` | — | MCP protocol version advertised to Codex. |
 | `AGENTSHIM_PROCESS_CALLS` | `16` | Per-instance concurrent process-call limit; 1–32. |
 | `AGENTSHIM_DETACHED_CALLS` | `16` | Per-instance live detached `bash` trees; 1–16. |
+| `AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX` | `1800` | Maximum detached/background Bash runtime in seconds; 600–14400. Omitted job timeouts use this value and explicit timeouts may only shorten it. |
 | `AGENTSHIM_OUTPUT_BYTES` | `32000` | Per-call output ceiling in bytes; 4096–262144. |
 | `AGENTSHIM_BURST_TOKENS` | profile default | Shared projected model-token budget; 2048–32768. |
 | `AGENTSHIM_TOOL_TIMEOUT_SHELF` | `600` | The shelf value the server stays below so the client's `tool_timeout_sec` fires after the server's own Timeout. Effective max execution time is shelf minus 10 seconds; 15–3600. |

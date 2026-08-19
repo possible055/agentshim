@@ -114,7 +114,7 @@ impl BashRequest {
     /// # Errors
     ///
     /// Returns a validation error for an empty command, an out-of-range timeout, or a
-    /// `detach`/`log_path`/`timeout_ms` combination the tool does not accept.
+    /// invalid detached log-path combination.
     pub fn validate(&self, timeout_ceiling_ms: u64) -> Result<(), ProcessError> {
         if self.command.is_empty() {
             return Err(invalid("command must not be empty"));
@@ -127,18 +127,17 @@ impl BashRequest {
             if self.log_path.is_none() {
                 return Err(invalid("detach requires a log_path inside the repository"));
             }
-            if self.timeout_ms.is_some() {
-                return Err(invalid(
-                    "timeout_ms does not apply to a detached command; it runs until it exits or \
-                     the server stops",
-                ));
-            }
             if self
                 .log_path
                 .as_deref()
                 .is_some_and(|path| path.contains('\0'))
             {
                 return Err(invalid("log_path must not contain NUL"));
+            }
+            if !(1..=timeout_ceiling_ms).contains(&self.background_timeout_ms(timeout_ceiling_ms)) {
+                return Err(invalid(format!(
+                    "timeout_ms must be from 1 to {timeout_ceiling_ms} for a detached command"
+                )));
             }
             return Ok(());
         }
@@ -157,6 +156,11 @@ impl BashRequest {
     pub fn timeout_ms(&self, timeout_ceiling_ms: u64) -> u64 {
         self.timeout_ms
             .unwrap_or(default_timeout_within(timeout_ceiling_ms))
+    }
+
+    #[must_use]
+    pub fn background_timeout_ms(&self, background_timeout_max_ms: u64) -> u64 {
+        self.timeout_ms.unwrap_or(background_timeout_max_ms)
     }
 
     #[must_use]
@@ -285,35 +289,37 @@ pub(crate) fn execute_output_with_capture(
 ) -> Result<ToolOutput, ProcessError> {
     let started = std::time::Instant::now();
     request.validate(timeout_ceiling_ms)?;
-    let deadline = (!request.detach).then(|| started + timeout);
+    let deadline = started + timeout;
+    let pre_spawn_timeout_ms = if request.detach {
+        u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)
+    } else {
+        request.timeout_ms(timeout_ceiling_ms)
+    };
     if cancellation.is_cancelled() {
         return Err(ProcessError::Cancelled);
     }
-    let runtime = match deadline.map_or_else(
-        || locator.resolve(cancellation),
-        |deadline| locator.resolve_before(cancellation, deadline),
-    ) {
+    let runtime = match locator.resolve_before(cancellation, deadline) {
         Ok(runtime) => runtime,
         Err(LocateError::Cancelled) => return Err(ProcessError::Cancelled),
         Err(LocateError::TimedOut) => {
             return Err(ProcessError::TimeoutBeforeSpawn {
-                timeout_ms: request.timeout_ms(timeout_ceiling_ms),
+                timeout_ms: pre_spawn_timeout_ms,
             });
         }
         Err(LocateError::Unavailable(error)) => {
             return Err(ProcessError::Unavailable(error.to_string()));
         }
     };
-    ensure_before_spawn(deadline, request.timeout_ms(timeout_ceiling_ms))?;
+    ensure_before_spawn(Some(deadline), pre_spawn_timeout_ms)?;
     tracing::info!(target: "agentshim", event = "process_resolve", phase = "execution");
     let cwd = spawn::resolve_cwd(root, request.cwd.as_deref()).map_err(invalid)?;
-    ensure_before_spawn(deadline, request.timeout_ms(timeout_ceiling_ms))?;
+    ensure_before_spawn(Some(deadline), pre_spawn_timeout_ms)?;
     let resolved = ResolvedProgram {
         absolute: runtime.executable.clone(),
         executable: runtime.executable.clone(),
         launcher: launcher_for(&runtime.executable)?,
     };
-    ensure_before_spawn(deadline, request.timeout_ms(timeout_ceiling_ms))?;
+    ensure_before_spawn(Some(deadline), pre_spawn_timeout_ms)?;
     let environment = bash_environment(&runtime, request.msys_argument_conversion);
     let args = bash_args(&request.command);
     if request.detach {
@@ -335,9 +341,9 @@ pub(crate) fn execute_output_with_capture(
             &launch,
             cancellation,
             output_budget,
+            Duration::from_millis(request.background_timeout_ms(timeout_ceiling_ms)),
         );
     }
-    let deadline = deadline.expect("foreground bash always has a deadline");
     let prepared = PreparedBash {
         resolved,
         cwd,
@@ -515,6 +521,7 @@ fn run_detached(
     launch: &DetachedLaunch<'_>,
     cancellation: &CancellationToken,
     output_budget: &dyn crate::output::CallBudget,
+    effective_timeout: Duration,
 ) -> Result<ToolOutput, ProcessError> {
     let DetachedLaunch {
         resolved,
@@ -563,6 +570,7 @@ fn run_detached(
         return Err(error);
     }
     let tree = crate::platform::process::spawn_detached(&plan, environment, log.writer)?;
+    let spawned_at = std::time::Instant::now();
     let pid = tree.pid();
     let job_id = admission.job_id().to_owned();
     let output = detached_response(&job_id, pid, &log_path);
@@ -575,7 +583,13 @@ fn run_detached(
             Some((tree, error))
         } else if cancellation.is_cancelled() {
             Some((tree, ProcessError::Cancelled))
-        } else if let Err(tree) = admission.retain(tree, log_path.clone(), log.reader) {
+        } else if let Err(tree) = admission.retain(
+            tree,
+            log_path.clone(),
+            log.reader,
+            effective_timeout,
+            spawned_at,
+        ) {
             Some((tree, ProcessError::Cancelled))
         } else {
             None

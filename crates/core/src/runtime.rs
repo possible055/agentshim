@@ -1,4 +1,5 @@
 mod config;
+pub mod deadline;
 mod file_work;
 pub(crate) mod resources;
 

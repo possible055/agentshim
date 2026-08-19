@@ -59,7 +59,7 @@ export async function startBackgroundBashNative(
     throw new HarnessError('background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs', 'AGENTSHIM_BACKGROUND_UNAVAILABLE')
   }
   if (exec.signal.aborted) throw abortedError()
-  const prepared = engine.prepareBash(nativeBashArgs(input.wire), exec.signal)
+  const prepared = engine.prepareBash(nativeBashArgs(input.wire, true), exec.signal)
   try {
     const decision = await policy.wrapArgv('bash', prepared.argv, input.wire, exec)
     if (decision.mode !== 'danger-full-access' && decision.wrappedArgv === undefined) {
@@ -80,6 +80,7 @@ export async function startBackgroundBashNative(
         try {
           const outcome = await handle.done()
           if (outcome.status === 'killed') return { status: 'killed', detail: outcome.detail }
+          if (outcome.status === 'timed_out') return { status: 'failed', detail: `timed_out: ${outcome.detail}` }
           if (outcome.status === 'failed') return { status: 'failed', detail: outcome.detail }
           return { status: 'completed', detail: outcome.detail }
         } catch (error) {

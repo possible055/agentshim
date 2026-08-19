@@ -7,7 +7,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use napi::{Env, Error, Result, Unknown, bindgen_prelude::spawn_blocking};
+use napi::{
+    Env, Error, Result, Unknown,
+    bindgen_prelude::{spawn, spawn_blocking},
+};
 use napi_derive::napi;
 use tokio_util::sync::CancellationToken;
 
@@ -113,14 +116,35 @@ impl LiveBuffer {
 pub(crate) struct BackgroundJob {
     capture: Arc<CallCapture>,
     live: Mutex<LiveBuffer>,
-    tree: Mutex<Option<DetachedTree>>,
-    cancelled: AtomicBool,
+    tree: Mutex<TreeState>,
+    timeout: Duration,
+    deadline: Instant,
     settled: AtomicBool,
     thread_done: AtomicBool,
-    shutdown: CancellationToken,
+    finished: CancellationToken,
     artifacts: Arc<Mutex<Vec<ArtifactRecord>>>,
     inline_output_bytes: u64,
     done_tx: tokio::sync::watch::Sender<Option<NativeJobOutcome>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BackgroundStopCause {
+    Explicit,
+    Timeout,
+    Shutdown,
+}
+
+#[derive(Clone)]
+struct TreeResult {
+    cause: Option<BackgroundStopCause>,
+    exit_code: Option<String>,
+    verified: bool,
+}
+
+enum TreeState {
+    Running(DetachedTree),
+    Stopping(BackgroundStopCause),
+    Settled(TreeResult),
 }
 
 impl BackgroundJob {
@@ -128,7 +152,12 @@ impl BackgroundJob {
         if self.settled.swap(true, Ordering::SeqCst) {
             return;
         }
+        self.finished.cancel();
         let _ = self.done_tx.send(Some(outcome));
+    }
+
+    fn timeout_ms(&self) -> u64 {
+        u64::try_from(self.timeout.as_millis()).unwrap_or(u64::MAX)
     }
 
     pub(crate) fn is_settled(&self) -> bool {
@@ -136,15 +165,65 @@ impl BackgroundJob {
     }
 
     pub(crate) fn cancel_from_engine(&self) {
-        if self.cancelled.swap(true, Ordering::SeqCst) {
-            return;
+        self.stop(BackgroundStopCause::Shutdown);
+    }
+
+    fn cancel_explicit(&self) {
+        self.stop(BackgroundStopCause::Explicit);
+    }
+
+    fn stop(&self, cause: BackgroundStopCause) {
+        let mut tree = {
+            let mut state = self
+                .tree
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let TreeState::Running(tree) = &mut *state else {
+                return;
+            };
+            if let Ok(observation) = tree.observe()
+                && !observation.tree_running
+            {
+                let exit_code = observation.primary_exit;
+                *state = TreeState::Settled(TreeResult {
+                    cause: None,
+                    exit_code,
+                    verified: true,
+                });
+                return;
+            }
+            let TreeState::Running(tree) =
+                std::mem::replace(&mut *state, TreeState::Stopping(cause))
+            else {
+                unreachable!("matched running tree")
+            };
+            tree
+        };
+        let terminated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tree.terminate_and_wait(Instant::now() + SETTLE_DEADLINE)
+        }))
+        .is_ok_and(|result| result.is_ok());
+        let exit_code = tree
+            .observe()
+            .ok()
+            .and_then(|observation| observation.primary_exit);
+        let mut state = self
+            .tree
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(*state, TreeState::Stopping(owner) if owner == cause) {
+            *state = TreeState::Settled(TreeResult {
+                cause: Some(cause),
+                exit_code,
+                verified: terminated,
+            });
         }
-        self.shutdown.cancel();
-        if let Ok(mut tree) = self.tree.lock()
-            && let Some(tree) = tree.as_mut()
-        {
-            let _ = tree.terminate_and_wait(Instant::now() + SETTLE_DEADLINE);
-        }
+    }
+}
+
+impl Drop for BackgroundJob {
+    fn drop(&mut self) {
+        self.stop(BackgroundStopCause::Shutdown);
     }
 }
 
@@ -161,15 +240,12 @@ fn drain_and_settle(job: Arc<BackgroundJob>, mut reader: std::fs::File) {
     let mut buf = vec![0u8; DRAIN_CHUNK_BYTES];
     let mut capture_error: Option<String> = None;
     loop {
-        if job.cancelled.load(Ordering::SeqCst) {
-            break;
-        }
         match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
                 if let Err(error) = job.capture.append(0, &buf[..n]) {
                     capture_error = Some(error.to_string());
-                    job.cancel_from_engine();
+                    job.cancel_explicit();
                     break;
                 }
                 let text = String::from_utf8_lossy(&buf[..n]);
@@ -183,7 +259,7 @@ fn drain_and_settle(job: Arc<BackgroundJob>, mut reader: std::fs::File) {
                     continue;
                 }
                 capture_error = Some(error.to_string());
-                job.cancel_from_engine();
+                job.cancel_explicit();
                 break;
             }
         }
@@ -194,10 +270,9 @@ fn drain_and_settle(job: Arc<BackgroundJob>, mut reader: std::fs::File) {
 }
 
 fn finish_job(job: &BackgroundJob, capture_error: Option<String>) {
-    let exit_code = settle_tree(job);
+    let tree_result = settle_tree(job);
     let limit_exceeded = job.capture.exceeded();
-    let cancelled = job.cancelled.load(Ordering::SeqCst);
-    let complete = !limit_exceeded && !cancelled;
+    let complete = !limit_exceeded && tree_result.cause.is_none();
     let records = match job.capture.publish(complete) {
         Ok(records) => records,
         Err(error) => {
@@ -213,7 +288,7 @@ fn finish_job(job: &BackgroundJob, capture_error: Option<String>) {
             job.settle(NativeJobOutcome {
                 status: "failed".to_owned(),
                 detail,
-                exit_code,
+                exit_code: tree_result.exit_code,
                 limit_exceeded,
                 artifacts: Vec::new(),
                 failure: Some(NativeFailure {
@@ -232,53 +307,55 @@ fn finish_job(job: &BackgroundJob, capture_error: Option<String>) {
     finish_published_job(
         job,
         capture_error,
-        exit_code,
+        tree_result,
         limit_exceeded,
         complete,
         records,
     );
 }
 
-fn settle_tree(job: &BackgroundJob) -> Option<String> {
-    if job.cancelled.load(Ordering::SeqCst) {
-        if let Ok(mut guard) = job.tree.lock() {
-            if let Some(tree) = guard.as_mut() {
-                let deadline = Instant::now() + SETTLE_DEADLINE;
-                let _ = tree.terminate_and_wait(deadline);
-            }
-        }
-    }
-
-    let mut exit_code = None;
-    let tree = job.tree.lock().ok().and_then(|mut guard| guard.take());
-    if let Some(mut tree) = tree {
-        let deadline = Instant::now() + SETTLE_DEADLINE;
-        while Instant::now() < deadline {
-            match tree.observe() {
-                Ok(obs) => {
-                    if !obs.tree_running {
-                        exit_code = obs.primary_exit;
-                        break;
+fn settle_tree(job: &BackgroundJob) -> TreeResult {
+    let deadline = Instant::now() + SETTLE_DEADLINE;
+    loop {
+        {
+            let mut state = job
+                .tree
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match &mut *state {
+                TreeState::Running(tree) => {
+                    if let Ok(observation) = tree.observe()
+                        && !observation.tree_running
+                    {
+                        let result = TreeResult {
+                            cause: None,
+                            exit_code: observation.primary_exit,
+                            verified: true,
+                        };
+                        *state = TreeState::Settled(result.clone());
+                        return result;
                     }
                 }
-                Err(_) => break,
+                TreeState::Stopping(_) => {}
+                TreeState::Settled(result) => return result.clone(),
             }
-            std::thread::sleep(Duration::from_millis(20));
         }
+        if Instant::now() >= deadline {
+            job.stop(BackgroundStopCause::Shutdown);
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
-
-    exit_code
 }
 
 fn finish_published_job(
     job: &BackgroundJob,
     capture_error: Option<String>,
-    exit_code: Option<String>,
+    tree_result: TreeResult,
     limit_exceeded: bool,
     complete: bool,
     records: Vec<ArtifactRecord>,
 ) {
-    let cancelled = job.cancelled.load(Ordering::SeqCst);
+    let exit_code = tree_result.exit_code;
     let publish = should_publish(&records, complete, job.inline_output_bytes);
     let artifacts: Vec<ArtifactPublished> = if publish {
         if let Ok(mut table) = job.artifacts.lock() {
@@ -309,7 +386,22 @@ fn finish_published_job(
 
     let (status, detail) = if let Some(error) = capture_error.as_ref() {
         ("failed", error.clone())
-    } else if cancelled {
+    } else if !tree_result.verified {
+        (
+            "failed",
+            format!(
+                "outcome uncertain after {}",
+                tree_result
+                    .cause
+                    .map_or("natural completion", background_stop_label)
+            ),
+        )
+    } else if tree_result.cause == Some(BackgroundStopCause::Timeout) {
+        (
+            "timed_out",
+            format!("background timeout elapsed after {} ms", job.timeout_ms()),
+        )
+    } else if tree_result.cause.is_some() {
         (
             "killed",
             exit_code
@@ -325,7 +417,17 @@ fn finish_published_job(
         )
     };
 
-    let failure = if limit_exceeded {
+    let failure = if !tree_result.verified {
+        Some(NativeFailure {
+            code: "AGENTSHIM_OUTCOME_UNCERTAIN".to_owned(),
+            message: detail.clone(),
+            retryable: true,
+            details: Some(serde_json::json!({
+                "kind": "teardown",
+                "cause": tree_result.cause.map(background_stop_label),
+            })),
+        })
+    } else if limit_exceeded {
         Some(NativeFailure {
             code: crate::capture::CAPTURE_LIMIT_EXCEEDED_CODE.to_owned(),
             message: "capture limit exceeded".to_owned(),
@@ -353,6 +455,14 @@ fn finish_published_job(
     });
 }
 
+const fn background_stop_label(cause: BackgroundStopCause) -> &'static str {
+    match cause {
+        BackgroundStopCause::Explicit => "explicit termination",
+        BackgroundStopCause::Timeout => "timeout",
+        BackgroundStopCause::Shutdown => "shutdown",
+    }
+}
+
 /// Opaque handle to one native background bash job. The handle owns the process
 /// tree, the durable capture, and the live preview buffer; dropping or disposing
 /// it cancels the job and settles the `done` promise.
@@ -368,7 +478,7 @@ impl EngineJobHandle {
     /// terminate and lets the drain thread settle `done`.
     #[napi]
     pub fn cancel(&self, reason: String) -> Result<NativeVoidResult> {
-        self.job.cancel_from_engine();
+        self.job.cancel_explicit();
         let _ = reason;
         Ok(NativeVoidResult {
             value: true,
@@ -448,14 +558,7 @@ impl EngineJobHandle {
     #[napi(ts_return_type = "Promise<NativeVoidResult>")]
     pub fn dispose(&self, env: Env) -> Result<Unknown<'static>> {
         if !self.job.settled.load(Ordering::SeqCst) {
-            let cancelled = self.cancel("handle disposed".to_owned())?;
-            if let Some(failure) = cancelled.failure {
-                let result = NativeVoidResult {
-                    value: false,
-                    failure: Some(failure),
-                };
-                return native_promise(env, detached_native_work(), async move { Ok(result) });
-            }
+            self.job.cancel_from_engine();
         }
         let handle = {
             let mut guard = self
@@ -492,6 +595,58 @@ impl Drop for EngineJobHandle {
             }
         }
     }
+}
+
+fn start_drain_thread(
+    job: &Arc<BackgroundJob>,
+    reader: std::fs::File,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let job = Arc::clone(job);
+    std::thread::Builder::new()
+        .name("agentshim-background-drain".to_owned())
+        .spawn(move || {
+            let drained = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                drain_and_settle(Arc::clone(&job), reader);
+            }));
+            if drained.is_err() && !job.settled.load(Ordering::SeqCst) {
+                job.cancel_from_engine();
+                job.settle(NativeJobOutcome {
+                    status: "failed".to_owned(),
+                    detail: "background drain worker panicked".to_owned(),
+                    exit_code: None,
+                    limit_exceeded: job.capture.exceeded(),
+                    artifacts: Vec::new(),
+                    failure: Some(NativeFailure {
+                        code: "AGENTSHIM_NATIVE_THREAD_FAILED".to_owned(),
+                        message: "background drain worker panicked".to_owned(),
+                        retryable: true,
+                        details: Some(serde_json::json!({
+                            "kind": "native_thread",
+                            "operation": "background_drain",
+                        })),
+                    }),
+                });
+            }
+            job.thread_done.store(true, Ordering::SeqCst);
+        })
+}
+
+fn arm_deadline(job: &Arc<BackgroundJob>, shutdown: CancellationToken) {
+    let weak_job = Arc::downgrade(job);
+    let finished = job.finished.clone();
+    let deadline = job.deadline;
+    std::mem::drop(spawn(async move {
+        if agentshim_core::runtime::deadline::wait(deadline, finished, shutdown).await
+            != agentshim_core::runtime::deadline::DeadlineEvent::Expired
+        {
+            return;
+        }
+        if let Some(job) = weak_job.upgrade() {
+            std::mem::drop(tokio::task::spawn_blocking(move || {
+                job.stop(BackgroundStopCause::Timeout);
+            }));
+        }
+    }));
 }
 
 pub(crate) fn start_background_prepared(
@@ -534,17 +689,16 @@ pub(crate) fn start_background_prepared(
     })?;
     let capture = Arc::new(capture);
 
-    let (tree, reader) =
-        match state
-            .tool_engine
-            .spawn_background_bash(prepared, wrapped_argv, &context)
-        {
-            Ok(spawned) => spawned,
-            Err(error) => {
-                capture.discard();
-                return Err(process_failure(&error));
-            }
-        };
+    let (tree, reader, effective_timeout, spawned_at) = match state
+        .tool_engine
+        .spawn_background_bash(prepared, wrapped_argv, &context)
+    {
+        Ok(spawned) => spawned,
+        Err(error) => {
+            capture.discard();
+            return Err(process_failure(&error));
+        }
+    };
     if cancellation.is_cancelled() {
         let mut tree = tree;
         let _ = tree.terminate_and_wait(Instant::now() + SETTLE_DEADLINE);
@@ -553,14 +707,16 @@ pub(crate) fn start_background_prepared(
     }
 
     let (done_tx, _done_rx) = tokio::sync::watch::channel(None);
+    let deadline = spawned_at + effective_timeout;
     let job = Arc::new(BackgroundJob {
         capture: Arc::clone(&capture),
         live: Mutex::new(LiveBuffer::new()),
-        tree: Mutex::new(Some(tree)),
-        cancelled: AtomicBool::new(false),
+        tree: Mutex::new(TreeState::Running(tree)),
+        timeout: effective_timeout,
+        deadline,
         settled: AtomicBool::new(false),
         thread_done: AtomicBool::new(false),
-        shutdown: state.shutdown.child_token(),
+        finished: CancellationToken::new(),
         artifacts: Arc::clone(&state.artifacts),
         inline_output_bytes: state.output_limits.capture_publish_bytes(),
         done_tx,
@@ -570,15 +726,31 @@ pub(crate) fn start_background_prepared(
             .backgrounds
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.shutdown.is_cancelled() || cancellation.is_cancelled() {
+            drop(backgrounds);
+            job.cancel_from_engine();
+            capture.discard();
+            return Err(NativeFailure::cancelled("background_commit"));
+        }
         backgrounds.retain(|existing| existing.strong_count() > 0);
         backgrounds.push(Arc::downgrade(&job));
     }
 
-    let job_clone = Arc::clone(&job);
-    let drain_thread = std::thread::spawn(move || {
-        drain_and_settle(Arc::clone(&job_clone), reader);
-        job_clone.thread_done.store(true, Ordering::SeqCst);
-    });
+    let drain_thread = start_drain_thread(&job, reader).map_err(|error| {
+        job.cancel_from_engine();
+        capture.discard();
+        NativeFailure::new(
+            "AGENTSHIM_NATIVE_THREAD_FAILED",
+            error.to_string(),
+            true,
+            Some(serde_json::json!({
+                "kind": "native_thread",
+                "operation": "background_drain_spawn",
+            })),
+        )
+    })?;
+
+    arm_deadline(&job, state.shutdown.child_token());
 
     Ok(EngineJobHandle {
         job,

@@ -57,7 +57,7 @@ export const runProgramParameters = {
 export const bashParameters = {
   command: { type: 'string', required: true, description: 'POSIX bash command line.' },
   description: { type: 'string', required: true, description: 'Short description of the command purpose.' },
-  timeoutMs: { type: 'number', description: 'Positive foreground timeout in milliseconds.' },
+  timeoutMs: { type: 'number', description: 'Positive runtime timeout in milliseconds; background values may only shorten the configured maximum.' },
   workdir: { type: 'string', description: 'Working directory; relative paths resolve against the workspace.' },
   run_in_background: { type: 'boolean', description: 'Run as a background job.' },
   msys_argument_conversion: { type: 'string', enum: ['default', 'disabled'], description: 'Windows only: Git Bash argument conversion mode.' },

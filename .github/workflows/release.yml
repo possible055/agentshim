@@ -434,7 +434,7 @@ jobs:
           node -e '
             const addon = require("./adapters/dsh/npm/${{ matrix.npm_platform }}/agentshim_napi.node");
             const api = addon.apiVersion();
-            if (api !== 4) { throw new Error("apiVersion " + api + " !== 4"); }
+            if (api !== 5) { throw new Error("apiVersion " + api + " !== 5"); }
             if (typeof addon.NativeHostRuntime !== "function") { throw new Error("NativeHostRuntime export is missing"); }
             console.log("addon apiVersion=" + api);
           '
@@ -442,7 +442,7 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
-          node -e "const addon = require('./adapters/dsh/npm/${{ matrix.npm_platform }}/agentshim_napi.node'); const api = addon.apiVersion(); if (api !== 4) { throw new Error('apiVersion ' + api + ' !== 4'); } if (typeof addon.NativeHostRuntime !== 'function') { throw new Error('NativeHostRuntime export is missing'); } console.log('addon apiVersion=' + api);"
+          node -e "const addon = require('./adapters/dsh/npm/${{ matrix.npm_platform }}/agentshim_napi.node'); const api = addon.apiVersion(); if (api !== 5) { throw new Error('apiVersion ' + api + ' !== 5'); } if (typeof addon.NativeHostRuntime !== 'function') { throw new Error('NativeHostRuntime export is missing'); } console.log('addon apiVersion=' + api);"
       - name: Record npm platform package provenance
         run: >-
           node adapters/dsh/scripts/release-packages.mjs record

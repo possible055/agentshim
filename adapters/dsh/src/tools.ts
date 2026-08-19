@@ -386,12 +386,13 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
         ...(args.justification === undefined ? {} : { justification: args.justification }),
       }
       if (args.run_in_background === true) {
-        if (args.timeoutMs !== undefined) {
-          throw new HarnessError('invalid arguments: timeoutMs does not apply to a background job', 'INVALID_ARGS')
-        }
         const backgroundInput = {
           command: args.command,
-          wire: { ...commonWire, detach: true },
+          wire: {
+            ...commonWire,
+            detach: true,
+            ...(args.timeoutMs === undefined ? {} : { timeout_ms: args.timeoutMs }),
+          },
         }
         const jobId = await startBackgroundBashNative(deps.ctx, deps.native, processPolicy, deps.jobs, backgroundInput, exec)
         return { kind: 'background' as const, jobId }

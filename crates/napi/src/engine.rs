@@ -46,6 +46,8 @@ pub struct NativeHostOptions {
     /// DSH tool timeout shelf. The process ceiling is derived below it by the
     /// core cleanup and protocol slack.
     pub tool_timeout_shelf_ms: Option<u32>,
+    /// Maximum background job runtime, resolved by the embedding host.
+    pub background_job_timeout_max_ms: Option<u32>,
     /// Explicit child environment; the Engine never reads the host ambient
     /// environment on its own.
     pub env: Option<Vec<EnvEntry>>,
@@ -61,6 +63,7 @@ struct NativeEngineConfig {
     output_limits: NativeOutputLimits,
     read_scope: agentshim_core::path::ReadScope,
     timeout_ceiling_ms: u64,
+    background_timeout_max_ms: u64,
     process_environment: agentshim_core::ProcessEnvironment,
     capture_root: std::path::PathBuf,
     capture_max_bytes: u64,
@@ -144,6 +147,7 @@ pub(crate) struct EngineState {
     pub(crate) tool_engine: agentshim_core::ToolEngine,
     pub(crate) output_limits: NativeOutputLimits,
     pub(crate) timeout_ceiling_ms: u64,
+    pub(crate) background_timeout_max_ms: u64,
     pub(crate) shutdown: CancellationToken,
     pub(crate) capture_root: std::path::PathBuf,
     pub(crate) capture_max_bytes: u64,
@@ -347,6 +351,19 @@ impl NativeEngineConfig {
                 "toolTimeoutShelfMs must be from 15000 through 3600000",
             ));
         }
+        let background_timeout_max = options.background_job_timeout_max_ms.map_or(
+            agentshim_core::runtime::DEFAULT_BACKGROUND_JOB_TIMEOUT_MAX,
+            |milliseconds| Duration::from_millis(u64::from(milliseconds)),
+        );
+        if !(agentshim_core::runtime::MIN_BACKGROUND_JOB_TIMEOUT_MAX
+            ..=agentshim_core::runtime::MAX_BACKGROUND_JOB_TIMEOUT_MAX)
+            .contains(&background_timeout_max)
+        {
+            return Err(Error::new(
+                napi::Status::InvalidArg,
+                "backgroundJobTimeoutMaxMs must be from 600000 through 14400000",
+            ));
+        }
         let env = options
             .env
             .unwrap_or_default()
@@ -384,11 +401,14 @@ impl NativeEngineConfig {
         };
         let mut runtime = agentshim_core::runtime::RuntimeConfig::for_host_defaults();
         runtime.tool_timeout_shelf = shelf;
+        runtime.background_job_timeout_max = background_timeout_max;
         Ok((
             Self {
                 output_limits: NativeOutputLimits::new(options.page_budget_bytes),
                 read_scope,
                 timeout_ceiling_ms: agentshim_core::tools::exec::max_timeout_ms_from_shelf(shelf),
+                background_timeout_max_ms: u64::try_from(background_timeout_max.as_millis())
+                    .unwrap_or(u64::MAX),
                 process_environment,
                 capture_root,
                 capture_max_bytes: clamp_capture_ceiling(options.capture_max_bytes),
@@ -449,6 +469,7 @@ impl Engine {
             tool_engine,
             output_limits: config.output_limits.clone(),
             timeout_ceiling_ms: config.timeout_ceiling_ms,
+            background_timeout_max_ms: config.background_timeout_max_ms,
             shutdown,
             capture_root: config.capture_root.clone(),
             capture_max_bytes: config.capture_max_bytes,

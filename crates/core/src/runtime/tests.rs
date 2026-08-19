@@ -3,16 +3,18 @@ mod tests {
     use std::ffi::{OsStr, OsString};
 
     use crate::runtime::{
-        DEFAULT_GLOB_MEMORY_BYTES, DEFAULT_GREP_MEMORY_BYTES, DEFAULT_MEMORY_BYTES,
-        DEFAULT_PDF_IMAGE_MEMORY_BYTES, DEFAULT_PDF_TEXT_MEMORY_BYTES, DEFAULT_PROCESS_CALLS,
-        DEFAULT_TOOL_TIMEOUT_SHELF, GLOB_MEMORY_BYTES_ENV, GREP_MEMORY_BYTES_ENV, MAX_IDLE_TIMEOUT,
+        DEFAULT_BACKGROUND_JOB_TIMEOUT_MAX, DEFAULT_GLOB_MEMORY_BYTES, DEFAULT_GREP_MEMORY_BYTES,
+        DEFAULT_MEMORY_BYTES, DEFAULT_PDF_IMAGE_MEMORY_BYTES, DEFAULT_PDF_TEXT_MEMORY_BYTES,
+        DEFAULT_PROCESS_CALLS, DEFAULT_TOOL_TIMEOUT_SHELF, GLOB_MEMORY_BYTES_ENV,
+        GREP_MEMORY_BYTES_ENV, MAX_BACKGROUND_JOB_TIMEOUT_MAX, MAX_IDLE_TIMEOUT,
         MAX_PDF_IMAGE_MEMORY_BYTES, MAX_PDF_TEXT_MEMORY_BYTES, MAX_READ_ONLY_CALLS,
         MAX_TOOL_MEMORY_BYTES, MAX_TOOL_TIMEOUT_SHELF, MIN_IDLE_TIMEOUT,
         MIN_PDF_IMAGE_MEMORY_BYTES, MIN_PDF_TEXT_MEMORY_BYTES, MIN_TOOL_MEMORY_BYTES,
         MemoryReservation, PDF_IMAGE_MEMORY_BYTES_ENV, PDF_TEXT_MEMORY_BYTES_ENV,
         RESPECT_GITIGNORE_ENV, RuntimeConfig, RuntimeResources, blocking_threads,
-        global_memory_bytes, parse_idle_timeout, parse_memory_bytes_in_range, parse_process_calls,
-        parse_respect_gitignore, parse_tool_memory_bytes, parse_tool_timeout_shelf,
+        global_memory_bytes, parse_background_job_timeout_max, parse_idle_timeout,
+        parse_memory_bytes_in_range, parse_process_calls, parse_respect_gitignore,
+        parse_tool_memory_bytes, parse_tool_timeout_shelf,
     };
     use tokio_util::sync::CancellationToken;
 
@@ -210,6 +212,27 @@ mod tests {
         for value in ["14", "3601", "0", "-1", "many"] {
             let error =
                 parse_tool_timeout_shelf(Some(OsStr::new(value))).expect_err("invalid shelf");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
+    }
+
+    #[test]
+    fn background_job_timeout_defaults_and_bounds_match_the_host_contract() {
+        assert_eq!(
+            parse_background_job_timeout_max(None).expect("default"),
+            DEFAULT_BACKGROUND_JOB_TIMEOUT_MAX,
+        );
+        assert_eq!(
+            parse_background_job_timeout_max(Some(OsStr::new("600"))).expect("minimum"),
+            std::time::Duration::from_secs(600),
+        );
+        assert_eq!(
+            parse_background_job_timeout_max(Some(OsStr::new("14400"))).expect("maximum"),
+            MAX_BACKGROUND_JOB_TIMEOUT_MAX,
+        );
+        for value in ["599", "14401", "0", "-1", "many"] {
+            let error = parse_background_job_timeout_max(Some(OsStr::new(value)))
+                .expect_err("invalid background maximum");
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         }
     }

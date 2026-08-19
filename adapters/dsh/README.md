@@ -34,29 +34,30 @@ The entry package exact-pins its platform package. There is no install script or
 - id: agentshim
   config:
     root: /absolute/path/to/repo
-    readScope: normal
     toolCallTimeoutMs: 600000
     captureRoot: /absolute/private/artifact/root
     captureMaxBytes: 67108864
     captureCleanup: never
-    env: {}
+    env:
+      AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX: '600'
 ```
 
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `root` | `process.cwd()` | Canonical local root and exact agent-cwd match target. |
-| `readScope` | `normal` | `normal` or `unrestricted`. |
-| `env` | `{}` | Child variables layered over DSH's credential-scrubbed parent environment. `AGENTSHIM_BASH` set here also directs load-time bash discovery, so plugin config is honored even when the host process never had it. |
+| `env` | `{}` | Child variables layered over DSH's credential-scrubbed parent environment. `AGENTSHIM_BASH` directs discovery. `AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX` is parsed once at activation after this merge, so config overrides the parent environment. |
 | `toolCallTimeoutMs` | `600000` | DSH deadline shelf; values below 600000 are rejected and the process ceiling is 590000 ms. |
 | `captureRoot` | Platform data directory | Private persistent process-artifact root; an explicit value must be absolute. |
 | `captureMaxBytes` | `67108864` | Aggregate raw bytes per process call; 1 MiB through 1 GiB. |
 | `captureCleanup` | `never` | `never` or cleanup of this Engine's session directory at `session-end`. |
 
+The plugin does not provide a separate read-scope policy. `read`, `grep`, and `glob` can access paths outside the workspace when those paths are supported by the native engine. DSH sandbox mode governs write side effects from process calls; it does not restrict reads or dynamically change the read-only tools' access range.
+
 ## Process and background behavior
 
 Every process call is prepared before DSH sandbox policy wraps the exact argv. `read-only` and `workspace-write` calls use `ctx.sandbox.confine()`; approved `danger-full-access` calls remain one-shot. Confinement failure never retries unconfined.
 
-`run_in_background: true` registers a DSH-owned job. Use `job_output`, `job_list`, and `job_kill`; `bash_status` is a non-consuming lifecycle snapshot. Plugin unload and owner disposal wait for process trees, pipes, capture publication, and native threads to settle.
+`run_in_background: true` registers a DSH-owned job. Its public `timeoutMs` is measured from successful spawn; omitted values use `AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX` (1800 seconds by default, range 600–14400), and explicit values may only shorten it. Expiry becomes a native `timed_out` outcome and a failed DSH job detail. Use `job_output`, `job_list`, and `job_kill`; `bash_status` and `jobs.wait` only wait or observe and never alter the deadline. Plugin unload and owner disposal race through the same first-wins tree owner and wait for process trees, pipes, capture publication, and native threads to settle.
 
 ## PDF images and artifacts
 

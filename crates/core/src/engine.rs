@@ -91,6 +91,7 @@ impl PreparedRunProgram {
 pub struct PreparedBash {
     inner: bash::PreparedBash,
     memory_charge: usize,
+    background_timeout: Option<Duration>,
 }
 
 impl PreparedBash {
@@ -440,6 +441,42 @@ impl ToolEngine {
         Ok(PreparedBash {
             inner,
             memory_charge: request.memory_charge(),
+            background_timeout: None,
+        })
+    }
+
+    pub fn prepare_background_bash(
+        &self,
+        request: &bash::BashRequest,
+        background_timeout_max_ms: u64,
+        launch_timeout_ceiling_ms: u64,
+        context: &OperationContext,
+    ) -> Result<PreparedBash, ProcessError> {
+        self.ensure_process_active(&context.cancellation)?;
+        if request.detach {
+            return Err(ProcessError::Validation(
+                "native background bash prepare does not accept detach".to_owned(),
+            ));
+        }
+        request.validate(background_timeout_max_ms)?;
+        let launch_timeout_ms =
+            crate::tools::exec::spawn::default_timeout_within(launch_timeout_ceiling_ms);
+        let mut inner = bash::prepare_bash_foreground(
+            &self.root,
+            &self.bash_locator,
+            request,
+            Duration::from_millis(launch_timeout_ms),
+            background_timeout_max_ms,
+            &context.cancellation,
+        )?;
+        inner.request_timeout_ms = launch_timeout_ms;
+        self.apply_process_environment(&mut inner.environment);
+        Ok(PreparedBash {
+            inner,
+            memory_charge: request.memory_charge(),
+            background_timeout: Some(Duration::from_millis(
+                request.background_timeout_ms(background_timeout_max_ms),
+            )),
         })
     }
 
@@ -515,36 +552,46 @@ impl ToolEngine {
         .map_err(|error| ProcessError::Worker(error.to_string()))?
     }
 
-    pub async fn run_detached_bash(
+    pub async fn run_detached_bash<F>(
         &self,
         request: bash::BashRequest,
         admission: DetachedAdmission,
-        timeout_ceiling_ms: u64,
+        background_timeout_max_ms: u64,
+        launch_timeout_ceiling_ms: u64,
+        on_commit: F,
         context: OperationContext,
-    ) -> Result<ToolOutput, ProcessError> {
+    ) -> Result<ToolOutput, ProcessError>
+    where
+        F: FnOnce() + Send + 'static,
+    {
         if !request.detach {
             return Err(ProcessError::Validation(
                 "detached bash execution requires detach".to_owned(),
             ));
         }
-        request.validate(timeout_ceiling_ms)?;
+        request.validate(background_timeout_max_ms)?;
         self.ensure_process_active(&context.cancellation)?;
-        let timeout_ms = request.timeout_ms(timeout_ceiling_ms);
-        let timeout = Duration::from_millis(timeout_ms);
+        let launch_timeout_ms =
+            crate::tools::exec::spawn::default_timeout_within(launch_timeout_ceiling_ms);
+        let launch_timeout = Duration::from_millis(launch_timeout_ms);
         let queued = Instant::now();
         let memory = tokio::time::timeout(
-            timeout,
+            launch_timeout,
             self.resources
                 .reserve_memory(request.memory_charge(), &context.cancellation),
         )
         .await
-        .map_err(|_| ProcessError::TimeoutBeforeSpawn { timeout_ms })?
+        .map_err(|_| ProcessError::TimeoutBeforeSpawn {
+            timeout_ms: launch_timeout_ms,
+        })?
         .map_err(|_| ProcessError::Cancelled)?;
         trace_capacity_acquired(queued);
-        let remaining = timeout
+        let remaining = launch_timeout
             .checked_sub(queued.elapsed())
             .filter(|remaining| !remaining.is_zero())
-            .ok_or(ProcessError::TimeoutBeforeSpawn { timeout_ms })?;
+            .ok_or(ProcessError::TimeoutBeforeSpawn {
+                timeout_ms: launch_timeout_ms,
+            })?;
         let root = Arc::clone(&self.root);
         let locator = self.bash_locator.clone();
         let (cancellation, _relay) =
@@ -560,10 +607,13 @@ impl ToolEngine {
                     &request,
                     remaining,
                     &cancellation,
-                    timeout_ceiling_ms,
+                    background_timeout_max_ms,
                     output_budget.as_ref(),
                     None,
                 );
+                if result.is_ok() {
+                    on_commit();
+                }
                 drop(memory);
                 result
             })
@@ -577,8 +627,19 @@ impl ToolEngine {
         prepared: PreparedBash,
         wrapped_argv: Option<&[String]>,
         context: &OperationContext,
-    ) -> Result<(crate::platform::process::DetachedTree, std::fs::File), ProcessError> {
+    ) -> Result<
+        (
+            crate::platform::process::DetachedTree,
+            std::fs::File,
+            Duration,
+            Instant,
+        ),
+        ProcessError,
+    > {
         self.ensure_process_active(&context.cancellation)?;
+        let background_timeout = prepared.background_timeout.ok_or_else(|| {
+            ProcessError::Validation("background spawn requires a background prepare".to_owned())
+        })?;
         let bash::PreparedBash {
             mut resolved,
             cwd,
@@ -620,11 +681,12 @@ impl ToolEngine {
         };
         let (mut tree, reader) =
             crate::platform::process::spawn_detached_capture(&plan, &environment)?;
+        let spawned_at = Instant::now();
         if context.cancellation.is_cancelled() || self.resources.shutdown_token().is_cancelled() {
             tree.terminate_and_wait(Instant::now() + crate::tools::exec::spawn::CLEANUP_DEADLINE)?;
             return Err(ProcessError::Cancelled);
         }
-        Ok((tree, reader))
+        Ok((tree, reader, background_timeout, spawned_at))
     }
 
     pub fn verify_bash(&self) -> Result<(), ProcessError> {

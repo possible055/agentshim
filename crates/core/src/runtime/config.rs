@@ -34,6 +34,7 @@ const HOST_BLOCKING_THREADS: usize = 2;
 const WORKER_ENV: &str = "AGENTSHIM_IO_WORKERS";
 const PROCESS_CALLS_ENV: &str = "AGENTSHIM_PROCESS_CALLS";
 const TOOL_TIMEOUT_SHELF_ENV: &str = "AGENTSHIM_TOOL_TIMEOUT_SHELF";
+pub const BACKGROUND_JOB_TIMEOUT_MAX_ENV: &str = "AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX";
 const IDLE_TIMEOUT_ENV: &str = "AGENTSHIM_IDLE_TIMEOUT";
 pub const GREP_MEMORY_BYTES_ENV: &str = "AGENTSHIM_GREP_MEMORY_BYTES";
 pub const GLOB_MEMORY_BYTES_ENV: &str = "AGENTSHIM_GLOB_MEMORY_BYTES";
@@ -50,6 +51,9 @@ pub const DEFAULT_TOOL_TIMEOUT_SHELF: Duration = Duration::from_secs(600);
 /// deadline and protocol slack are subtracted.
 pub const MIN_TOOL_TIMEOUT_SHELF: Duration = Duration::from_secs(15);
 pub const MAX_TOOL_TIMEOUT_SHELF: Duration = Duration::from_secs(3600);
+pub const DEFAULT_BACKGROUND_JOB_TIMEOUT_MAX: Duration = Duration::from_secs(1800);
+pub const MIN_BACKGROUND_JOB_TIMEOUT_MAX: Duration = Duration::from_secs(600);
+pub const MAX_BACKGROUND_JOB_TIMEOUT_MAX: Duration = Duration::from_secs(14400);
 /// The floor stays at one second so integration tests can exercise the idle watchdog
 /// quickly; the watchdog is opt-in, so the low bound costs nothing in production.
 pub const MIN_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -69,6 +73,7 @@ pub struct RuntimeConfig {
     pub pdf_image_memory_bytes: usize,
     pub memory_bytes: usize,
     pub tool_timeout_shelf: Duration,
+    pub background_job_timeout_max: Duration,
     /// Optional host idle-watchdog deadline. `None` disables the watchdog.
     pub idle_timeout: Option<Duration>,
     pub respect_gitignore: bool,
@@ -97,6 +102,7 @@ impl RuntimeConfig {
             pdf_image_memory_bytes: DEFAULT_PDF_IMAGE_MEMORY_BYTES,
             memory_bytes: DEFAULT_MEMORY_BYTES,
             tool_timeout_shelf: DEFAULT_TOOL_TIMEOUT_SHELF,
+            background_job_timeout_max: DEFAULT_BACKGROUND_JOB_TIMEOUT_MAX,
             idle_timeout: None,
             respect_gitignore: false,
         }
@@ -155,6 +161,9 @@ impl RuntimeConfig {
         let memory_bytes = global_memory_bytes(grep_memory_bytes, glob_memory_bytes);
         let tool_timeout_shelf =
             parse_tool_timeout_shelf(env::var_os(TOOL_TIMEOUT_SHELF_ENV).as_deref())?;
+        let background_job_timeout_max = parse_background_job_timeout_max(
+            env::var_os(BACKGROUND_JOB_TIMEOUT_MAX_ENV).as_deref(),
+        )?;
         let idle_timeout = parse_idle_timeout(env::var_os(IDLE_TIMEOUT_ENV).as_deref())?;
         let respect_gitignore =
             parse_respect_gitignore(env::var_os(RESPECT_GITIGNORE_ENV).as_deref())?;
@@ -189,6 +198,7 @@ impl RuntimeConfig {
             pdf_image_memory_bytes,
             memory_bytes,
             tool_timeout_shelf,
+            background_job_timeout_max,
             idle_timeout,
             respect_gitignore,
         })
@@ -314,6 +324,29 @@ pub fn parse_tool_timeout_shelf(value: Option<&OsStr>) -> io::Result<Duration> {
                         "{TOOL_TIMEOUT_SHELF_ENV} must be an integer from {} to {} seconds",
                         MIN_TOOL_TIMEOUT_SHELF.as_secs(),
                         MAX_TOOL_TIMEOUT_SHELF.as_secs(),
+                    ),
+                )
+            }),
+    }
+}
+
+pub fn parse_background_job_timeout_max(value: Option<&OsStr>) -> io::Result<Duration> {
+    match value {
+        None => Ok(DEFAULT_BACKGROUND_JOB_TIMEOUT_MAX),
+        Some(value) => value
+            .to_str()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .filter(|duration| {
+                (MIN_BACKGROUND_JOB_TIMEOUT_MAX..=MAX_BACKGROUND_JOB_TIMEOUT_MAX).contains(duration)
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "{BACKGROUND_JOB_TIMEOUT_MAX_ENV} must be an integer from {} to {} seconds",
+                        MIN_BACKGROUND_JOB_TIMEOUT_MAX.as_secs(),
+                        MAX_BACKGROUND_JOB_TIMEOUT_MAX.as_secs(),
                     ),
                 )
             }),

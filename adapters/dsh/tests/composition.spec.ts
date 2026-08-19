@@ -114,7 +114,6 @@ async function mountComposition(
   if (ctx.get('shell') === undefined) await ctx.plugin(UnconfinedShell)
   const config: Config = {
     root,
-    readScope: 'normal',
     captureRoot: join(root, '.dsh-test-captures'),
     env: {
       FIXTURE_REPORT: join(root, 'report.json'),
@@ -322,7 +321,6 @@ describe('agent scope replacement', () => {
     registerInheritedTools(ctx, ['bash', 'str_replace_editor'])
     pluginFibers.push(await ctx.plugin(agentshim, {
       root,
-      readScope: 'normal',
       captureRoot: join(root, '.dsh-test-captures'),
       env: { FIXTURE_REPORT: join(root, 'report.json'), FIXTURE_BOOT_FILE: join(root, 'boot.txt') },
       toolCallTimeoutMs: 600_000,
@@ -441,7 +439,6 @@ describe('agent scope replacement', () => {
 
     pluginFibers.push(await ctx.plugin(agentshim, {
       root,
-      readScope: 'normal',
       captureRoot: join(root, '.dsh-test-captures'),
       env: { FIXTURE_REPORT: join(root, 'report.json'), FIXTURE_BOOT_FILE: join(root, 'boot.txt') },
       toolCallTimeoutMs: 600_000,
@@ -475,7 +472,6 @@ describe('agent scope replacement', () => {
 
     await expect(ctx.plugin(agentshim, {
       root,
-      readScope: 'normal',
       captureRoot: join(root, '.dsh-test-captures'),
       env: {
         FIXTURE_REPORT: join(root, 'report.json'),
@@ -509,7 +505,6 @@ describe('agent scope replacement', () => {
     await ctx.plugin(StubAgentRegistry)
     pluginFibers.push(await ctx.plugin(agentshim, {
       root,
-      readScope: 'normal',
       captureRoot: join(root, '.dsh-test-captures'),
       env: {
         FIXTURE_REPORT: join(root, 'report.json'),
@@ -564,7 +559,6 @@ describe('agent scope replacement', () => {
     await ctx.plugin(RemoteFs)
     await expect(ctx.plugin(agentshim, {
       root,
-      readScope: 'normal',
       captureRoot: join(root, '.dsh-test-captures'),
       env: {},
       toolCallTimeoutMs: 600_000,
@@ -785,6 +779,45 @@ describe('DSH native contracts', () => {
     })
   })
 
+  it('forwards timeoutMs to a background job and settles it as timed out', async () => {
+    const root = await makeRoot()
+    const ctx = await mountComposition(root, {
+      env: { AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX: '600' },
+    }, async inner => {
+      await inner.plugin(LocalJobRegistry)
+      inner.jobs.attachController('background-timeout-test')
+      registerInheritedTools(inner, ['bash'])
+    })
+    const { agent } = await mintAgent(ctx, 'background-timeout', root)
+    ctx.emit('agent/created', { agent })
+    await ctx.plugin(class extends Service {
+      constructor(inner: Context) {
+        super(inner, 'agents')
+      }
+      list(): Agent[] {
+        return [agent]
+      }
+      get(id: string): Agent | undefined {
+        return id === agent.id ? agent : undefined
+      }
+    })
+    const started = await executeTool(ctx, agent, 'bash', {
+      command: 'while :; do printf x >> timeout-marker.txt; sleep 0.02; done',
+      description: 'Time out a background tree',
+      timeoutMs: 100,
+      run_in_background: true,
+    })
+    expect(started.isError, JSON.stringify(started)).toBe(false)
+    const jobId = (started as unknown as { value: { jobId: string } }).value.jobId
+    const snapshot = await ctx.jobs.wait(JobId(jobId), 5_000, agent)
+    expect(snapshot).toMatchObject({ status: 'failed' })
+    expect(snapshot.detail).toContain('timed_out')
+    const first = (await readFile(join(root, 'timeout-marker.txt'))).length
+    await new Promise(resolve => setTimeout(resolve, 150))
+    const second = (await readFile(join(root, 'timeout-marker.txt'))).length
+    expect(second).toBe(first)
+  })
+
   it.skipIf(stagedNativeAddon === undefined)('registers native background Bash as a DSH job with live output and cancellation', async () => {
     const previous = process.env.AGENTSHIM_DSH_NATIVE_DLL
     process.env.AGENTSHIM_DSH_NATIVE_DLL = stagedNativeAddon
@@ -926,7 +959,6 @@ describe('DSH native contracts', () => {
     await ctx.plugin(UnconfinedShell)
     pluginFibers.push(await ctx.plugin(agentshim, {
       root,
-      readScope: 'normal',
       captureRoot: join(root, '.dsh-test-captures'),
       env: { FIXTURE_REPORT: '', FIXTURE_BOOT_FILE: '' },
       toolCallTimeoutMs: 600_000,
@@ -1043,6 +1075,24 @@ describe('DSH native contracts', () => {
     })
     return { confineCalls, approvals }
   }
+
+  it('reads a workspace-external absolute path without process confinement in workspace-write mode', async () => {
+    const root = await makeRoot()
+    const outside = await makeRoot()
+    const outsideFile = join(outside, 'outside.txt')
+    await writeFile(outsideFile, 'outside workspace\n')
+    let stub: SandboxStub | undefined
+    const ctx = await mountComposition(root, {}, async inner => {
+      stub = await mountSandboxServices(inner, 'workspace-write', root)
+    })
+    const { agent } = await mintStandardAgent(ctx, 'read-outside-workspace', root)
+
+    const result = await executeTool(ctx, agent, 'read', { path: outsideFile })
+
+    expect(result.isError).toBe(false)
+    expect(result.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('outside workspace') })
+    expect(stub?.confineCalls).toHaveLength(0)
+  })
 
   it.skipIf(stagedNativeAddon === undefined)('confines standing process calls through the native engine and keeps one-time approval in-process', async () => {
     const previous = process.env.AGENTSHIM_DSH_NATIVE_DLL

@@ -6,7 +6,6 @@ export const MIN_TOOL_CALL_TIMEOUT_MS = 600_000
 
 export interface PluginConfigInput {
   readonly root: string
-  readonly readScope: 'normal' | 'unrestricted'
   readonly env: Record<string, string>
   readonly toolCallTimeoutMs: number
   readonly captureRoot?: string
@@ -31,9 +30,6 @@ export async function resolvePluginConfig(input: PluginConfigInput): Promise<Res
     throw new Error(`dsh-agentshim: root ${JSON.stringify(rawRoot)} does not exist: ${String(error)}`)
   }
   if (!(await stat(root)).isDirectory()) throw new Error(`dsh-agentshim: root ${JSON.stringify(root)} is not a directory`)
-  if (input.readScope !== 'normal' && input.readScope !== 'unrestricted') {
-    throw new Error(`dsh-agentshim: readScope must be "normal" or "unrestricted", got ${JSON.stringify(input.readScope)}`)
-  }
   if (!Number.isFinite(input.toolCallTimeoutMs) || input.toolCallTimeoutMs < MIN_TOOL_CALL_TIMEOUT_MS) {
     throw new Error(`dsh-agentshim: toolCallTimeoutMs must be >= ${MIN_TOOL_CALL_TIMEOUT_MS}`)
   }

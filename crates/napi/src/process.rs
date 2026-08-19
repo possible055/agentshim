@@ -27,6 +27,7 @@ pub struct BashArgs {
     pub cwd: Option<String>,
     pub timeout_ms: Option<u32>,
     pub msys_argument_conversion: Option<String>,
+    pub background: Option<bool>,
 }
 
 #[napi(object)]
@@ -717,14 +718,20 @@ impl EngineState {
             cancellation.clone(),
             Arc::new(self.output_limits.clone()),
         );
-        let prepared =
-            match self
-                .tool_engine
+        let prepared = match if args.background.unwrap_or(false) {
+            self.tool_engine.prepare_background_bash(
+                &request,
+                self.background_timeout_max_ms,
+                self.timeout_ceiling_ms,
+                &context,
+            )
+        } else {
+            self.tool_engine
                 .prepare_bash(&request, self.timeout_ceiling_ms, &context)
-            {
-                Ok(prepared) => prepared,
-                Err(error) => return NativeResult::failure(process_failure(&error)),
-            };
+        } {
+            Ok(prepared) => prepared,
+            Err(error) => return NativeResult::failure(process_failure(&error)),
+        };
         let handle = uuid::Uuid::new_v4().simple().to_string();
         let final_argv = prepared.argv();
         if cancellation.is_cancelled() {

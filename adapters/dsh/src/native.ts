@@ -5,7 +5,7 @@ import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { TOOL_ABORTED } from '@deepseek-ai/dsh-tools'
 
 /** Native API contract version; activation refuses mismatched addons. */
-export const REQUIRED_NATIVE_API_VERSION = 4
+export const REQUIRED_NATIVE_API_VERSION = 5
 
 export interface NativeFailure {
   readonly code: string
@@ -82,6 +82,7 @@ export interface NativeHostOptions {
   readonly pageBudgetBytes?: number
   readonly readScope?: 'normal' | 'unrestricted'
   readonly toolTimeoutShelfMs?: number
+  readonly backgroundJobTimeoutMaxMs?: number
   readonly env?: ReadonlyArray<{ key: string; value: string }>
   readonly captureRoot?: string
   readonly captureMaxBytes?: number
@@ -154,6 +155,7 @@ export interface NativeBashArgs {
   readonly cwd?: string
   readonly timeoutMs?: number
   readonly msysArgumentConversion?: 'enabled' | 'disabled'
+  readonly background?: boolean
 }
 
 export function nativeRunProgramArgs(args: Record<string, unknown>): NativeRunProgramArgs {
@@ -174,12 +176,13 @@ export function nativeRunProgramArgs(args: Record<string, unknown>): NativeRunPr
   }
 }
 
-export function nativeBashArgs(wire: Record<string, unknown>): NativeBashArgs {
+export function nativeBashArgs(wire: Record<string, unknown>, background = false): NativeBashArgs {
   return {
     command: wire.command as string,
     ...(wire.cwd === undefined ? {} : { cwd: wire.cwd as string }),
     ...(wire.timeout_ms === undefined ? {} : { timeoutMs: wire.timeout_ms as number }),
     ...(wire.msys_argument_conversion === undefined ? {} : { msysArgumentConversion: wire.msys_argument_conversion as 'enabled' | 'disabled' }),
+    ...(background ? { background: true } : {}),
   }
 }
 
@@ -529,4 +532,22 @@ export function loadNativeAddon(): NativeLoadResult {
 export function nativeEngineEnv(configEnv: Record<string, string>): Array<{ key: string; value: string }> {
   const merged: Record<string, string> = { ...scrubbedParentEnv(), ...configEnv }
   return Object.entries(merged).map(([key, value]) => ({ key, value }))
+}
+
+export const BACKGROUND_JOB_TIMEOUT_MAX_ENV = 'AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX'
+export const DEFAULT_BACKGROUND_JOB_TIMEOUT_MAX_SECONDS = 1800
+export const MIN_BACKGROUND_JOB_TIMEOUT_MAX_SECONDS = 600
+export const MAX_BACKGROUND_JOB_TIMEOUT_MAX_SECONDS = 14400
+
+export function backgroundJobTimeoutMaxMs(env: ReadonlyArray<{ key: string; value: string }>): number {
+  const raw = env.find(entry => entry.key === BACKGROUND_JOB_TIMEOUT_MAX_ENV)?.value
+  if (raw === undefined) return DEFAULT_BACKGROUND_JOB_TIMEOUT_MAX_SECONDS * 1000
+  if (!/^[0-9]+$/.test(raw)) {
+    throw new Error(`dsh-agentshim: ${BACKGROUND_JOB_TIMEOUT_MAX_ENV} must be an integer from ${MIN_BACKGROUND_JOB_TIMEOUT_MAX_SECONDS} to ${MAX_BACKGROUND_JOB_TIMEOUT_MAX_SECONDS} seconds`)
+  }
+  const seconds = Number(raw)
+  if (!Number.isSafeInteger(seconds) || seconds < MIN_BACKGROUND_JOB_TIMEOUT_MAX_SECONDS || seconds > MAX_BACKGROUND_JOB_TIMEOUT_MAX_SECONDS) {
+    throw new Error(`dsh-agentshim: ${BACKGROUND_JOB_TIMEOUT_MAX_ENV} must be an integer from ${MIN_BACKGROUND_JOB_TIMEOUT_MAX_SECONDS} to ${MAX_BACKGROUND_JOB_TIMEOUT_MAX_SECONDS} seconds`)
+  }
+  return seconds * 1000
 }

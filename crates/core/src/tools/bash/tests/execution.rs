@@ -37,7 +37,7 @@ fn omitted_msys_argument_conversion_uses_the_default_and_unknown_values_are_reje
 }
 
 #[test]
-fn validation_rejects_empty_commands_and_unsupported_detach_combinations() {
+fn validation_accepts_bounded_detached_timeout_and_rejects_invalid_combinations() {
     let mut empty = request("");
     empty.command = String::new();
     assert!(matches!(
@@ -56,6 +56,12 @@ fn validation_rejects_empty_commands_and_unsupported_detach_combinations() {
     let mut with_timeout = request("true");
     with_timeout.detach = true;
     with_timeout.log_path = Some("build.log".to_owned());
+    assert!(
+        with_timeout
+            .validate(crate::tools::exec::spawn::default_max_timeout_ms())
+            .is_ok()
+    );
+    with_timeout.timeout_ms = Some(crate::tools::exec::spawn::default_max_timeout_ms() + 1);
     assert!(matches!(
         with_timeout.validate(crate::tools::exec::spawn::default_max_timeout_ms()),
         Err(ProcessError::Validation(_))

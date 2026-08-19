@@ -8,13 +8,18 @@ pub(super) fn tool_catalog(
     read_scope: ReadScope,
     max_timeout_ms: u64,
     default_timeout_ms: u64,
+    background_timeout_max_ms: u64,
 ) -> [Tool; 6] {
     [
         read_tool(read_scope),
         grep_tool(read_scope),
         glob_tool(read_scope),
         run_program_tool(max_timeout_ms, default_timeout_ms),
-        bash_tool(max_timeout_ms, default_timeout_ms),
+        bash_tool(
+            max_timeout_ms,
+            default_timeout_ms,
+            background_timeout_max_ms,
+        ),
         bash_status_tool(),
     ]
 }
@@ -293,7 +298,11 @@ fn run_program_tool(max: u64, default: u64) -> Tool {
     )
 }
 
-fn bash_tool(max: u64, default: u64) -> Tool {
+#[allow(
+    clippy::too_many_lines,
+    reason = "the three mutually exclusive public Bash variants stay adjacent in one schema"
+)]
+fn bash_tool(max: u64, default: u64, background_max: u64) -> Tool {
     Tool::new(
         "bash",
         "Run a POSIX bash command line non-interactively and return merged stdout/stderr with the exit code. Write POSIX bash (never PowerShell) on all platforms. For long-running commands, set detach=true with a log_path to run in the background and monitor via bash_status.",
@@ -315,12 +324,9 @@ fn bash_tool(max: u64, default: u64) -> Tool {
                 },
                 "detach": {
                     "type": "boolean",
+                    "const": false,
                     "default": false,
-                    "description": "Run command in background. Requires log_path and returns a job_id for use with bash_status."
-                },
-                "log_path": {
-                    "type": "string",
-                    "description": "Output log file path for detached execution. Required when detach is true."
+                    "description": "Run this command in the foreground."
                 },
                 "msys_argument_conversion": {
                     "type": "string",
@@ -333,10 +339,48 @@ fn bash_tool(max: u64, default: u64) -> Tool {
                     "minimum": 1,
                     "maximum": max,
                     "default": default,
-                    "description": "Execution timeout in milliseconds. For longer tasks, use detach=true instead."
+                    "description": "Foreground execution timeout in milliseconds."
                 }
               },
               "required": ["command"]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "command": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "POSIX bash command line to execute."
+                },
+                "cwd": {
+                  "type": "string",
+                  "description": "Optional working directory (relative paths resolve against repository root)."
+                },
+                "detach": {
+                  "type": "boolean",
+                  "const": true,
+                  "description": "Run command as an instance-bound managed background job."
+                },
+                "log_path": {
+                  "type": "string",
+                  "description": "Output log file path for detached execution."
+                },
+                "msys_argument_conversion": {
+                  "type": "string",
+                  "enum": ["default", "disabled"],
+                  "default": "default",
+                  "description": "Windows only: set 'disabled' to prevent MSYS/Git Bash argument conversion."
+                },
+                "timeout_ms": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": background_max,
+                  "default": background_max,
+                  "description": "Maximum background runtime after the process tree is spawned."
+                }
+              },
+              "required": ["command", "detach", "log_path"]
             },
             {
               "type": "object",
@@ -387,6 +431,24 @@ fn bash_status_tool() -> Tool {
                     "maximum": 16384,
                     "default": 8192,
                     "description": "Maximum number of trailing log bytes to return (set 0 for status only)."
+                },
+                "cursor": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional byte cursor for incremental log reads."
+                },
+                "max_bytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 16384,
+                    "description": "Maximum bytes returned from cursor; defaults to tail_bytes."
+                },
+                "wait_ms": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000,
+                    "default": 0,
+                    "description": "Maximum snapshot wait only; never changes the job deadline."
                 }
             },
             "required": ["job_id"]

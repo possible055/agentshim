@@ -80,6 +80,7 @@ pub enum JobState {
     Terminating,
     Completed,
     Terminated,
+    TimedOut,
     OutcomeUncertain,
 }
 
@@ -92,6 +93,7 @@ impl JobState {
             Self::Terminating => "terminating",
             Self::Completed => "completed",
             Self::Terminated => "terminated",
+            Self::TimedOut => "timed_out",
             Self::OutcomeUncertain => "outcome_uncertain",
         }
     }
@@ -122,6 +124,9 @@ pub struct JobSnapshot {
     pub state: JobState,
     pub pid: u32,
     pub runtime: Duration,
+    pub timeout: Duration,
+    pub remaining: Option<Duration>,
+    pub cause: Option<&'static str>,
     pub primary_exit: Option<String>,
     pub log_path: PathBuf,
     pub log: RawLogSnapshot,
@@ -261,17 +266,21 @@ pub fn render_termination_with_budget(
     output_budget: &dyn crate::output::CallBudget,
 ) -> Result<ToolOutput, ProcessError> {
     let outcome = snapshot.outcome.unwrap_or(match snapshot.state {
-        JobState::Terminated => "verified",
+        JobState::Terminated | JobState::TimedOut => "verified",
         JobState::OutcomeUncertain => "outcome_uncertain",
         _ => "already_terminal",
     });
     let output = ToolOutput::new(format!(
-        "Job: {}\nState: {}\nPID: {}\nOutcome: {}\nRuntime ms: {}\nLog: {}",
+        "Job: {}\nState: {}\nPID: {}\nOutcome: {}\nRuntime ms: {}\nTimeout ms: {}{}\nLog: {}",
         snapshot.job_id,
         snapshot.state.label(),
         snapshot.pid,
         outcome,
         u64::try_from(snapshot.runtime.as_millis()).unwrap_or(u64::MAX),
+        u64::try_from(snapshot.timeout.as_millis()).unwrap_or(u64::MAX),
+        snapshot
+            .cause
+            .map_or_else(String::new, |cause| format!("\nCause: {cause}")),
         diagnostic_path(&snapshot.log_path),
     ));
     if !output.fits_content_and_call(output_budget, cancellation) {
@@ -283,17 +292,26 @@ pub fn render_termination_with_budget(
 fn render(snapshot: &JobSnapshot, tail_bytes: usize) -> ToolOutput {
     let exit = snapshot.primary_exit.as_deref().unwrap_or("pending");
     let mut text = format!(
-        "Job: {}\nState: {}\nPID: {}\nRuntime ms: {}\nExit: {}\nLog: {}",
+        "Job: {}\nState: {}\nPID: {}\nRuntime ms: {}\nTimeout ms: {}\nRemaining ms: {}\nExit: {}\nLog: {}",
         snapshot.job_id,
         snapshot.state.label(),
         snapshot.pid,
         u64::try_from(snapshot.runtime.as_millis()).unwrap_or(u64::MAX),
+        u64::try_from(snapshot.timeout.as_millis()).unwrap_or(u64::MAX),
+        snapshot
+            .remaining
+            .map(|remaining| u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX))
+            .map_or_else(|| "pending".to_owned(), |remaining| remaining.to_string()),
         exit,
         diagnostic_path(&snapshot.log_path),
     );
     if let Some(outcome) = snapshot.outcome {
         text.push_str("\nOutcome: ");
         text.push_str(outcome);
+    }
+    if let Some(cause) = snapshot.cause {
+        text.push_str("\nCause: ");
+        text.push_str(cause);
     }
     if let Some(error) = &snapshot.log.error {
         text.push_str("\nLog error: ");
@@ -335,6 +353,9 @@ fn render(snapshot: &JobSnapshot, tail_bytes: usize) -> ToolOutput {
             "jobId": snapshot.job_id,
             "state": snapshot.state.label(),
             "exitCode": snapshot.primary_exit,
+            "timeoutMs": u64::try_from(snapshot.timeout.as_millis()).unwrap_or(u64::MAX),
+            "remainingMs": snapshot.remaining.map(|remaining| u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX)),
+            "cause": snapshot.cause,
             "totalBytes": snapshot.log.total,
             "chunkStart": snapshot.log.start,
             "nextCursor": next_cursor,

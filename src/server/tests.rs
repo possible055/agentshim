@@ -164,6 +164,14 @@ fn catalog_timeout(server: &AgentShim, field: &str) -> u64 {
         .expect("timeout schema integer")
 }
 
+fn bash_catalog_timeout(server: &AgentShim, branch: usize, field: &str) -> u64 {
+    let tool = rmcp::ServerHandler::get_tool(server, "bash").expect("bash catalog entry");
+    let value = serde_json::to_value(tool).expect("serialize tool");
+    value["inputSchema"]["oneOf"][branch]["properties"]["timeout_ms"][field]
+        .as_u64()
+        .expect("bash timeout schema integer")
+}
+
 fn core_rejects_constraint(case: &ConstraintCase, timeout_ceiling_ms: u64) -> bool {
     let arguments = case.args.as_object().cloned();
     match case.tool.as_str() {
@@ -605,6 +613,13 @@ async fn mcp_instances_keep_timeout_catalog_dispatch_and_output_limits_isolated(
     let codex_max = agentshim_core::tools::exec::max_timeout_ms_from_shelf(codex_shelf);
     assert_eq!(catalog_timeout(&cursor, "maximum"), cursor_max);
     assert_eq!(catalog_timeout(&codex, "maximum"), codex_max);
+    assert_eq!(bash_catalog_timeout(&cursor, 0, "maximum"), cursor_max);
+    assert_eq!(bash_catalog_timeout(&codex, 0, "maximum"), codex_max);
+    assert_eq!(
+        bash_catalog_timeout(&codex, 1, "maximum"),
+        1_800_000,
+        "background policy must not subtract foreground cleanup/protocol slack",
+    );
     assert_eq!(cursor.client_profile(), crate::ClientProfile::Cursor);
     assert_eq!(codex.client_profile(), crate::ClientProfile::Codex);
 
@@ -906,6 +921,124 @@ async fn cancellation_after_detached_commit_preserves_the_job_id_response() {
     assert_eq!(result.is_error, Some(false));
     assert!(server.detached.status(job_id, 0).is_ok());
     server.detached.terminate_all();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropped_request_future_after_commit_still_arms_the_deadline() {
+    if crate::bash_report().is_err() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("fixture");
+    let server = AgentShim::from_path(fixture.path()).expect("server");
+    let request: CallToolRequestParams = serde_json::from_value(json!({
+        "name": "bash",
+        "arguments": {
+            "command": "while :; do sleep 0.02; done",
+            "detach": true,
+            "log_path": "dropped-request.log",
+            "timeout_ms": 100
+        }
+    }))
+    .expect("timeout request");
+    let admission = server.try_admit_tool(&request).expect("detached admission");
+    let job_id = match &admission {
+        ToolAdmission::Detached(admission) => admission.job_id().to_owned(),
+        _ => panic!("detached request must reserve detached admission"),
+    };
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    let release = Arc::new(std::sync::Barrier::new(2));
+    let hook_entered = Arc::clone(&entered);
+    let hook_release = Arc::clone(&release);
+    server.detached.set_after_commit_hook(move || {
+        hook_entered.wait();
+        hook_release.wait();
+    });
+    let worker_server = server.clone();
+    let worker = tokio::spawn(async move {
+        worker_server
+            .call_bash_for_test(
+                request.arguments,
+                &tokio_util::sync::CancellationToken::new(),
+                admission,
+                &default_output_budget(),
+            )
+            .await
+    });
+
+    entered.wait();
+    worker.abort();
+    release.wait();
+    let _ = worker.await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let snapshot = server
+        .detached
+        .status(&job_id, 0)
+        .expect("timed out status");
+    assert_eq!(
+        snapshot.state,
+        crate::tools::bash::status::JobState::TimedOut
+    );
+    assert_eq!(snapshot.cause, Some("timeout"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn detached_timeout_stops_the_tree_without_status_polling() {
+    if crate::bash_report().is_err() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("fixture");
+    let server = AgentShim::from_path(fixture.path()).expect("server");
+    let request: CallToolRequestParams = serde_json::from_value(json!({
+        "name": "bash",
+        "arguments": {
+            "command": "while :; do printf x >> marker.txt; sleep 0.02; done",
+            "detach": true,
+            "log_path": "timeout.log",
+            "timeout_ms": 100
+        }
+    }))
+    .expect("timeout request");
+    let admission = server.try_admit_tool(&request).expect("detached admission");
+    let budget = default_output_budget();
+    let response = server
+        .call_bash_for_test(
+            request.arguments,
+            &tokio_util::sync::CancellationToken::new(),
+            admission,
+            &budget,
+        )
+        .await;
+    let CallToolResponse::Complete(result) = response else {
+        panic!("detached response must be complete");
+    };
+    let ContentBlock::Text(content) = &result.content[0] else {
+        panic!("detached response must contain text");
+    };
+    let job_id = content
+        .text
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("job_id="))
+        .expect("detached job id");
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let first_len = fs::metadata(fixture.path().join("marker.txt"))
+        .expect("marker")
+        .len();
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let second_len = fs::metadata(fixture.path().join("marker.txt"))
+        .expect("stable marker")
+        .len();
+    let snapshot = server.detached.status(job_id, 0).expect("timed out status");
+    assert_eq!(
+        snapshot.state,
+        crate::tools::bash::status::JobState::TimedOut
+    );
+    assert_eq!(snapshot.cause, Some("timeout"));
+    assert_eq!(
+        first_len, second_len,
+        "process tree kept writing after timeout"
+    );
 }
 
 #[test]

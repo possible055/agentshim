@@ -133,7 +133,6 @@ await ctx.plugin(Object.assign(inner => {
 
 const plugin = await ctx.plugin(agentshim, {
   root,
-  readScope: 'normal',
   env: {},
   toolCallTimeoutMs: 600_000,
   captureRoot: process.env.AGENTSHIM_PACKED_CAPTURE,

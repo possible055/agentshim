@@ -8,7 +8,7 @@ import { assertLocalFileSystem } from './policy.ts'
 import { buildToolDefinitions, promptSections, RESTRICT_CANDIDATES } from './tools.ts'
 import { PUBLIC_TOOL_NAMES } from './contracts.ts'
 import { BackgroundJobManager } from './jobs.ts'
-import { loadNativeAddon, nativeEngineEnv, nativeLoadFailureError } from './native.ts'
+import { backgroundJobTimeoutMaxMs, loadNativeAddon, nativeEngineEnv, nativeLoadFailureError } from './native.ts'
 import type { NativeEngine, NativeHostOptions } from './native.ts'
 import { EnginePool } from './engine-pool.ts'
 import {
@@ -25,7 +25,6 @@ export const inject: readonly string[] = ['fs']
 export interface Config {
   /** Plugin working root; defaults to the host's `process.cwd()`. */
   root: string
-  readScope: 'normal' | 'unrestricted'
   /** Extra environment merged on top of the scrubbed parent environment, e.g. `AGENTSHIM_*` settings. */
   env: Record<string, string>
   /** DSH tool deadline; the native process ceiling is derived from this shelf. */
@@ -40,7 +39,6 @@ export interface Config {
 
 export const Config = z.object({
   root: z.string().default(''),
-  readScope: z.union([z.const('normal'), z.const('unrestricted')]).default('normal'),
   env: z.dict(String).default({}),
   toolCallTimeoutMs: z.number().min(MIN_TOOL_CALL_TIMEOUT_MS).default(MIN_TOOL_CALL_TIMEOUT_MS),
   captureRoot: z.string().default(''),
@@ -188,10 +186,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   if (loaded.engine === undefined) {
     throw nativeLoadFailureError(loaded.failure)
   }
+  const engineEnv = nativeEngineEnv(config.env)
   const hostOptions: NativeHostOptions = {
-    env: nativeEngineEnv(config.env),
-    readScope: resolved.readScope,
+    env: engineEnv,
+    readScope: 'unrestricted',
     toolTimeoutShelfMs: resolved.toolCallTimeoutMs,
+    backgroundJobTimeoutMaxMs: backgroundJobTimeoutMaxMs(engineEnv),
     captureRoot: resolved.captureRoot,
     captureMaxBytes: resolved.captureMaxBytes,
     captureCleanup: resolved.captureCleanup,

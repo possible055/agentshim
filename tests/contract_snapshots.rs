@@ -149,15 +149,21 @@ fn bash_job_tools_have_fixed_order_and_mutually_exclusive_schemas() {
 
     let bash_schema = &tool(tools, "bash")["inputSchema"];
     let alternatives = bash_schema["oneOf"].as_array().expect("bash oneOf");
-    assert_eq!(alternatives.len(), 2);
+    assert_eq!(alternatives.len(), 3);
     assert_eq!(alternatives[0]["required"], json!(["command"]));
-    assert_eq!(alternatives[1]["required"], json!(["action", "job_id"]));
     assert_eq!(
-        alternatives[1]["properties"]["action"]["const"],
+        alternatives[1]["required"],
+        json!(["command", "detach", "log_path"])
+    );
+    assert_eq!(alternatives[1]["properties"]["detach"]["const"], true);
+    assert_eq!(alternatives[2]["required"], json!(["action", "job_id"]));
+    assert_eq!(
+        alternatives[2]["properties"]["action"]["const"],
         "terminate"
     );
     assert_eq!(alternatives[0]["additionalProperties"], false);
     assert_eq!(alternatives[1]["additionalProperties"], false);
+    assert_eq!(alternatives[2]["additionalProperties"], false);
 
     let status_schema = &tool(tools, "bash_status")["inputSchema"];
     assert_eq!(status_schema["required"], json!(["job_id"]));
@@ -165,6 +171,7 @@ fn bash_job_tools_have_fixed_order_and_mutually_exclusive_schemas() {
     assert_eq!(status_schema["properties"]["tail_bytes"]["minimum"], 0);
     assert_eq!(status_schema["properties"]["tail_bytes"]["maximum"], 16384);
     assert_eq!(status_schema["properties"]["tail_bytes"]["default"], 8192);
+    assert_eq!(status_schema["properties"]["wait_ms"]["maximum"], 1000);
 }
 
 fn tool<'a>(tools: &'a [Value], name: &str) -> &'a Value {

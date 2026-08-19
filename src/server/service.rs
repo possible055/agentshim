@@ -55,6 +55,7 @@ const TOOLS_CACHE_SCOPE: &str = "private";
 struct McpHostConfig {
     max_timeout_ms: u64,
     default_timeout_ms: u64,
+    background_timeout_max_ms: u64,
     output_bytes: usize,
     read_scope: ReadScope,
     client_profile: crate::ClientProfile,
@@ -83,6 +84,10 @@ impl McpHostConfig {
         Ok(Self {
             max_timeout_ms,
             default_timeout_ms: agentshim_core::tools::exec::DEFAULT_TIMEOUT_MS.min(max_timeout_ms),
+            background_timeout_max_ms: u64::try_from(
+                runtime.background_job_timeout_max.as_millis(),
+            )
+            .unwrap_or(u64::MAX),
             output_bytes: runtime.output_bytes,
             read_scope,
             client_profile,
@@ -193,6 +198,7 @@ impl AgentShimBuilder {
             host_config.read_scope,
             host_config.max_timeout_ms,
             host_config.default_timeout_ms,
+            host_config.background_timeout_max_ms,
         ));
         let output_token_gate = OutputTokenGate::load_shared().map_err(io::Error::other)?;
         let burst_output_gate =
@@ -383,8 +389,17 @@ impl AgentShim {
         let max_timeout_ms = agentshim_core::tools::exec::default_max_timeout_ms();
         let default_timeout_ms =
             agentshim_core::tools::exec::DEFAULT_TIMEOUT_MS.min(max_timeout_ms);
+        let background_timeout_max_ms =
+            u64::try_from(agentshim_core::runtime::DEFAULT_BACKGROUND_JOB_TIMEOUT_MAX.as_millis())
+                .unwrap_or(u64::MAX);
         ListToolsResult::with_all_items(
-            tool_catalog(read_scope, max_timeout_ms, default_timeout_ms).to_vec(),
+            tool_catalog(
+                read_scope,
+                max_timeout_ms,
+                default_timeout_ms,
+                background_timeout_max_ms,
+            )
+            .to_vec(),
         )
         .with_ttl_ms(TOOLS_CACHE_TTL_MS)
         .with_cache_scope(CacheScope::Private)
@@ -398,6 +413,10 @@ impl AgentShim {
 
     pub(super) fn max_timeout_ms(&self) -> u64 {
         self.host_config.max_timeout_ms
+    }
+
+    pub(super) fn background_timeout_max_ms(&self) -> u64 {
+        self.host_config.background_timeout_max_ms
     }
 
     fn call_output_budget(&self) -> CallOutputBudget {

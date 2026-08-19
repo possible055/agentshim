@@ -18,6 +18,7 @@ use crate::{
         exec::{ProcessError, spawn::CLEANUP_DEADLINE},
     },
 };
+use tokio_util::sync::CancellationToken;
 
 pub const DETACHED_CALLS_ENV: &str = "AGENTSHIM_DETACHED_CALLS";
 pub const DEFAULT_DETACHED_CALLS: usize = 16;
@@ -53,13 +54,33 @@ enum RosterState {
 enum ActivePhase {
     Running(DetachedTree),
     Finalizing,
-    Terminating,
+    Terminating(StopCause),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StopCause {
+    Explicit,
+    Timeout,
+    Shutdown,
+}
+
+impl StopCause {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::Timeout => "timeout",
+            Self::Shutdown => "shutdown",
+        }
+    }
 }
 
 struct ActiveJob {
     job_id: String,
     pid: u32,
     started_at: Instant,
+    timeout: Duration,
+    deadline: Instant,
+    finished: CancellationToken,
     log_key: String,
     log_path: PathBuf,
     log_reader: Arc<File>,
@@ -71,6 +92,7 @@ struct ActiveJob {
 enum TerminalState {
     Completed,
     Terminated,
+    TimedOut,
     OutcomeUncertain,
 }
 
@@ -79,6 +101,7 @@ impl TerminalState {
         match self {
             Self::Completed => JobState::Completed,
             Self::Terminated => JobState::Terminated,
+            Self::TimedOut => JobState::TimedOut,
             Self::OutcomeUncertain => JobState::OutcomeUncertain,
         }
     }
@@ -89,8 +112,10 @@ struct TerminalJob {
     pid: u32,
     started_at: Instant,
     finished_at: Instant,
+    timeout: Duration,
     log_path: PathBuf,
     state: TerminalState,
+    cause: Option<StopCause>,
     primary_exit: Option<String>,
     final_log: RawLogSnapshot,
     log_reader: Arc<File>,
@@ -176,6 +201,8 @@ impl DetachedTrees {
         log_path: PathBuf,
         log_reader: Arc<File>,
         reserved_key: Option<String>,
+        timeout: Duration,
+        started_at: Instant,
     ) -> Result<(), DetachedTree> {
         let mut state = self.lock();
         if state.state != RosterState::Accepting {
@@ -190,7 +217,10 @@ impl DetachedTrees {
         state.active.push(ActiveJob {
             job_id,
             pid,
-            started_at: Instant::now(),
+            started_at,
+            timeout,
+            deadline: started_at + timeout,
+            finished: CancellationToken::new(),
             log_key: reserved_key.unwrap_or_default(),
             log_path,
             log_reader,
@@ -223,7 +253,7 @@ impl DetachedTrees {
                     }
                     (ActivePhase::Running(_), RefreshOutcome::Stable) => JobState::Running,
                     (ActivePhase::Finalizing, _) => JobState::Finalizing,
-                    (ActivePhase::Terminating, _) => JobState::Terminating,
+                    (ActivePhase::Terminating(_), _) => JobState::Terminating,
                 };
                 SnapshotSource::Active {
                     base: active_snapshot(job, model_state, None),
@@ -268,7 +298,7 @@ impl DetachedTrees {
                     }
                     (ActivePhase::Running(_), RefreshOutcome::Stable) => JobState::Running,
                     (ActivePhase::Finalizing, _) => JobState::Finalizing,
-                    (ActivePhase::Terminating, _) => JobState::Terminating,
+                    (ActivePhase::Terminating(_), _) => JobState::Terminating,
                 };
                 (
                     active_snapshot(job, model_state, None),
@@ -294,12 +324,12 @@ impl DetachedTrees {
         Ok(snapshot)
     }
 
-    pub fn begin_terminate(&self, job_id: &str) -> Result<TerminateStart, ProcessError> {
+    pub fn begin_stop(&self, job_id: &str, cause: StopCause) -> Result<StopStart, ProcessError> {
         validate_job_id(job_id)?;
         let _ = self.refresh_job(job_id);
         let mut state = self.lock();
         if let Some(job) = state.terminal.iter().find(|job| job.job_id == job_id) {
-            return Ok(TerminateStart::Immediate(terminal_snapshot(
+            return Ok(StopStart::Immediate(terminal_snapshot(
                 job,
                 Some("already_terminal"),
             )));
@@ -309,18 +339,18 @@ impl DetachedTrees {
         };
         let job = &mut state.active[index];
         match &job.phase {
-            ActivePhase::Finalizing => Ok(TerminateStart::Immediate(active_snapshot(
+            ActivePhase::Finalizing => Ok(StopStart::Immediate(active_snapshot(
                 job,
                 JobState::Finalizing,
                 Some("already_completed"),
             ))),
-            ActivePhase::Terminating => Ok(TerminateStart::Immediate(active_snapshot(
+            ActivePhase::Terminating(_) => Ok(StopStart::Immediate(active_snapshot(
                 job,
                 JobState::Terminating,
                 Some("already_requested"),
             ))),
             ActivePhase::Running(_) => {
-                let phase = std::mem::replace(&mut job.phase, ActivePhase::Terminating);
+                let phase = std::mem::replace(&mut job.phase, ActivePhase::Terminating(cause));
                 let ActivePhase::Running(tree) = phase else {
                     unreachable!("matched running phase")
                 };
@@ -330,11 +360,13 @@ impl DetachedTrees {
                     pid: job.pid,
                     log_reader: Arc::clone(&job.log_reader),
                     primary_exit: job.primary_exit.clone(),
-                    tree,
+                    tree: Some(tree),
+                    cause,
+                    completed: false,
                 };
                 tracing::info!(target: "agentshim", event = "detached_terminate_accepted", phase = "lifecycle", outcome = "accepted", pid = job.pid);
                 self.changed.notify_all();
-                Ok(TerminateStart::Accepted(work))
+                Ok(StopStart::Accepted(work))
             }
         }
     }
@@ -347,7 +379,10 @@ impl DetachedTrees {
         let mut work = Vec::new();
         for job in &mut state.active {
             if matches!(job.phase, ActivePhase::Running(_)) {
-                let phase = std::mem::replace(&mut job.phase, ActivePhase::Terminating);
+                let phase = std::mem::replace(
+                    &mut job.phase,
+                    ActivePhase::Terminating(StopCause::Shutdown),
+                );
                 let ActivePhase::Running(tree) = phase else {
                     unreachable!("matched running phase")
                 };
@@ -357,7 +392,9 @@ impl DetachedTrees {
                     pid: job.pid,
                     log_reader: Arc::clone(&job.log_reader),
                     primary_exit: job.primary_exit.clone(),
-                    tree,
+                    tree: Some(tree),
+                    cause: StopCause::Shutdown,
+                    completed: false,
                 });
             }
         }
@@ -418,7 +455,7 @@ impl DetachedTrees {
         };
         if let Some(work) = finalize {
             let log = self.snapshot_log(&work.log_reader, MAX_TAIL_BYTES);
-            self.finish_terminal(&work.job_id, TerminalState::Completed, log, None);
+            self.finish_terminal(&work.job_id, TerminalState::Completed, log, None, None);
         }
         RefreshOutcome::Stable
     }
@@ -429,6 +466,7 @@ impl DetachedTrees {
         terminal_state: TerminalState,
         final_log: RawLogSnapshot,
         primary_exit: Option<String>,
+        cause: Option<StopCause>,
     ) -> JobSnapshot {
         let mut state = self.lock();
         let index = state
@@ -437,6 +475,7 @@ impl DetachedTrees {
             .position(|job| job.job_id == job_id)
             .expect("terminal transition keeps its active placeholder");
         let mut active = state.active.remove(index);
+        active.finished.cancel();
         if primary_exit.is_some() {
             active.primary_exit = primary_exit;
         }
@@ -451,8 +490,10 @@ impl DetachedTrees {
             pid: active.pid,
             started_at: active.started_at,
             finished_at: Instant::now(),
+            timeout: active.timeout,
             log_path: active.log_path,
             state: terminal_state,
+            cause,
             primary_exit: active.primary_exit,
             final_log,
             log_reader: active.log_reader,
@@ -496,14 +537,25 @@ impl DetachedTrees {
         let state = self.lock();
         let mut pids = state.shutdown_uncertain_pids.clone();
         pids.extend(
-            state
-                .active
-                .iter()
-                .filter_map(|job| matches!(job.phase, ActivePhase::Terminating).then_some(job.pid)),
+            state.active.iter().filter_map(|job| {
+                matches!(job.phase, ActivePhase::Terminating(_)).then_some(job.pid)
+            }),
         );
         pids.sort_unstable();
         pids.dedup();
         pids
+    }
+
+    pub fn deadline_registration(&self, job_id: &str) -> Option<DeadlineRegistration> {
+        self.lock()
+            .active
+            .iter()
+            .find(|job| job.job_id == job_id)
+            .map(|job| DeadlineRegistration {
+                job_id: job.job_id.clone(),
+                deadline: job.deadline,
+                finished: job.finished.clone(),
+            })
     }
 
     #[cfg(any(test, feature = "test-hooks"))]
@@ -655,7 +707,7 @@ struct FinalizeWork {
     log_reader: Arc<File>,
 }
 
-pub enum TerminateStart {
+pub enum StopStart {
     Immediate(JobSnapshot),
     Accepted(TerminationWork),
 }
@@ -666,7 +718,9 @@ pub struct TerminationWork {
     pid: u32,
     log_reader: Arc<File>,
     primary_exit: Option<String>,
-    tree: DetachedTree,
+    tree: Option<DetachedTree>,
+    cause: StopCause,
+    completed: bool,
 }
 
 impl TerminationWork {
@@ -686,23 +740,75 @@ impl TerminationWork {
         let terminal_state = if injected_failure {
             TerminalState::OutcomeUncertain
         } else {
-            match self.tree.terminate_and_wait(deadline) {
+            match self
+                .tree
+                .as_mut()
+                .expect("stop owner retains the tree")
+                .terminate_and_wait(deadline)
+            {
+                Ok(()) if self.cause == StopCause::Timeout => TerminalState::TimedOut,
                 Ok(()) => TerminalState::Terminated,
                 Err(_) => TerminalState::OutcomeUncertain,
             }
         };
-        if let Ok(observation) = self.tree.observe()
+        if let Ok(observation) = self
+            .tree
+            .as_mut()
+            .expect("stop owner retains the tree")
+            .observe()
             && observation.primary_exit.is_some()
         {
             self.primary_exit = observation.primary_exit;
         }
         let final_log = self.trees.snapshot_log(&self.log_reader, MAX_TAIL_BYTES);
         let state = terminal_state.model_state().label();
-        let snapshot =
-            self.trees
-                .finish_terminal(&self.job_id, terminal_state, final_log, self.primary_exit);
+        let snapshot = self.trees.finish_terminal(
+            &self.job_id,
+            terminal_state,
+            final_log,
+            self.primary_exit.clone(),
+            Some(self.cause),
+        );
+        self.completed = true;
         tracing::info!(target: "agentshim", event = "detached_terminate_finished", phase = "lifecycle", outcome = state, pid = self.pid);
         snapshot
+    }
+}
+
+impl Drop for TerminationWork {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let final_log = self.trees.snapshot_log(&self.log_reader, MAX_TAIL_BYTES);
+        self.trees.finish_terminal(
+            &self.job_id,
+            TerminalState::OutcomeUncertain,
+            final_log,
+            self.primary_exit.clone(),
+            Some(self.cause),
+        );
+    }
+}
+
+#[derive(Clone)]
+pub struct DeadlineRegistration {
+    job_id: String,
+    deadline: Instant,
+    finished: CancellationToken,
+}
+
+impl DeadlineRegistration {
+    pub fn job_id(&self) -> &str {
+        &self.job_id
+    }
+
+    pub fn deadline(&self) -> Instant {
+        self.deadline
+    }
+
+    pub fn finished(&self) -> CancellationToken {
+        self.finished.clone()
     }
 }
 
@@ -712,6 +818,12 @@ fn active_snapshot(job: &ActiveJob, state: JobState, outcome: Option<&'static st
         state,
         pid: job.pid,
         runtime: job.started_at.elapsed(),
+        timeout: job.timeout,
+        remaining: Some(job.deadline.saturating_duration_since(Instant::now())),
+        cause: match &job.phase {
+            ActivePhase::Terminating(cause) => Some(cause.label()),
+            ActivePhase::Running(_) | ActivePhase::Finalizing => None,
+        },
         primary_exit: job.primary_exit.clone(),
         log_path: job.log_path.clone(),
         log: RawLogSnapshot {
@@ -730,6 +842,9 @@ fn terminal_snapshot(job: &TerminalJob, outcome: Option<&'static str>) -> JobSna
         state: job.state.model_state(),
         pid: job.pid,
         runtime: job.finished_at.saturating_duration_since(job.started_at),
+        timeout: job.timeout,
+        remaining: Some(Duration::ZERO),
+        cause: job.cause.map(StopCause::label),
         primary_exit: job.primary_exit.clone(),
         log_path: job.log_path.clone(),
         log: job.final_log.clone(),
@@ -823,6 +938,8 @@ impl DetachedAdmission {
         tree: DetachedTree,
         log_path: PathBuf,
         log_reader: Arc<File>,
+        timeout: Duration,
+        started_at: Instant,
     ) -> Result<(), DetachedTree> {
         match self.trees.commit(
             self.job_id.clone(),
@@ -830,6 +947,8 @@ impl DetachedAdmission {
             log_path,
             log_reader,
             self.reserved_key.clone(),
+            timeout,
+            started_at,
         ) {
             Ok(()) => {
                 self.settled = true;

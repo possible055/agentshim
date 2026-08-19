@@ -98,17 +98,14 @@ mcp_2026_07_28 = true
 
 ## 配置 DSH
 
-构建原生 adapter 并安装到指定的 DSH profile（如 Web UI 使用 `web`，CLI 任务使用 `headless`）：
+将原生 adapter 及其精确可选平台包安装到目标 DSH profile（如 Web UI 使用 `web`，CLI 任务使用 `headless`）：
 
 ```sh
-cd adapters/dsh
-pnpm install --frozen-lockfile
-pnpm pack
-dsh plugin --profile web add /absolute/path/to/dsh-agentshim-0.1.0.tgz
+dsh plugin --profile web add dsh-agentshim
 dsh web --dump-config
 ```
 
-使用 tarball 安装时不需要先将 `dsh-agentshim` 发布到 npm。发布后才可改用较短的 `dsh plugin --profile web add dsh-agentshim`。前置条件、配置、sandbox 审批行为与移除流程请参阅 [DSH adapter 指南](adapters/dsh/README.md)。
+DSH 通过平台 addon 在进程内加载 `agentshim-core`；它不会启动 MCP 服务，也不需要已安装的 `agentshim` 可执行文件。不支持的平台、缺失的包或原生 API 不匹配都会导致 plugin activation 失败。配置、capture 保留策略、sandbox 审批行为与移除流程请参阅 [DSH adapter 指南](adapters/dsh/README.md)。
 
 ## 选项
 
@@ -165,7 +162,7 @@ args = ["serve", "--read-scope", "normal"]
 { "action": "terminate", "job_id": "bash-550e8400-e29b-41d4-a716-446655440000" }
 ```
 
-同时最多可有 16 棵 active detached 进程树。实例保留最近 32 笔 terminal record，每笔最多 16 KiB final tail；ID 不跨 reconnect 或 restart，也不提供 list API。完整 log 仍可用 `read(log_path)` 读取，terminal eviction 不会删除该文件。
+同时最多可有 16 棵 active detached 进程树。`timeout_ms` 自进程树成功 spawn 起算；省略时使用 `AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX`，显式值只能缩短它。Deadline 到期会主动终止完整进程树并记录 `timed_out`。实例保留最近 32 笔 terminal record，每笔最多 16 KiB final tail；ID 不跨 reconnect 或 restart，也不提供 list API。完整 log 仍可用 `read(log_path)` 读取，terminal eviction 不会删除该文件。
 
 ### Windows Bash 参数转换
 
@@ -201,9 +198,11 @@ Git Bash 在启动 Windows 原生程序前，会转换看起来像 POSIX 路径�
 | `CODEX_MCP_PROTOCOL_VERSION` | — | 向 Codex 声明的 MCP 协议版本。 |
 | `AGENTSHIM_PROCESS_CALLS` | `16` | 每个实例的进程调用并行上限；1–32。 |
 | `AGENTSHIM_DETACHED_CALLS` | `16` | 每个实例存活中的 detached `bash` 进程树数量；1–16。 |
+| `AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX` | `1800` | detached／background Bash 的最长运行时间（秒）；600–14400。省略的 job timeout 使用此值，显式值只能缩短它。 |
 | `AGENTSHIM_OUTPUT_BYTES` | `32000` | 每次呼叫的输出上限（字节）；4096–262144。 |
 | `AGENTSHIM_BURST_TOKENS` | profile 默认值 | 共用的预估模型 token 预算；2048–32768。 |
 | `AGENTSHIM_TOOL_TIMEOUT_SHELF` | `600` | 服务端会保持低于此 shelf 值，以便客户端的 `tool_timeout_sec` 在服务端自身 Timeout 之后触发。有效最长执行时间为 shelf 减 10 秒；15–3600。 |
+| `AGENTSHIM_IDLE_TIMEOUT` | 关闭 | 仅 `codex` profile 的空闲关闭秒数；1–86400。入站 JSON-RPC 消息重置 deadline，活跃的前景呼叫或 detached 进程树会推迟关闭。 |
 | `AGENTSHIM_GREP_MEMORY_BYTES` | `268435456` | 每次 `grep` 呼叫保留候选项目的内存硬上限。 |
 | `AGENTSHIM_GLOB_MEMORY_BYTES` | `33554432` | 每次 `glob` 呼叫保留匹配项目的内存硬上限。 |
 | `AGENTSHIM_PDF_TEXT_MEMORY_BYTES` | `67108864` | `auto`/`text` 模式 PDF 读取的每次呼叫内存预算。 |

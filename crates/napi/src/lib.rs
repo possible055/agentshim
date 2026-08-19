@@ -11,7 +11,7 @@ mod engine;
 mod process;
 
 /// Module API version; hosts must exact-match before using any Engine capability.
-pub const API_VERSION: u32 = 4;
+pub const API_VERSION: u32 = 5;
 
 #[napi_derive::napi]
 pub fn api_version() -> u32 {

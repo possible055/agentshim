@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use crate::tools::{
     bash::{
         BashRequest, BashToolRequest,
-        detached::{DetachedAdmission, TerminateStart},
+        detached::{DetachedAdmission, StopCause, StopStart},
         status::BashStatusRequest,
     },
     exec::ProcessError,
@@ -278,10 +278,12 @@ impl AgentShim {
                     );
                 }
                 let started = Instant::now();
-                let action = self.detached.begin_terminate(&request.job_id);
+                let action = self
+                    .detached
+                    .begin_stop(&request.job_id, StopCause::Explicit);
                 let render_budget = output_budget.clone();
                 let result = match action {
-                    Ok(TerminateStart::Immediate(snapshot)) => {
+                    Ok(StopStart::Immediate(snapshot)) => {
                         let rendered = crate::tools::bash::status::render_termination_with_budget(
                             &snapshot,
                             &CancellationToken::new(),
@@ -289,7 +291,7 @@ impl AgentShim {
                         );
                         Ok(rendered)
                     }
-                    Ok(TerminateStart::Accepted(work)) => {
+                    Ok(StopStart::Accepted(work)) => {
                         tokio::task::spawn_blocking(move || {
                             let snapshot = work.run();
                             crate::tools::bash::status::render_termination_with_budget(
@@ -349,7 +351,12 @@ impl AgentShim {
         output_budget: &crate::output::CallOutputBudget,
     ) -> CallToolResponse {
         let max_timeout_ms = self.max_timeout_ms();
-        if let Err(error) = bash_request.validate(max_timeout_ms) {
+        let timeout_ceiling_ms = if bash_request.detach {
+            self.background_timeout_max_ms()
+        } else {
+            max_timeout_ms
+        };
+        if let Err(error) = bash_request.validate(timeout_ceiling_ms) {
             return classified_tool_error(output_budget, "validation", error.to_string());
         }
         // The parsed request, not the pre-admission peek, decides which resource this call
@@ -378,8 +385,18 @@ impl AgentShim {
         let detached_response = bash_request.detach;
         let running = Instant::now();
         let result = if let Some(admission) = detached_admission {
+            let job_id = admission.job_id().to_owned();
+            let detached = self.detached.clone();
+            let shutdown = self.resources.shutdown_token();
             self.tool_engine
-                .run_detached_bash(bash_request, admission, max_timeout_ms, operation)
+                .run_detached_bash(
+                    bash_request,
+                    admission,
+                    self.background_timeout_max_ms(),
+                    max_timeout_ms,
+                    move || Self::arm_detached_deadline(detached, shutdown, &job_id),
+                    operation,
+                )
                 .await
         } else {
             let prepared =
@@ -407,6 +424,32 @@ impl AgentShim {
             },
             output_budget,
         )
+    }
+
+    fn arm_detached_deadline(
+        detached: crate::tools::bash::detached::DetachedTrees,
+        shutdown: CancellationToken,
+        job_id: &str,
+    ) {
+        let Some(registration) = detached.deadline_registration(job_id) else {
+            return;
+        };
+        tokio::spawn(async move {
+            let event = agentshim_core::runtime::deadline::wait(
+                registration.deadline(),
+                registration.finished(),
+                shutdown,
+            )
+            .await;
+            if event != agentshim_core::runtime::deadline::DeadlineEvent::Expired {
+                return;
+            }
+            if let Ok(StopStart::Accepted(work)) =
+                detached.begin_stop(registration.job_id(), StopCause::Timeout)
+            {
+                std::mem::drop(tokio::task::spawn_blocking(move || work.run()));
+            }
+        });
     }
 
     async fn call_bash_status(

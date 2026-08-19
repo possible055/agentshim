@@ -329,6 +329,13 @@ async fn run_doctor(config: RuntimeLimits, options: &ServeOptions) -> Result<(),
         "detached calls: {}",
         service.runtime_limits().detached_calls
     );
+    println!(
+        "background job timeout max: {}s",
+        service
+            .runtime_limits()
+            .background_job_timeout_max
+            .as_secs()
+    );
     println!("output bytes: {}", service.runtime_limits().output_bytes);
     println!(
         "respect gitignore: {}",

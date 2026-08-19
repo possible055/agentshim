@@ -1,10 +1,16 @@
-import { access, copyFile, mkdtemp, writeFile } from 'node:fs/promises'
+import { access, copyFile, mkdtemp, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Worker } from 'node:worker_threads'
 import { afterEach, describe, expect, it } from 'vitest'
-import { loadNativeAddon, nativeEngineEnv, nativePlatformTriple, REQUIRED_NATIVE_API_VERSION } from '../src/native.ts'
+import {
+  backgroundJobTimeoutMaxMs,
+  loadNativeAddon,
+  nativeEngineEnv,
+  nativePlatformTriple,
+  REQUIRED_NATIVE_API_VERSION,
+} from '../src/native.ts'
 import type { NativeSandboxAttribution } from '../src/native.ts'
 
 const builtLibrary = fileURLToPath(new URL(
@@ -30,11 +36,17 @@ async function stageAddon(): Promise<string | undefined> {
 const stagedAddon = await stageAddon()
 
 const originalEnv = process.env.AGENTSHIM_DSH_NATIVE_DLL
+const originalBackgroundTimeout = process.env.AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX
 afterEach(() => {
   if (originalEnv === undefined) {
     delete process.env.AGENTSHIM_DSH_NATIVE_DLL
   } else {
     process.env.AGENTSHIM_DSH_NATIVE_DLL = originalEnv
+  }
+  if (originalBackgroundTimeout === undefined) {
+    delete process.env.AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX
+  } else {
+    process.env.AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX = originalBackgroundTimeout
   }
 })
 
@@ -61,6 +73,29 @@ function pdfFixture(): Buffer {
 }
 
 describe('native addon loading', () => {
+  it('resolves background timeout from scrubbed parent env with config.env precedence', () => {
+    process.env.AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX = '700'
+    expect(backgroundJobTimeoutMaxMs(nativeEngineEnv({}))).toBe(700_000)
+    expect(backgroundJobTimeoutMaxMs(nativeEngineEnv({ AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX: '800' }))).toBe(800_000)
+    expect(() => backgroundJobTimeoutMaxMs(nativeEngineEnv({ AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX: '599' }))).toThrow(/600 to 14400/)
+    expect(() => backgroundJobTimeoutMaxMs(nativeEngineEnv({ AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX: 'nope' }))).toThrow(/integer/)
+  })
+
+  it.skipIf(stagedAddon === undefined)('accepts only the typed background timeout option and ignores ambient policy', async () => {
+    process.env.AGENTSHIM_DSH_NATIVE_DLL = stagedAddon!
+    process.env.AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX = 'invalid-ambient-value'
+    const result = loadNativeAddon()
+    if (result.engine === undefined) throw new Error('unreachable')
+    const root = await mkdtemp(join(tmpdir(), 'agentshim-native-policy-'))
+    expect(() => new result.engine!.NativeHostRuntime({
+      env: nativeEngineEnv({}),
+      backgroundJobTimeoutMaxMs: 599_999,
+    })).toThrow(/600000 through 14400000/)
+    const host = new result.engine.NativeHostRuntime({ env: nativeEngineEnv({}) })
+    const engine = host.openEngine(root)
+    await engine.close()
+  })
+
   it('reports the platform triple for the supported matrix vocabulary', () => {
     const triple = nativePlatformTriple()
     expect(typeof triple).toBe('string')
@@ -367,6 +402,7 @@ describe('native addon loading', () => {
     const engine = host.openEngine(root)
     const prepared = engine.prepareBash({
       command: 'for i in 1 2 3 4 5 6; do printf "line-%s\\n" "$i"; sleep 0.05; done; exit 0',
+      background: true,
     })
     expect(prepared.argv.length).toBeGreaterThan(1)
 
@@ -395,7 +431,7 @@ describe('native addon loading', () => {
     const host = new result.engine.NativeHostRuntime({ env: nativeEngineEnv({}) })
     const engine = host.openEngine(root)
     const handles = Array.from({ length: 3 }, (_, index) => {
-      const prepared = engine.prepareBash({ command: `sleep 0.1; printf concurrent-${index}` })
+      const prepared = engine.prepareBash({ command: `sleep 0.1; printf concurrent-${index}`, background: true })
       return engine.startBackgroundPrepared(prepared.handle)
     })
     const outcomes = await Promise.all(handles.map(handle => handle.done()))
@@ -418,6 +454,7 @@ describe('native addon loading', () => {
 
     const prepared = engine.prepareBash({
       command: 'while :; do printf x; sleep 0.05; done',
+      background: true,
     })
     const handle = engine.startBackgroundPrepared(prepared.handle)
 
@@ -431,6 +468,56 @@ describe('native addon loading', () => {
 
     await handle.dispose()
     await engine.close()
+  })
+
+  it.skipIf(stagedAddon === undefined)('times out a native background tree without polling', async () => {
+    process.env.AGENTSHIM_DSH_NATIVE_DLL = stagedAddon!
+    const result = loadNativeAddon()
+    if (result.engine === undefined) throw new Error('unreachable')
+    const root = await mkdtemp(join(tmpdir(), 'agentshim-native-bg-timeout-'))
+    const host = new result.engine.NativeHostRuntime({
+      env: nativeEngineEnv({}),
+      backgroundJobTimeoutMaxMs: 600_000,
+    })
+    const engine = host.openEngine(root)
+    const prepared = engine.prepareBash({
+      command: 'while :; do printf x >> marker.txt; sleep 0.02; done',
+      timeoutMs: 100,
+      background: true,
+    })
+    const handle = engine.startBackgroundPrepared(prepared.handle)
+    const outcome = await handle.done()
+    expect(outcome.status).toBe('timed_out')
+    const first = (await stat(join(root, 'marker.txt'))).size
+    await new Promise(resolve => setTimeout(resolve, 150))
+    const second = (await stat(join(root, 'marker.txt'))).size
+    expect(second).toBe(first)
+    await handle.dispose()
+    await engine.close()
+  })
+
+  it.skipIf(stagedAddon === undefined)('settles a timeout, cancel, and close race exactly once', async () => {
+    process.env.AGENTSHIM_DSH_NATIVE_DLL = stagedAddon!
+    const result = loadNativeAddon()
+    if (result.engine === undefined) throw new Error('unreachable')
+    const root = await mkdtemp(join(tmpdir(), 'agentshim-native-bg-race-'))
+    const host = new result.engine.NativeHostRuntime({ backgroundJobTimeoutMaxMs: 600_000 })
+    const engine = host.openEngine(root)
+    const prepared = engine.prepareBash({
+      command: 'while :; do sleep 0.02; done',
+      timeoutMs: 100,
+      background: true,
+    })
+    const handle = engine.startBackgroundPrepared(prepared.handle)
+    const done = handle.done()
+    await new Promise(resolve => setTimeout(resolve, 100))
+    handle.cancel('race with timeout')
+    const close = engine.close()
+    const outcome = await done
+    expect(['killed', 'timed_out']).toContain(outcome.status)
+    expect(outcome.failure).toBeUndefined()
+    await close
+    await handle.dispose()
   })
 
   it.skipIf(stagedAddon === undefined)('maps structured native failures and relays foreground cancellation', async () => {
@@ -536,6 +623,7 @@ describe('native addon loading', () => {
       engine.beginCall('worker-background-call')
       const prepared = engine.prepareBash('worker-background-call', {
         command: 'printf started > background-started.txt; sleep 1.5; printf orphan > background-orphan.txt; while :; do sleep 1; done',
+        background: true,
       }).value
       const handle = engine.startBackgroundPrepared('worker-background-call', prepared.handle).value
       void handle.done()

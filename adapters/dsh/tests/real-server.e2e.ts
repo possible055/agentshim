@@ -96,7 +96,6 @@ async function startRealComposition(
   await beforeAdapter?.(ctx)
   const adapter = await ctx.plugin(agentshim, {
     root: repoRoot,
-    readScope: 'normal',
     captureRoot,
     env: {},
     toolCallTimeoutMs: MIN_TOOL_CALL_TIMEOUT_MS,
