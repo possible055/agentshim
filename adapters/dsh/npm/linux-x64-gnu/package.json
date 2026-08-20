@@ -1,6 +1,6 @@
 {
   "name": "dsh-agentshim-linux-x64-gnu",
-  "version": "0.1.4",
+  "version": "0.1.5-alpha.1",
   "agentshimNativeApi": 5,
   "license": "MIT",
   "main": "agentshim_napi.node",

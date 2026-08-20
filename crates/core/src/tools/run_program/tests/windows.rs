@@ -64,10 +64,15 @@ fn windows_lingering_grandchild_parent_fixture() {
         .expect("spawn lingering child fixture");
     let pid_file = std::path::PathBuf::from(pid_file);
     let started = std::time::Instant::now();
-    while !pid_file.exists() && started.elapsed() < Duration::from_secs(2) {
+    while std::fs::read_to_string(&pid_file).map_or(true, |content| content.trim().is_empty())
+        && started.elapsed() < Duration::from_secs(2)
+    {
         thread::sleep(Duration::from_millis(10));
     }
-    assert!(pid_file.exists(), "lingering child did not start");
+    assert!(
+        std::fs::read_to_string(&pid_file).is_ok_and(|content| !content.trim().is_empty()),
+        "lingering child did not start"
+    );
     drop(child);
 }
 

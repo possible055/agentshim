@@ -93,13 +93,24 @@ fn process_overload_is_fail_fast_and_preserves_resource_busy_contract() {
         pid_files.push(pid_file);
     }
     let active_deadline = Instant::now() + Duration::from_secs(5);
-    while pid_files.iter().any(|path| !path.exists()) && Instant::now() < active_deadline {
+    let pids = loop {
+        let parsed = pid_files
+            .iter()
+            .map(|path| {
+                std::fs::read_to_string(path)
+                    .ok()
+                    .and_then(|value| value.trim().parse::<u32>().ok())
+            })
+            .collect::<Vec<_>>();
+        if parsed.iter().all(Option::is_some) {
+            break parsed.into_iter().flatten().collect::<Vec<_>>();
+        }
+        assert!(
+            Instant::now() < active_deadline,
+            "two process calls did not occupy the documented class capacity"
+        );
         thread::sleep(Duration::from_millis(10));
-    }
-    assert!(
-        pid_files.iter().all(|path| path.exists()),
-        "two process calls did not occupy the documented class capacity"
-    );
+    };
 
     let mut overflow = empty_params();
     overflow.insert("name".to_owned(), json!("run_program"));
@@ -131,12 +142,7 @@ fn process_overload_is_fail_fast_and_preserves_resource_busy_contract() {
     );
     session.close();
 
-    for pid_file in pid_files {
-        let pid = std::fs::read_to_string(pid_file)
-            .expect("child PID")
-            .trim()
-            .parse::<u32>()
-            .expect("numeric child PID");
+    for pid in pids {
         assert!(
             !process_is_running(pid),
             "cancelled overload fixture survived"
@@ -176,13 +182,24 @@ fn default_process_and_read_only_capacity_can_progress_together() {
         pid_files.push(pid_file);
     }
     let active_deadline = Instant::now() + Duration::from_secs(10);
-    while pid_files.iter().any(|path| !path.exists()) && Instant::now() < active_deadline {
+    let pids = loop {
+        let parsed = pid_files
+            .iter()
+            .map(|path| {
+                std::fs::read_to_string(path)
+                    .ok()
+                    .and_then(|value| value.trim().parse::<u32>().ok())
+            })
+            .collect::<Vec<_>>();
+        if parsed.iter().all(Option::is_some) {
+            break parsed.into_iter().flatten().collect::<Vec<_>>();
+        }
+        assert!(
+            Instant::now() < active_deadline,
+            "sixteen process calls did not start concurrently"
+        );
         thread::sleep(Duration::from_millis(10));
-    }
-    assert!(
-        pid_files.iter().all(|path| path.exists()),
-        "sixteen process calls did not start concurrently"
-    );
+    };
 
     let read_ids = (100..100 + CAPACITY).collect::<BTreeSet<_>>();
     for id in &read_ids {
@@ -227,12 +244,7 @@ fn default_process_and_read_only_capacity_can_progress_together() {
     );
 
     session.close();
-    for pid_file in pid_files {
-        let pid = std::fs::read_to_string(pid_file)
-            .expect("child PID")
-            .trim()
-            .parse::<u32>()
-            .expect("numeric child PID");
+    for pid in pids {
         assert!(
             !process_is_running(pid),
             "parallel fixture survived server shutdown"

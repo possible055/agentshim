@@ -5,12 +5,12 @@
 ## Requirements
 
 - Node.js `^22.19.0 || >=24.0.0`.
-- The DSH `0.1.0-rc.6` or `0.1.0-rc.7` package family.
+- The DSH `0.1.0-rc.6`, `0.1.0-rc.7`, or `0.1.0-rc.8` package family.
 - A local filesystem provider for the configured root.
 - One supported platform: Windows x64 MSVC, macOS ARM64, Linux x64 glibc, or Linux ARM64 glibc.
 - Background Bash requires `ctx.jobs` and a job controller.
 
-An unsupported platform, a missing optional native package, a load failure, or an addon API version other than `4` rejects plugin activation.
+An unsupported platform, a missing optional native package, a load failure, or an addon API version other than `5` rejects plugin activation.
 
 ## Install
 
