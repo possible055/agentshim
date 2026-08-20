@@ -1,6 +1,6 @@
 mod candidates;
 mod file_search;
-mod ordered;
+mod pipeline;
 mod profile;
 mod request;
 mod result;

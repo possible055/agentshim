@@ -3,15 +3,14 @@ use std::sync::Arc;
 
 #[cfg(feature = "bench-internals")]
 use super::candidates::Candidate;
-use super::{candidates::CandidateMetrics, request::GrepSourcePolicy};
+use super::request::GrepSourcePolicy;
 
 #[derive(Clone, Copy)]
 pub enum GrepStage {
     #[cfg(feature = "bench-internals")]
     Total,
     Setup,
-    CandidateTraversal,
-    CandidateSort,
+    Pipeline,
     SearchWall,
     SearchOpenWorker,
     SearchOpenHandleWorker,
@@ -29,8 +28,6 @@ pub enum GrepStage {
     #[cfg(any(test, feature = "bench-internals"))]
     SearchPathnameFingerprintWorker,
     SearchVerifyWorker,
-    OrderedReduceWall,
-    OrderedWaitWorker,
     Render,
 }
 
@@ -40,6 +37,7 @@ pub struct GrepStageTimings {
     pub total_ns: u64,
     pub setup_ns: u64,
     pub candidate_traversal_ns: u64,
+    pub pipeline_ns: u64,
     pub candidate_sort_ns: u64,
     pub search_wall_ns: u64,
     pub search_open_worker_ns: u64,
@@ -114,6 +112,7 @@ pub struct GrepProfileCounters {
     total_ns: std::sync::atomic::AtomicU64,
     setup_ns: std::sync::atomic::AtomicU64,
     candidate_traversal_ns: std::sync::atomic::AtomicU64,
+    pipeline_ns: std::sync::atomic::AtomicU64,
     candidate_sort_ns: std::sync::atomic::AtomicU64,
     search_wall_ns: std::sync::atomic::AtomicU64,
     search_open_worker_ns: std::sync::atomic::AtomicU64,
@@ -174,6 +173,7 @@ impl Default for GrepProfileCounters {
             total_ns: std::sync::atomic::AtomicU64::new(0),
             setup_ns: std::sync::atomic::AtomicU64::new(0),
             candidate_traversal_ns: std::sync::atomic::AtomicU64::new(0),
+            pipeline_ns: std::sync::atomic::AtomicU64::new(0),
             candidate_sort_ns: std::sync::atomic::AtomicU64::new(0),
             search_wall_ns: std::sync::atomic::AtomicU64::new(0),
             search_open_worker_ns: std::sync::atomic::AtomicU64::new(0),
@@ -265,62 +265,6 @@ impl GrepProfiler {
         counters
             .lanes
             .store(lanes, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    pub fn record_candidate_metrics(&self, metrics: CandidateMetrics) {
-        let Self::Enabled(counters) = self else {
-            return;
-        };
-        counters
-            .candidate_count
-            .store(metrics.count, std::sync::atomic::Ordering::Relaxed);
-        counters.candidate_estimated_retained_bytes.store(
-            metrics.estimated_retained_bytes,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        counters
-            .candidate_vec_capacity
-            .store(metrics.vec_capacity, std::sync::atomic::Ordering::Relaxed);
-        counters.candidate_soft_target_crossings.store(
-            metrics.soft_target_crossings,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        counters
-            .candidate_key_bytes
-            .store(metrics.key_bytes, std::sync::atomic::Ordering::Relaxed);
-        counters
-            .candidate_key_capacity
-            .store(metrics.key_capacity, std::sync::atomic::Ordering::Relaxed);
-        counters.candidate_capability_key_bytes.store(
-            metrics.capability_key_bytes,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        counters.candidate_capability_key_capacity.store(
-            metrics.capability_key_capacity,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        counters
-            .candidate_absolute_bytes
-            .store(metrics.absolute_bytes, std::sync::atomic::Ordering::Relaxed);
-        counters.candidate_absolute_capacity.store(
-            metrics.absolute_capacity,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        counters
-            .candidate_sort_key_bytes
-            .store(metrics.sort_key_bytes, std::sync::atomic::Ordering::Relaxed);
-        counters.candidate_sort_key_capacity.store(
-            metrics.sort_key_capacity,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        counters.candidate_slash_path_bytes.store(
-            metrics.slash_path_bytes,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        counters.candidate_slash_path_capacity.store(
-            metrics.slash_path_capacity,
-            std::sync::atomic::Ordering::Relaxed,
-        );
     }
 
     pub fn record_search_reader(&self) {
@@ -463,6 +407,7 @@ impl GrepProfiler {
             total_ns: load_u64(&counters.total_ns),
             setup_ns: load_u64(&counters.setup_ns),
             candidate_traversal_ns: load_u64(&counters.candidate_traversal_ns),
+            pipeline_ns: load_u64(&counters.pipeline_ns),
             candidate_sort_ns: load_u64(&counters.candidate_sort_ns),
             search_wall_ns: load_u64(&counters.search_wall_ns),
             search_open_worker_ns: load_u64(&counters.search_open_worker_ns),
@@ -562,8 +507,7 @@ impl Drop for GrepSpan<'_> {
         let target = match stage {
             GrepStage::Total => &counters.total_ns,
             GrepStage::Setup => &counters.setup_ns,
-            GrepStage::CandidateTraversal => &counters.candidate_traversal_ns,
-            GrepStage::CandidateSort => &counters.candidate_sort_ns,
+            GrepStage::Pipeline => &counters.pipeline_ns,
             GrepStage::SearchWall => &counters.search_wall_ns,
             GrepStage::SearchOpenWorker => &counters.search_open_worker_ns,
             GrepStage::SearchOpenHandleWorker => &counters.search_open_handle_worker_ns,
@@ -583,8 +527,6 @@ impl Drop for GrepSpan<'_> {
                 &counters.search_pathname_fingerprint_worker_ns
             }
             GrepStage::SearchVerifyWorker => &counters.search_verify_worker_ns,
-            GrepStage::OrderedReduceWall => &counters.ordered_reduce_wall_ns,
-            GrepStage::OrderedWaitWorker => &counters.ordered_wait_worker_ns,
             GrepStage::Render => &counters.render_ns,
         };
         let _ = target.fetch_update(
@@ -658,10 +600,6 @@ impl GrepProfiler {
     }
 
     pub fn set_workload(&self, _candidate_count: usize, _lanes: usize) {
-        let _ = self;
-    }
-
-    pub fn record_candidate_metrics(&self, _metrics: CandidateMetrics) {
         let _ = self;
     }
 

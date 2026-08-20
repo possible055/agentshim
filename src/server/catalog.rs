@@ -90,12 +90,12 @@ fn read_tool(read_scope: ReadScope) -> Tool {
 fn grep_tool(read_scope: ReadScope) -> Tool {
     let (description, path_description, glob_description) = match read_scope {
         ReadScope::Normal => (
-            "Search file contents under the repository root using Rust regex or fixed strings. If output is truncated, a trailing Partial: next_offset=N indicates the offset for the next call.",
+            "Search file contents under the repository root using Rust regex or fixed strings. If output is truncated, a trailing Partial: next_offset=N indicates a best-effort continuation. Results are not sorted; narrow your pattern or path for precise pagination.",
             "Optional platform-native file or directory to search. Relative paths resolve against the repository root.",
             "Optional case-sensitive glob over repository-root-relative paths.",
         ),
         ReadScope::Unrestricted => (
-            "Search file contents using Rust regex or fixed strings. Relative paths resolve against the repository root; absolute paths may reach supported locations outside it. If output is truncated, a trailing Partial: next_offset=N indicates the offset for the next call.",
+            "Search file contents using Rust regex or fixed strings. Relative paths resolve against the repository root; absolute paths may reach supported locations outside it. If output is truncated, a trailing Partial: next_offset=N indicates a best-effort continuation. Results are not sorted; narrow your pattern or path for precise pagination.",
             "Optional platform-native file or directory to search. Relative paths resolve against the repository root; absolute paths may reach supported local filesystems.",
             "Optional case-sensitive glob over repository-root-relative paths, or request-path-relative paths for external absolute inputs.",
         ),
@@ -158,7 +158,7 @@ fn grep_tool(read_scope: ReadScope) -> Tool {
                     "type": "integer",
                     "minimum": 0,
                     "default": 0,
-                    "description": "Number of matching entries to skip before returning results. Pass next_offset from a truncated response to continue."
+                    "description": "Best-effort skip. Results are not sorted; for precise pagination, narrow your pattern or glob."
                 },
                 "path": {
                     "type": "string",
@@ -179,12 +179,12 @@ fn grep_tool(read_scope: ReadScope) -> Tool {
 fn glob_tool(read_scope: ReadScope) -> Tool {
     let (description, path_description, pattern_description) = match read_scope {
         ReadScope::Normal => (
-            "Find paths under the repository root using a glob pattern. Returns files by default; use type to find directories or any entry. If output is truncated, a trailing Partial: next_offset=N indicates the offset for the next call.",
+            "Find paths under the repository root using a glob pattern. Returns files by default; use type to find directories or any entry. If output is truncated, a trailing Partial: next_offset=N indicates a best-effort continuation. Results are not sorted; narrow your pattern or path for precise pagination.",
             "Platform-native directory to traverse. Relative paths resolve against the repository root.",
             "Case-sensitive glob over repository-root-relative paths.",
         ),
         ReadScope::Unrestricted => (
-            "Find local filesystem paths using a glob pattern. Returns files by default; use type to find directories or any entry. Relative paths resolve against the repository root; absolute paths may reach supported locations outside it. If output is truncated, a trailing Partial: next_offset=N indicates the offset for the next call.",
+            "Find local filesystem paths using a glob pattern. Returns files by default; use type to find directories or any entry. Relative paths resolve against the repository root; absolute paths may reach supported locations outside it. If output is truncated, a trailing Partial: next_offset=N indicates a best-effort continuation. Results are not sorted; narrow your pattern or path for precise pagination.",
             "Platform-native directory to traverse. Relative paths resolve against the repository root; absolute paths may reach supported local filesystems.",
             "Case-sensitive glob over repository-root-relative paths, or request-path-relative paths for external absolute inputs.",
         ),
@@ -211,7 +211,7 @@ fn glob_tool(read_scope: ReadScope) -> Tool {
                     "type": "integer",
                     "minimum": 0,
                     "default": 0,
-                    "description": "Number of matching paths to skip before returning results. Pass next_offset from a truncated response to continue."
+                    "description": "Best-effort skip. Results are not sorted; for precise pagination, narrow your pattern or path."
                 },
                 "path": {
                     "type": "string",

@@ -1,3 +1,5 @@
+const TEXT_FAST_PATH_BYTES: u64 = 4 * 1024 * 1024;
+
 pub enum Attempt<T> {
     Stable(T),
     Changed,
@@ -191,15 +193,27 @@ pub fn execute_prepared_with_budget(
     let PreparedKind::Text { detected_encoding } = prepared.kind else {
         unreachable!("PDF reads return before text decoding");
     };
-    let reader = io::Cursor::new(prepared.prefix).chain(&mut prepared.file);
     let mut collector = LineCollector::new(request.start_line.unwrap_or(1), request.line_count);
-    let summary = decode_stream(
-        reader,
-        request.encoding.as_deref().or(detected_encoding),
-        usize::MAX,
-        cancellation,
-        |chunk| Ok(collector.push(chunk)),
-    )?;
+    let summary = if prepared.before.length() <= TEXT_FAST_PATH_BYTES {
+        let mut bytes = prepared.prefix;
+        prepared.file.read_to_end(&mut bytes)?;
+        decode_stream(
+            Cursor::new(bytes),
+            request.encoding.as_deref().or(detected_encoding),
+            usize::MAX,
+            cancellation,
+            |chunk| Ok(collector.push(chunk)),
+        )?
+    } else {
+        let reader = Cursor::new(prepared.prefix).chain(&mut prepared.file);
+        decode_stream(
+            reader,
+            request.encoding.as_deref().or(detected_encoding),
+            usize::MAX,
+            cancellation,
+            |chunk| Ok(collector.push(chunk)),
+        )?
+    };
     collector.finish_eof();
     run_after_read_hook();
 
@@ -265,7 +279,7 @@ pub fn has_binary_magic(prefix: &[u8]) -> bool {
         || prefix.starts_with(b"RIFF") && prefix.get(8..12) == Some(b"WEBP")
 }
 use std::{
-    io::{self, Read},
+    io::{self, Cursor, Read},
     path::Path,
 };
 

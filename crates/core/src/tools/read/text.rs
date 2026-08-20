@@ -1,3 +1,4 @@
+use memchr::memchr;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -57,7 +58,7 @@ impl LineCollector {
     pub fn push(&mut self, text: &str) -> DecodeControl {
         self.saw_input |= !text.is_empty();
         let mut remaining = text;
-        while let Some(newline) = remaining.as_bytes().iter().position(|byte| *byte == b'\n') {
+        while let Some(newline) = memchr(b'\n', remaining.as_bytes()) {
             self.push_segment(&remaining[..newline]);
             self.ended_with_newline = true;
             if !self.finish_line() {
@@ -78,18 +79,24 @@ impl LineCollector {
         if self.current_number < self.start || self.current.len() >= LINE_PREFIX_BYTES {
             return;
         }
-        for character in text.chars() {
-            if self.current.len() >= LINE_PREFIX_BYTES {
-                break;
-            }
-            self.current.push(character);
+        let remaining = LINE_PREFIX_BYTES.saturating_sub(self.current.len());
+        let bytes = text.as_bytes();
+        let mut end = bytes.len().min(remaining);
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
         }
+        self.current.push_str(&text[..end]);
     }
 
     pub fn finish_eof(&mut self) {
         if !self.stopped && self.saw_input && !self.ended_with_newline {
             self.stopped = !self.finish_line();
         }
+    }
+
+    #[cfg(test)]
+    pub fn allocation_state_for_test(&self) -> (usize, usize) {
+        (self.current.capacity(), self.candidates.capacity())
     }
 
     fn finish_line(&mut self) -> bool {

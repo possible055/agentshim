@@ -45,6 +45,12 @@ fn descriptions_quote_real_continuation_markers() {
                 "{name} must name the {field} argument the renderer actually emits"
             );
         }
+        for name in ["grep", "glob"] {
+            assert!(
+                tool(tools, name).to_string().contains("best-effort"),
+                "{name} must describe offset continuation as best-effort"
+            );
+        }
 
         assert!(
             tool(tools, "read").to_string().contains(PDF_CURSOR_FIELD),

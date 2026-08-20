@@ -349,6 +349,9 @@ impl ToolEngine {
         context: OperationContext,
     ) -> Result<ToolOutput, grep::GrepError> {
         let queued = Instant::now();
+        let grep_admission = self.resources.try_admit_grep().ok_or_else(|| {
+            cancelled_or_grep_concurrency_busy(&context.cancellation, &self.resources)
+        })?;
         let admission = self
             .try_read_only_admission(&context.cancellation)
             .ok_or_else(|| cancelled_or_grep_busy(&context.cancellation, &self.resources))?;
@@ -386,7 +389,7 @@ impl ToolEngine {
                     reservation,
                     output_budget.as_ref(),
                 );
-                drop((admission, worker, open_file));
+                drop((grep_admission, admission, worker, open_file));
                 result.map_err(|error| normalize_grep_cancellation(error, &cancellation))
             })
         })
@@ -930,6 +933,17 @@ fn cancelled_or_grep_busy(
         grep::GrepError::Cancelled
     } else {
         grep::GrepError::ResourceBusy("read_only")
+    }
+}
+
+fn cancelled_or_grep_concurrency_busy(
+    request: &CancellationToken,
+    resources: &RuntimeResources,
+) -> grep::GrepError {
+    if request.is_cancelled() || resources.shutdown_token().is_cancelled() {
+        grep::GrepError::Cancelled
+    } else {
+        grep::GrepError::ResourceBusy("grep_concurrency")
     }
 }
 

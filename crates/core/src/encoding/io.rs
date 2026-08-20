@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::decoder::{StrictDecoder, detect_encoding};
 
-const DECODE_CHUNK_BYTES: usize = 64 * 1024;
+const DECODE_CHUNK_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TranscodeFailure {

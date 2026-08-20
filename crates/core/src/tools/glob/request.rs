@@ -8,7 +8,7 @@ use std::{
 use super::profile::ProfiledGlob;
 use super::{
     profile::{GlobProfiler, GlobStage},
-    result::{GlobMatch, TopK, render_with_budget},
+    result::{BoundedCollector, GlobMatch, render_with_budget},
 };
 
 use globset::GlobBuilder;
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    path::{FileAccess, PathError, PathSortKey, ResolvedPath},
+    path::{FileAccess, PathError, ResolvedPath},
     runtime::{FileWorkCredit, FileWorkPool, RuntimeResources},
     tools::ToolOutput,
     traversal::{
@@ -96,11 +96,8 @@ impl GlobRequest {
 }
 
 #[must_use]
-pub fn memory_charge(request: &GlobRequest) -> usize {
-    let offset = request.offset.unwrap_or(0);
-    let limit = request.limit.unwrap_or(DEFAULT_LIMIT);
-    let retain = offset.saturating_add(limit).min(MAX_MATCHES);
-    MEMORY_SAFETY_BYTES.saturating_add(retain.saturating_mul(std::mem::size_of::<GlobMatch>()))
+pub fn memory_charge(_request: &GlobRequest) -> usize {
+    MEMORY_SAFETY_BYTES.saturating_add(MAX_MATCHES.saturating_mul(std::mem::size_of::<GlobMatch>()))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -303,11 +300,12 @@ fn execute_inner_with_traversal(
     let traversal = selection.traversal;
     let offset = request.offset.unwrap_or(0);
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT);
-    let retain = offset.saturating_add(limit).min(MAX_MATCHES);
     let collection = GlobCollection {
-        store: TopK::new(retain, resources.config().glob_memory_bytes, memory)?,
+        store: BoundedCollector::new(MAX_MATCHES, resources.config().glob_memory_bytes, memory)?,
         total: 0,
         scan_stopped: false,
+        early_stop: offset == 0,
+        probe: offset.saturating_add(limit).saturating_add(1),
         terminal_error: None,
     };
     let regular_plan = regular_collect_plan(request, resources, selection.threads);
@@ -371,9 +369,7 @@ fn execute_inner_with_traversal(
     if summary.skipped() > 0 {
         tracing::warn!(target: "agentshim", event = "traversal_skipped", phase = "execution", outcome = "degraded_success", counters = %format!("io_errors={},escaped_entries={},non_unicode_entries={}", summary.io_errors, summary.escaped_entries, summary.non_unicode_entries));
     }
-    let sort_span = profiler.span(GlobStage::FinalSort);
-    let retained = collection.store.into_sorted(cancellation)?;
-    drop(sort_span);
+    let retained = collection.store.into_order();
     let render_span = profiler.span(GlobStage::Render);
     let result = render_with_budget(
         request,
@@ -432,10 +428,23 @@ fn select_glob_traversal(
 }
 
 struct GlobCollection {
-    store: TopK,
+    store: BoundedCollector,
     total: usize,
     scan_stopped: bool,
+    early_stop: bool,
+    probe: usize,
     terminal_error: Option<GlobError>,
+}
+
+impl GlobCollection {
+    fn record_match(&mut self) -> bool {
+        if self.total >= MAX_MATCHES || (self.early_stop && self.total >= self.probe) {
+            self.scan_stopped = true;
+            return false;
+        }
+        self.total += 1;
+        true
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -489,13 +498,8 @@ fn collect_serial(
         if !matches_glob_entry(matcher, plan.entry_type, entry) {
             return TraversalControl::Continue;
         }
-        if !record_match(&mut collection.total) {
-            collection.scan_stopped = true;
+        if !collection.record_match() {
             return TraversalControl::Stop;
-        }
-        let sort_key = PathSortKey::new(entry.key);
-        if !collection.store.might_admit(&sort_key) {
-            return TraversalControl::Continue;
         }
         let path = match access.resolve_walked_entry(base, entry.key, entry.absolute) {
             Ok(path) => path,
@@ -537,32 +541,16 @@ fn collect_parallel(
     let collection = Mutex::new(collection);
     let prefilter = |entry: TraversalEntry<'_>| matches_glob_entry(matcher, plan.entry_type, entry);
     let visit = |batch: &[crate::traversal::OwnedTraversalEntry]| {
-        let threshold = {
-            let wait_span = profiler.span(GlobStage::MergeWaitWorker);
-            let collection = collection
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            drop(wait_span);
-            collection.store.threshold()
-        };
-        let mut found = Vec::new();
+        let mut found = Vec::with_capacity(batch.len());
         let matched_entries = batch.len();
         for entry in batch {
-            let sort_key = PathSortKey::new(&entry.key);
-            if !threshold.might_admit(&sort_key) {
-                continue;
-            }
             match access.resolve_walked_entry(base, &entry.key, &entry.absolute) {
                 Ok(path) => found.push(path),
                 Err(error) => {
-                    let wait_span = profiler.span(GlobStage::MergeWaitWorker);
                     let mut collection = collection
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    drop(wait_span);
-                    let hold_span = profiler.span(GlobStage::MergeWorkWorker);
                     collection.terminal_error = Some(error.into());
-                    drop(hold_span);
                     return TraversalControl::Stop;
                 }
             }
@@ -577,13 +565,10 @@ fn collect_parallel(
         if collection.terminal_error.is_some() || collection.scan_stopped {
             return TraversalControl::Stop;
         }
-        for _ in 0..matched_entries {
-            if !record_match(&mut collection.total) {
-                collection.scan_stopped = true;
+        for path in found {
+            if !collection.record_match() {
                 return TraversalControl::Stop;
             }
-        }
-        for path in found {
             if let Err(error) = collection.store.admit(&path) {
                 collection.terminal_error = Some(error);
                 return TraversalControl::Stop;
@@ -637,12 +622,4 @@ fn with_benchmark_resources<T>(
 ) -> Result<T, GlobError> {
     let resources = RuntimeResources::new(crate::runtime::RuntimeConfig::for_tests(lanes));
     execute(&resources)
-}
-
-pub fn record_match(total: &mut usize) -> bool {
-    if *total >= MAX_MATCHES {
-        return false;
-    }
-    *total += 1;
-    true
 }

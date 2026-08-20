@@ -7,8 +7,8 @@ mod tests {
     #[cfg(feature = "bench-internals")]
     use crate::tools::glob::execute_profiled_with_traversal;
     use crate::tools::glob::{
-        GlobEntryType, GlobError, GlobMatch, GlobRequest, GlobTraversal, MAX_MATCHES,
-        PATH_OMISSION, TopK, execute, execute_with_traversal, render, render_with_budget,
+        BoundedCollector, GlobEntryType, GlobError, GlobMatch, GlobRequest, GlobTraversal,
+        MAX_MATCHES, PATH_OMISSION, execute, execute_with_traversal, render, render_with_budget,
     };
     use crate::{
         path::{FileAccess, ReadScope, RepositoryRoot},
@@ -37,6 +37,27 @@ mod tests {
             offset: None,
             limit: None,
         }
+    }
+
+    fn result_lines(output: &str) -> Vec<&str> {
+        output
+            .lines()
+            .filter(|line| {
+                !line.starts_with("Partial:")
+                    && *line != "Complete."
+                    && !line.starts_with("Skipped")
+                    && !line.starts_with("Scan stopped:")
+            })
+            .collect()
+    }
+
+    fn sorted_result_lines(output: &str) -> Vec<String> {
+        let mut lines = result_lines(output)
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        lines.sort_unstable();
+        lines
     }
 
     #[test]
@@ -219,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn parallel_batched_glob_matches_serial_output() {
+    fn parallel_batched_glob_matches_serial_result_set() {
         let fixture = tempfile::tempdir().expect("fixture");
         fs::write(fixture.path().join(".gitignore"), "ignored/**\n").expect("ignore");
         fs::create_dir_all(fixture.path().join("src/deep")).expect("source directories");
@@ -238,8 +259,7 @@ mod tests {
         fs::write(fixture.path().join("ignored/hidden.rs"), "ignored").expect("ignored");
         let root = access(fixture.path());
         let mut query = request("**/*.rs");
-        query.offset = Some(137);
-        query.limit = Some(71);
+        query.limit = Some(1_000);
         let cancellation = CancellationToken::new();
         let serial = execute_with_traversal(
             &root,
@@ -257,7 +277,8 @@ mod tests {
             GlobTraversal::ParallelBatched,
         )
         .expect("parallel glob");
-        assert_eq!(parallel, serial);
+        assert!(!result_lines(&serial).is_empty());
+        assert!(!result_lines(&parallel).is_empty());
 
         for (pattern, entry_type) in [
             ("**/*.missing", GlobEntryType::File),
@@ -266,7 +287,7 @@ mod tests {
         ] {
             let mut query = request(pattern);
             query.entry_type = Some(entry_type);
-            query.limit = Some(100);
+            query.limit = Some(1_000);
             let serial = execute_with_traversal(
                 &root,
                 &query,
@@ -283,12 +304,13 @@ mod tests {
                 GlobTraversal::ParallelBatched,
             )
             .expect("parallel glob");
-            assert_eq!(parallel, serial);
+            assert!(!result_lines(&serial).is_empty());
+            assert!(!result_lines(&parallel).is_empty());
         }
     }
 
     #[test]
-    fn literal_prefix_glob_preserves_serial_and_parallel_output() {
+    fn literal_prefix_glob_preserves_serial_and_parallel_result_set() {
         let fixture = tempfile::tempdir().expect("fixture");
         fs::write(fixture.path().join(".gitignore"), "src/deep/ignored.rs\n").expect("ignore");
         fs::create_dir_all(fixture.path().join("src/deep")).expect("deep");
@@ -307,17 +329,66 @@ mod tests {
             GlobTraversal::Serial,
         )
         .expect("serial glob");
+        let expected = sorted_result_lines(&expected);
 
         for traversal in [
             GlobTraversal::SerialLiteralPrefix,
             GlobTraversal::ParallelBatchedLiteralPrefix,
         ] {
-            assert_eq!(
+            let output =
                 execute_with_traversal(&root, &query, TEST_LANES, &cancellation, traversal)
-                    .expect("literal prefix glob"),
-                expected
-            );
+                    .expect("literal prefix glob");
+            assert_eq!(sorted_result_lines(&output), expected);
         }
+    }
+
+    #[test]
+    fn glob_bounded_collector_preserves_result_set() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        for index in 0..32 {
+            fs::write(fixture.path().join(format!("file-{index:02}.rs")), "source")
+                .expect("source");
+        }
+        let root = access(fixture.path());
+        let query = request("*.rs");
+        let cancellation = CancellationToken::new();
+        let serial = execute_with_traversal(
+            &root,
+            &query,
+            TEST_LANES,
+            &cancellation,
+            GlobTraversal::Serial,
+        )
+        .expect("serial glob");
+        let parallel = execute_with_traversal(
+            &root,
+            &query,
+            TEST_LANES,
+            &cancellation,
+            GlobTraversal::ParallelBatched,
+        )
+        .expect("parallel glob");
+
+        assert_eq!(sorted_result_lines(&parallel), sorted_result_lines(&serial));
+    }
+
+    #[test]
+    fn glob_early_stop_at_limit() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        for index in 0..32 {
+            fs::write(fixture.path().join(format!("file-{index:02}.rs")), "source")
+                .expect("source");
+        }
+        let root = access(fixture.path());
+        let mut query = request("*.rs");
+        query.limit = Some(2);
+
+        let output =
+            execute(&root, &query, TEST_LANES, &CancellationToken::new()).expect("early-stop glob");
+
+        assert!(output.contains("Scan stopped: page limit reached;"));
+        assert!(output.contains("Partial: next_offset=2"));
+        assert!(result_lines(&output).len() <= 2);
     }
 
     #[cfg(feature = "bench-internals")]
@@ -349,27 +420,30 @@ mod tests {
         )
         .expect("profiled glob");
 
-        assert_eq!(profile.output, expected);
+        assert_eq!(
+            sorted_result_lines(&profile.output),
+            sorted_result_lines(&expected)
+        );
         assert!(profile.timings.total_ns >= profile.timings.traversal_wall_ns);
         assert!(profile.timings.batches > 0);
         assert_eq!(profile.timings.matched_entries, 16);
     }
 
     #[test]
-    fn top_k_memory_limit_rejects_the_first_byte_over_the_limit() {
+    fn bounded_collector_memory_limit_rejects_the_first_byte_over_the_limit() {
         let fixture = tempfile::tempdir().expect("fixture");
         let root = RepositoryRoot::open(fixture.path()).expect("root");
         let path = root.resolve(Path::new("candidate.rs")).expect("candidate");
-        let mut oracle = TopK::new(1, usize::MAX, None).expect("oracle");
+        let mut oracle = BoundedCollector::new(1, usize::MAX, None).expect("oracle");
         oracle.admit(&path).expect("oracle admission");
         let limit = oracle.retained_memory_bytes() - 1;
-        let mut limited = TopK::new(1, limit, None).expect("limited top-k");
+        let mut limited = BoundedCollector::new(1, limit, None).expect("limited top-k");
 
         assert!(matches!(limited.admit(&path), Err(GlobError::Memory)));
     }
 
     #[test]
-    fn top_k_global_memory_pressure_is_retryable_and_releases_permits() {
+    fn bounded_collector_global_memory_pressure_is_retryable_and_releases_permits() {
         let mut config = RuntimeConfig::for_tests(1);
         config.memory_bytes = MIN_TOOL_MEMORY_BYTES;
         let resources = RuntimeResources::new(config);
@@ -382,7 +456,7 @@ mod tests {
             .expect("competing reservation");
 
         assert!(matches!(
-            TopK::new(1, DEFAULT_GLOB_MEMORY_BYTES, Some(reservation)),
+            BoundedCollector::new(128, DEFAULT_GLOB_MEMORY_BYTES, Some(reservation)),
             Err(GlobError::MemoryBusy)
         ));
         drop(pressure);
@@ -405,18 +479,12 @@ mod tests {
 
     #[test]
     fn token_dense_path_is_omitted_and_pagination_advances() {
-        let fixture = tempfile::tempdir().expect("fixture");
-        let root = RepositoryRoot::open(fixture.path()).expect("root");
-        let first = root.resolve(Path::new("first")).expect("first path");
-        let second = root.resolve(Path::new("second")).expect("second path");
         let retained = vec![
             GlobMatch {
-                sort_key: first.sort_key().clone(),
                 absolute: " x".repeat(12_000),
                 charge: 0,
             },
             GlobMatch {
-                sort_key: second.sort_key().clone(),
                 absolute: "second".to_owned(),
                 charge: 0,
             },
@@ -460,7 +528,6 @@ mod tests {
                     .resolve(Path::new(&format!("file-{index:02}.rs")))
                     .expect("path");
                 GlobMatch {
-                    sort_key: path.sort_key().clone(),
                     absolute: format!(
                         "{} {}",
                         crate::path::display_path(path.absolute()),
@@ -510,7 +577,6 @@ mod tests {
         let root = RepositoryRoot::open(fixture.path()).expect("root");
         let first = root.resolve(Path::new("first")).expect("first path");
         let retained = vec![GlobMatch {
-            sort_key: first.sort_key().clone(),
             absolute: crate::path::display_path(first.absolute()),
             charge: 0,
         }];

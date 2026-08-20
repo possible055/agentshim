@@ -49,9 +49,6 @@ impl FileWorkPool {
             }
             return None;
         }
-        if !self.only_active_request() {
-            return None;
-        }
         let mut available = self.credits.available.load(Ordering::Acquire);
         loop {
             if available == 0 {
@@ -148,11 +145,6 @@ impl FileWorkPool {
     #[must_use]
     pub fn is_poisoned(&self) -> bool {
         self.poisoned.load(Ordering::Acquire)
-    }
-
-    #[must_use]
-    fn only_active_request(&self) -> bool {
-        self.active_requests.load(Ordering::Acquire) <= 1
     }
 }
 

@@ -1,54 +1,37 @@
-use std::{cmp::Ordering, collections::BinaryHeap};
-
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     output::{OutputFormatter, OutputLimits, search_tail},
-    path::{PathSortKey, ResolvedPath},
-    sorting,
+    path::ResolvedPath,
+    runtime::MemoryReservation,
     tools::ToolOutput,
-    traversal::{TraversalError, TraversalSummary},
+    traversal::TraversalSummary,
 };
 
 use super::request::{DEFAULT_LIMIT, GlobError, GlobRequest, MAX_MATCHES, PATH_OMISSION};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GlobMatch {
-    pub sort_key: PathSortKey,
     pub absolute: String,
     pub charge: usize,
 }
 
-impl Ord for GlobMatch {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.sort_key
-            .cmp(&other.sort_key)
-            .then_with(|| self.absolute.cmp(&other.absolute))
-    }
-}
-
-impl PartialOrd for GlobMatch {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-pub struct TopK {
+pub struct BoundedCollector {
     capacity: usize,
-    heap: BinaryHeap<GlobMatch>,
+    matches: Vec<GlobMatch>,
     charged: usize,
     memory_limit: usize,
-    reservation: Option<crate::runtime::MemoryReservation>,
+    reservation: Option<MemoryReservation>,
 }
 
-impl TopK {
+impl BoundedCollector {
     pub fn new(
         capacity: usize,
         memory_limit: usize,
-        mut reservation: Option<crate::runtime::MemoryReservation>,
+        mut reservation: Option<MemoryReservation>,
     ) -> Result<Self, GlobError> {
-        let heap = BinaryHeap::with_capacity(capacity);
-        let charged = heap
+        let matches = Vec::with_capacity(capacity);
+        let charged = matches
             .capacity()
             .saturating_mul(std::mem::size_of::<GlobMatch>());
         if charged > memory_limit {
@@ -62,81 +45,23 @@ impl TopK {
         }
         Ok(Self {
             capacity,
-            heap,
+            matches,
             charged,
             memory_limit,
             reservation,
         })
     }
 
-    pub fn threshold(&self) -> TopKThreshold {
-        TopKThreshold {
-            has_capacity: self.capacity > 0 && self.heap.len() < self.capacity,
-            worst: self.heap.peek().map(|entry| entry.sort_key.clone()),
-        }
-    }
-
-    pub fn might_admit(&self, sort_key: &PathSortKey) -> bool {
-        self.threshold().might_admit(sort_key)
-    }
-
     pub fn admit(&mut self, path: &ResolvedPath) -> Result<(), GlobError> {
-        if self.capacity == 0 {
+        if self.matches.len() >= self.capacity {
             return Ok(());
         }
         let absolute = crate::path::display_path(path.absolute());
-        let charge = absolute
-            .capacity()
-            .saturating_add(path.sort_key().capacity_bytes());
-        let candidate = GlobMatch {
-            sort_key: path.sort_key().clone(),
-            absolute,
-            charge,
-        };
-        if self.heap.len() < self.capacity {
-            self.charge(charge)?;
-            self.heap.push(candidate);
-            return Ok(());
-        }
-        let Some(worst) = self.heap.peek() else {
-            return Ok(());
-        };
-        if candidate >= *worst {
-            return Ok(());
-        }
-        let new_charge = self
-            .charged
-            .saturating_sub(worst.charge)
-            .saturating_add(charge);
-        if new_charge > self.memory_limit {
-            return Err(GlobError::Memory);
-        }
-        self.reserve(new_charge)?;
-        self.heap.pop();
-        self.heap.push(candidate);
-        self.charged = new_charge;
-        Ok(())
-    }
-
-    pub fn len(&self) -> usize {
-        self.heap.len()
-    }
-
-    pub fn retained_memory_bytes(&self) -> usize {
-        self.charged
-    }
-
-    fn charge(&mut self, charge: usize) -> Result<(), GlobError> {
+        let charge = absolute.capacity();
         let total = self.charged.saturating_add(charge);
         if total > self.memory_limit {
             return Err(GlobError::Memory);
         }
-        self.reserve(total)?;
-        self.charged = total;
-        Ok(())
-    }
-
-    fn reserve(&mut self, total: usize) -> Result<(), GlobError> {
         if self
             .reservation
             .as_mut()
@@ -144,43 +69,40 @@ impl TopK {
         {
             return Err(GlobError::MemoryBusy);
         }
+        self.matches.push(GlobMatch { absolute, charge });
+        self.charged = total;
         Ok(())
     }
 
-    pub fn into_sorted(
-        self,
-        cancellation: &CancellationToken,
-    ) -> Result<Vec<GlobMatch>, GlobError> {
-        let mut retained = self.heap.into_vec();
-        sorting::sort_by(&mut retained, cancellation, Ord::cmp)
-            .map_err(|_| TraversalError::Cancelled)?;
-        Ok(retained)
+    pub fn len(&self) -> usize {
+        self.matches.len()
     }
-}
 
-#[derive(Clone)]
-pub struct TopKThreshold {
-    has_capacity: bool,
-    worst: Option<PathSortKey>,
-}
+    pub fn retained_memory_bytes(&self) -> usize {
+        self.charged
+    }
 
-impl TopKThreshold {
-    pub fn might_admit(&self, sort_key: &PathSortKey) -> bool {
-        self.has_capacity || self.worst.as_ref().is_some_and(|worst| sort_key <= worst)
+    pub fn into_order(self) -> Vec<GlobMatch> {
+        self.matches
     }
 }
 
 fn page_tail(
     summary: &TraversalSummary,
     scan_stopped: bool,
+    total: usize,
     next_offset: Option<usize>,
     nothing_matched: bool,
 ) -> Vec<String> {
     let mut extras = Vec::new();
     if scan_stopped {
-        extras.push(format!(
-            "Scan stopped: more than {MAX_MATCHES} paths matched; narrow pattern or path."
-        ));
+        if total >= MAX_MATCHES {
+            extras.push(format!(
+                "Scan stopped: more than {MAX_MATCHES} paths matched; narrow pattern or path."
+            ));
+        } else {
+            extras.push("Scan stopped: page limit reached; narrow pattern or path.".to_owned());
+        }
     }
     if nothing_matched && summary.gitignore_filtered {
         extras.push(crate::output::GITIGNORE_RETRY_HINT.to_owned());
@@ -237,7 +159,7 @@ pub fn render_with_budget(
     let mut cap = available;
     loop {
         let next_offset = (offset.saturating_add(cap) < total).then(|| offset.saturating_add(cap));
-        let tail = page_tail(summary, scan_stopped, next_offset, total == 0);
+        let tail = page_tail(summary, scan_stopped, total, next_offset, total == 0);
         let header = if available == 0 {
             if offset == 0 {
                 "No paths matched.".to_owned()
@@ -269,7 +191,7 @@ pub fn render_with_budget(
         }
         if cap == 1 {
             let next_offset = (offset.saturating_add(1) < total).then(|| offset.saturating_add(1));
-            let tail = page_tail(summary, scan_stopped, next_offset, total == 0);
+            let tail = page_tail(summary, scan_stopped, total, next_offset, total == 0);
             let mut formatter = OutputFormatter::new(String::new(), tail, limits)?;
             if formatter.try_push_line(PATH_OMISSION, cancellation)? {
                 let fallback = ToolOutput::new(formatter.finish(cancellation)?);

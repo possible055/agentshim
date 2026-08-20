@@ -3,18 +3,19 @@ mod tests {
     use std::ffi::{OsStr, OsString};
 
     use crate::runtime::{
-        DEFAULT_BACKGROUND_JOB_TIMEOUT_MAX, DEFAULT_GLOB_MEMORY_BYTES, DEFAULT_GREP_MEMORY_BYTES,
-        DEFAULT_MEMORY_BYTES, DEFAULT_PDF_IMAGE_MEMORY_BYTES, DEFAULT_PDF_TEXT_MEMORY_BYTES,
-        DEFAULT_PROCESS_CALLS, DEFAULT_TOOL_TIMEOUT_SHELF, GLOB_MEMORY_BYTES_ENV,
-        GREP_MEMORY_BYTES_ENV, MAX_BACKGROUND_JOB_TIMEOUT_MAX, MAX_IDLE_TIMEOUT,
-        MAX_PDF_IMAGE_MEMORY_BYTES, MAX_PDF_TEXT_MEMORY_BYTES, MAX_READ_ONLY_CALLS,
-        MAX_TOOL_MEMORY_BYTES, MAX_TOOL_TIMEOUT_SHELF, MIN_IDLE_TIMEOUT,
-        MIN_PDF_IMAGE_MEMORY_BYTES, MIN_PDF_TEXT_MEMORY_BYTES, MIN_TOOL_MEMORY_BYTES,
-        MemoryReservation, PDF_IMAGE_MEMORY_BYTES_ENV, PDF_TEXT_MEMORY_BYTES_ENV,
-        RESPECT_GITIGNORE_ENV, RuntimeConfig, RuntimeResources, blocking_threads,
-        global_memory_bytes, parse_background_job_timeout_max, parse_idle_timeout,
-        parse_memory_bytes_in_range, parse_process_calls, parse_respect_gitignore,
-        parse_tool_memory_bytes, parse_tool_timeout_shelf,
+        DEFAULT_BACKGROUND_JOB_TIMEOUT_MAX, DEFAULT_GLOB_MEMORY_BYTES,
+        DEFAULT_GREP_CONCURRENT_CALLS, DEFAULT_GREP_MEMORY_BYTES, DEFAULT_MEMORY_BYTES,
+        DEFAULT_PDF_IMAGE_MEMORY_BYTES, DEFAULT_PDF_TEXT_MEMORY_BYTES, DEFAULT_PROCESS_CALLS,
+        DEFAULT_TOOL_TIMEOUT_SHELF, GLOB_MEMORY_BYTES_ENV, GREP_MEMORY_BYTES_ENV,
+        MAX_BACKGROUND_JOB_TIMEOUT_MAX, MAX_IDLE_TIMEOUT, MAX_PDF_IMAGE_MEMORY_BYTES,
+        MAX_PDF_TEXT_MEMORY_BYTES, MAX_READ_ONLY_CALLS, MAX_TOOL_MEMORY_BYTES,
+        MAX_TOOL_TIMEOUT_SHELF, MIN_IDLE_TIMEOUT, MIN_PDF_IMAGE_MEMORY_BYTES,
+        MIN_PDF_TEXT_MEMORY_BYTES, MIN_TOOL_MEMORY_BYTES, MemoryReservation,
+        PDF_IMAGE_MEMORY_BYTES_ENV, PDF_TEXT_MEMORY_BYTES_ENV, RESPECT_GITIGNORE_ENV,
+        RuntimeConfig, RuntimeResources, blocking_threads, global_memory_bytes,
+        parse_background_job_timeout_max, parse_idle_timeout, parse_memory_bytes_in_range,
+        parse_process_calls, parse_respect_gitignore, parse_tool_memory_bytes,
+        parse_tool_timeout_shelf,
     };
     use tokio_util::sync::CancellationToken;
 
@@ -342,7 +343,11 @@ mod tests {
 
         let first_request = pool.begin_request();
         let second_request = pool.begin_request();
-        assert!(pool.try_credits(3).is_empty());
+        let first_share = pool.try_credits(2);
+        let second_share = pool.try_credits(1);
+        assert_eq!(first_share.len(), 2);
+        assert_eq!(second_share.len(), 1);
+        drop((first_share, second_share));
         drop(second_request);
         assert_eq!(pool.try_credits(2).len(), 2);
         drop(first_request);
@@ -449,6 +454,31 @@ mod tests {
         assert!(resources.try_admit_process().is_none());
         drop(process_permits);
         assert!(resources.try_admit_process().is_some());
+    }
+
+    #[test]
+    fn file_work_pool_allows_concurrent_requests() {
+        let resources = RuntimeResources::new(RuntimeConfig::for_tests(3));
+        let pool = resources.file_work_pool();
+        let _first_request = pool.begin_request();
+        let _second_request = pool.begin_request();
+
+        let first_share = pool.try_credits(1);
+        let second_share = pool.try_credits(1);
+        assert_eq!(first_share.len(), 1);
+        assert_eq!(second_share.len(), 1);
+    }
+
+    #[test]
+    fn grep_concurrent_calls_admission_limit() {
+        let resources = RuntimeResources::new(RuntimeConfig::for_tests(1));
+        let permits = (0..DEFAULT_GREP_CONCURRENT_CALLS)
+            .map(|_| resources.try_admit_grep().expect("grep admission"))
+            .collect::<Vec<_>>();
+
+        assert!(resources.try_admit_grep().is_none());
+        drop(permits);
+        assert!(resources.try_admit_grep().is_some());
     }
 
     #[tokio::test]

@@ -2,12 +2,14 @@ use std::{env, ffi::OsStr, io, time::Duration};
 
 pub const MAX_READ_ONLY_CALLS: usize = 16;
 pub const MAX_SEARCH_LANES: usize = 16;
+pub const DEFAULT_WORKER_LANES: usize = 4;
 pub const MAX_OPEN_FILES: usize = 64;
 pub const DEFAULT_PROCESS_CALLS: usize = 16;
+pub const DEFAULT_GREP_CONCURRENT_CALLS: usize = 2;
 pub const MAX_CONFIGURED_PROCESS_CALLS: usize = 32;
 pub const DEFAULT_MEMORY_BYTES: usize = 256 * 1024 * 1024;
 pub const DEFAULT_GREP_MEMORY_BYTES: usize = 256 * 1024 * 1024;
-pub const DEFAULT_GLOB_MEMORY_BYTES: usize = 32 * 1024 * 1024;
+pub const DEFAULT_GLOB_MEMORY_BYTES: usize = 64 * 1024 * 1024;
 pub const MIN_TOOL_MEMORY_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_TOOL_MEMORY_BYTES: usize = 1024 * 1024 * 1024;
 pub const DEFAULT_PDF_TEXT_MEMORY_BYTES: usize = 64 * 1024 * 1024;
@@ -65,6 +67,7 @@ pub struct RuntimeConfig {
     pub scheduler_threads: usize,
     pub blocking_threads: usize,
     pub process_calls: usize,
+    pub grep_concurrent_calls: usize,
     pub detached_calls: usize,
     pub output_bytes: usize,
     pub grep_memory_bytes: usize,
@@ -94,6 +97,7 @@ impl RuntimeConfig {
             scheduler_threads: default_scheduler_threads(available),
             blocking_threads: blocking_threads(process_calls, detached_calls),
             process_calls,
+            grep_concurrent_calls: DEFAULT_GREP_CONCURRENT_CALLS,
             detached_calls,
             output_bytes: crate::output::MODEL_BYTE_LIMIT,
             grep_memory_bytes: DEFAULT_GREP_MEMORY_BYTES,
@@ -188,6 +192,7 @@ impl RuntimeConfig {
             scheduler_threads: default_scheduler_threads(available),
             blocking_threads: blocking_threads(process_calls, detached_calls),
             process_calls,
+            grep_concurrent_calls: DEFAULT_GREP_CONCURRENT_CALLS,
             detached_calls,
             output_bytes: crate::output::parse_configured_byte_limit(
                 env::var_os(crate::output::OUTPUT_BYTES_ENV).as_deref(),
@@ -381,14 +386,8 @@ pub fn blocking_threads(process_calls: usize, detached_calls: usize) -> usize {
     process_calls + MAX_READ_ONLY_CALLS + detached_calls + HOST_BLOCKING_THREADS
 }
 
-#[cfg(windows)]
 pub fn default_worker_lanes(available: usize) -> usize {
-    available.saturating_mul(4).clamp(1, MAX_SEARCH_LANES)
-}
-
-#[cfg(not(windows))]
-pub fn default_worker_lanes(available: usize) -> usize {
-    available.saturating_mul(2).clamp(1, 8)
+    available.clamp(1, DEFAULT_WORKER_LANES)
 }
 
 pub fn default_scheduler_threads(available: usize) -> usize {

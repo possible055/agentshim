@@ -8,9 +8,8 @@ use tokio_util::sync::CancellationToken;
 #[cfg(feature = "bench-internals")]
 use super::profile::ProfiledGrep;
 use super::{
-    candidates::collect_candidates,
     file_search::SearchPlan,
-    ordered::{OrderedSearchContext, ordered_search},
+    pipeline::pipelined_search,
     profile::{GrepProfiler, GrepStage},
     result::render_with_budget,
 };
@@ -24,17 +23,14 @@ use crate::{
 pub const DEFAULT_LIMIT: usize = 200;
 const MAX_LIMIT: usize = 1_000;
 const MAX_CONTEXT: usize = 20;
-#[cfg(any(test, feature = "bench-internals"))]
+#[cfg(feature = "bench-internals")]
 pub const CANDIDATE_SOFT_TARGET_BYTES: usize = 64 * 1024 * 1024;
-pub const MEMORY_SOURCE_BYTES: usize = 16 * 1024;
+pub const MEMORY_SOURCE_BYTES: usize = 256 * 1024;
 pub const SEARCH_HEAP_BYTES: usize = 8 * 1024 * 1024;
 pub const CAPTURE_MEMORY_BYTES: usize = 8 * 1024 * 1024;
-pub const PAGE_MEMORY_BYTES: usize = 48 * 1024;
+pub const PAGE_MEMORY_BYTES: usize = 512 * 1024;
 const CANDIDATE_HEADROOM_BYTES: usize = 1024 * 1024;
 pub const PARALLEL_BATCH_SIZE: usize = 256;
-pub const CONTENT_SEARCH_BATCH_SIZE: usize = 8;
-pub const STREAM_SEARCH_BATCH_SIZE: usize = 16;
-pub const UNSTABLE_SORT_MIN_CANDIDATES: usize = 10_000;
 pub const GENERIC_OMISSION: &str = "[grep result omitted: exceeds output budget]";
 pub const CONTENT_OMISSION: &str = "[line text omitted: exceeds output budget]";
 
@@ -103,6 +99,7 @@ impl GrepMemoryPolicy {
         self.base_lane_bytes().saturating_add(self.page_bytes)
     }
 
+    #[cfg(any(test, feature = "bench-internals"))]
     pub const fn candidate_limit_bytes(self) -> usize {
         self.request_bytes
             .saturating_sub(self.base_reservation_bytes())
@@ -141,14 +138,12 @@ impl GrepMemoryPolicy {
 const BENCH_SOURCE_ENV: &str = "AGENTSHIM_BENCH_GREP_SOURCE";
 #[cfg(feature = "bench-internals")]
 const BENCH_PATHNAME_REOPEN_ENV: &str = "AGENTSHIM_BENCH_GREP_PATHNAME_REOPEN";
-#[cfg(feature = "bench-internals")]
-const BENCH_CANDIDATE_POLICY_ENV: &str = "AGENTSHIM_BENCH_GREP_CANDIDATE_POLICY";
-#[cfg(feature = "bench-internals")]
-pub const BENCH_SORT_ENV: &str = "AGENTSHIM_BENCH_GREP_SORT";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GrepTraversal {
     Adaptive,
+    #[cfg(any(test, feature = "bench-internals"))]
     Serial,
+    #[cfg(any(test, feature = "bench-internals"))]
     ParallelBatched,
     #[cfg(any(test, feature = "bench-internals"))]
     SerialLiteralPrefix,
@@ -261,36 +256,12 @@ impl GrepBenchmarkVariant {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CandidatePolicy {
     SoftTarget,
     #[cfg(feature = "bench-internals")]
     FatalCeiling,
-}
-
-impl CandidatePolicy {
-    #[allow(clippy::unnecessary_wraps)]
-    pub fn from_environment() -> Result<Self, GrepError> {
-        #[cfg(feature = "bench-internals")]
-        {
-            match std::env::var(BENCH_CANDIDATE_POLICY_ENV).as_deref() {
-                Ok("soft" | "unlimited") | Err(std::env::VarError::NotPresent) => {
-                    Ok(Self::SoftTarget)
-                }
-                Ok("fatal-64m") => Ok(Self::FatalCeiling),
-                Ok(value) => Err(GrepError::Validation(format!(
-                    "{BENCH_CANDIDATE_POLICY_ENV} must be soft or fatal-64m; got {value}"
-                ))),
-                Err(error) => Err(GrepError::Validation(format!(
-                    "{BENCH_CANDIDATE_POLICY_ENV} is not valid Unicode: {error}"
-                ))),
-            }
-        }
-        #[cfg(not(feature = "bench-internals"))]
-        {
-            Ok(Self::SoftTarget)
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
@@ -736,7 +707,6 @@ fn execute_inner(
         memory,
         output_budget,
     } = execution;
-    let candidate_policy = CandidatePolicy::from_environment()?;
     let memory_policy = GrepMemoryPolicy::new(resources.config().grep_memory_bytes);
     let file_work_pool = resources.file_work_pool();
     let _file_work_request = file_work_pool.begin_request();
@@ -760,76 +730,51 @@ fn execute_inner(
         .glob
         .as_deref()
         .and_then(crate::traversal::literal_path_prefix);
+    let base = access.resolve(std::path::Path::new(request.path.as_deref().unwrap_or(".")))?;
+    let single_file = access.metadata_kind(&base)?.is_file;
+    let (encoding, fallback_encoding) = request.resolved_encodings_inner(single_file)?;
     drop(setup_span);
-    let include_ignored = resources.config().include_ignored(request.include_ignored);
-    let mut candidate_set = collect_candidates(
-        access,
-        request.path.as_deref().unwrap_or("."),
-        glob.as_ref(),
-        include_ignored,
-        cancellation,
-        traversal,
-        resources,
-        #[cfg(any(test, feature = "bench-internals"))]
-        literal_prefix.as_deref(),
-        candidate_policy,
-        profiler,
-        memory,
-        memory_policy,
-    )
-    .map_err(normalize_cancellation)?;
-    let skipped = candidate_set.traversal.io_errors
-        + candidate_set.traversal.escaped_entries
-        + candidate_set.traversal.non_unicode_entries;
-    if skipped > 0 {
-        tracing::warn!(target: "agentshim", event = "grep_skipped", phase = "execution", outcome = "degraded_success", counters = %format!("io_errors={},escaped_entries={},non_unicode_entries={}", candidate_set.traversal.io_errors, candidate_set.traversal.escaped_entries, candidate_set.traversal.non_unicode_entries));
-    }
+    let mode = request.mode.unwrap_or_default();
     let probe = request
         .offset
         .unwrap_or(0)
         .saturating_add(request.limit.unwrap_or(DEFAULT_LIMIT))
         .saturating_add(1);
-    let mode = request.mode.unwrap_or_default();
-    let (encoding, fallback_encoding) =
-        request.resolved_encodings_inner(candidate_set.single_file)?;
+    let allow_early_stop = !single_file
+        && request.offset.unwrap_or(0) == 0
+        && matches!(mode, GrepMode::Content | GrepMode::Files);
     let plan = SearchPlan {
         mode,
         context: request.context_lines.unwrap_or(0),
         probe,
         skip: 0,
-        allow_early_stop: !candidate_set.single_file
-            && matches!(mode, GrepMode::Content | GrepMode::Files),
+        allow_early_stop,
         encoding,
         fallback_encoding,
         memory: memory_policy,
     };
-    let lanes = resources
-        .file_work_pool()
-        .extra_capacity()
-        .saturating_add(1)
-        .clamp(1, candidate_set.candidates.len().max(1));
-    profiler.set_workload(candidate_set.candidates.len(), lanes);
-    let access = Arc::clone(access);
-    let context = OrderedSearchContext {
+    let include_ignored = resources.config().include_ignored(request.include_ignored);
+    let search_span = profiler.span(GrepStage::SearchWall);
+    let page = pipelined_search(
+        access,
+        &base,
+        matcher,
+        glob.as_ref(),
+        include_ignored,
         cancellation,
-        access: &access,
-        matcher: &matcher,
+        traversal,
+        #[cfg(any(test, feature = "bench-internals"))]
+        literal_prefix.as_deref(),
+        #[cfg(not(any(test, feature = "bench-internals")))]
+        None,
+        request,
         plan,
-        single_file: candidate_set.single_file,
         variant,
         profiler,
         resources,
-        memory: memory_policy,
-        candidate_bytes: candidate_set.retained_bytes,
-    };
-    let search_span = profiler.span(GrepStage::SearchWall);
-    let page = ordered_search(
-        &candidate_set.candidates,
-        lanes,
-        request,
-        std::mem::take(&mut candidate_set.traversal),
-        &context,
-    )?;
+        memory,
+    )
+    .map_err(normalize_cancellation)?;
     drop(search_span);
     let render_span = profiler.span(GrepStage::Render);
     let output = render_with_budget(request, &page, cancellation, output_budget);
@@ -837,7 +782,6 @@ fn execute_inner(
     if let Ok(output) = &output {
         profiler.add_render_copy_bytes(output.text.len());
     }
-    drop(candidate_set);
     output
 }
 

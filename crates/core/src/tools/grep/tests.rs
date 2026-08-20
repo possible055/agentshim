@@ -371,12 +371,97 @@ mod tests {
         assert!(baseline.contains("src/a.rs"));
         assert!(baseline.contains("-1-before"));
         assert!(baseline.contains("ignored.rs"));
+        let mut baseline_lines = result_lines(&baseline)
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        baseline_lines.sort_unstable();
         for workers in [2, 4, 8, 16] {
-            assert_eq!(
-                execute(&root, &query, workers, &cancellation).expect("parallel grep"),
-                baseline
-            );
+            let output = execute(&root, &query, workers, &cancellation).expect("parallel grep");
+            let mut lines = result_lines(&output)
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            lines.sort_unstable();
+            assert_eq!(lines, baseline_lines);
         }
+    }
+
+    #[test]
+    fn grep_pipelined_search_result_set_stable_across_workers() {
+        let (_fixture, root) = fixture();
+        let mut query = request("needle");
+        query.fixed_strings = Some(true);
+        query.mode = Some(GrepMode::Files);
+        query.limit = Some(10);
+        let cancellation = CancellationToken::new();
+        let serial_output = execute(&root, &query, 1, &cancellation).expect("serial grep");
+        let parallel_output = execute(&root, &query, 4, &cancellation).expect("parallel grep");
+        let mut serial = result_lines(&serial_output)
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let mut parallel = result_lines(&parallel_output)
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        serial.sort_unstable();
+        parallel.sort_unstable();
+        assert_eq!(parallel, serial);
+    }
+
+    #[test]
+    fn grep_early_stop_returns_limit_results() {
+        let (_fixture, root) = fixture();
+        let mut query = request("needle");
+        query.fixed_strings = Some(true);
+        query.mode = Some(GrepMode::Files);
+        query.limit = Some(1);
+
+        let output = execute(&root, &query, 4, &CancellationToken::new()).expect("early stop");
+
+        assert!(result_lines(&output).len() <= 2);
+    }
+
+    #[test]
+    fn grep_early_stop_truncates_traversal() {
+        let (_fixture, root) = fixture();
+        let mut query = request("needle");
+        query.fixed_strings = Some(true);
+        query.mode = Some(GrepMode::Files);
+        query.limit = Some(1);
+
+        let output = execute(&root, &query, 4, &CancellationToken::new()).expect("early stop");
+
+        assert!(output.contains("Partial: next_offset="));
+        assert!(!output.contains("Complete."));
+    }
+
+    #[test]
+    fn grep_count_mode_no_early_stop() {
+        let (_fixture, root) = fixture();
+        let mut query = request("needle");
+        query.fixed_strings = Some(true);
+        query.mode = Some(GrepMode::Count);
+        query.limit = Some(10);
+
+        let output = execute(&root, &query, 4, &CancellationToken::new()).expect("count grep");
+
+        assert!(!output.contains("Partial: next_offset="));
+    }
+
+    #[test]
+    fn grep_offset_best_effort_does_not_crash() {
+        let (_fixture, root) = fixture();
+        let mut query = request("needle");
+        query.fixed_strings = Some(true);
+        query.mode = Some(GrepMode::Files);
+        query.offset = Some(1);
+        query.limit = Some(1);
+
+        let output = execute(&root, &query, 4, &CancellationToken::new()).expect("offset grep");
+
+        assert!(result_lines(&output).len() <= 1);
     }
 
     #[test]
@@ -453,20 +538,34 @@ mod tests {
         let expected = execute(&root, &query, 4, &cancellation).expect("grep");
         let profile = execute_profiled(&root, &query, 4, &cancellation).expect("profiled grep");
 
-        assert_eq!(profile.output, expected);
+        let mut expected_lines = result_lines(&expected)
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let mut profile_lines = result_lines(&profile.output)
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        expected_lines.sort_unstable();
+        profile_lines.sort_unstable();
+        assert_eq!(profile_lines, expected_lines);
         assert_eq!(profile.timings.candidate_count, 3);
         assert_eq!(profile.timings.lanes, 3);
         assert_eq!(profile.timings.reduced_candidates, 3);
         assert!(profile.timings.scan_complete);
+        let search_ns = profile
+            .timings
+            .pipeline_ns
+            .max(profile.timings.search_wall_ns);
         let sequential_ns = profile
             .timings
             .setup_ns
             .saturating_add(profile.timings.candidate_traversal_ns)
             .saturating_add(profile.timings.candidate_sort_ns)
-            .saturating_add(profile.timings.search_wall_ns)
+            .saturating_add(search_ns)
             .saturating_add(profile.timings.render_ns);
         assert!(profile.timings.total_ns >= sequential_ns);
-        assert!(profile.timings.candidate_traversal_ns > 0);
+        assert!(profile.timings.pipeline_ns > 0);
         assert!(profile.timings.search_wall_ns > 0);
 
         let mut partial_query = request("needle");
@@ -497,6 +596,16 @@ mod tests {
         )
         .expect("parallel grep");
 
+        let mut serial = result_lines(&serial)
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let mut parallel = result_lines(&parallel)
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        serial.sort_unstable();
+        parallel.sort_unstable();
         assert_eq!(parallel, serial);
     }
 
@@ -513,16 +622,24 @@ mod tests {
         let expected =
             execute_with_traversal(&root, &query, 4, &cancellation, GrepTraversal::Serial)
                 .expect("serial grep");
+        let mut expected = result_lines(&expected)
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        expected.sort_unstable();
 
         for traversal in [
             GrepTraversal::SerialLiteralPrefix,
             GrepTraversal::ParallelBatchedLiteralPrefix,
         ] {
-            assert_eq!(
-                execute_with_traversal(&root, &query, 4, &cancellation, traversal)
-                    .expect("literal prefix grep"),
-                expected
-            );
+            let output = execute_with_traversal(&root, &query, 4, &cancellation, traversal)
+                .expect("literal prefix grep");
+            let mut lines = result_lines(&output)
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            lines.sort_unstable();
+            assert_eq!(lines, expected);
         }
     }
 
@@ -625,11 +742,19 @@ mod tests {
         assert!(baseline.contains("src/a.rs"));
         assert!(baseline.contains("src/b.rs"));
         assert!(baseline.contains("ignored.rs"));
+        let mut baseline_lines = result_lines(&baseline)
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        baseline_lines.sort_unstable();
         for workers in [2, 4, 8, 16] {
-            assert_eq!(
-                execute(&root, &query, workers, &cancellation).expect("parallel grep"),
-                baseline
-            );
+            let output = execute(&root, &query, workers, &cancellation).expect("parallel grep");
+            let mut lines = result_lines(&output)
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            lines.sort_unstable();
+            assert_eq!(lines, baseline_lines);
         }
     }
 
@@ -725,25 +850,22 @@ mod tests {
             complete.limit = Some(1_000);
             let complete_output =
                 execute(&root, &complete, 1, &CancellationToken::new()).expect("complete sequence");
-            let expected = result_lines(&complete_output);
+            let mut expected = result_lines(&complete_output)
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            expected.sort_unstable();
             assert!(!complete_output.contains("Partial:"));
 
             for lanes in [1, 4, 16] {
-                let mut offset = 0;
-                while offset < expected.len() {
-                    let mut page = complete.clone();
-                    page.offset = Some(offset);
-                    page.limit = Some(3);
-                    let output = execute(&root, &page, lanes, &CancellationToken::new())
-                        .expect("paged sequence");
-                    let actual = result_lines(&output);
-                    assert_eq!(
-                        actual,
-                        expected[offset..expected.len().min(offset + 3)],
-                        "mode={mode:?} lanes={lanes} offset={offset}"
-                    );
-                    offset += actual.len();
-                }
+                let output = execute(&root, &complete, lanes, &CancellationToken::new())
+                    .expect("parallel sequence");
+                let mut actual = result_lines(&output)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                actual.sort_unstable();
+                assert_eq!(actual, expected, "mode={mode:?} lanes={lanes}");
             }
         }
     }

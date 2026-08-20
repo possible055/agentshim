@@ -15,6 +15,7 @@ use super::{
 pub struct RuntimeCapacity {
     config: RuntimeConfig,
     read_only_calls: Arc<Semaphore>,
+    grep_calls: Arc<Semaphore>,
     worker_lanes: Arc<Semaphore>,
     open_files: Arc<Semaphore>,
     process_calls: Arc<Semaphore>,
@@ -82,6 +83,7 @@ impl RuntimeCapacity {
         Self {
             config,
             read_only_calls: Arc::new(Semaphore::new(MAX_READ_ONLY_CALLS)),
+            grep_calls: Arc::new(Semaphore::new(config.grep_concurrent_calls)),
             worker_lanes: Arc::new(Semaphore::new(config.worker_lanes)),
             open_files: Arc::new(Semaphore::new(MAX_OPEN_FILES)),
             process_calls: Arc::new(Semaphore::new(config.process_calls)),
@@ -190,6 +192,17 @@ impl RuntimeResources {
             .clone()
             .try_acquire_owned()
             .ok()?;
+        if self.shutdown.is_cancelled() {
+            return None;
+        }
+        Some(permit)
+    }
+
+    pub(crate) fn try_admit_grep(&self) -> Option<OwnedSemaphorePermit> {
+        if self.shutdown.is_cancelled() {
+            return None;
+        }
+        let permit = self.capacity.grep_calls.clone().try_acquire_owned().ok()?;
         if self.shutdown.is_cancelled() {
             return None;
         }

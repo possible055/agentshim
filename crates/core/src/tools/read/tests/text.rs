@@ -223,6 +223,66 @@ fn candidate_budget_names_the_partial_stop_cause() {
 }
 
 #[test]
+fn read_large_file_lazy_render_preserves_output() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let mut text = String::new();
+    for line in 1..=80_000 {
+        use std::fmt::Write as _;
+        writeln!(text, "line-{line:05}-{}", "x".repeat(24)).expect("fixture line");
+    }
+    fs::write(fixture.path().join("large.txt"), text).expect("large fixture");
+    let root = access(fixture.path());
+    let mut page = request("large.txt");
+    page.start_line = Some(79_991);
+    page.line_count = Some(5);
+
+    let output = execute(&root, &page, &CancellationToken::new()).expect("large read");
+
+    assert!(output.contains("79991\tline-79991-"));
+    assert!(output.contains("79995\tline-79995-"));
+    assert!(output.ends_with("Partial: next_start_line=79996. (line_count)"));
+}
+
+#[test]
+fn read_large_file_zero_allocation_beyond_target() {
+    let mut collector = crate::tools::read::text::LineCollector::new(10_001, Some(1));
+    let before = "unretained\n".repeat(10_000);
+
+    assert_eq!(
+        collector.push(&before),
+        crate::encoding::DecodeControl::Continue
+    );
+    assert_eq!(collector.allocation_state_for_test(), (0, 0));
+
+    collector.push("target\n");
+    collector.finish_eof();
+    assert!(collector.allocation_state_for_test().1 > 0);
+}
+
+#[test]
+fn read_4mb_fast_path_matches_stream_path() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let prefix = "first\nsecond\nthird\nfourth\n";
+    let fast = format!("{prefix}{}", "fast\n".repeat(200_000));
+    assert!(fast.len() <= 4 * 1024 * 1024);
+    let stream = format!("{prefix}{}", "stream\n".repeat(700_000));
+    assert!(stream.len() > 4 * 1024 * 1024);
+    fs::write(fixture.path().join("fast.txt"), fast).expect("fast fixture");
+    fs::write(fixture.path().join("stream.txt"), stream).expect("stream fixture");
+    let root = access(fixture.path());
+    let mut fast_request = request("fast.txt");
+    fast_request.line_count = Some(3);
+    let mut stream_request = request("stream.txt");
+    stream_request.line_count = Some(3);
+
+    let cancellation = CancellationToken::new();
+    let fast_output = execute(&root, &fast_request, &cancellation).expect("fast read");
+    let stream_output = execute(&root, &stream_request, &cancellation).expect("stream read");
+
+    assert_eq!(fast_output, stream_output);
+}
+
+#[test]
 fn retries_one_change_then_succeeds() {
     let fixture = tempfile::tempdir().expect("fixture");
     let path = fixture.path().join("race.txt");

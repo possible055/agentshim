@@ -52,6 +52,10 @@ impl Page {
         self.scan_complete = true;
     }
 
+    pub fn set_traversal_summary(&mut self, traversal: TraversalSummary) {
+        self.traversal = traversal;
+    }
+
     pub fn reduce(
         &mut self,
         outcome: FileOutcome,

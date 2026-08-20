@@ -16,7 +16,7 @@ pub const PREFIX_BYTES: usize = 8 * 1024;
 pub const CANDIDATE_BYTES: usize = 256 * 1024;
 pub const LINE_PREFIX_BYTES: usize = 8 * 1024;
 pub const MAX_LINE_COUNT: usize = 2_000;
-pub const TEXT_READ_MEMORY_BYTES: usize = 256 * 1024;
+pub const TEXT_READ_MEMORY_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
