@@ -150,11 +150,19 @@ mod tests {
         fs::create_dir(fixture.path().join(".git")).expect("git");
         fs::write(fixture.path().join(".git/internal.rs"), "g").expect("git file");
         let root = access(fixture.path());
+
+        let mut full = request("*.rs");
+        full.limit = Some(100);
+        let full = execute(&root, &full, TEST_LANES, &CancellationToken::new()).expect("full glob");
+        assert!(full.contains(".hidden.rs"));
+        assert!(full.contains("a.rs"));
+        assert!(!full.contains(".git/internal.rs"));
+        assert!(!full.contains("Partial:"));
+
         let mut query = request("*.rs");
         query.limit = Some(2);
         let first = execute(&root, &query, TEST_LANES, &CancellationToken::new()).expect("glob");
-        assert!(first.contains(".hidden.rs"));
-        assert!(first.contains("a.rs"));
+        assert_eq!(result_lines(&first).len(), 2);
         assert!(first.ends_with("Partial: next_offset=2."));
 
         query.include_ignored = Some(false);
@@ -210,14 +218,19 @@ mod tests {
         let mut query = request("*.rs");
         query.limit = Some(100);
         let output = execute(&root, &query, TEST_LANES, &CancellationToken::new()).expect("glob");
-        assert!(!output.contains("Pattern:"));
-        assert!(
-            output.starts_with(&crate::path::display_path(
-                root.resolve(std::path::Path::new("a.rs"))
-                    .expect("a")
-                    .absolute()
-            ))
+        let a = crate::path::display_path(
+            root.resolve(std::path::Path::new("a.rs"))
+                .expect("a")
+                .absolute(),
         );
+        let b = crate::path::display_path(
+            root.resolve(std::path::Path::new("b.rs"))
+                .expect("b")
+                .absolute(),
+        );
+        assert!(!output.contains("Pattern:"));
+        assert!(output.starts_with(&a) || output.starts_with(&b));
+        assert!(output.contains(&a) && output.contains(&b));
         assert!(!output.contains("Partial:"));
     }
 

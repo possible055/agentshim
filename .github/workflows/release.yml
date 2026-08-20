@@ -31,6 +31,7 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
       npm_dist_tag: ${{ steps.release.outputs.npm_dist_tag }}
+      native_api: ${{ steps.release.outputs.native_api }}
     steps:
       - name: Validate dispatch context
         shell: bash
@@ -120,6 +121,19 @@ jobs:
             fi
           done
 
+          native_api="$(jq -er '.agentshimNativeApi' adapters/dsh/package.json)"
+          if ! [[ "$native_api" =~ ^[0-9]+$ ]]; then
+            echo "adapters/dsh/package.json agentshimNativeApi is not a non-negative integer: $native_api" >&2
+            exit 1
+          fi
+          for plat_json in adapters/dsh/npm/*/package.json; do
+            plat_api="$(jq -er '.agentshimNativeApi' "$plat_json")"
+            if [[ "$plat_api" != "$native_api" ]]; then
+              echo "$plat_json agentshimNativeApi $plat_api does not match $native_api" >&2
+              exit 1
+            fi
+          done
+
           if [[ -n "$(git ls-remote --tags origin "refs/tags/$tag")" ]]; then
             echo "remote tag $tag already exists" >&2
             exit 1
@@ -191,6 +205,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "npm_dist_tag=$npm_dist_tag" >> "$GITHUB_OUTPUT"
+          echo "native_api=$native_api" >> "$GITHUB_OUTPUT"
 
   package:
     name: Package ${{ matrix.target }}
@@ -739,13 +754,14 @@ jobs:
         env:
           COMMIT_SHA: ${{ needs.preflight.outputs.commit_sha }}
           VERSION: ${{ needs.preflight.outputs.version }}
+          NATIVE_API: ${{ needs.preflight.outputs.native_api }}
         run: |
           set -euo pipefail
           node adapters/dsh/scripts/release-packages.mjs verify \
             --directory npm-dist \
             --version "$VERSION" \
             --commit "$COMMIT_SHA" \
-            --native-api 4
+            --native-api "$NATIVE_API"
       - name: Publish platform npm packages
         shell: bash
         env:

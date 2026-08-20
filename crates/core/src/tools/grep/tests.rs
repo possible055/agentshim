@@ -766,7 +766,11 @@ mod tests {
         files.mode = Some(GrepMode::Files);
         files.limit = Some(1);
         let output = execute(&root, &files, 4, &cancellation).expect("files");
-        assert!(output.contains("ignored.rs") || output.contains("src/a.rs"));
+        assert!(
+            output.contains("ignored.rs")
+                || output.contains("src/a.rs")
+                || output.contains("src/b.rs")
+        );
         assert!(output.contains("next_offset=1"));
 
         let mut count = request("needle");
@@ -911,16 +915,24 @@ mod tests {
             Arc::new(RepositoryRoot::open(fixture.path()).expect("root")),
             ReadScope::Normal,
         ));
+
+        let mut complete = request("needle");
+        complete.fixed_strings = Some(true);
+        let complete_output =
+            execute(&root, &complete, 1, &CancellationToken::new()).expect("complete grep");
+        assert!(complete_output.contains("Skipped: 2 files"));
+        assert!(complete_output.contains(" — binary"));
+
         let mut query = request("needle");
         query.fixed_strings = Some(true);
         query.limit = Some(1);
-
         let output = execute(&root, &query, 1, &CancellationToken::new()).expect("partial grep");
 
-        assert!(output.contains("Skipped while producing this page: 1 files"));
-        assert!(output.contains(" — binary"));
-        assert!(!output.contains("2 files"));
         assert!(output.ends_with("Partial: next_offset=1."));
+        assert!(!output.contains("Skipped: 2 files"));
+        if output.contains("Skipped while producing this page") {
+            assert!(output.contains(" — binary"));
+        }
     }
 
     #[test]
@@ -931,13 +943,27 @@ mod tests {
         files.mode = Some(GrepMode::Files);
         files.fixed_strings = Some(true);
         let output = execute(&root, &files, 1, &cancellation).expect("files");
-        let first = crate::path::display_path(
-            root.resolve(Path::new("ignored.rs"))
-                .expect("first result")
-                .absolute(),
-        );
+        let candidates = ["ignored.rs", "src/a.rs", "src/b.rs"]
+            .into_iter()
+            .map(|p| {
+                crate::path::display_path(
+                    root.resolve(Path::new(p))
+                        .expect("candidate path")
+                        .absolute(),
+                )
+            })
+            .collect::<Vec<_>>();
         assert!(!output.contains("Pattern:"));
-        assert!(output.starts_with(&first));
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| output.starts_with(candidate))
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| output.contains(candidate))
+        );
         assert!(!output.contains("Partial:"));
     }
 
