@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       platform:
-        description: Platform to validate
+        description: Platform to validate (standard excludes Linux x64 already required by CI)
         required: true
         default: all
         type: choice
@@ -26,7 +26,7 @@ concurrency:
 
 jobs:
   linux-x86-64:
-    if: ${{ inputs.platform == 'all' || inputs.platform == 'standard' || inputs.platform == 'linux-x86-64' }}
+    if: ${{ inputs.platform == 'all' || inputs.platform == 'linux-x86-64' }}
     name: Linux x86-64 CI
     uses: ./.github/workflows/rust-validation.yml
     with:
@@ -35,10 +35,7 @@ jobs:
       system: Linux
       machine: x86_64
       runner_arch: X64
-      setup_node: false
-      run_format: true
-      build_docs: true
-      run_metadata: true
+      engine_only: true
 
   linux-arm64:
     if: ${{ inputs.platform == 'all' || inputs.platform == 'standard' || inputs.platform == 'linux-arm64' }}
@@ -50,10 +47,7 @@ jobs:
       system: Linux
       machine: aarch64
       runner_arch: ARM64
-      setup_node: false
-      run_format: true
-      build_docs: true
-      run_metadata: true
+      engine_only: true
 
   macos-arm64:
     if: ${{ inputs.platform == 'all' || inputs.platform == 'standard' || inputs.platform == 'macos-arm64' }}
@@ -65,10 +59,7 @@ jobs:
       system: Darwin
       machine: arm64
       runner_arch: ARM64
-      setup_node: false
-      run_format: true
-      build_docs: true
-      run_metadata: true
+      engine_only: true
 
   windows-arm64:
     if: ${{ inputs.platform == 'all' || inputs.platform == 'windows-arm64' }}
@@ -79,6 +70,7 @@ jobs:
       platform: windows
       runner_arch: ARM64
       os_architecture: Arm64
+      engine_only: true
 
   macos-x86-64:
     if: ${{ inputs.platform == 'all' || inputs.platform == 'macos-x86-64' }}
@@ -90,4 +82,4 @@ jobs:
       system: Darwin
       machine: x86_64
       runner_arch: X64
-      setup_node: false
+      engine_only: true

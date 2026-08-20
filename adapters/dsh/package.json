@@ -33,7 +33,12 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "lint": "oxlint src tests scripts",
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=2",
+    "test:unit": "vitest run tests/contracts.spec.ts tests/content.spec.ts tests/engine-pool.spec.ts tests/policy.spec.ts --maxWorkers=2",
+    "test:platform": "vitest run tests/native.spec.ts --maxWorkers=1",
+    "test:composition": "vitest run tests/composition.spec.ts --maxWorkers=1",
+    "test:e2e": "vitest run tests/real-server.e2e.ts --maxWorkers=1",
+    "test:long": "vitest run tests/real-server.e2e.ts --maxWorkers=1 -t \"keeps a DSH bash call alive past 60 seconds\"",
     "build": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
     "test:packed": "node scripts/test-packed.mjs",
     "test:release-packages": "node scripts/test-release-packages.mjs",

@@ -27,3 +27,14 @@ jobs:
       run_format: true
       build_docs: true
       run_metadata: true
+
+  linux-engine-validation:
+    name: Linux x86-64 Core/NAPI CI
+    uses: ./.github/workflows/rust-validation.yml
+    with:
+      runner: ubuntu-24.04
+      platform: unix
+      system: Linux
+      machine: x86_64
+      runner_arch: X64
+      engine_only: true

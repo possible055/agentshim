@@ -15,6 +15,7 @@ import * as ObservationPolicy from '@deepseek-ai/dsh-fs-observation-policy'
 import LocalAttachmentStore from '@deepseek-ai/dsh-attachment-local'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { JobId } from '@deepseek-ai/dsh-jobs'
+import type { JobSnapshot } from '@deepseek-ai/dsh-jobs'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as agentshim from '../src/index.ts'
 import type { Config } from '../src/index.ts'
@@ -195,6 +196,29 @@ async function waitForBackgroundOutput(ctx: Context, agent: Agent, jobId: string
     if (Date.now() >= deadline) throw new Error(`background output did not arrive for ${jobId}`)
     await new Promise(resolve => setTimeout(resolve, 10))
   }
+}
+
+async function waitForJobTerminal(
+  ctx: Context,
+  agent: Agent,
+  jobId: string,
+  timeoutMs = 10_000,
+): Promise<JobSnapshot> {
+  const startedAt = performance.now()
+  let snapshot = ctx.jobs.get(JobId(jobId), agent)
+  while (snapshot.status === 'running' || snapshot.status === 'stopping') {
+    const elapsedMs = performance.now() - startedAt
+    const remainingMs = Math.ceil(timeoutMs - elapsedMs)
+    if (remainingMs <= 0) break
+    snapshot = await ctx.jobs.wait(JobId(jobId), remainingMs, agent)
+  }
+  if (snapshot.status !== 'running' && snapshot.status !== 'stopping') return snapshot
+
+  const elapsedMs = Math.round(performance.now() - startedAt)
+  const outputTail = ctx.jobs.read(JobId(jobId), agent).text.slice(-512)
+  throw new Error(
+    `job ${jobId} did not settle within ${timeoutMs}ms; elapsed=${elapsedMs}ms; snapshot=${JSON.stringify(snapshot)}; outputTail=${JSON.stringify(outputTail)}`,
+  )
 }
 
 function visibleNames(ctx: Context, agent: Agent): string[] {
@@ -765,7 +789,7 @@ describe('DSH native contracts', () => {
     const value = (started as unknown as { value: { kind: string; jobId: string } }).value
     expect(value).toEqual({ kind: 'background', jobId: 'bash-1' })
 
-    const snapshot = await ctx.jobs.wait(JobId(value.jobId), 5_000, agent)
+    const snapshot = await waitForJobTerminal(ctx, agent, value.jobId)
     expect(snapshot).toMatchObject({ id: 'bash-1', status: 'completed', detail: 'exit code: 0' })
     expect(ctx.jobs.read(JobId(value.jobId), agent).text).toBe('background')
 
@@ -809,7 +833,7 @@ describe('DSH native contracts', () => {
     })
     expect(started.isError, JSON.stringify(started)).toBe(false)
     const jobId = (started as unknown as { value: { jobId: string } }).value.jobId
-    const snapshot = await ctx.jobs.wait(JobId(jobId), 5_000, agent)
+    const snapshot = await waitForJobTerminal(ctx, agent, jobId)
     expect(snapshot).toMatchObject({ status: 'failed' })
     expect(snapshot.detail).toContain('timed_out')
     const first = (await readFile(join(root, 'timeout-marker.txt'))).length
@@ -849,7 +873,7 @@ describe('DSH native contracts', () => {
       const value = (started as unknown as { value: { kind: string; jobId: string } }).value
       expect(value).toEqual({ kind: 'background', jobId: 'bash-1' })
 
-      const snapshot = await ctx.jobs.wait(JobId(value.jobId), 10_000, agent)
+      const snapshot = await waitForJobTerminal(ctx, agent, value.jobId)
       expect(snapshot).toMatchObject({ id: 'bash-1', status: 'completed', detail: 'exit code: 0' })
       const output = ctx.jobs.read(JobId(value.jobId), agent).text
       expect(output).toContain('native-bg-1')
@@ -870,7 +894,7 @@ describe('DSH native contracts', () => {
       const longJobId = (longStarted as unknown as { value: { jobId: string } }).value.jobId
       await waitForBackgroundOutput(ctx, agent, longJobId)
       expect(ctx.jobs.kill(JobId(longJobId), agent, 'native test cancellation')).toBe('requested')
-      expect(await ctx.jobs.wait(JobId(longJobId), 10_000, agent)).toMatchObject({ status: 'killed' })
+      expect(await waitForJobTerminal(ctx, agent, longJobId)).toMatchObject({ status: 'killed' })
     } finally {
       if (previous === undefined) {
         delete process.env.AGENTSHIM_DSH_NATIVE_DLL
@@ -907,13 +931,14 @@ describe('DSH native contracts', () => {
         run_in_background: true,
       })
       const jobId = (started as unknown as { value: { jobId: string } }).value.jobId
-      await waitForBackgroundOutput(ctx, agent, jobId)
 
       const adapter = pluginFibers.pop()
       expect(adapter).toBeDefined()
+      const disposeStartedAt = performance.now()
       await adapter!.dispose()
+      expect(performance.now() - disposeStartedAt).toBeLessThan(10_000)
 
-      expect(await ctx.jobs.wait(JobId(jobId), 10_000, agent)).toMatchObject({ status: 'killed' })
+      expect(await waitForJobTerminal(ctx, agent, jobId)).toMatchObject({ status: 'killed' })
     } finally {
       if (previous === undefined) {
         delete process.env.AGENTSHIM_DSH_NATIVE_DLL

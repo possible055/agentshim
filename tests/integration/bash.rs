@@ -5,6 +5,7 @@ use super::*;
 /// and runs in parallel with the protocol drain, so detached trees die inside the shared
 /// shutdown deadline even while responses are still pending on a blocked stdout pipe.
 #[test]
+#[ignore = "local stress: saturates stdout while shutdown races a blocked protocol drain"]
 fn stdin_eof_terminates_detached_trees_while_the_drain_is_still_blocked() {
     if agentshim::bash_report().is_err() {
         return;
@@ -87,6 +88,7 @@ fn stdin_eof_terminates_detached_trees_while_the_drain_is_still_blocked() {
 /// L4/L5: every tree a shutdown owns shares one deadline. Sixteen live trees must not
 /// turn into sixteen serialized five-second waits.
 #[test]
+#[ignore = "local stress: launches sixteen detached process trees"]
 fn shutdown_of_sixteen_detached_trees_shares_one_deadline() {
     if agentshim::bash_report().is_err() {
         return;

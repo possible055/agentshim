@@ -35,8 +35,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  adapter:
-    name: Adapter (${{ matrix.os }})
+  quality:
+    name: Adapter quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 11.21.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.21.1
+          cache: pnpm
+          cache-dependency-path: adapters/dsh/pnpm-lock.yaml
+      - run: pnpm --dir adapters/dsh install --frozen-lockfile
+      - run: pnpm --dir adapters/dsh typecheck
+      - run: pnpm --dir adapters/dsh lint
+      - run: pnpm --dir adapters/dsh test:unit
+      - run: pnpm --dir adapters/dsh build
+      - run: pnpm --dir adapters/dsh test:release-packages
+      - run: pnpm --dir adapters/dsh verify:cutover
+
+  native:
+    name: Adapter native (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -45,6 +67,7 @@ jobs:
         # accepts a release commit only if its push run succeeded.
         os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-24.04","windows-2025"]') || fromJSON('["ubuntu-24.04","windows-2025","macos-15"]') }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
@@ -57,14 +80,13 @@ jobs:
           cache-dependency-path: adapters/dsh/pnpm-lock.yaml
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: pnpm --dir adapters/dsh install --frozen-lockfile
-      - run: pnpm --dir adapters/dsh typecheck
-      - run: pnpm --dir adapters/dsh lint
       - run: cargo build --locked -p agentshim-napi
-      - run: pnpm --dir adapters/dsh test
+      - run: pnpm --dir adapters/dsh test:platform
+      - run: pnpm --dir adapters/dsh test:composition
+        if: runner.os == 'Linux'
+      - run: pnpm --dir adapters/dsh test:e2e
+        if: runner.os == 'Linux'
         env:
           AGENTSHIM_REAL_E2E: '1'
-          AGENTSHIM_LONG_E2E: ${{ runner.os == 'Linux' && '1' || '0' }}
       - run: pnpm --dir adapters/dsh build
-      - run: pnpm --dir adapters/dsh test:release-packages
       - run: pnpm --dir adapters/dsh test:packed
-      - run: pnpm --dir adapters/dsh verify:cutover
