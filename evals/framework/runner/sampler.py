@@ -1,6 +1,6 @@
 import concurrent.futures
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
@@ -217,3 +217,67 @@ def run_concurrent_calls(
         resource_delta=resource_delta_dict,
         output_bytes=output_bytes,
     )
+
+
+def run_parallel_different_calls(
+    adapter: TargetAdapter,
+    monitor: BaseMonitor,
+    call_fns: Sequence[Callable[[], dict[str, Any]]],
+    target_name: str,
+    tool_name: str,
+    scenario: str,
+    scale: str,
+    iteration: int,
+    is_warmup: bool,
+    monitor_interval_ms: int = 10,
+) -> list[SampleResult]:
+    root_pids = adapter.get_root_pids()
+    if root_pids:
+        monitor.start_sampling(root_pids, interval_ms=monitor_interval_ms)
+
+    start_time = time.perf_counter()
+    concurrency = len(call_fns)
+    results: list[SampleResult] = []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+        future_map = {executor.submit(fn): idx for idx, fn in enumerate(call_fns)}
+        per_index: dict[int, tuple[bool, SampleStatus, str | None, int]] = {}
+        for future in concurrent.futures.as_completed(future_map):
+            idx = future_map[future]
+            try:
+                res = future.result()
+                resp_obj = res.get("response", {})
+                output_bytes = len(str(resp_obj).encode("utf-8"))
+                per_index[idx] = (True, "ok", None, output_bytes)
+            except Exception as ex:
+                per_index[idx] = (False, _status_for_error(ex), str(ex), 0)
+
+    total_duration_ms = (time.perf_counter() - start_time) * 1000.0
+
+    resource_delta_dict = None
+    if root_pids:
+        delta = monitor.stop_sampling()
+        resource_delta_dict = asdict(delta)
+
+    for idx in range(concurrency):
+        success, status, error_msg, output_bytes = per_index.get(
+            idx, (False, "error", "missing future", 0)
+        )
+        results.append(
+            SampleResult(
+                target=target_name,
+                tool=tool_name,
+                scenario=f"{scenario}_q{idx + 1}",
+                scale=scale,
+                concurrency=concurrency,
+                iteration=iteration,
+                is_warmup=is_warmup,
+                duration_ms=total_duration_ms,
+                success=success,
+                status=status,
+                error=error_msg,
+                resource_delta=resource_delta_dict if idx == 0 else None,
+                output_bytes=output_bytes,
+            )
+        )
+    return results

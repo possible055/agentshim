@@ -1,9 +1,13 @@
 import json
+import re
 import statistics
 from collections import defaultdict
 from dataclasses import asdict
 
 from ..runner.sampler import SampleResult
+
+_WARP_SCENARIO_RE = re.compile(r"^(?P<round_key>.+_r\d+_round\d+)_q\d+$")
+_WARP_ROUND_KEY_RE = re.compile(r"^(warp_grep_storm_.+_r\d+_round\d+)$")
 
 
 def _percentile(values: list[float], frac: float) -> float:
@@ -12,6 +16,11 @@ def _percentile(values: list[float], frac: float) -> float:
     sorted_v = sorted(values)
     idx = max(0, min(len(sorted_v) - 1, int(len(sorted_v) * frac) - 1))
     return sorted_v[idx]
+
+
+def _warp_round_key(scenario: str) -> str | None:
+    match = _WARP_SCENARIO_RE.match(scenario)
+    return match.group("round_key") if match else None
 
 
 class ReportGenerator:
@@ -24,16 +33,24 @@ class ReportGenerator:
 
     def generate_markdown_summary(self) -> str:
         grouped: dict[tuple[str, str, str, int, str], list[SampleResult]] = defaultdict(list)
+        warp_results: list[SampleResult] = []
         for result in self.results:
-            if not result.is_warmup and result.status == "ok":
-                key = (
-                    result.scale,
-                    result.tool,
-                    result.scenario,
-                    result.concurrency,
-                    result.target,
-                )
-                grouped[key].append(result)
+            if result.is_warmup:
+                continue
+            if result.status != "ok":
+                continue
+            round_key = _warp_round_key(result.scenario)
+            if round_key and result.concurrency > 1:
+                warp_results.append(result)
+                continue
+            key = (
+                result.scale,
+                result.tool,
+                result.scenario,
+                result.concurrency,
+                result.target,
+            )
+            grouped[key].append(result)
 
         scales = sorted({key[0] for key in grouped})
         tools = sorted({key[1] for key in grouped})
@@ -42,7 +59,7 @@ class ReportGenerator:
         targets = sorted({result.target for result in self.results})
 
         md_sections = [
-            "# Ranking Benchmark: read / grep / glob\n",
+            "# Ranking Benchmark: read / grep / glob / bash\n",
             "Warm single-call latency is ranked only for samples that passed the same-work gate.",
             (
                 "Concurrent throughput is retained for diagnosis "
@@ -115,7 +132,46 @@ class ReportGenerator:
                                 c_rows.append("| " + " | ".join(c_row_parts) + " |")
                 md_sections.append("\n".join(c_rows) + "\n")
 
-        md_sections.append("## 3. Resource Usage (Peak Working Set MiB / CPU Time ms)\n")
+        if warp_results:
+            md_sections.append(
+                "## 3. Warp Grep Storm (parallel x8, round-level wall time / success rate)\n"
+            )
+            warp_grouped: dict[tuple[str, str, str], list[SampleResult]] = defaultdict(list)
+            for result in warp_results:
+                round_key = _warp_round_key(result.scenario)
+                if round_key is None:
+                    continue
+                warp_grouped[(result.scale, round_key, result.target)].append(result)
+
+            warp_round_keys = sorted({key[1] for key in warp_grouped})
+            warp_targets = sorted({key[2] for key in warp_grouped})
+            w_header = (
+                "| Scale | Round | "
+                + " | ".join(f"{target} (wall ms / ok)" for target in warp_targets)
+                + " |"
+            )
+            w_sep = "|---|---|" + "|".join(["---:"] * len(warp_targets)) + "|"
+            w_rows = [w_header, w_sep]
+            for round_key in warp_round_keys:
+                round_scales = sorted({key[0] for key in warp_grouped if key[1] == round_key})
+                for scale in round_scales:
+                    w_parts = [scale, round_key]
+                    has_row = False
+                    for target in warp_targets:
+                        samples = warp_grouped.get((scale, round_key, target), [])
+                        if samples:
+                            has_row = True
+                            wall_ms = samples[0].duration_ms
+                            ok_count = sum(1 for s in samples if s.success)
+                            total = len(samples)
+                            w_parts.append(f"{wall_ms:.2f} / {ok_count}/{total}")
+                        else:
+                            w_parts.append("-")
+                    if has_row:
+                        w_rows.append("| " + " | ".join(w_parts) + " |")
+            md_sections.append("\n".join(w_rows) + "\n")
+
+        md_sections.append("## 4. Resource Usage (Peak Working Set MiB / CPU Time ms)\n")
         res_header = (
             "| Scale | Tool | Scenario | "
             + " | ".join(f"{target} (Mem / CPU)" for target in targets)
@@ -156,13 +212,26 @@ class ReportGenerator:
             if result.status in {"unsupported", "skipped"} and not result.is_warmup
         ]
         if skipped:
-            md_sections.append("## 4. Unsupported and Skipped\n")
+            md_sections.append("## 5. Unsupported and Skipped\n")
             skip_rows = [
                 "| Target | Tool | Scenario | Status | Reason |",
                 "|---|---|---|---|---|",
             ]
             seen: set[tuple[str, str, str, str]] = set()
+            warp_collapsed: dict[tuple[str, str, str, str], int] = defaultdict(int)
             for result in skipped:
+                is_warp = _warp_round_key(result.scenario) is not None
+                if not is_warp:
+                    is_warp = _WARP_ROUND_KEY_RE.match(result.scenario) is not None
+                if is_warp:
+                    collapse_key = (
+                        result.target,
+                        result.tool,
+                        str(result.status),
+                        result.error or "",
+                    )
+                    warp_collapsed[collapse_key] += 1
+                    continue
                 skip_key = (
                     result.target,
                     result.tool,
@@ -176,6 +245,14 @@ class ReportGenerator:
                 skip_rows.append(
                     f"| {result.target} | {result.tool} | {result.scenario} "
                     f"| {result.status} | {reason} |"
+                )
+            for (target, tool, status, error), count in sorted(
+                warp_collapsed.items(), key=lambda item: (item[0][0], item[0][1], item[0][2])
+            ):
+                reason = error.replace("|", "\\|")
+                skip_rows.append(
+                    f"| {target} | {tool} | warp_grep_storm ({count} rounds) "
+                    f"| {status} | {reason} |"
                 )
             md_sections.append("\n".join(skip_rows) + "\n")
 

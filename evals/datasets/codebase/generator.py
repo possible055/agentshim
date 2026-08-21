@@ -56,10 +56,7 @@ def generate_file_content(
 
 
 def _is_prefix_complete_name(filename: str) -> bool:
-    stem = Path(filename).stem
-    if not stem.startswith(PREFIX_STEM_PREFIX) or len(stem) != len(PREFIX_STEM_PREFIX) + 1:
-        return False
-    return stem[-1].isdigit()
+    return Path(filename).name.startswith(PREFIX_STEM_PREFIX)
 
 
 def generate_codebase(target_dir: Path, file_count: int, seed: int = 42) -> Path:
@@ -92,12 +89,16 @@ def generate_codebase(target_dir: Path, file_count: int, seed: int = 42) -> Path
     dense_file_count = 0
     dense_hit_count = 0
     prefix_files: list[str] = []
+    suffix_bench_files: list[str] = []
     read_relative_path: str | None = None
     read_marker: str | None = None
 
     for file_index in range(file_count):
         chosen_dir = rng.choice(directories)
-        extension = rng.choice(EXTENSIONS)
+        if file_index % max(1, file_count // 25) == 0:
+            extension = ".bench.txt"
+        else:
+            extension = rng.choice(EXTENSIONS)
         filename = f"file_{file_index:06d}{extension}"
         filepath = chosen_dir / filename
         include_sparse = file_index % sparse_step == 0
@@ -122,20 +123,46 @@ def generate_codebase(target_dir: Path, file_count: int, seed: int = 42) -> Path
             dense_hit_count += DENSE_HITS_PER_FILE
         if _is_prefix_complete_name(filename):
             prefix_files.append(relative_path)
+        if filename.endswith(".bench.txt"):
+            suffix_bench_files.append(relative_path)
 
     prefix_files.sort()
+    suffix_bench_files.sort()
+
+    with (target_dir / "read-target.txt").open("w", encoding="utf-8", newline="\n") as out:
+        for line in range(20_000):
+            out.write(f"read-sentinel-{line:05d} " + "x" * 80 + "\n")
+
+    with (target_dir / "large-budget-target.txt").open("w", encoding="utf-8", newline="\n") as out:
+        for line in range(5_000):
+            out.write(f"budget-sentinel-{line:05d} " + "y" * 90 + "\n")
+
     expected: dict[str, Any] = {
         "version": 1,
         "file_count": file_count,
-        "regular_file_count": file_count + 2,
+        "regular_file_count": file_count + 4,
         "read": {
             "path": read_relative_path,
             "marker": read_marker,
         },
+        "read_target": {
+            "path": "read-target.txt",
+            "total_lines": 20_000,
+            "slice_start": 5001,
+            "slice_count": 50,
+            "first_sentinel": "read-sentinel-05000",
+            "last_sentinel": "read-sentinel-05049",
+        },
+        "large_budget_target": {
+            "path": "large-budget-target.txt",
+            "total_lines": 5_000,
+        },
         "sparse_file_count": sparse_file_count,
         "dense_file_count": dense_file_count,
         "dense_hit_count": dense_hit_count,
+        "absent_token": "AGENTSHIM_ABSENT_TOKEN_404",
         "prefix_files": prefix_files,
+        "suffix_bench_files": suffix_bench_files,
     }
     (target_dir / EXPECTED_FILENAME).write_text(
         json.dumps(expected, indent=2) + "\n", encoding="utf-8"

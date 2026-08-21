@@ -377,8 +377,11 @@ class CargoMcpAdapter(McpStdioAdapter):
         env = super().process_env()
         if "RUST_LOG" not in env:
             env["RUST_LOG"] = "warn"
-        # Ranking measures tool work, not a tight client burst window.
-        env.setdefault("AGENTSHIM_BURST_TOKENS", "8192")
+        if self.name == "agentshim":
+            env.setdefault("AGENTSHIM_BURST_TOKENS", "32768")
+            env.setdefault("AGENTSHIM_OUTPUT_BYTES", "262144")
+        elif self.name == "fastctx":
+            env.setdefault("FASTCTX_TOKEN_BUDGET", "100000")
         return env
 
     def initialize_timeout_s(self) -> float:
@@ -388,9 +391,13 @@ class CargoMcpAdapter(McpStdioAdapter):
         if self.binary_path:
             candidate = Path(self.binary_path)
             return candidate if candidate.exists() else None
-        release_dir = self.root_dir / "target" / "release"
-        for filename in (self.name, f"{self.name}.exe"):
-            candidate = release_dir / filename
+        candidates = [
+            self.root_dir / "target" / "release" / f"{self.name}.exe",
+            self.root_dir / "target" / "release" / self.name,
+            self.root_dir / "repos" / self.name / "target" / "release" / f"{self.name}.exe",
+            self.root_dir / "repos" / self.name / "target" / "release" / self.name,
+        ]
+        for candidate in candidates:
             if candidate.exists():
                 return candidate
         return None
@@ -399,13 +406,27 @@ class CargoMcpAdapter(McpStdioAdapter):
         resolved = self._resolved_binary()
         if resolved is not None:
             self._uses_cargo_fallback = False
-            return [str(resolved), "serve"]
+            cmd = [str(resolved), "serve"]
+            if self.name == "agentshim":
+                cmd.extend(["--read-scope", "unrestricted"])
+            elif self.name == "fastctx":
+                cmd.append("--enable-shell")
+            return cmd
         if self.name != "agentshim":
             raise SkipTargetError(
                 f"{self.name} binary not found under {self.root_dir / 'target' / 'release'}"
             )
         self._uses_cargo_fallback = True
-        return ["cargo", "run", "--release", "--locked", "--", "serve"]
+        return [
+            "cargo",
+            "run",
+            "--release",
+            "--locked",
+            "--",
+            "serve",
+            "--read-scope",
+            "unrestricted",
+        ]
 
 
 class ExternalCommandAdapter(McpStdioAdapter):

@@ -14,28 +14,35 @@ from evals.datasets.pdf.download import ensure_dataset  # noqa: E402
 from evals.framework import BenchmarkRunner, ReportGenerator, SampleResult  # noqa: E402
 
 COMPARE_TARGETS = ["agentshim", "fastctx", "pi", "opencode"]
+DSH_TARGETS = ["agentshim_dsh", "fastctx", "pi", "opencode"]
 SCALE_COUNTS = {"1k": 1000, "10k": 10000, "100k": 100000}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Agentshim evals: rank read/grep/glob against fastctx/pi/opencode, "
-            "plus extra PDF read and a agentshim-only run_program suite. "
-            "bash is available but not part of the ranking compare default."
+            "Agentshim evals: rank read/grep/glob/bash against fastctx/pi/opencode, "
+            "plus extra PDF read and a agentshim-only run_program suite."
         )
     )
     parser.add_argument(
         "--suite",
-        choices=["compare", "pdf", "run-program"],
+        choices=["compare", "dsh", "pdf", "run-program", "macro"],
         default="compare",
-        help="Which suite to run (default: compare)",
+        help=(
+            "Which suite to run (default: compare). "
+            "'dsh' evaluates agentshim via the DSH native addon path."
+        ),
     )
     parser.add_argument(
         "--targets",
         nargs="+",
-        default=COMPARE_TARGETS,
-        help="Targets to evaluate (default: agentshim fastctx pi opencode)",
+        default=None,
+        help=(
+            "Targets to evaluate "
+            "(default: agentshim fastctx pi opencode; "
+            "dsh suite uses agentshim_dsh fastctx pi opencode)"
+        ),
     )
     parser.add_argument(
         "--scales",
@@ -47,8 +54,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tools",
         nargs="+",
-        default=["read", "grep", "glob"],
-        help="Compare-suite tools (default: read grep glob). bash is optional and not ranked.",
+        default=["read", "grep", "glob", "bash"],
+        help="Compare-suite tools (default: read grep glob bash). All four are ranked.",
     )
     parser.add_argument(
         "--warm",
@@ -99,6 +106,18 @@ def parse_args() -> argparse.Namespace:
         default=2,
         help="How many long PDFs to sample in the pdf suite (default: 2)",
     )
+    parser.add_argument(
+        "--burst-quiet",
+        type=float,
+        default=None,
+        help="Seconds of quiet time to wait between calls for burst reset (default: auto)",
+    )
+    parser.add_argument(
+        "--trajectories",
+        nargs="+",
+        default=None,
+        help="Filter specific trajectories or repository names in the macro suite",
+    )
     return parser.parse_args()
 
 
@@ -108,9 +127,11 @@ def _target_configs(args: argparse.Namespace) -> dict[str, dict[str, Any]]:
             "root_dir": str(PROJECT_ROOT),
             "binary_path": args.binary_path,
         },
+        "agentshim_dsh": {},
+        "dsh": {},
         "fastctx": {},
-        "pi": {"command": ["pi", "mcp"]},
-        "opencode": {"command": ["opencode", "mcp"]},
+        "pi": {},
+        "opencode": {},
         "baseline_cli": {},
     }
     if args.fastctx_root:
@@ -135,7 +156,12 @@ def _prepare_compare_corpus(scales: list[str]) -> dict[str, Path]:
 
 def main() -> None:
     args = parse_args()
-    targets: list[str] = list(args.targets)
+    if args.targets is not None:
+        targets: list[str] = list(args.targets)
+    elif args.suite == "dsh":
+        targets = list(DSH_TARGETS)
+    else:
+        targets = list(COMPARE_TARGETS)
     scales: list[str] = list(args.scales)
     tools: list[str] = list(args.tools)
     warm: int = int(args.warm)
@@ -145,7 +171,7 @@ def main() -> None:
 
     corpus_paths: dict[str, Path] = {}
     pdf_root: Path | None = None
-    if args.suite == "compare":
+    if args.suite in ("compare", "dsh"):
         corpus_paths = _prepare_compare_corpus(scales)
     elif args.suite == "pdf":
         requested_root = Path(args.pdf_root) if args.pdf_root else None
@@ -161,6 +187,8 @@ def main() -> None:
         target_configs=_target_configs(args),
         pdf_root=pdf_root,
         long_pdf_limit=int(args.long_pdf_limit),
+        burst_quiet_seconds=args.burst_quiet,
+        trajectories=args.trajectories,
     )
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")

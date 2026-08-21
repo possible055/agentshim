@@ -21,7 +21,7 @@ dependencies = [
 
 [[package]]
 name = "agentshim"
-version = "0.1.5-alpha.1"
+version = "0.1.5-alpha.2"
 dependencies = [
  "agentshim-core",
  "agentshim-gigatoken",
@@ -54,7 +54,7 @@ dependencies = [
 
 [[package]]
 name = "agentshim-core"
-version = "0.1.5-alpha.1"
+version = "0.1.5-alpha.2"
 dependencies = [
  "agentshim-pdf-read",
  "base64",
@@ -94,7 +94,7 @@ dependencies = [
 
 [[package]]
 name = "agentshim-napi"
-version = "0.1.5-alpha.1"
+version = "0.1.5-alpha.2"
 dependencies = [
  "agentshim-core",
  "base64",

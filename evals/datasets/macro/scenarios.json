@@ -1,0 +1,251 @@
+{
+  "version": 2,
+  "description": "Tier 2: Actual working environment across 3 heavy real-world projects. Warp-grep parallel x8 with configurable rounds (4/6/8 = 32-64 requests), lightweight glob/read, and actual bash targets.",
+  "trajectories": [
+    {
+      "id": "warp_grep_storm_transformers",
+      "repository": "transformers",
+      "description": "Parallel grep storm across HuggingFace Transformers: 8 queries per round, 4/6/8 rounds",
+      "type": "warp_grep_storm",
+      "rounds_config": [4, 6, 8],
+      "queries_per_round": 8,
+      "query_pool": [
+        {"pattern": "class LlamaForCausalLM", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class BertModel", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class MistralForCausalLM", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class GPT2LMHeadModel", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class T5ForConditionalGeneration", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class CLIPModel", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class ViTModel", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class WhisperForConditionalGeneration", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "prepare_inputs_for_generation", "path": "src/transformers/models", "mode": "content", "fixed_strings": true, "limit": 30},
+        {"pattern": "_update_model_kwargs_for_generation", "path": "src/transformers/models", "mode": "content", "fixed_strings": true, "limit": 30},
+        {"pattern": "def _reorder_cache", "path": "src/transformers/models", "mode": "content", "fixed_strings": true, "limit": 30},
+        {"pattern": "def forward", "path": "src/transformers/models/llama", "mode": "content", "fixed_strings": true, "limit": 30},
+        {"pattern": "def forward", "path": "src/transformers/models/mistral", "mode": "content", "fixed_strings": true, "limit": 30},
+        {"pattern": "def forward", "path": "src/transformers/models/bert", "mode": "content", "fixed_strings": true, "limit": 30},
+        {"pattern": "def forward", "path": "src/transformers/models/gpt2", "mode": "content", "fixed_strings": true, "limit": 30},
+        {"pattern": "def forward", "path": "src/transformers/models/t5", "mode": "content", "fixed_strings": true, "limit": 30},
+        {"pattern": "_prepare_4d_causal_attention_mask", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "_extract_past_from_model_output", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "DynamicCache", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "StaticCache", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "QuantizedCache", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "OffloadedCache", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "SinkCache", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "SlidingWindowCache", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class LlamaModelTest", "path": "tests", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class BertModelTest", "path": "tests", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class MistralModelTest", "path": "tests", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class GPT2ModelTest", "path": "tests", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class T5ModelTest", "path": "tests", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class CLIPModelTest", "path": "tests", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class ViTModelTest", "path": "tests", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class WhisperModelTest", "path": "tests", "mode": "content", "fixed_strings": true, "limit": 20}
+      ]
+    },
+    {
+      "id": "warp_grep_storm_pytorch",
+      "repository": "pytorch",
+      "description": "Parallel grep storm across PyTorch C++/Python tree: 8 queries per round, 4/6/8 rounds",
+      "type": "warp_grep_storm",
+      "rounds_config": [4, 6, 8],
+      "queries_per_round": 8,
+      "query_pool": [
+        {"pattern": "struct TensorImpl", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class Tensor", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "TORCH_LIBRARY", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "TORCH_LIBRARY_IMPL", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class Node", "path": "torch/csrc/autograd", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "struct DispatchKey", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class AutogradMeta", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class Function", "path": "torch/autograd", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "DispatchKey::CPU", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "DispatchKey::CUDA", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "DispatchKey::Autograd", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "DispatchKey::BackendSelect", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "register_kernel", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "Dispatcher::singleton", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "m.impl(", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "m.def(", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class Module(nn.Module)", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "def _forward_unimplemented", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "def register_buffer", "path": "torch/nn/modules", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "def register_parameter", "path": "torch/nn/modules", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class Linear(Module)", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class Conv2d(Module)", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class Embedding(Module)", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class MultiheadAttention(Module)", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class TestAutograd(TestCase)", "path": "test", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class TestNN(TestCase)", "path": "test", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class TestTensor(TestCase)", "path": "test", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class TestCuda(TestCase)", "path": "test", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class TestCppExtensions(TestCase)", "path": "test", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class TestTorch(TestCase)", "path": "test", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class TestDtype(TestCase)", "path": "test", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "class TestOps(TestCase)", "path": "test", "mode": "content", "fixed_strings": true, "limit": 20}
+      ]
+    },
+    {
+      "id": "warp_grep_storm_openclaw",
+      "repository": "openclaw",
+      "description": "Parallel grep storm across OpenClaw Monorepo: 8 queries per round, 4/6/8 rounds",
+      "type": "warp_grep_storm",
+      "rounds_config": [4, 6, 8],
+      "queries_per_round": 8,
+      "query_pool": [
+        {"pattern": "export interface Agent", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "export interface Tool", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "export interface Session", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "export interface Config", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "export class Engine", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "export class Runtime", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "export class Server", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "export class Client", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "async execute(", "mode": "content", "fixed_strings": true, "limit": 30},
+        {"pattern": "async handle(", "mode": "content", "fixed_strings": true, "limit": 30},
+        {"pattern": "async invoke(", "mode": "content", "fixed_strings": true, "limit": 30},
+        {"pattern": "applyPlugin", "mode": "content", "fixed_strings": true, "limit": 30},
+        {"pattern": "registerTool", "mode": "content", "fixed_strings": true, "limit": 30},
+        {"pattern": "registerCommand", "mode": "content", "fixed_strings": true, "limit": 30},
+        {"pattern": "middleware", "mode": "content", "fixed_strings": true, "limit": 30},
+        {"pattern": "interceptor", "mode": "content", "fixed_strings": true, "limit": 30},
+        {"pattern": "class Sandbox", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "PermissionGate", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "confine(", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "approval", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "securityPolicy", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "DACL", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "JobObject", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "CancellationToken", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "describe(\"Engine\"", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "describe(\"Runtime\"", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "describe(\"Plugin\"", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "describe(\"Sandbox\"", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "describe(\"Tool\"", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "describe(\"Session\"", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "describe(\"Config\"", "mode": "content", "fixed_strings": true, "limit": 20},
+        {"pattern": "describe(\"Transport\"", "mode": "content", "fixed_strings": true, "limit": 20}
+      ]
+    },
+    {
+      "id": "lightweight_glob_transformers",
+      "repository": "transformers",
+      "description": "Lightweight glob discovery across Transformers source tree",
+      "type": "parallel_glob",
+      "globs": [
+        {"pattern": "src/transformers/models/*/__init__.py", "limit": 50},
+        {"pattern": "src/transformers/models/llama/*.py", "limit": 20},
+        {"pattern": "tests/test_*.py", "limit": 50}
+      ]
+    },
+    {
+      "id": "lightweight_glob_pytorch",
+      "repository": "pytorch",
+      "description": "Lightweight glob discovery across PyTorch source tree",
+      "type": "parallel_glob",
+      "globs": [
+        {"pattern": "torch/nn/modules/*.py", "limit": 50},
+        {"pattern": "torch/csrc/autograd/*.h", "limit": 50},
+        {"pattern": "test/test_*.py", "limit": 50}
+      ]
+    },
+    {
+      "id": "lightweight_glob_openclaw",
+      "repository": "openclaw",
+      "description": "Lightweight glob discovery across OpenClaw monorepo structure",
+      "type": "parallel_glob",
+      "globs": [
+        {"pattern": "packages/*/package.json", "limit": 50},
+        {"pattern": "crates/*/Cargo.toml", "limit": 50},
+        {"pattern": "docs/**/*.md", "limit": 50}
+      ]
+    },
+    {
+      "id": "lightweight_read_transformers",
+      "repository": "transformers",
+      "description": "Lightweight read slices from key Transformers source files",
+      "type": "grep_to_read_chain",
+      "grep_step": {
+        "pattern": "class PreTrainedModel",
+        "path": "src/transformers",
+        "mode": "content",
+        "fixed_strings": true,
+        "limit": 8
+      },
+      "read_slices": [
+        {"path": "src/transformers/modeling_utils.py", "start_line": 100, "line_count": 50},
+        {"path": "src/transformers/modeling_utils.py", "start_line": 500, "line_count": 50},
+        {"path": "src/transformers/models/llama/modeling_llama.py", "start_line": 100, "line_count": 50}
+      ]
+    },
+    {
+      "id": "lightweight_read_pytorch",
+      "repository": "pytorch",
+      "description": "Lightweight read slices from key PyTorch source files",
+      "type": "grep_to_read_chain",
+      "grep_step": {
+        "pattern": "class Module",
+        "path": "torch/nn",
+        "mode": "content",
+        "fixed_strings": true,
+        "limit": 8
+      },
+      "read_slices": [
+        {"path": "torch/nn/modules/module.py", "start_line": 100, "line_count": 50},
+        {"path": "torch/nn/modules/module.py", "start_line": 500, "line_count": 50},
+        {"path": "torch/tensor.py", "start_line": 100, "line_count": 50}
+      ]
+    },
+    {
+      "id": "lightweight_read_openclaw",
+      "repository": "openclaw",
+      "description": "Lightweight read slices from key OpenClaw source files",
+      "type": "grep_to_read_chain",
+      "grep_step": {
+        "pattern": "export class Engine",
+        "mode": "content",
+        "fixed_strings": true,
+        "limit": 8
+      },
+      "read_slices": [
+        {"path": "packages/engine/src/index.ts", "start_line": 1, "line_count": 50},
+        {"path": "packages/runtime/src/index.ts", "start_line": 1, "line_count": 50},
+        {"path": "packages/core/src/index.ts", "start_line": 1, "line_count": 50}
+      ]
+    },
+    {
+      "id": "actual_bash_transformers",
+      "repository": "transformers",
+      "description": "Actual bash targets on Transformers repository",
+      "type": "actual_bash",
+      "commands": [
+        {"id": "git_log", "command": "git log --oneline -10", "description": "Recent commit history"},
+        {"id": "count_models", "command": "find src/transformers/models -maxdepth 1 -type d | wc -l", "description": "Count model directories"},
+        {"id": "grep_version", "command": "grep -r \"__version__\" setup.py | head -1", "description": "Extract version string"}
+      ]
+    },
+    {
+      "id": "actual_bash_pytorch",
+      "repository": "pytorch",
+      "description": "Actual bash targets on PyTorch repository",
+      "type": "actual_bash",
+      "commands": [
+        {"id": "git_log", "command": "git log --oneline -10", "description": "Recent commit history"},
+        {"id": "count_py", "command": "find torch -name \"*.py\" | wc -l", "description": "Count Python source files"},
+        {"id": "count_headers", "command": "find torch/csrc -name \"*.h\" | wc -l", "description": "Count C++ header files"}
+      ]
+    },
+    {
+      "id": "actual_bash_openclaw",
+      "repository": "openclaw",
+      "description": "Actual bash targets on OpenClaw repository",
+      "type": "actual_bash",
+      "commands": [
+        {"id": "git_log", "command": "git log --oneline -10", "description": "Recent commit history"},
+        {"id": "count_packages", "command": "find packages -name \"package.json\" -maxdepth 2 | wc -l", "description": "Count monorepo packages"},
+        {"id": "count_crates", "command": "find crates -name \"Cargo.toml\" -maxdepth 2 | wc -l", "description": "Count Rust crates"}
+      ]
+    }
+  ]
+}

@@ -10,6 +10,64 @@
       "gate": "read_marker"
     },
     {
+      "id": "read_slice",
+      "tool": "read",
+      "description": "Read exact lines 5001-5050 from 20,000-line target file",
+      "target_key": "read_target",
+      "start_line": 5001,
+      "line_count": 50,
+      "gate": "read_slice_sentinel"
+    },
+    {
+      "id": "read_overflow",
+      "tool": "read",
+      "description": "Read past the end of file (lines 25000-25050)",
+      "target_key": "read_target",
+      "start_line": 25000,
+      "line_count": 50,
+      "gate": "read_overflow_eof"
+    },
+    {
+      "id": "read_budget_page",
+      "tool": "read",
+      "description": "Read 250-line page from 5000-line file (fits all targets' output limits)",
+      "target_key": "large_budget_target",
+      "start_line": 1,
+      "line_count": 250
+    },
+    {
+      "id": "glob_suffix",
+      "tool": "glob",
+      "description": "Match only the expected .bench.txt files",
+      "pattern": "**/*.bench.txt",
+      "limit": 100,
+      "gate": "glob_suffix_set"
+    },
+    {
+      "id": "glob_prefix_complete",
+      "tool": "glob",
+      "description": "Complete set of the ten file_00000[0-9] paths",
+      "pattern": "**/file_00000[0-9].*",
+      "limit": 200,
+      "gate": "glob_path_set"
+    },
+    {
+      "id": "glob_first_page",
+      "tool": "glob",
+      "description": "First page of **/* with an explicit limit of 50",
+      "pattern": "**/*",
+      "limit": 50,
+      "gate": "glob_first_page"
+    },
+    {
+      "id": "glob_gitignore",
+      "tool": "glob",
+      "description": "Verify gitignore exclusions for ignored target files",
+      "pattern": "**/ignored_file.rs",
+      "limit": 10,
+      "gate": "glob_gitignore_clean"
+    },
+    {
       "id": "grep_sparse_fullscan",
       "tool": "grep",
       "description": "Full-scan the sparse marker via count/summary",
@@ -30,20 +88,39 @@
       "gate": "grep_hit_total"
     },
     {
-      "id": "glob_prefix_complete",
-      "tool": "glob",
-      "description": "Complete set of the ten file_00000[0-9] paths",
-      "pattern": "**/file_00000[0-9].*",
-      "limit": 200,
-      "gate": "glob_path_set"
+      "id": "grep_zero",
+      "tool": "grep",
+      "description": "Full-scan worst-case for absent token (0 matches)",
+      "pattern": "AGENTSHIM_ABSENT_TOKEN_404",
+      "mode": "files",
+      "limit": 100,
+      "fixed_strings": true,
+      "gate": "grep_zero_matches"
     },
     {
-      "id": "glob_first_page",
-      "tool": "glob",
-      "description": "First page of **/* with an explicit limit of 50",
-      "pattern": "**/*",
-      "limit": 50,
-      "gate": "glob_first_page"
+      "id": "grep_literal_vs_re",
+      "tool": "grep",
+      "description": "Fixed string keyword scan across codebase",
+      "pattern": "fn main()",
+      "mode": "count",
+      "limit": 1000,
+      "fixed_strings": true,
+      "gate": "grep_literal_matches"
+    },
+    {
+      "id": "bash_noop",
+      "tool": "bash",
+      "description": "Minimal process spawn dispatch latency",
+      "command": "true",
+      "gate": "bash_exit_zero"
+    },
+    {
+      "id": "bash_timeout_kill",
+      "tool": "bash",
+      "description": "Process tree timeout cancellation",
+      "command": "sleep 2",
+      "timeout_ms": 100,
+      "gate": "bash_timeout_terminated"
     }
   ]
 }

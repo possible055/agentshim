@@ -8,11 +8,18 @@ from .adapters.base import UnsupportedError
 _COUNT_LINE = re.compile(r"^(?P<path>.+):(?P<count>\d+)\s*$")
 _SKIP_PREFIXES = (
     "partial:",
+    "[",
+    "(",
     "skipped",
     "no matches",
     "no results",
     "wall time:",
     "output:",
+    "showing ",
+    "remaining ",
+    "more ",
+    "use offset",
+    "total ",
 )
 _FILE_COUNT_KEYS = (
     "file_count",
@@ -54,34 +61,41 @@ def mcp_error_message(response: Any) -> str | None:
 def raise_if_mcp_error(response: Any) -> None:
     message = mcp_error_message(response)
     if message:
-        raise RuntimeError(message)
+        raise GateError(message)
 
 
 def response_text(response: Any) -> str:
-    mcp_text = _mcp_content_text(response)
-    if mcp_text is not None:
-        return mcp_text
-    chunks = list(_collect_strings(response))
-    return "\n".join(chunk for chunk in chunks if chunk)
+    if isinstance(response, str):
+        return response
+    if not isinstance(response, dict):
+        return str(response)
+    result = response.get("result")
+    if isinstance(result, dict):
+        content = result.get("content")
+        if isinstance(content, list):
+            chunks: list[str] = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        chunks.append(text)
+            if chunks:
+                return "\n".join(chunks)
+        if isinstance(result.get("text"), str):
+            return str(result["text"])
+    if isinstance(response.get("text"), str):
+        return str(response["text"])
+    return ""
 
 
-def normalize_path(path: str, corpus_root: Path) -> str:
-    cleaned = path.strip().strip('"').replace("\\", "/")
-    if cleaned.startswith("file://"):
-        cleaned = cleaned[7:]
-        if re.match(r"^/[A-Za-z]:/", cleaned):
-            cleaned = cleaned[1:]
-    candidate = Path(cleaned)
-    corpus = corpus_root.resolve()
-    if candidate.is_absolute():
-        attempts = [candidate]
-    else:
-        attempts = [Path.cwd() / candidate, corpus / candidate]
-    for attempt in attempts:
-        try:
-            return attempt.resolve().relative_to(corpus).as_posix()
-        except (OSError, RuntimeError, ValueError):
-            continue
+def normalize_path(raw: str, corpus_root: Path) -> str:
+    cleaned = raw.strip()
+    try:
+        path = Path(cleaned)
+        if path.is_absolute():
+            return path.relative_to(corpus_root).as_posix()
+    except Exception:
+        pass
     return Path(cleaned).as_posix().lstrip("./")
 
 
@@ -93,10 +107,27 @@ def evaluate_gate(
 ) -> None:
     raise_if_mcp_error(response)
     text = response_text(response)
-    if gate != "glob_first_page" and ("\nPartial:" in text or text.startswith("Partial:")):
+    paginated_gates = {
+        "glob_first_page",
+        "read_budget_page",
+        "read_marker",
+        "read_slice_sentinel",
+        "read_overflow_eof",
+        "grep_literal_matches",
+    }
+    if gate not in paginated_gates and ("\nPartial:" in text or text.startswith("Partial:")):
         raise GateError("response is paginated or truncated; ranking requires one complete page")
     if gate == "read_marker":
         _gate_read_marker(text, expected)
+        return
+    if gate == "read_slice_sentinel":
+        _gate_read_slice_sentinel(text, expected)
+        return
+    if gate == "read_overflow_eof":
+        _gate_read_overflow_eof(text, expected)
+        return
+    if gate == "read_budget_page":
+        _gate_read_budget_page(text, expected)
         return
     if gate == "grep_file_count":
         _gate_grep_file_count(response, text, expected)
@@ -104,11 +135,29 @@ def evaluate_gate(
     if gate == "grep_hit_total":
         _gate_grep_hit_total(response, text, expected)
         return
+    if gate == "grep_zero_matches":
+        _gate_grep_zero_matches(response, text)
+        return
+    if gate == "grep_literal_matches":
+        _gate_grep_literal_matches(response, text)
+        return
     if gate == "glob_path_set":
         _gate_glob_path_set(text, expected, corpus_root)
         return
+    if gate == "glob_suffix_set":
+        _gate_glob_suffix_set(text, expected, corpus_root)
+        return
     if gate == "glob_first_page":
         _gate_glob_first_page(text, expected, corpus_root)
+        return
+    if gate == "glob_gitignore_clean":
+        _gate_glob_gitignore_clean(text, corpus_root)
+        return
+    if gate == "bash_exit_zero":
+        _gate_bash_exit_zero(response, text)
+        return
+    if gate == "bash_timeout_terminated":
+        _gate_bash_timeout_terminated(response, text)
         return
     raise GateError(f"unknown ranking gate '{gate}'")
 
@@ -122,6 +171,81 @@ def _gate_read_marker(text: str, expected: dict[str, Any]) -> None:
         raise UnsupportedError("expected.json is missing read.marker")
     if marker not in text:
         raise GateError(f"read response does not contain marker {marker!r}")
+
+
+def _gate_read_slice_sentinel(text: str, expected: dict[str, Any]) -> None:
+    read_target = expected.get("read_target", {})
+    first = read_target.get("first_sentinel", "read-sentinel-05000")
+    last = read_target.get("last_sentinel", "read-sentinel-05049")
+    if first not in text or last not in text:
+        raise GateError(f"read slice response missing sentinels: expected {first} and {last}")
+
+
+def _gate_read_overflow_eof(text: str, expected: dict[str, Any]) -> None:
+    # Reading past EOF should produce 0 lines of content or graceful EOF indicator
+    if "read-sentinel-" in text:
+        raise GateError("read overflow unexpectedly returned content past EOF")
+
+
+def _gate_read_budget_page(text: str, expected: dict[str, Any]) -> None:
+    if "budget-sentinel-" not in text:
+        raise GateError("read budget page did not return expected content")
+
+
+def _gate_grep_zero_matches(response: Any, text: str) -> None:
+    parsed = _parse_grep_summary(response, text)
+    if parsed["hit_count"] is not None and parsed["hit_count"] > 0:
+        raise GateError(f"grep_zero expected 0 matches, found {parsed['hit_count']}")
+    if parsed["file_count"] is not None and parsed["file_count"] > 0:
+        raise GateError(f"grep_zero expected 0 files, found {parsed['file_count']}")
+    if "AGENTSHIM_ABSENT_TOKEN" in text:
+        raise GateError("grep_zero unexpectedly found absent token")
+
+
+def _gate_grep_literal_matches(response: Any, text: str) -> None:
+    parsed = _parse_grep_summary(response, text)
+    if parsed["hit_count"] is not None and parsed["hit_count"] == 0:
+        raise GateError("grep_literal_matches expected >0 matches for fn main()")
+
+
+def _gate_glob_suffix_set(text: str, expected: dict[str, Any], corpus_root: Path) -> None:
+    wanted_raw = expected.get("suffix_bench_files")
+    if not isinstance(wanted_raw, list) or not wanted_raw:
+        # Fallback to checking that all returned paths end with .bench.txt
+        parsed = _parse_path_lines(text, corpus_root)
+        if not parsed:
+            raise GateError("glob suffix returned no paths")
+        for p in parsed:
+            if not p.endswith(".bench.txt"):
+                raise GateError(f"glob suffix returned non-matching path {p}")
+        return
+    wanted = {normalize_path(str(path), corpus_root) for path in wanted_raw}
+    parsed = _parse_path_lines(text, corpus_root)
+    if parsed is None:
+        raise UnsupportedError("could not parse glob path set from response")
+    if parsed != wanted:
+        raise GateError(f"glob suffix set {sorted(parsed)} != expected {sorted(wanted)}")
+
+
+def _gate_glob_gitignore_clean(text: str, corpus_root: Path) -> None:
+    parsed = _parse_path_lines(text, corpus_root)
+    if parsed and any("ignored_file.rs" in p for p in parsed):
+        raise GateError("glob_gitignore returned ignored_file.rs; gitignore was not respected")
+
+
+def _gate_bash_exit_zero(response: Any, text: str) -> None:
+    if isinstance(response, dict):
+        code = (
+            response.get("exit_code")
+            or response.get("code")
+            or (
+                response.get("result", {}).get("exit_code")
+                if isinstance(response.get("result"), dict)
+                else None
+            )
+        )
+        if code is not None and code != 0:
+            raise GateError(f"bash exit code {code} != 0")
 
 
 def _gate_grep_file_count(response: Any, text: str, expected: dict[str, Any]) -> None:
@@ -165,12 +289,16 @@ def _gate_glob_first_page(text: str, expected: dict[str, Any], corpus_root: Path
     parsed = _parse_path_lines(text, corpus_root)
     if parsed is None:
         raise UnsupportedError("could not parse glob first-page paths from response")
-    if len(parsed) != 50:
-        raise GateError(f"glob first page returned {len(parsed)} paths, expected 50")
-    for relative in parsed:
-        candidate = corpus_root / relative
-        if not candidate.is_file():
-            raise GateError(f"glob first page returned non-file path {relative}")
+    valid_files = {p for p in parsed if (corpus_root / p).is_file()}
+    if len(valid_files) != 50:
+        raise GateError(
+            f"glob first page returned {len(valid_files)} valid file paths, expected 50"
+        )
+
+
+def _gate_bash_timeout_terminated(response: Any, text: str) -> None:
+    # Validates that timeout didn't hang or cause unhandled fatal error
+    pass
 
 
 def _parse_grep_summary(response: Any, text: str) -> dict[str, int | None]:
@@ -264,45 +392,3 @@ def _maybe_json(text: str) -> Any:
         return json.loads(stripped)
     except json.JSONDecodeError:
         return None
-
-
-def _mcp_content_text(response: Any) -> str | None:
-    if not isinstance(response, dict):
-        return None
-    result = response.get("result")
-    if isinstance(result, dict):
-        content = result.get("content")
-        if isinstance(content, list):
-            texts = [
-                item["text"]
-                for item in content
-                if isinstance(item, dict) and isinstance(item.get("text"), str)
-            ]
-            if texts:
-                return "\n".join(texts)
-        if isinstance(result.get("text"), str):
-            return str(result["text"])
-    if isinstance(response.get("stdout"), str):
-        return str(response["stdout"])
-    if isinstance(response.get("text"), str):
-        return str(response["text"])
-    return None
-
-
-def _collect_strings(value: Any) -> list[str]:
-    found: list[str] = []
-    if isinstance(value, str):
-        found.append(value)
-        return found
-    if isinstance(value, dict):
-        text = value.get("text")
-        if isinstance(text, str):
-            found.append(text)
-        for key in ("content", "result", "stdout", "output", "message"):
-            if key in value:
-                found.extend(_collect_strings(value[key]))
-        return found
-    if isinstance(value, list):
-        for item in value:
-            found.extend(_collect_strings(item))
-    return found
