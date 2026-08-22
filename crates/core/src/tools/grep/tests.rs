@@ -1011,20 +1011,22 @@ mod tests {
         fs::create_dir(fixture.path().join("paging")).expect("paging directory");
         let mut large = String::from("needle ");
         large.push_str(&"x".repeat(crate::output::MODEL_BYTE_LIMIT * 2));
-        large.push('\n');
-        fs::write(fixture.path().join("paging/0-large.rs"), large).expect("large match");
-        fs::write(fixture.path().join("paging/z-small.rs"), "needle small\n").expect("small match");
+        large.push_str("\nneedle small\n");
+        fs::write(fixture.path().join("paging/mixed.rs"), large).expect("mixed matches");
         let mut query = request("needle");
         query.path = Some("paging".to_owned());
         query.fixed_strings = Some(true);
         query.limit = Some(1);
 
         let first = execute(&root, &query, 1, &CancellationToken::new()).expect("first page");
+        assert!(first.contains("mixed.rs:1:"));
+        assert!(first.contains("[line text omitted: exceeds output budget]"));
+        assert!(!first.contains("needle small"));
         assert!(first.contains("next_offset=1"));
 
         query.offset = Some(1);
         let second = execute(&root, &query, 1, &CancellationToken::new()).expect("second page");
-        assert!(second.contains("z-small.rs"));
+        assert!(second.contains("mixed.rs:2:"));
         assert!(second.contains("needle small"));
     }
 

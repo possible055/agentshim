@@ -77,8 +77,8 @@ class WindowsMonitor(BaseMonitor):
     INVALID_HANDLE = ctypes.c_void_p(-1).value
 
     def __init__(self) -> None:
-        self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        self.psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        self.psapi = ctypes.WinDLL("psapi", use_last_error=True)  # type: ignore[attr-defined]
 
         self.kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
         self.kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE

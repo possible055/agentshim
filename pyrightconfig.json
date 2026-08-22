@@ -32,8 +32,7 @@
         "."
     ],
     "typeCheckingMode": "standard",
-    "pythonVersion": "3.13",
-    "pythonPlatform": "Windows",
+    "pythonVersion": "3.12",
     "reportMissingImports": "none",
     "reportMissingTypeStubs": "none",
     "reportUnusedImport": "warning",
