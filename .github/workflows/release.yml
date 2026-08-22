@@ -162,6 +162,10 @@ jobs:
             exit 1
           fi
 
+          # dsh-adapter.yml is path-filtered, so a push run only exists when the
+          # commit touches its paths. Release commits always qualify because
+          # scripts/prepare-release bumps Cargo.toml; changing that filter or
+          # the release flow breaks this lookup.
           dsh_runs="$(gh api -X GET \
             "repos/${GITHUB_REPOSITORY}/actions/workflows/dsh-adapter.yml/runs" \
             -f branch=main \

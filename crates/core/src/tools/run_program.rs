@@ -195,6 +195,8 @@ fn environment_keys_equal(left: &str, right: &str) -> bool {
     let right = right.encode_utf16().collect::<Vec<_>>();
     let left_length = i32::try_from(left.len()).unwrap_or(i32::MAX);
     let right_length = i32::try_from(right.len()).unwrap_or(i32::MAX);
+    // Safety: both buffers outlive the call and the lengths match their slices;
+    // `CompareStringOrdinal` only reads them and is otherwise side-effect free.
     unsafe {
         CompareStringOrdinal(left.as_ptr(), left_length, right.as_ptr(), right_length, 1)
             == CSTR_EQUAL

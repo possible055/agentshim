@@ -40,10 +40,6 @@ on:
         required: false
         type: boolean
         default: false
-      deny_test_warnings:
-        required: false
-        type: boolean
-        default: false
       engine_only:
         required: false
         type: boolean
@@ -59,7 +55,6 @@ jobs:
     timeout-minutes: 30
     env:
       CARGO_TERM_COLOR: always
-      RUSTFLAGS: ${{ inputs.deny_test_warnings && '-Dwarnings' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Determine validation scope
@@ -108,7 +103,6 @@ jobs:
                   Cargo.lock \
                   rust-toolchain.toml \
                   .gitattributes \
-                  .cargo \
                   .github/workflows/ci.yml \
                   .github/workflows/optional-platform-ci.yml \
                   .github/workflows/rust-validation.yml
@@ -180,6 +174,14 @@ jobs:
         run: cargo clippy --locked -p agentshim-core -p agentshim-napi --all-targets --all-features -- -D warnings
       - name: Test engine packages default features
         run: cargo test --locked -p agentshim-core -p agentshim-napi --tests
+      - name: Check root package targets
+        if: ${{ inputs.engine_only }}
+        run: cargo check --locked -p agentshim --all-targets
+      - name: Test documentation examples
+        if: ${{ inputs.engine_only }}
+        # pdf-read's retained upstream doctests reference the original
+        # `pdf_oxide` crate name and do not compile in this workspace.
+        run: cargo test --locked --doc --workspace --exclude agentshim-pdf-read
       - name: Lint derivative packages
         if: ${{ !inputs.engine_only && steps.validation-scope.outputs.scope == 'full' }}
         run: cargo clippy --locked -p agentshim-pdf-read -p agentshim-gigatoken --all-targets --all-features -- -D warnings

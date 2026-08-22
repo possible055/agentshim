@@ -189,30 +189,6 @@ impl FileFingerprint {
         }
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
-    pub fn from_dir(directory: &cap_std::fs::Dir) -> io::Result<Self> {
-        let file = File::from_std(directory.try_clone()?.into_std_file());
-        Self::from_file(&file)
-    }
-
-    #[cfg(any(test, feature = "bench-internals"))]
-    pub fn same_file(&self, other: &Self) -> bool {
-        #[cfg(unix)]
-        {
-            self.platform.device == other.platform.device
-                && self.platform.inode == other.platform.inode
-        }
-        #[cfg(windows)]
-        {
-            self.platform.volume == other.platform.volume
-                && self.platform.file_id == other.platform.file_id
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            self == other
-        }
-    }
-
     #[cfg(windows)]
     pub fn matches_current_state(&self, file: &File) -> io::Result<bool> {
         use std::os::windows::io::AsRawHandle;

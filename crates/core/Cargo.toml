@@ -47,6 +47,7 @@ unsafe_op_in_unsafe_fn = "deny"
 [lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "deny"
 # Public documentation is being tightened alongside the typed host API.
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"

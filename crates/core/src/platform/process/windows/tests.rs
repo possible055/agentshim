@@ -249,8 +249,12 @@ mod tests {
             System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
         };
 
+        // Safety: a pure query-open of a PID this test owns; the handle is
+        // closed exactly once when the open succeeded.
         let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
         if !handle.is_null() {
+            // Safety: the handle was just returned by `OpenProcess` and is
+            // closed exactly once here.
             unsafe {
                 CloseHandle(handle);
             }

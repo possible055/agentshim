@@ -198,6 +198,7 @@ fn unix_timeout_terminates_descendant_process_group() {
         .trim()
         .parse::<i32>()
         .expect("pid integer");
+    // Safety: signal 0 only checks for the PID's existence; no signal is delivered.
     let result = unsafe { libc::kill(pid, 0) };
     assert_eq!(result, -1);
     assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
@@ -245,6 +246,9 @@ fn unix_session_escape_parent_fixture() {
         ])
         .env("AGENTSHIM_SESSION_ESCAPE_FIXTURE", "helper")
         .env("AGENTSHIM_SESSION_ESCAPE_PID_FILE", &pid_file);
+    // Safety: `pre_exec` runs the closure between `fork` and `exec`, so it may
+    // only call async-signal-safe functions; `setsid` is, and the closure
+    // performs no allocation.
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() == -1 {

@@ -8,7 +8,8 @@ mod tests {
     use crate::tools::glob::execute_profiled_with_traversal;
     use crate::tools::glob::{
         BoundedCollector, GlobEntryType, GlobError, GlobMatch, GlobRequest, GlobTraversal,
-        MAX_MATCHES, PATH_OMISSION, execute, execute_with_traversal, render, render_with_budget,
+        MAX_MATCHES, PATH_OMISSION, execute, execute_with_traversal,
+        execute_with_traversal_and_budget, render, render_with_budget,
     };
     use crate::{
         path::{FileAccess, ReadScope, RepositoryRoot},
@@ -271,54 +272,49 @@ mod tests {
         }
         fs::write(fixture.path().join("ignored/hidden.rs"), "ignored").expect("ignored");
         let root = access(fixture.path());
-        let mut query = request("**/*.rs");
-        query.limit = Some(1_000);
         let cancellation = CancellationToken::new();
-        let serial = execute_with_traversal(
-            &root,
-            &query,
-            TEST_LANES,
-            &cancellation,
-            GlobTraversal::Serial,
-        )
-        .expect("serial glob");
-        let parallel = execute_with_traversal(
-            &root,
-            &query,
-            TEST_LANES,
-            &cancellation,
-            GlobTraversal::ParallelBatched,
-        )
-        .expect("parallel glob");
-        assert!(!result_lines(&serial).is_empty());
-        assert!(!result_lines(&parallel).is_empty());
+        // A budget wide enough for the whole result set keeps every match on one
+        // page, so the comparison sees each mode's full ordering.
+        let wide_budget = crate::output::TestCallBudget {
+            page_bytes: 2 * 1024 * 1024,
+            wire_bytes: 2 * 1024 * 1024,
+            ceiling: 1_000_000,
+        };
+        let run = |pattern: &str, entry_type: Option<GlobEntryType>, traversal| {
+            let mut query = request(pattern);
+            query.entry_type = entry_type;
+            query.limit = Some(1_000);
+            execute_with_traversal_and_budget(
+                &root,
+                &query,
+                TEST_LANES,
+                &cancellation,
+                traversal,
+                &wide_budget,
+            )
+            .expect("glob run")
+        };
+
+        let expected = sorted_result_lines(&run("**/*.rs", None, GlobTraversal::Serial));
+        assert_eq!(
+            expected.len(),
+            514,
+            "serial glob must find every fixture path"
+        );
 
         for (pattern, entry_type) in [
+            ("**/*.rs", GlobEntryType::File),
             ("**/*.missing", GlobEntryType::File),
             ("**/*", GlobEntryType::Directory),
             ("**/*", GlobEntryType::Any),
         ] {
-            let mut query = request(pattern);
-            query.entry_type = Some(entry_type);
-            query.limit = Some(1_000);
-            let serial = execute_with_traversal(
-                &root,
-                &query,
-                TEST_LANES,
-                &cancellation,
-                GlobTraversal::Serial,
-            )
-            .expect("serial glob");
-            let parallel = execute_with_traversal(
-                &root,
-                &query,
-                TEST_LANES,
-                &cancellation,
-                GlobTraversal::ParallelBatched,
-            )
-            .expect("parallel glob");
-            assert!(!result_lines(&serial).is_empty());
-            assert!(!result_lines(&parallel).is_empty());
+            let serial = run(pattern, Some(entry_type), GlobTraversal::Serial);
+            let parallel = run(pattern, Some(entry_type), GlobTraversal::ParallelBatched);
+            assert_eq!(
+                sorted_result_lines(&parallel),
+                sorted_result_lines(&serial),
+                "pattern={pattern} entry_type={entry_type:?}"
+            );
         }
     }
 

@@ -133,7 +133,9 @@ pub(super) fn scope_enabled(scope: &str) -> bool {
 
 pub(super) fn set_codex_home(value: Option<OsString>) {
     match value {
+        // Safety: single-threaded bench setup, before any env reader exists.
         Some(value) => unsafe { std::env::set_var("CODEX_HOME", value) },
+        // Safety: single-threaded bench setup, before any env reader exists.
         None => unsafe { std::env::remove_var("CODEX_HOME") },
     }
 }

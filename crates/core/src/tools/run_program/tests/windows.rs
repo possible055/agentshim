@@ -84,12 +84,15 @@ fn windows_process_is_running(pid: u32) -> bool {
     };
 
     const STILL_ACTIVE_EXIT_CODE: u32 = 259;
+    // Safety: a pure query-open of a PID this helper owns.
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if handle.is_null() {
         return false;
     }
     let mut exit_code = 0_u32;
+    // Safety: the handle is open and `exit_code` is a valid out parameter.
     let succeeded = unsafe { GetExitCodeProcess(handle, &raw mut exit_code) } != 0;
+    // Safety: the handle is closed exactly once here.
     unsafe {
         CloseHandle(handle);
     }

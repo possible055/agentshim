@@ -53,6 +53,8 @@ pub fn spawn_detached_capture(
     let output = Pipe::stdout()?;
     let input_handle = null_input.as_raw_handle() as HANDLE;
     let output_handle = output.child.raw();
+    // Safety: the handle is owned by this function and the call only toggles
+    // its inherit flag for the child that is about to be created.
     if unsafe { SetHandleInformation(input_handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0
     {
         return Err(io::Error::last_os_error().into());
@@ -62,6 +64,10 @@ pub fn spawn_detached_capture(
     let startup = startup_info([input_handle, output_handle, output_handle], &attributes)?;
     let mut command_line = launch.command_line;
     let mut process_info = PROCESS_INFORMATION::default();
+    // Safety: the application and command-line buffers are NUL-terminated wide
+    // strings owned by `launch`, the environment block stays alive for the
+    // call, the startup-info pointer matches `EXTENDED_STARTUPINFO_PRESENT`,
+    // and `process_info` is a valid out pointer.
     let created = unsafe {
         CreateProcessW(
             launch.application.as_ptr(),
@@ -117,6 +123,8 @@ pub fn spawn_detached(
     let log_handle = log.as_raw_handle() as HANDLE;
     let input_handle = null_input.as_raw_handle() as HANDLE;
     for handle in [input_handle, log_handle] {
+        // Safety: both handles are owned by this function and the call only
+        // toggles their inherit flag for the child that is about to be created.
         if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 {
             return Err(io::Error::last_os_error().into());
         }
@@ -127,6 +135,10 @@ pub fn spawn_detached(
 
     let mut command_line = launch.command_line;
     let mut process_info = PROCESS_INFORMATION::default();
+    // Safety: the application and command-line buffers are NUL-terminated wide
+    // strings owned by `launch`, the environment block stays alive for the
+    // call, the startup-info pointer matches `EXTENDED_STARTUPINFO_PRESENT`,
+    // and `process_info` is a valid out pointer.
     let created = unsafe {
         CreateProcessW(
             launch.application.as_ptr(),
@@ -201,10 +213,14 @@ impl DetachedTree {
         if self.primary_exit.is_some() {
             return Ok(());
         }
+        // Safety: the process handle is owned by `self`; a zero timeout makes
+        // the call a non-blocking poll with no side effects.
         let wait = unsafe { WaitForSingleObject(self.process.raw(), 0) };
         match wait {
             windows_sys::Win32::Foundation::WAIT_OBJECT_0 => {
                 let mut code = 0_u32;
+                // Safety: the process handle is owned by `self` and `code` is a
+                // valid out parameter for the duration of the call.
                 if unsafe { GetExitCodeProcess(self.process.raw(), &raw mut code) } == 0 {
                     return Err(io::Error::last_os_error());
                 }
@@ -224,6 +240,8 @@ impl DetachedTree {
     /// failed accounting query is reported instead of guessed away. Polling backs off
     /// instead of busy-looping on the accounting call.
     pub fn terminate_and_wait(&mut self, deadline: std::time::Instant) -> Result<(), ProcessError> {
+        // Safety: the job handle is owned by `self` and the call terminates
+        // exactly the process tree assigned to that job.
         if unsafe { TerminateJobObject(self.job.raw(), TERMINATION_EXIT_CODE) } == 0 {
             return Err(io::Error::last_os_error().into());
         }
@@ -270,6 +288,8 @@ pub fn set_after_primary_observation_hook_for_tests(hook: impl FnOnce() + 'stati
 
 fn job_active_processes(job: HANDLE) -> io::Result<u32> {
     let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+    // Safety: the job handle is valid for the call and the accounting struct
+    // with its exact size is a valid out parameter.
     if unsafe {
         QueryInformationJobObject(
             job,

@@ -43,10 +43,7 @@ fn mixed_workload_resource_soak() {
         "sample_unit": "one sequential read, glob, grep, and run_program cycle",
         "burst_epoch_policy": "one workload iteration per production burst epoch",
         "burst_quiet_ms": BURST_QUIET_MS,
-        "started_unix_ms": SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time")
-            .as_millis(),
+        "started_unix_ms": unix_ms_now(),
     }));
 
     let mut session = Session::start();
@@ -79,10 +76,7 @@ fn mixed_workload_resource_soak() {
                     "response": failure.response,
                     "active_descendant_pids": descendants,
                     "server_exit_status": server_exit_status,
-                    "finished_unix_ms": SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .expect("system time")
-                        .as_millis(),
+                    "finished_unix_ms": unix_ms_now(),
                 }));
                 panic!(
                     "{} request {} failed during iteration {}",
@@ -130,11 +124,8 @@ fn mixed_workload_resource_soak() {
         "threads": metric_summary(measured, |sample| sample.threads),
         "resource_tail_growth_blocking": resource_growth,
         "thread_tail_growth_blocking": thread_growth,
-        "threshold_policy": "zero surviving controlled descendants is blocking; resource and thread tail growth require net growth >= 3, slope >= 0.25 per iteration, and increases in at least half of tail transitions; memory growth is observational",
-        "finished_unix_ms": SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time")
-            .as_millis(),
+        "threshold_policy": THRESHOLD_POLICY,
+        "finished_unix_ms": unix_ms_now(),
     }));
     assert!(
         surviving_descendants.is_empty(),

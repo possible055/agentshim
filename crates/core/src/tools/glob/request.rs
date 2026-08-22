@@ -231,6 +231,36 @@ pub fn execute_with_traversal(
     })
 }
 
+#[cfg(any(test, feature = "bench-internals"))]
+/// Execute glob with an explicit traversal strategy and output budget for tests.
+///
+/// # Errors
+///
+/// Returns the same validation, path, traversal, cancellation, and formatting
+/// errors as [`execute_with_traversal`].
+pub fn execute_with_traversal_and_budget(
+    access: &Arc<FileAccess>,
+    request: &GlobRequest,
+    lanes: usize,
+    cancellation: &CancellationToken,
+    traversal: GlobTraversal,
+    output_budget: &dyn crate::output::CallBudget,
+) -> Result<String, GlobError> {
+    with_benchmark_resources(lanes, |resources| {
+        execute_inner_with_traversal(
+            access,
+            request,
+            resources,
+            cancellation,
+            traversal,
+            &GlobProfiler::disabled(),
+            None,
+            output_budget,
+        )
+        .map(|output| output.text)
+    })
+}
+
 #[cfg(feature = "bench-internals")]
 /// Execute one explicitly selected glob traversal and return stage timings.
 ///

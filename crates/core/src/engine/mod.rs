@@ -1,10 +1,4 @@
-use std::{
-    ffi::OsString,
-    io,
-    path::PathBuf,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{io, sync::Arc, time::Instant};
 
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
@@ -15,17 +9,9 @@ use crate::{
     runtime::{MemoryReservation, RuntimeResources},
     tools::{
         ToolOutput,
-        bash::{
-            self,
-            detached::DetachedAdmission,
-            locate::{BashLocator, LocateError},
-        },
-        exec::{
-            CaptureSink, ProcessError,
-            resolve::{ProcessResolver, ResolvedProgram, launcher_for},
-            spawn::{EnvironmentPlan, ExecPlan, Streams},
-        },
-        glob, grep, read, run_program,
+        bash::locate::BashLocator,
+        exec::{ProcessError, resolve::ProcessResolver},
+        glob, grep, read,
     },
 };
 
@@ -55,51 +41,9 @@ pub struct ToolEngine {
     process_environment: Option<ProcessEnvironment>,
 }
 
-#[derive(Clone, Debug)]
-pub struct ProcessEnvironment {
-    entries: Arc<Vec<(String, String)>>,
-    bash_override: Option<OsString>,
-}
+pub use process::{PreparedBash, PreparedRunProgram, ProcessEnvironment};
 
-impl ProcessEnvironment {
-    pub fn new(
-        entries: Vec<(String, String)>,
-        bash_override: Option<OsString>,
-    ) -> Result<Self, ProcessError> {
-        run_program::validate_base_environment(&entries)?;
-        Ok(Self {
-            entries: Arc::new(entries),
-            bash_override,
-        })
-    }
-}
-
-#[derive(Debug)]
-pub struct PreparedRunProgram {
-    inner: run_program::PreparedRunProgram,
-    memory_charge: usize,
-}
-
-impl PreparedRunProgram {
-    #[must_use]
-    pub fn argv(&self) -> Vec<String> {
-        prepared_argv(&self.inner.resolved, &self.inner.args)
-    }
-}
-
-#[derive(Debug)]
-pub struct PreparedBash {
-    inner: bash::PreparedBash,
-    memory_charge: usize,
-    background_timeout: Option<Duration>,
-}
-
-impl PreparedBash {
-    #[must_use]
-    pub fn argv(&self) -> Vec<String> {
-        prepared_argv(&self.inner.resolved, &self.inner.args)
-    }
-}
+mod process;
 
 impl ToolEngine {
     #[must_use]
@@ -162,7 +106,17 @@ impl ToolEngine {
         let queued = Instant::now();
         let admission = self
             .try_read_only_admission(&context.cancellation)
-            .ok_or_else(|| cancelled_or_read_busy(&context.cancellation, &self.resources))?;
+            .ok_or_else(|| {
+                cancelled_or_busy(
+                    read::ReadError::Cancelled,
+                    read::ReadError::ResourceBusy {
+                        resource: "read_only",
+                        retry_after: None,
+                    },
+                    &context.cancellation,
+                    &self.resources,
+                )
+            })?;
         let worker = self
             .resources
             .acquire_worker(&context.cancellation)
@@ -204,7 +158,7 @@ impl ToolEngine {
                     break;
                 }
                 Err(error) => {
-                    result = Some(Err(normalize_read_cancellation(error, &cancellation)));
+                    result = Some(Err(normalize_cancellation(error, &cancellation)));
                     break;
                 }
             };
@@ -280,7 +234,7 @@ impl ToolEngine {
                     break;
                 }
                 Err(error) => {
-                    result = Some(Err(normalize_read_cancellation(error, &cancellation)));
+                    result = Some(Err(normalize_cancellation(error, &cancellation)));
                     break;
                 }
             }
@@ -302,45 +256,41 @@ impl ToolEngine {
         request: glob::GlobRequest,
         context: OperationContext,
     ) -> Result<ToolOutput, glob::GlobError> {
-        let queued = Instant::now();
         let admission = self
             .try_read_only_admission(&context.cancellation)
-            .ok_or_else(|| cancelled_or_glob_busy(&context.cancellation, &self.resources))?;
-        let worker = self
-            .resources
-            .acquire_worker(&context.cancellation)
-            .await
-            .map_err(|_| glob::GlobError::Cancelled)?;
+            .ok_or_else(|| {
+                cancelled_or_busy(
+                    glob::GlobError::Cancelled,
+                    glob::GlobError::ResourceBusy("read_only"),
+                    &context.cancellation,
+                    &self.resources,
+                )
+            })?;
         let charge = glob::memory_charge(&request);
-        let memory = self
-            .resources
-            .reserve_memory(charge, &context.cancellation)
-            .await
-            .map_err(|_| glob::GlobError::Cancelled)?;
-        trace_capacity_acquired(queued);
-        let reservation = MemoryReservation::from_initial(&self.resources, memory, charge);
-        let (cancellation, _relay) =
-            relayed_cancellation(&context.cancellation, self.resources.shutdown_token());
         let access = Arc::clone(&self.access);
         let resources = self.resources.clone();
-        let output_budget = Arc::clone(&context.output_budget);
         let span = tracing::Span::current();
-        tokio::task::spawn_blocking(move || {
-            span.in_scope(|| {
-                let result = glob::execute_output_with_budget(
-                    &access,
-                    &request,
-                    &resources,
-                    &cancellation,
-                    reservation,
-                    output_budget.as_ref(),
-                );
-                drop((admission, worker));
-                result.map_err(|error| normalize_glob_cancellation(error, &cancellation))
-            })
-        })
+        self.spawn_budgeted_search(
+            &context,
+            charge,
+            vec![admission],
+            || glob::GlobError::Cancelled,
+            glob::GlobError::Worker,
+            move |cancellation, output_budget, reservation| {
+                span.in_scope(|| {
+                    glob::execute_output_with_budget(
+                        &access,
+                        &request,
+                        &resources,
+                        cancellation,
+                        reservation,
+                        output_budget,
+                    )
+                    .map_err(|error| normalize_cancellation(error, cancellation))
+                })
+            },
+        )
         .await
-        .map_err(|error| glob::GlobError::Worker(error.to_string()))?
     }
 
     pub async fn grep(
@@ -348,409 +298,54 @@ impl ToolEngine {
         request: grep::GrepRequest,
         context: OperationContext,
     ) -> Result<ToolOutput, grep::GrepError> {
-        let queued = Instant::now();
         let grep_admission = self.resources.try_admit_grep().ok_or_else(|| {
-            cancelled_or_grep_concurrency_busy(&context.cancellation, &self.resources)
+            cancelled_or_busy(
+                grep::GrepError::Cancelled,
+                grep::GrepError::ResourceBusy("grep_concurrency"),
+                &context.cancellation,
+                &self.resources,
+            )
         })?;
         let admission = self
             .try_read_only_admission(&context.cancellation)
-            .ok_or_else(|| cancelled_or_grep_busy(&context.cancellation, &self.resources))?;
-        let worker = self
-            .resources
-            .acquire_worker(&context.cancellation)
-            .await
-            .map_err(|_| grep::GrepError::Cancelled)?;
+            .ok_or_else(|| {
+                cancelled_or_busy(
+                    grep::GrepError::Cancelled,
+                    grep::GrepError::ResourceBusy("read_only"),
+                    &context.cancellation,
+                    &self.resources,
+                )
+            })?;
         let open_file = self
             .resources
             .acquire_open_file(&context.cancellation)
             .await
             .map_err(|_| grep::GrepError::Cancelled)?;
         let charge = grep::base_memory_charge(self.resources.config().grep_memory_bytes);
-        let memory = self
-            .resources
-            .reserve_memory(charge, &context.cancellation)
-            .await
-            .map_err(|_| grep::GrepError::Cancelled)?;
-        trace_capacity_acquired(queued);
-        let reservation = MemoryReservation::from_initial(&self.resources, memory, charge);
-        let (cancellation, _relay) =
-            relayed_cancellation(&context.cancellation, self.resources.shutdown_token());
         let access = Arc::clone(&self.access);
         let resources = self.resources.clone();
-        let output_budget = Arc::clone(&context.output_budget);
         let span = tracing::Span::current();
-        tokio::task::spawn_blocking(move || {
-            span.in_scope(|| {
-                let result = grep::execute_output_with_budget(
-                    &access,
-                    &request,
-                    &resources,
-                    &cancellation,
-                    reservation,
-                    output_budget.as_ref(),
-                );
-                drop((grep_admission, admission, worker, open_file));
-                result.map_err(|error| normalize_grep_cancellation(error, &cancellation))
-            })
-        })
-        .await
-        .map_err(|error| grep::GrepError::Worker(error.to_string()))?
-    }
-
-    pub fn prepare_run_program(
-        &self,
-        request: &run_program::ProcessRequest,
-        timeout_ceiling_ms: u64,
-        context: &OperationContext,
-    ) -> Result<PreparedRunProgram, ProcessError> {
-        self.ensure_process_active(&context.cancellation)?;
-        let timeout = Duration::from_millis(request.timeout_ms(timeout_ceiling_ms));
-        let mut inner = run_program::prepare_run_program(
-            &self.root,
-            &self.process_resolver,
-            request,
-            timeout,
-            timeout_ceiling_ms,
-        )?;
-        self.apply_process_environment(&mut inner.environment);
-        Ok(PreparedRunProgram {
-            inner,
-            memory_charge: request.memory_charge(),
-        })
-    }
-
-    pub fn prepare_bash(
-        &self,
-        request: &bash::BashRequest,
-        timeout_ceiling_ms: u64,
-        context: &OperationContext,
-    ) -> Result<PreparedBash, ProcessError> {
-        self.ensure_process_active(&context.cancellation)?;
-        if request.detach {
-            return Err(ProcessError::Validation(
-                "foreground bash prepare does not accept detach".to_owned(),
-            ));
-        }
-        let timeout = Duration::from_millis(request.timeout_ms(timeout_ceiling_ms));
-        let mut inner = bash::prepare_bash_foreground(
-            &self.root,
-            &self.bash_locator,
-            request,
-            timeout,
-            timeout_ceiling_ms,
-            &context.cancellation,
-        )?;
-        self.apply_process_environment(&mut inner.environment);
-        Ok(PreparedBash {
-            inner,
-            memory_charge: request.memory_charge(),
-            background_timeout: None,
-        })
-    }
-
-    pub fn prepare_background_bash(
-        &self,
-        request: &bash::BashRequest,
-        background_timeout_max_ms: u64,
-        launch_timeout_ceiling_ms: u64,
-        context: &OperationContext,
-    ) -> Result<PreparedBash, ProcessError> {
-        self.ensure_process_active(&context.cancellation)?;
-        if request.detach {
-            return Err(ProcessError::Validation(
-                "native background bash prepare does not accept detach".to_owned(),
-            ));
-        }
-        request.validate(background_timeout_max_ms)?;
-        let launch_timeout_ms =
-            crate::tools::exec::spawn::default_timeout_within(launch_timeout_ceiling_ms);
-        let mut inner = bash::prepare_bash_foreground(
-            &self.root,
-            &self.bash_locator,
-            request,
-            Duration::from_millis(launch_timeout_ms),
-            background_timeout_max_ms,
-            &context.cancellation,
-        )?;
-        inner.request_timeout_ms = launch_timeout_ms;
-        self.apply_process_environment(&mut inner.environment);
-        Ok(PreparedBash {
-            inner,
-            memory_charge: request.memory_charge(),
-            background_timeout: Some(Duration::from_millis(
-                request.background_timeout_ms(background_timeout_max_ms),
-            )),
-        })
-    }
-
-    pub async fn spawn_run_program(
-        &self,
-        prepared: PreparedRunProgram,
-        wrapped_argv: Option<Vec<String>>,
-        context: OperationContext,
-        capture_sink: Option<Arc<dyn CaptureSink>>,
-    ) -> Result<ToolOutput, ProcessError> {
-        let permits = self
-            .acquire_process(
-                prepared.inner.deadline,
-                prepared.inner.request_timeout_ms,
-                prepared.memory_charge,
-                &context.cancellation,
-            )
-            .await?;
-        let (cancellation, _relay) =
-            relayed_cancellation(&context.cancellation, self.resources.shutdown_token());
-        let output_budget = Arc::clone(&context.output_budget);
-        let span = tracing::Span::current();
-        tokio::task::spawn_blocking(move || {
-            span.in_scope(|| {
-                let result = run_program::execute_prepared_run_program(
-                    prepared.inner,
-                    wrapped_argv.as_deref(),
-                    &cancellation,
-                    output_budget.as_ref(),
-                    capture_sink.as_ref(),
-                );
-                drop(permits);
-                result
-            })
-        })
-        .await
-        .map_err(|error| ProcessError::Worker(error.to_string()))?
-    }
-
-    pub async fn spawn_bash(
-        &self,
-        prepared: PreparedBash,
-        wrapped_argv: Option<Vec<String>>,
-        context: OperationContext,
-        capture_sink: Option<Arc<dyn CaptureSink>>,
-    ) -> Result<ToolOutput, ProcessError> {
-        let permits = self
-            .acquire_process(
-                prepared.inner.deadline,
-                prepared.inner.request_timeout_ms,
-                prepared.memory_charge,
-                &context.cancellation,
-            )
-            .await?;
-        let (cancellation, _relay) =
-            relayed_cancellation(&context.cancellation, self.resources.shutdown_token());
-        let output_budget = Arc::clone(&context.output_budget);
-        let span = tracing::Span::current();
-        tokio::task::spawn_blocking(move || {
-            span.in_scope(|| {
-                let result = bash::execute_prepared_bash(
-                    prepared.inner,
-                    wrapped_argv.as_deref(),
-                    &cancellation,
-                    output_budget.as_ref(),
-                    capture_sink.as_ref(),
-                );
-                drop(permits);
-                result
-            })
-        })
-        .await
-        .map_err(|error| ProcessError::Worker(error.to_string()))?
-    }
-
-    pub async fn run_detached_bash<F>(
-        &self,
-        request: bash::BashRequest,
-        admission: DetachedAdmission,
-        background_timeout_max_ms: u64,
-        launch_timeout_ceiling_ms: u64,
-        on_commit: F,
-        context: OperationContext,
-    ) -> Result<ToolOutput, ProcessError>
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        if !request.detach {
-            return Err(ProcessError::Validation(
-                "detached bash execution requires detach".to_owned(),
-            ));
-        }
-        request.validate(background_timeout_max_ms)?;
-        self.ensure_process_active(&context.cancellation)?;
-        let launch_timeout_ms =
-            crate::tools::exec::spawn::default_timeout_within(launch_timeout_ceiling_ms);
-        let launch_timeout = Duration::from_millis(launch_timeout_ms);
-        let queued = Instant::now();
-        let memory = tokio::time::timeout(
-            launch_timeout,
-            self.resources
-                .reserve_memory(request.memory_charge(), &context.cancellation),
+        self.spawn_budgeted_search(
+            &context,
+            charge,
+            vec![grep_admission, admission, open_file],
+            || grep::GrepError::Cancelled,
+            grep::GrepError::Worker,
+            move |cancellation, output_budget, reservation| {
+                span.in_scope(|| {
+                    grep::execute_output_with_budget(
+                        &access,
+                        &request,
+                        &resources,
+                        cancellation,
+                        reservation,
+                        output_budget,
+                    )
+                    .map_err(|error| normalize_cancellation(error, cancellation))
+                })
+            },
         )
         .await
-        .map_err(|_| ProcessError::TimeoutBeforeSpawn {
-            timeout_ms: launch_timeout_ms,
-        })?
-        .map_err(|_| ProcessError::Cancelled)?;
-        trace_capacity_acquired(queued);
-        let remaining = launch_timeout
-            .checked_sub(queued.elapsed())
-            .filter(|remaining| !remaining.is_zero())
-            .ok_or(ProcessError::TimeoutBeforeSpawn {
-                timeout_ms: launch_timeout_ms,
-            })?;
-        let root = Arc::clone(&self.root);
-        let locator = self.bash_locator.clone();
-        let (cancellation, _relay) =
-            relayed_cancellation(&context.cancellation, self.resources.shutdown_token());
-        let output_budget = Arc::clone(&context.output_budget);
-        let span = tracing::Span::current();
-        tokio::task::spawn_blocking(move || {
-            span.in_scope(|| {
-                let result = bash::execute_output_with_capture(
-                    &root,
-                    &locator,
-                    Some(admission),
-                    &request,
-                    remaining,
-                    &cancellation,
-                    background_timeout_max_ms,
-                    output_budget.as_ref(),
-                    None,
-                );
-                if result.is_ok() {
-                    on_commit();
-                }
-                drop(memory);
-                result
-            })
-        })
-        .await
-        .map_err(|error| ProcessError::Worker(error.to_string()))?
-    }
-
-    pub fn spawn_background_bash(
-        &self,
-        prepared: PreparedBash,
-        wrapped_argv: Option<&[String]>,
-        context: &OperationContext,
-    ) -> Result<
-        (
-            crate::platform::process::DetachedTree,
-            std::fs::File,
-            Duration,
-            Instant,
-        ),
-        ProcessError,
-    > {
-        self.ensure_process_active(&context.cancellation)?;
-        let background_timeout = prepared.background_timeout.ok_or_else(|| {
-            ProcessError::Validation("background spawn requires a background prepare".to_owned())
-        })?;
-        let bash::PreparedBash {
-            mut resolved,
-            cwd,
-            args,
-            environment,
-            deadline,
-            request_timeout_ms,
-            ..
-        } = prepared.inner;
-        if Instant::now() >= deadline {
-            return Err(ProcessError::TimeoutBeforeSpawn {
-                timeout_ms: request_timeout_ms,
-            });
-        }
-        let args = if let Some(argv) = wrapped_argv {
-            let command = argv.first().ok_or_else(|| {
-                ProcessError::Validation(
-                    "wrapped argv must contain at least the executable".to_owned(),
-                )
-            })?;
-            resolved = ResolvedProgram {
-                absolute: PathBuf::from(command),
-                executable: PathBuf::from(command),
-                launcher: launcher_for(std::path::Path::new(command))?,
-            };
-            argv[1..].to_vec()
-        } else {
-            args
-        };
-        let plan = ExecPlan {
-            resolved: &resolved,
-            cwd: &cwd,
-            args: &args,
-            environment: &environment,
-            stdin: None,
-            streams: Streams::Merged,
-            timeout: Duration::ZERO,
-            capture_page_bytes: context.output_budget.page_bytes(),
-        };
-        let (mut tree, reader) =
-            crate::platform::process::spawn_detached_capture(&plan, &environment)?;
-        let spawned_at = Instant::now();
-        if context.cancellation.is_cancelled() || self.resources.shutdown_token().is_cancelled() {
-            tree.terminate_and_wait(Instant::now() + crate::tools::exec::spawn::CLEANUP_DEADLINE)?;
-            return Err(ProcessError::Cancelled);
-        }
-        Ok((tree, reader, background_timeout, spawned_at))
-    }
-
-    pub fn verify_bash(&self) -> Result<(), ProcessError> {
-        self.bash_runtime().map(|_| ())
-    }
-
-    pub fn bash_runtime(&self) -> Result<(PathBuf, String), ProcessError> {
-        self.bash_locator
-            .resolve(&self.resources.shutdown_token())
-            .map(|runtime| (runtime.executable.clone(), runtime.locale.clone()))
-            .map_err(|error| match error {
-                LocateError::Cancelled => ProcessError::Cancelled,
-                LocateError::TimedOut => ProcessError::TimeoutBeforeSpawn {
-                    timeout_ms: crate::tools::exec::DEFAULT_TIMEOUT_MS,
-                },
-                LocateError::Unavailable(message) => ProcessError::Unavailable(message.to_string()),
-            })
-    }
-
-    async fn acquire_process(
-        &self,
-        deadline: std::time::Instant,
-        timeout_ms: u64,
-        memory_bytes: usize,
-        cancellation: &CancellationToken,
-    ) -> Result<(OwnedSemaphorePermit, OwnedSemaphorePermit), ProcessError> {
-        let queued = Instant::now();
-        self.ensure_process_active(cancellation)?;
-        if Instant::now() >= deadline {
-            return Err(ProcessError::TimeoutBeforeSpawn { timeout_ms });
-        }
-        let process = self.resources.try_admit_process().ok_or_else(|| {
-            if cancellation.is_cancelled() || self.resources.shutdown_token().is_cancelled() {
-                ProcessError::Cancelled
-            } else {
-                ProcessError::ResourceBusy("foreground process capacity is full".to_owned())
-            }
-        })?;
-        let memory = tokio::time::timeout_at(
-            tokio::time::Instant::from_std(deadline),
-            self.resources.reserve_memory(memory_bytes, cancellation),
-        )
-        .await
-        .map_err(|_| ProcessError::TimeoutBeforeSpawn { timeout_ms })?
-        .map_err(|_| ProcessError::Cancelled)?;
-        trace_capacity_acquired(queued);
-        Ok((process, memory))
-    }
-
-    fn ensure_process_active(&self, cancellation: &CancellationToken) -> Result<(), ProcessError> {
-        if cancellation.is_cancelled() || self.resources.shutdown_token().is_cancelled() {
-            Err(ProcessError::Cancelled)
-        } else {
-            Ok(())
-        }
-    }
-
-    fn apply_process_environment(&self, environment: &mut EnvironmentPlan) {
-        if let Some(base) = &self.process_environment {
-            environment.base = Some(base.entries.as_ref().clone());
-        }
     }
 
     async fn acquire_pdf_admission(
@@ -784,6 +379,93 @@ impl ToolEngine {
             return None;
         }
         self.resources.try_admit_read_only()
+    }
+
+    /// One admission-to-worker pipeline for the read-only search tools: admit the
+    /// caller's permits, take a worker and the tool's memory charge, then run the
+    /// search on the blocking pool under a shutdown-relayed cancellation token.
+    #[allow(clippy::type_complexity)]
+    async fn spawn_budgeted_search<E, F>(
+        &self,
+        context: &OperationContext,
+        charge: usize,
+        mut holds: Vec<OwnedSemaphorePermit>,
+        cancelled: fn() -> E,
+        worker_error: fn(String) -> E,
+        execute: F,
+    ) -> Result<ToolOutput, E>
+    where
+        E: Send + 'static,
+        F: FnOnce(&CancellationToken, &dyn CallBudget, MemoryReservation) -> Result<ToolOutput, E>
+            + Send
+            + 'static,
+    {
+        let queued = Instant::now();
+        let worker = self
+            .resources
+            .acquire_worker(&context.cancellation)
+            .await
+            .map_err(|_| cancelled())?;
+        let memory = self
+            .resources
+            .reserve_memory(charge, &context.cancellation)
+            .await
+            .map_err(|_| cancelled())?;
+        trace_capacity_acquired(queued);
+        holds.push(worker);
+        let reservation = MemoryReservation::from_initial(&self.resources, memory, charge);
+        let output_budget = Arc::clone(&context.output_budget);
+        self.relayed_blocking(context, worker_error, move |cancellation| {
+            let result = execute(cancellation, output_budget.as_ref(), reservation);
+            drop(holds);
+            result
+        })
+        .await
+    }
+
+    async fn spawn_prepared_process<F>(
+        &self,
+        deadline: std::time::Instant,
+        timeout_ms: u64,
+        memory_charge: usize,
+        context: &OperationContext,
+        execute: F,
+    ) -> Result<ToolOutput, ProcessError>
+    where
+        F: FnOnce(&CancellationToken, &dyn CallBudget) -> Result<ToolOutput, ProcessError>
+            + Send
+            + 'static,
+    {
+        let permits = self
+            .acquire_process(deadline, timeout_ms, memory_charge, &context.cancellation)
+            .await?;
+        let output_budget = Arc::clone(&context.output_budget);
+        self.relayed_blocking(context, ProcessError::Worker, move |cancellation| {
+            let result = execute(cancellation, output_budget.as_ref());
+            drop(permits);
+            result
+        })
+        .await
+    }
+
+    /// Run `work` on the blocking pool with the request's cancellation relayed to the
+    /// shutdown token, mapping a pool worker panic to the caller's error type.
+    async fn relayed_blocking<T, E>(
+        &self,
+        context: &OperationContext,
+        worker_error: fn(String) -> E,
+        work: impl FnOnce(&CancellationToken) -> Result<T, E> + Send + 'static,
+    ) -> Result<T, E>
+    where
+        T: Send + 'static,
+        E: Send + 'static,
+    {
+        let (cancellation, _relay) =
+            relayed_cancellation(&context.cancellation, self.resources.shutdown_token());
+        match tokio::task::spawn_blocking(move || work(&cancellation)).await {
+            Ok(result) => result,
+            Err(error) => Err(worker_error(error.to_string())),
+        }
     }
 
     pub async fn auxiliary_read_only<T, F>(
@@ -884,7 +566,7 @@ fn relayed_cancellation(
     (cancellation, CancellationRelay(relay))
 }
 
-fn trace_capacity_acquired(queued: Instant) {
+pub(super) fn trace_capacity_acquired(queued: Instant) {
     tracing::info!(
         target: "agentshim",
         event = "capacity_acquired",
@@ -893,110 +575,79 @@ fn trace_capacity_acquired(queued: Instant) {
     );
 }
 
-fn prepared_argv(resolved: &ResolvedProgram, args: &[String]) -> Vec<String> {
-    let mut command_argv = Vec::with_capacity(args.len().saturating_add(1));
-    command_argv.push(resolved.executable.to_string_lossy().into_owned());
-    command_argv.extend(args.iter().cloned());
-    command_argv
-}
-
-fn cancelled_or_read_busy(
+fn cancelled_or_busy<E>(
+    cancelled: E,
+    busy: E,
     request: &CancellationToken,
     resources: &RuntimeResources,
-) -> read::ReadError {
+) -> E {
     if request.is_cancelled() || resources.shutdown_token().is_cancelled() {
-        read::ReadError::Cancelled
+        cancelled
     } else {
-        read::ReadError::ResourceBusy {
-            resource: "read_only",
-            retry_after: None,
+        busy
+    }
+}
+
+/// Error types whose cancellation-shaped variants must collapse into the single
+/// `Cancelled` variant when the relayed token actually fired.
+trait CancellationClassified: Sized {
+    fn cancellation_shaped(&self) -> bool;
+    fn cancelled() -> Self;
+}
+
+impl CancellationClassified for read::ReadError {
+    fn cancellation_shaped(&self) -> bool {
+        match self {
+            read::ReadError::Output(crate::output::OutputError::Cancelled)
+            | read::ReadError::Cancelled => true,
+            read::ReadError::Pdf(error) => {
+                error.kind() == agentshim_pdf_read::PdfReadErrorKind::Cancelled
+            }
+            _ => false,
         }
     }
-}
 
-fn cancelled_or_glob_busy(
-    request: &CancellationToken,
-    resources: &RuntimeResources,
-) -> glob::GlobError {
-    if request.is_cancelled() || resources.shutdown_token().is_cancelled() {
-        glob::GlobError::Cancelled
-    } else {
-        glob::GlobError::ResourceBusy("read_only")
-    }
-}
-
-fn cancelled_or_grep_busy(
-    request: &CancellationToken,
-    resources: &RuntimeResources,
-) -> grep::GrepError {
-    if request.is_cancelled() || resources.shutdown_token().is_cancelled() {
-        grep::GrepError::Cancelled
-    } else {
-        grep::GrepError::ResourceBusy("read_only")
-    }
-}
-
-fn cancelled_or_grep_concurrency_busy(
-    request: &CancellationToken,
-    resources: &RuntimeResources,
-) -> grep::GrepError {
-    if request.is_cancelled() || resources.shutdown_token().is_cancelled() {
-        grep::GrepError::Cancelled
-    } else {
-        grep::GrepError::ResourceBusy("grep_concurrency")
-    }
-}
-
-fn normalize_read_cancellation(
-    error: read::ReadError,
-    cancellation: &CancellationToken,
-) -> read::ReadError {
-    let cancellation_error = match &error {
-        read::ReadError::Output(crate::output::OutputError::Cancelled)
-        | read::ReadError::Cancelled => true,
-        read::ReadError::Pdf(error) => {
-            error.kind() == agentshim_pdf_read::PdfReadErrorKind::Cancelled
-        }
-        _ => false,
-    };
-    if cancellation.is_cancelled() && cancellation_error {
+    fn cancelled() -> Self {
         read::ReadError::Cancelled
-    } else {
-        error
     }
 }
 
-fn normalize_glob_cancellation(
-    error: glob::GlobError,
-    cancellation: &CancellationToken,
-) -> glob::GlobError {
-    if cancellation.is_cancelled()
-        && matches!(
-            &error,
+impl CancellationClassified for glob::GlobError {
+    fn cancellation_shaped(&self) -> bool {
+        matches!(
+            self,
             glob::GlobError::Traversal(crate::traversal::TraversalError::Cancelled)
                 | glob::GlobError::Output(crate::output::OutputError::Cancelled)
                 | glob::GlobError::Cancelled
         )
-    {
+    }
+
+    fn cancelled() -> Self {
         glob::GlobError::Cancelled
-    } else {
-        error
     }
 }
 
-fn normalize_grep_cancellation(
-    error: grep::GrepError,
-    cancellation: &CancellationToken,
-) -> grep::GrepError {
-    if cancellation.is_cancelled()
-        && matches!(
-            &error,
+impl CancellationClassified for grep::GrepError {
+    fn cancellation_shaped(&self) -> bool {
+        matches!(
+            self,
             grep::GrepError::Traversal(crate::traversal::TraversalError::Cancelled)
                 | grep::GrepError::Output(crate::output::OutputError::Cancelled)
                 | grep::GrepError::Cancelled
         )
-    {
+    }
+
+    fn cancelled() -> Self {
         grep::GrepError::Cancelled
+    }
+}
+
+fn normalize_cancellation<E: CancellationClassified>(
+    error: E,
+    cancellation: &CancellationToken,
+) -> E {
+    if cancellation.is_cancelled() && error.cancellation_shaped() {
+        E::cancelled()
     } else {
         error
     }

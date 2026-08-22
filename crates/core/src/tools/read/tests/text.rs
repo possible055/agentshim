@@ -418,6 +418,8 @@ fn named_pipe_and_device_paths_are_rejected_without_blocking() {
     let fixture = tempfile::tempdir().expect("fixture");
     let fifo = fixture.path().join("source.fifo");
     let fifo_bytes = CString::new(fifo.as_os_str().as_bytes()).expect("FIFO path");
+    // Safety: `fifo_bytes` is a NUL-terminated path owned by this test, and the
+    // mode bits only apply to the FIFO this test is about to create.
     assert_eq!(unsafe { libc::mkfifo(fifo_bytes.as_ptr(), 0o600) }, 0);
     let root = access(fixture.path());
     let cancellation = CancellationToken::new();

@@ -48,11 +48,6 @@ fn requests_bash_terminate(arguments: Option<&JsonObject>) -> bool {
         == Some("terminate")
 }
 
-#[derive(Debug)]
-pub(super) enum ToolAdmissionFailure {
-    Process(ProcessError),
-}
-
 fn first_shell_token(command: &str) -> Option<&str> {
     let command = command.trim_start();
     let first = command.as_bytes().first().copied()?;
@@ -105,35 +100,14 @@ impl AgentShim {
         request_cancellation: &CancellationToken,
         output_budget: &crate::output::CallOutputBudget,
     ) -> CallToolResponse {
-        let read_request: crate::tools::read::ReadRequest = match parse_request(arguments, "read") {
-            Ok(request) => request,
-            Err(error) => return classified_tool_error(output_budget, "validation", error),
-        };
-        let running = Instant::now();
-        let result = self
-            .tool_engine
-            .read(
-                read_request,
-                agentshim_core::OperationContext::new(
-                    request_cancellation.clone(),
-                    Arc::new(output_budget.clone()),
-                ),
-            )
-            .await;
-        if matches!(&result, Err(crate::tools::read::ReadError::Cancelled))
-            && self.resources.shutdown_token().is_cancelled()
-            && !request_cancellation.is_cancelled()
-        {
-            return classified_tool_error(output_budget, "shutdown", "read stopped by shutdown");
-        }
-        blocking_response(
+        self.run_read_only_tool(
             "read",
-            duration_ms(running.elapsed()),
-            Ok(result),
-            self.output_token_gate.as_ref(),
+            arguments,
             request_cancellation,
             output_budget,
+            |engine, request, context| Box::pin(engine.read(request, context)),
         )
+        .await
     }
 
     async fn call_glob(
@@ -142,35 +116,14 @@ impl AgentShim {
         request_cancellation: &CancellationToken,
         output_budget: &crate::output::CallOutputBudget,
     ) -> CallToolResponse {
-        let glob_request = match parse_request(arguments, "glob") {
-            Ok(request) => request,
-            Err(error) => return classified_tool_error(output_budget, "validation", error),
-        };
-        let running = Instant::now();
-        let result = self
-            .tool_engine
-            .glob(
-                glob_request,
-                agentshim_core::OperationContext::new(
-                    request_cancellation.clone(),
-                    Arc::new(output_budget.clone()),
-                ),
-            )
-            .await;
-        if matches!(&result, Err(crate::tools::glob::GlobError::Cancelled))
-            && self.resources.shutdown_token().is_cancelled()
-            && !request_cancellation.is_cancelled()
-        {
-            return classified_tool_error(output_budget, "shutdown", "glob stopped by shutdown");
-        }
-        blocking_response(
+        self.run_read_only_tool(
             "glob",
-            duration_ms(running.elapsed()),
-            Ok(result),
-            self.output_token_gate.as_ref(),
+            arguments,
             request_cancellation,
             output_budget,
+            |engine, request, context| Box::pin(engine.glob(request, context)),
         )
+        .await
     }
 
     async fn call_grep(
@@ -179,29 +132,68 @@ impl AgentShim {
         request_cancellation: &CancellationToken,
         output_budget: &crate::output::CallOutputBudget,
     ) -> CallToolResponse {
-        let grep_request: crate::tools::grep::GrepRequest = match parse_request(arguments, "grep") {
+        self.run_read_only_tool(
+            "grep",
+            arguments,
+            request_cancellation,
+            output_budget,
+            |engine, request, context| Box::pin(engine.grep(request, context)),
+        )
+        .await
+    }
+
+    /// One pipeline for the three read-only tools: parse, run under the shared
+    /// operation context, reclassify a shutdown-time cancellation, and render.
+    async fn run_read_only_tool<R, E, F>(
+        &self,
+        tool: &'static str,
+        arguments: Option<JsonObject>,
+        request_cancellation: &CancellationToken,
+        output_budget: &crate::output::CallOutputBudget,
+        invoke: F,
+    ) -> CallToolResponse
+    where
+        R: serde::de::DeserializeOwned,
+        E: super::response::DiagnosticError,
+        F: for<'engine> FnOnce(
+            &'engine agentshim_core::ToolEngine,
+            R,
+            agentshim_core::OperationContext,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<crate::tools::ToolOutput, E>>
+                    + Send
+                    + 'engine,
+            >,
+        >,
+    {
+        let request: R = match parse_request(arguments, tool) {
             Ok(request) => request,
             Err(error) => return classified_tool_error(output_budget, "validation", error),
         };
         let running = Instant::now();
-        let result = self
-            .tool_engine
-            .grep(
-                grep_request,
-                agentshim_core::OperationContext::new(
-                    request_cancellation.clone(),
-                    Arc::new(output_budget.clone()),
-                ),
-            )
-            .await;
-        if matches!(&result, Err(crate::tools::grep::GrepError::Cancelled))
+        let result = invoke(
+            &self.tool_engine,
+            request,
+            agentshim_core::OperationContext::new(
+                request_cancellation.clone(),
+                Arc::new(output_budget.clone()),
+            ),
+        )
+        .await;
+        if result.is_err()
             && self.resources.shutdown_token().is_cancelled()
             && !request_cancellation.is_cancelled()
+            && matches!(&result, Err(error) if error.error_class() == "client_cancellation")
         {
-            return classified_tool_error(output_budget, "shutdown", "grep stopped by shutdown");
+            return classified_tool_error(
+                output_budget,
+                "shutdown",
+                format!("{tool} stopped by shutdown"),
+            );
         }
         blocking_response(
-            "grep",
+            tool,
             duration_ms(running.elapsed()),
             Ok(result),
             self.output_token_gate.as_ref(),
@@ -580,18 +572,16 @@ impl AgentShim {
     pub(super) fn try_admit_tool(
         &self,
         request: &CallToolRequestParams,
-    ) -> Result<ToolAdmission, ToolAdmissionFailure> {
+    ) -> Result<ToolAdmission, ProcessError> {
         match request.name.as_ref() {
             "read" | "glob" | "grep" => Ok(ToolAdmission::ReadOnlyFacade),
             "bash_status" => Ok(ToolAdmission::AuxiliaryReadOnly),
             "bash" if requests_bash_terminate(request.arguments.as_ref()) => {
                 Ok(ToolAdmission::DetachedControl)
             }
-            "bash" if requests_detach(request.arguments.as_ref()) => self
-                .detached
-                .admit()
-                .map(ToolAdmission::Detached)
-                .map_err(ToolAdmissionFailure::Process),
+            "bash" if requests_detach(request.arguments.as_ref()) => {
+                self.detached.admit().map(ToolAdmission::Detached)
+            }
             "run_program" | "bash" => Ok(ToolAdmission::ForegroundProcess),
             _ => Ok(ToolAdmission::None),
         }

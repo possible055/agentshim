@@ -121,9 +121,6 @@ pub enum ReadError {
     Validation(String),
     #[error(transparent)]
     Path(#[from] PathError),
-    #[error("path cannot be represented losslessly in model-visible JSON")]
-    #[allow(dead_code)]
-    NonUnicodePath,
     #[error("target is a directory; use glob to list its contents")]
     Directory,
     #[error("target is not a regular file")]

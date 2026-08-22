@@ -12,7 +12,6 @@ on:
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
-      - .cargo/**
       - .github/workflows/dsh-adapter.yml
   pull_request:
     paths:
@@ -23,7 +22,6 @@ on:
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
-      - .cargo/**
       - .github/workflows/dsh-adapter.yml
   workflow_dispatch:
 

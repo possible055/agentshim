@@ -29,12 +29,12 @@ pub use request::{
 #[cfg(test)]
 use candidates::{CandidateCollection, candidate};
 #[cfg(test)]
-use file_search::{SearchPlan, search_file, search_file_with_hook, search_file_with_variant_hook};
+use file_search::{SearchPlan, search_file_with};
 #[cfg(test)]
-use request::{CandidatePolicy, PAGE_MEMORY_BYTES, build_matcher};
+use request::{PAGE_MEMORY_BYTES, build_matcher};
 #[cfg(test)]
 use result::{Page, render, render_with_budget};
 
 #[cfg(test)]
-#[path = "grep/tests.rs"]
+#[path = "grep/tests/mod.rs"]
 mod test_suite;

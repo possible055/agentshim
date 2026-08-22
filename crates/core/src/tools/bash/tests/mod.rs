@@ -115,4 +115,5 @@ fn windows_argument_echo_command(root: &std::path::Path) -> String {
 }
 
 mod detached;
+mod detached_admission;
 mod execution;

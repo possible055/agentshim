@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 
-pub(super) fn minimal_pdf(content: &[u8]) -> Vec<u8> {
+pub fn minimal_pdf(content: &[u8]) -> Vec<u8> {
     let mut stream = format!("<< /Length {} >>\nstream\n", content.len()).into_bytes();
     stream.extend_from_slice(content);
     stream.extend_from_slice(b"\nendstream");
@@ -14,11 +14,11 @@ pub(super) fn minimal_pdf(content: &[u8]) -> Vec<u8> {
     ])
 }
 
-pub(super) fn pdf_with_text() -> Vec<u8> {
+pub fn pdf_with_text() -> Vec<u8> {
     minimal_pdf(b"BT /F1 18 Tf 20 150 Td (PDF read heading) Tj ET")
 }
 
-pub(super) fn pdf_with_pages(count: usize) -> Vec<u8> {
+pub fn pdf_with_pages(count: usize) -> Vec<u8> {
     let mut bodies: Vec<Vec<u8>> = Vec::new();
     let page_ids: Vec<usize> = (0..count).map(|index| 4 + index * 2).collect();
     let kids = page_ids
@@ -50,7 +50,7 @@ pub(super) fn pdf_with_pages(count: usize) -> Vec<u8> {
     assemble_pdf(&bodies)
 }
 
-pub(super) fn pdf_full_page_image() -> Vec<u8> {
+pub fn pdf_full_page_image() -> Vec<u8> {
     let pixels = vec![0x80_u8; 80 * 80 * 3];
     let mut image = format!(
         "<< /Type /XObject /Subtype /Image /Width 80 /Height 80 /ColorSpace /DeviceRGB \
@@ -76,7 +76,7 @@ pub(super) fn pdf_full_page_image() -> Vec<u8> {
     ])
 }
 
-pub(super) fn pdf_text_then_image() -> Vec<u8> {
+pub fn pdf_text_then_image() -> Vec<u8> {
     let pixels = vec![0x80_u8; 80 * 80 * 3];
     let mut image = format!(
         "<< /Type /XObject /Subtype /Image /Width 80 /Height 80 /ColorSpace /DeviceRGB \
@@ -116,7 +116,7 @@ pub(super) fn pdf_text_then_image() -> Vec<u8> {
     ])
 }
 
-pub(super) fn pdf_with_page_densities(lines_per_page: &[usize]) -> Vec<u8> {
+pub fn pdf_with_page_densities(lines_per_page: &[usize]) -> Vec<u8> {
     let count = lines_per_page.len();
     let mut bodies: Vec<Vec<u8>> = Vec::new();
     let page_ids: Vec<usize> = (0..count).map(|index| 4 + index * 2).collect();
@@ -158,7 +158,7 @@ pub(super) fn pdf_with_page_densities(lines_per_page: &[usize]) -> Vec<u8> {
     assemble_pdf(&bodies)
 }
 
-pub(super) fn pdf_with_bulky_pages(count: usize, lines_per_page: usize) -> Vec<u8> {
+pub fn pdf_with_bulky_pages(count: usize, lines_per_page: usize) -> Vec<u8> {
     let mut bodies: Vec<Vec<u8>> = Vec::new();
     let page_ids: Vec<usize> = (0..count).map(|index| 4 + index * 2).collect();
     let kids = page_ids
@@ -199,7 +199,7 @@ pub(super) fn pdf_with_bulky_pages(count: usize, lines_per_page: usize) -> Vec<u
     assemble_pdf(&bodies)
 }
 
-pub(super) fn assemble_pdf(bodies: &[Vec<u8>]) -> Vec<u8> {
+pub fn assemble_pdf(bodies: &[Vec<u8>]) -> Vec<u8> {
     let mut pdf = b"%PDF-1.7\n".to_vec();
     let mut offsets = vec![0_usize; bodies.len() + 1];
     for (index, body) in bodies.iter().enumerate() {

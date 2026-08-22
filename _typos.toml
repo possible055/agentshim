@@ -1,0 +1,16 @@
+[files]
+extend-exclude = [
+    # Raw BPE rank data, not prose.
+    "crates/gigatoken-core/assets",
+    # Retained upstream source: glyph names, CMap tables, and encoded test
+    # vectors dominate the text and are not English prose.
+    "crates/pdf-read-core",
+]
+
+[default.extend-words]
+# Hyphenated compound in watchdog documentation.
+mis = "mis"
+# whoami.exe CSV output flag.
+fo = "fo"
+# PDF stream dictionary key.
+Parms = "Parms"

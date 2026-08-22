@@ -159,6 +159,8 @@ pub fn settle_threads_with_deadlines(
 }
 
 fn cancel_thread_io<T>(thread: &thread::JoinHandle<T>) {
+    // Safety: the raw handle is borrowed from the live join handle; failure is
+    // an expected outcome when the thread is not currently blocked on I/O.
     unsafe {
         CancelSynchronousIo(thread.as_raw_handle());
     }
@@ -330,6 +332,8 @@ fn append_ascii(output: &mut Vec<u16>, value: &str) {
 
 fn system_cmd() -> Result<PathBuf, ProcessError> {
     let mut buffer = vec![0_u16; 32_768];
+    // Safety: the buffer pointer and capacity match, and the call only writes
+    // UTF-16 units inside that buffer.
     let length = unsafe {
         GetSystemDirectoryW(
             buffer.as_mut_ptr(),
@@ -432,6 +436,9 @@ fn environment_key_order(left: &OsStr, right: &OsStr) -> Ordering {
     let right = right.encode_wide().collect::<Vec<_>>();
     let left_length = i32::try_from(left.len()).unwrap_or(i32::MAX);
     let right_length = i32::try_from(right.len()).unwrap_or(i32::MAX);
+    // Safety: both buffers outlive the call with lengths matching their
+    // slices; `CompareStringOrdinal` only reads them and is otherwise
+    // side-effect free.
     match unsafe {
         CompareStringOrdinal(left.as_ptr(), left_length, right.as_ptr(), right_length, 1)
     } {
@@ -465,6 +472,8 @@ impl Pipe {
         };
         let mut read = null_mut();
         let mut write = null_mut();
+        // Safety: both out pointers are valid for the call, and the security
+        // attributes struct is fully initialized with its size.
         if unsafe { CreatePipe(&raw mut read, &raw mut write, &raw const attributes, 0) } == 0 {
             return Err(io::Error::last_os_error());
         }
@@ -475,6 +484,8 @@ impl Pipe {
         } else {
             (read, write)
         };
+        // Safety: the parent end is owned by this function and the call only
+        // clears its inherit flag.
         if unsafe { SetHandleInformation(parent.raw(), HANDLE_FLAG_INHERIT, 0) } == 0 {
             return Err(io::Error::last_os_error());
         }
@@ -490,6 +501,8 @@ pub struct AttributeList {
 impl AttributeList {
     pub fn new(handles: &[HANDLE]) -> io::Result<Self> {
         let mut bytes = 0_usize;
+        // Safety: a null attribute-list pointer is the documented sizing mode;
+        // the call only writes the required byte count.
         unsafe {
             InitializeProcThreadAttributeList(null_mut(), 1, 0, &raw mut bytes);
         }
@@ -499,11 +512,15 @@ impl AttributeList {
         let words = bytes.div_ceil(size_of::<usize>());
         let storage = vec![0_usize; words];
         let pointer = storage.as_ptr().cast_mut().cast::<c_void>();
+        // Safety: the storage buffer holds the byte count returned by the
+        // sizing call, so the pointer and buffer length are a valid pair.
         if unsafe { InitializeProcThreadAttributeList(pointer, 1, 0, &raw mut bytes) } == 0 {
             return Err(io::Error::last_os_error());
         }
         let handles = handles.to_vec().into_boxed_slice();
         let list = Self { storage, handles };
+        // Safety: the attribute list was initialized above and the handle
+        // buffer pointer and size match the boxed slice stored in `list`.
         if unsafe {
             UpdateProcThreadAttribute(
                 list.as_ptr(),
@@ -528,6 +545,8 @@ impl AttributeList {
 
 impl Drop for AttributeList {
     fn drop(&mut self) {
+        // Safety: the list was initialized in `new` and drop runs exactly
+        // once, so the pointer is valid and not double-deleted.
         unsafe {
             DeleteProcThreadAttributeList(self.as_ptr());
         }
@@ -557,6 +576,9 @@ impl Lifecycle {
         let thread = match OwnedHandle::new(info.hThread) {
             Ok(thread) => thread,
             Err(error) => {
+                // Safety: the process handle is owned by this scope; the child
+                // is still suspended, so termination reaps a not-yet-running
+                // process.
                 unsafe {
                     TerminateProcess(process.raw(), TERMINATION_EXIT_CODE);
                 }
@@ -583,10 +605,13 @@ impl Lifecycle {
                 "invalid lifecycle transition to JobAssigned",
             ));
         }
+        // Safety: both null parameters are documented as optional defaults.
         let job = OwnedHandle::new(unsafe { CreateJobObjectW(null(), null()) })?;
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         set_job_information(job.raw(), JobObjectExtendedLimitInformation, &limits)?;
+        // Safety: an invalid file handle with a null existing port is the
+        // documented way to create a fresh completion port.
         let completion = OwnedHandle::new(unsafe {
             CreateIoCompletionPort(INVALID_HANDLE_VALUE, null_mut(), 0, 1)
         })?;
@@ -603,6 +628,8 @@ impl Lifecycle {
         self.completion = Some(completion);
         #[cfg(test)]
         inject_failure(FailurePoint::JobReady)?;
+        // Safety: both handles are owned by this lifecycle and remain valid
+        // for the duration of the call.
         if unsafe {
             AssignProcessToJobObject(
                 self.job.as_ref().expect("job installed").raw(),
@@ -629,6 +656,8 @@ impl Lifecycle {
             .thread
             .as_ref()
             .ok_or_else(|| io::Error::other("primary thread handle is unavailable"))?;
+        // Safety: the thread handle is owned by this lifecycle and the state
+        // machine guarantees the thread is still suspended here.
         if unsafe { ResumeThread(thread.raw()) } == u32::MAX {
             return Err(io::Error::last_os_error());
         }
@@ -642,6 +671,8 @@ impl Lifecycle {
             .process
             .as_ref()
             .ok_or_else(|| io::Error::other("primary process handle is unavailable"))?;
+        // Safety: the process handle is owned by this lifecycle; a zero
+        // timeout makes the call a non-blocking poll.
         let wait = unsafe { WaitForSingleObject(process.raw(), 0) };
         match wait {
             WAIT_OBJECT_0 => {}
@@ -649,6 +680,8 @@ impl Lifecycle {
             _ => return Err(io::Error::last_os_error()),
         }
         let mut code = 0_u32;
+        // Safety: the process handle is owned by this lifecycle and `code` is
+        // a valid out parameter for the duration of the call.
         if unsafe { GetExitCodeProcess(process.raw(), &raw mut code) } == 0 {
             return Err(io::Error::last_os_error());
         }
@@ -661,6 +694,8 @@ impl Lifecycle {
             .job
             .as_ref()
             .ok_or_else(|| io::Error::other("job handle is unavailable"))?;
+        // Safety: the job handle is owned by this lifecycle and the accounting
+        // struct with its exact size is a valid out parameter.
         if unsafe {
             QueryInformationJobObject(
                 job.raw(),
@@ -684,6 +719,9 @@ impl Lifecycle {
         let mut transferred = 0_u32;
         let mut key = 0_usize;
         let mut overlapped = null_mut();
+        // Safety: the completion handle is owned by this lifecycle and all
+        // four out pointers are valid for the duration of the call; the return
+        // value is intentionally ignored because this is a hint-only poll.
         unsafe {
             GetQueuedCompletionStatus(
                 completion.raw(),
@@ -700,6 +738,8 @@ impl Lifecycle {
             .job
             .as_ref()
             .ok_or_else(|| io::Error::other("job handle is unavailable"))?;
+        // Safety: the job handle is owned by this lifecycle and the call
+        // terminates exactly the process tree assigned to that job.
         if unsafe { TerminateJobObject(job.raw(), TERMINATION_EXIT_CODE) } == 0 {
             return Err(io::Error::last_os_error().into());
         }
@@ -736,6 +776,9 @@ impl Drop for Lifecycle {
         if self.state == LifecycleState::Complete {
             return;
         }
+        // Safety: both handles are owned by this lifecycle and drop runs
+        // exactly once; the state machine selects the matching termination
+        // call, so each handle is terminated at most once.
         unsafe {
             if matches!(
                 self.state,
@@ -752,6 +795,8 @@ impl Drop for Lifecycle {
 }
 
 fn set_job_information<T>(handle: HANDLE, class: i32, value: &T) -> io::Result<()> {
+    // Safety: the handle is a live job object and the value reference and its
+    // exact size are a valid pointer/length pair for the call.
     if unsafe {
         SetInformationJobObject(
             handle,
@@ -769,7 +814,8 @@ fn set_job_information<T>(handle: HANDLE, class: i32, value: &T) -> io::Result<(
 
 pub struct OwnedHandle(HANDLE);
 
-// The wrapper owns exactly one HANDLE and transfers that ownership when moved to a drain thread.
+// Safety: the wrapper owns exactly one HANDLE, never shares it, and moves it
+// wholesale to a drain thread, so no two threads hold it simultaneously.
 unsafe impl Send for OwnedHandle {}
 
 impl OwnedHandle {
@@ -788,12 +834,16 @@ impl OwnedHandle {
     pub fn into_file(self) -> File {
         let raw = self.0;
         mem::forget(self);
+        // Safety: `raw` came from the wrapper whose ownership was just
+        // forgotten, so the returned file becomes its single owner.
         unsafe { File::from_raw_handle(raw as RawHandle) }
     }
 }
 
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
+        // Safety: the handle is owned by this wrapper and drop closes it
+        // exactly once.
         unsafe {
             CloseHandle(self.0);
         }

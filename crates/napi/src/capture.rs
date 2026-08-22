@@ -1,6 +1,6 @@
 use std::{
     fs::{File, OpenOptions},
-    io::{self, Write},
+    io::{self, Read as _, Write},
     path::{Path, PathBuf},
     sync::{
         Mutex,
@@ -88,8 +88,20 @@ impl CallCapture {
         })
     }
 
-    fn stream_index(&self, stream: usize) -> usize {
-        stream.min(self.streams.len().saturating_sub(1))
+    /// Resolve a capture-stream id to its slot index. Unknown ids are rejected
+    /// rather than clamped so output never lands in a neighbouring stream's
+    /// file.
+    fn stream_index(&self, stream: usize) -> io::Result<usize> {
+        if stream >= self.streams.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "unknown capture stream {stream}; this call captures {} streams",
+                    self.streams.len()
+                ),
+            ));
+        }
+        Ok(stream)
     }
 
     pub fn exceeded(&self) -> bool {
@@ -132,14 +144,42 @@ impl CallCapture {
         Ok(records)
     }
 
-    /// True when the whole capture is valid UTF-8 without NUL bytes.
+    /// True when the whole capture is valid UTF-8 without NUL bytes. Streams
+    /// the file in bounded chunks so a multi-gigabyte artifact is never held
+    /// in memory; a UTF-8 character split across a chunk boundary is carried
+    /// into the next round.
     fn text_probe(path: &Path, bytes: u64) -> io::Result<bool> {
-        let limit = u64::from(u32::MAX);
-        if bytes > limit {
+        const CHUNK: usize = 64 * 1024;
+        const CEILING: u64 = u32::MAX as u64;
+        if bytes > CEILING {
             return Ok(false);
         }
-        let data = std::fs::read(path)?;
-        Ok(!data.contains(&0) && std::str::from_utf8(&data).is_ok())
+        let mut file = File::open(path)?;
+        let mut carry: Vec<u8> = Vec::new();
+        let mut chunk = vec![0_u8; CHUNK];
+        loop {
+            let read = file.read(&mut chunk)?;
+            if read == 0 {
+                break;
+            }
+            carry.extend_from_slice(&chunk[..read]);
+            match std::str::from_utf8(&carry) {
+                Ok(text) => {
+                    if text.contains('\0') {
+                        return Ok(false);
+                    }
+                    carry.clear();
+                }
+                Err(error) if error.error_len().is_none() => {
+                    if carry[..error.valid_up_to()].contains(&0) {
+                        return Ok(false);
+                    }
+                    carry.drain(..error.valid_up_to());
+                }
+                Err(_) => return Ok(false),
+            }
+        }
+        Ok(std::str::from_utf8(&carry).is_ok_and(|text| !text.contains('\0')))
     }
 
     /// Remove the session directory when nothing about the call needs an artifact.
@@ -153,7 +193,7 @@ impl CaptureSink for CallCapture {
         if self.exceeded.load(Ordering::SeqCst) {
             return Err(io::Error::other(CAPTURE_LIMIT_EXCEEDED_CODE));
         }
-        let index = self.stream_index(stream);
+        let index = self.stream_index(stream)?;
         let next = self
             .written
             .fetch_add(bytes.len() as u64, Ordering::SeqCst)
@@ -200,4 +240,55 @@ pub(crate) fn should_publish(
     records
         .iter()
         .any(|record| record.bytes > 0 && !record.valid_text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn capture_root(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "agentshim-capture-test-{}-{tag}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn unknown_stream_ids_are_rejected_not_clamped() {
+        let root = capture_root("streams");
+        let capture = CallCapture::create(&root, "session", "call", &["output"], 4096).unwrap();
+        let error = capture
+            .append(3, b"x")
+            .expect_err("an out-of-range stream id must be rejected");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        capture.append(0, b"hello").unwrap();
+        let published = capture.publish(true).unwrap();
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].stream, "output");
+        assert_eq!(published[0].bytes, 5);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn text_probe_streams_boundaries_and_refuses_invalid_text() {
+        let root = capture_root("probe");
+        let good = CallCapture::create(&root, "session", "good", &["output"], 1 << 20).unwrap();
+        let mut payload = vec![b'a'; 64 * 1024 - 1];
+        payload.extend_from_slice("€".as_bytes());
+        payload.extend_from_slice(&vec![b'b'; 128 * 1024]);
+        good.append(0, &payload).unwrap();
+        let published = good.publish(true).unwrap();
+        assert!(published[0].valid_text);
+
+        let bad = CallCapture::create(&root, "session", "bad", &["output"], 1 << 20).unwrap();
+        bad.append(0, &[0xFF, 0xFE]).unwrap();
+        assert!(!bad.publish(true).unwrap()[0].valid_text);
+
+        let nul = CallCapture::create(&root, "session", "nul", &["output"], 1 << 20).unwrap();
+        nul.append(0, b"a\0b").unwrap();
+        assert!(!nul.publish(true).unwrap()[0].valid_text);
+        std::fs::remove_dir_all(&root).ok();
+    }
 }

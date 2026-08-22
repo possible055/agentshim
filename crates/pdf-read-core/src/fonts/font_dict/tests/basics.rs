@@ -544,6 +544,33 @@ fn test_lookup_predefined_cmap_adobe_korea1() {
 }
 
 #[test]
+fn test_lookup_predefined_cmap_adobe_arabic_persian() {
+    // Adobe-Arabic-1 / Adobe-Persian-1 CIDFonts without /ToUnicode (Nazanin,
+    // Yagut, Mitra, Lotus): §9.10.3 step-3 identity fallback over the Arabic
+    // block; without it these decode as Latin-Extended-B garbage.
+    let arabic = Some(CIDSystemInfo {
+        registry: "Adobe".to_string(),
+        ordering: "Arabic".to_string(),
+        supplement: 0,
+    });
+    let persian = Some(CIDSystemInfo {
+        registry: "Adobe".to_string(),
+        ordering: "Persian".to_string(),
+        supplement: 0,
+    });
+
+    // CID 0x0627 = ا (ARABIC LETTER ALEF), 0x0641 = ف (ARABIC LETTER FEH).
+    assert_eq!(
+        lookup_predefined_cmap("Identity-H", &arabic, 0x0627),
+        Some(0x0627)
+    );
+    assert_eq!(
+        lookup_predefined_cmap("Identity-H", &persian, 0x0641),
+        Some(0x0641)
+    );
+}
+
+#[test]
 fn test_lookup_predefined_cmap_wrong_ordering() {
     // Test that lookup fails if CIDSystemInfo ordering doesn't match
     let cid_system_info_wrong = Some(CIDSystemInfo {

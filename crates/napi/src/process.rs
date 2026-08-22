@@ -265,12 +265,7 @@ pub(crate) fn process_failure(error: &agentshim_core::tools::exec::ProcessError)
             true,
             Some(serde_json::json!({ "kind": "teardown" })),
         ),
-        ProcessError::Worker(message) => NativeFailure::new(
-            "AGENTSHIM_NATIVE_THREAD_FAILED",
-            message.clone(),
-            true,
-            Some(serde_json::json!({ "kind": "native_thread" })),
-        ),
+        ProcessError::Worker(message) => native_thread_failure(message),
         ProcessError::Output(error) => NativeFailure::new(
             "AGENTSHIM_OUTPUT_FAILED",
             error.to_string(),
@@ -565,14 +560,16 @@ async fn create_capture(
         }
     })
     .await
-    .map_err(|error| {
-        NativeFailure::new(
-            "AGENTSHIM_NATIVE_THREAD_FAILED",
-            error.to_string(),
-            true,
-            Some(serde_json::json!({ "kind": "native_thread" })),
-        )
-    })?
+    .map_err(native_thread_failure)?
+}
+
+fn native_thread_failure(message: impl std::fmt::Display) -> NativeFailure {
+    NativeFailure::new(
+        "AGENTSHIM_NATIVE_THREAD_FAILED",
+        message.to_string(),
+        true,
+        Some(serde_json::json!({ "kind": "native_thread" })),
+    )
 }
 
 async fn settle_capture(
@@ -590,23 +587,16 @@ async fn settle_capture(
     .await
     {
         Ok(result) => result,
-        Err(error) => NativeResult::failure(NativeFailure::new(
-            "AGENTSHIM_NATIVE_THREAD_FAILED",
-            error.to_string(),
-            true,
-            Some(serde_json::json!({ "kind": "native_thread" })),
-        )),
+        Err(error) => NativeResult::failure(native_thread_failure(error)),
     }
 }
 
 impl EngineState {
-    fn take_run_program(
-        &self,
+    fn take_prepared<T>(
+        lock: &std::sync::Mutex<std::collections::HashMap<String, T>>,
         handle: &str,
-    ) -> std::result::Result<agentshim_core::PreparedRunProgram, NativeFailure> {
-        let mut prepared = self
-            .prepared
-            .run_program
+    ) -> std::result::Result<T, NativeFailure> {
+        let mut prepared = lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         prepared.remove(handle).ok_or_else(|| {
@@ -617,25 +607,20 @@ impl EngineState {
                 Some(serde_json::json!({ "kind": "prepared_handle" })),
             )
         })
+    }
+
+    fn take_run_program(
+        &self,
+        handle: &str,
+    ) -> std::result::Result<agentshim_core::PreparedRunProgram, NativeFailure> {
+        Self::take_prepared(&self.prepared.run_program, handle)
     }
 
     pub(crate) fn take_bash(
         &self,
         handle: &str,
     ) -> std::result::Result<agentshim_core::PreparedBash, NativeFailure> {
-        let mut prepared = self
-            .prepared
-            .bash
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        prepared.remove(handle).ok_or_else(|| {
-            NativeFailure::new(
-                "AGENTSHIM_PREPARED_HANDLE_INVALID",
-                "prepared handle is unknown or already spawned",
-                false,
-                Some(serde_json::json!({ "kind": "prepared_handle" })),
-            )
-        })
+        Self::take_prepared(&self.prepared.bash, handle)
     }
 
     pub(crate) fn prepare_run_program(

@@ -74,6 +74,8 @@ pub(crate) fn set_private_permissions(file: &File) -> io::Result<()> {
 pub(crate) fn try_lock_file(file: &File) -> io::Result<bool> {
     use std::os::fd::AsRawFd;
 
+    // Safety: the raw fd is borrowed from the live `file` for the duration of
+    // the call, and `flock` only mutates the descriptor's lock state.
     let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if result == 0 {
         return Ok(true);
@@ -90,6 +92,8 @@ pub(crate) fn try_lock_file(file: &File) -> io::Result<bool> {
 pub(crate) fn unlock_file(file: &File) -> io::Result<()> {
     use std::os::fd::AsRawFd;
 
+    // Safety: the raw fd is borrowed from the live `file` for the duration of
+    // the call, and `flock` only mutates the descriptor's lock state.
     let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
     if result == 0 {
         Ok(())
@@ -107,7 +111,12 @@ pub(crate) fn try_lock_file(file: &File) -> io::Result<bool> {
         System::IO::OVERLAPPED,
     };
 
+    // Safety: `OVERLAPPED` is all-integer fields where an all-zero state is
+    // the documented no-offset value for whole-file `LockFileEx` locking.
     let mut overlapped: OVERLAPPED = unsafe { zeroed() };
+    // Safety: the raw handle is borrowed from the live `file`, the overlapped
+    // pointer stays valid for the synchronous call, and the lock range is the
+    // documented whole-file form.
     let result = unsafe {
         LockFileEx(
             file.as_raw_handle(),
@@ -121,6 +130,7 @@ pub(crate) fn try_lock_file(file: &File) -> io::Result<bool> {
     if result != 0 {
         return Ok(true);
     }
+    // Safety: a pure read of the calling thread's last-error slot.
     if unsafe { GetLastError() } == ERROR_LOCK_VIOLATION {
         Ok(false)
     } else {
@@ -133,7 +143,11 @@ pub(crate) fn unlock_file(file: &File) -> io::Result<()> {
     use std::{mem::zeroed, os::windows::io::AsRawHandle};
     use windows_sys::Win32::{Storage::FileSystem::UnlockFileEx, System::IO::OVERLAPPED};
 
+    // Safety: `OVERLAPPED` is all-integer fields where an all-zero state is
+    // the documented no-offset value for whole-file `UnlockFileEx` ranges.
     let mut overlapped: OVERLAPPED = unsafe { zeroed() };
+    // Safety: the raw handle is borrowed from the live `file` and the
+    // overlapped pointer stays valid for the synchronous call.
     let result = unsafe {
         UnlockFileEx(
             file.as_raw_handle(),

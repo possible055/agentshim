@@ -598,3 +598,12 @@ pub(super) mod platform {
         Ok(descendants)
     }
 }
+
+pub(super) const THRESHOLD_POLICY: &str = "zero surviving controlled descendants is blocking; resource and thread tail growth require net growth >= 3, slope >= 0.25 per iteration, and increases in at least half of tail transitions; memory growth is observational";
+
+pub(super) fn unix_ms_now() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time")
+        .as_millis()
+}

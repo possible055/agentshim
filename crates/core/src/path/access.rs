@@ -632,54 +632,6 @@ impl SameParentReader<'_> {
         })?;
         directory.open_with(name, &capability_read_options())
     }
-
-    #[cfg(any(test, feature = "bench-internals"))]
-    pub fn open_identity(&self, path: &ResolvedPath) -> io::Result<File> {
-        if path.backend != self.backend || batch_parent(path)? != self.parent {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "batch paths must use the same backend and parent directory",
-            ));
-        }
-        let Some(directory) = &self.directory else {
-            return self.access.open_file_identity(path);
-        };
-        let name = path.capability_key().file_name().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "batch path must name a child entry",
-            )
-        })?;
-        #[cfg(windows)]
-        let options = capability_identity_options();
-        #[cfg(not(windows))]
-        let options = capability_read_options();
-        directory.open_with(name, &options)
-    }
-
-    #[cfg(any(test, feature = "bench-internals"))]
-    pub fn directory(&self) -> Option<&Dir> {
-        self.directory.as_ref()
-    }
-
-    #[cfg(any(test, feature = "bench-internals"))]
-    pub fn reopen_parent(&self) -> io::Result<Option<Dir>> {
-        let directory = match self.backend {
-            PathBackend::Repository => Some(
-                self.access
-                    .root
-                    .capability()
-                    .open_dir(batch_parent_key(&self.parent))?,
-            ),
-            PathBackend::Codex(index) => Some(
-                self.access.codex_roots[index]
-                    .capability()
-                    .open_dir(batch_parent_key(&self.parent))?,
-            ),
-            PathBackend::Ambient => None,
-        };
-        Ok(directory)
-    }
 }
 
 fn discover_codex_roots() -> Vec<Arc<RepositoryRoot>> {

@@ -34,6 +34,16 @@ Changes to feature-gated PDF code must also compile the rendering-only profile:
 cargo check --locked -p agentshim-pdf-read --all-targets --no-default-features --features rendering
 ```
 
+## Local hooks
+
+Hook wrappers live in `scripts/hooks/` and redirect pre-commit output to stderr so editor-driven commits and pushes surface hook failures instead of hiding them in the Git output channel. Enable them per clone:
+
+```console
+git config core.hooksPath scripts/hooks
+```
+
+The wrappers replace `pre-commit install`; hooks generated into `.git/hooks` are ignored once `core.hooksPath` is set.
+
 ## Test isolation
 
 - Pure tests may run in parallel and must not depend on execution order.

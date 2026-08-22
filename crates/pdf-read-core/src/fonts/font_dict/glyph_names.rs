@@ -154,27 +154,7 @@ pub(crate) fn glyph_name_to_unicode(glyph_name: &str) -> Option<char> {
         return Some(unicode_char);
     }
 
-    // Priority 2: Parse "uniXXXX" format (e.g., uni0041 -> A)
-    // Common in custom fonts and font subsets
-    if glyph_name.starts_with("uni") && glyph_name.len() == 7 {
-        if let Ok(code_point) = u32::from_str_radix(&glyph_name[3..], 16) {
-            if let Some(c) = char::from_u32(code_point) {
-                return Some(c);
-            }
-        }
-    }
-
-    // Priority 3: Parse "uXXXX" format (e.g., u0041 -> A)
-    // Alternative format used by some PDF generators
-    if glyph_name.starts_with('u') && glyph_name.len() >= 5 {
-        if let Ok(code_point) = u32::from_str_radix(&glyph_name[1..], 16) {
-            if let Some(c) = char::from_u32(code_point) {
-                return Some(c);
-            }
-        }
-    }
-
-    // Priority 4: Underscore-delimited compound glyph names (AGL spec section 2)
+    // Priority 2: Underscore-delimited compound glyph names (AGL spec section 2)
     // e.g. "f_f" → 'f'+'f', "f_i" → 'f'+'i', "T_h" → 'T'+'h'
     // Return the first component character for single-char return type
     if glyph_name.contains('_') {
@@ -186,7 +166,7 @@ pub(crate) fn glyph_name_to_unicode(glyph_name: &str) -> Option<char> {
         }
     }
 
-    // Priority 5 (#535 follow-up): delegate to the unified fallback chain
+    // Priority 3 (#535 follow-up): delegate to the unified fallback chain
     // in `character_mapper::glyph_name_to_unicode`. The newer chain adds:
     //   - Variant-suffix stripping (`A.sc`, `bullet.alt`, `fi.001`) — common in
     //     subset fonts where producers append stylistic-variant tags.

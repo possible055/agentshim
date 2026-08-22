@@ -38,17 +38,7 @@ pub fn response_text(response: &Value) -> &str {
 }
 
 pub fn minimal_pdf(content: &[u8]) -> Vec<u8> {
-    let mut stream = format!("<< /Length {} >>\nstream\n", content.len()).into_bytes();
-    stream.extend_from_slice(content);
-    stream.extend_from_slice(b"\nendstream");
-
-    assemble_pdf(&[
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_vec(),
-        stream,
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_vec(),
-    ])
+    agentshim_core::tools::read::minimal_pdf(content)
 }
 
 pub fn pdf_with_text() -> Vec<u8> {
@@ -70,7 +60,7 @@ pub fn pdf_full_page_image() -> Vec<u8> {
     content.extend_from_slice(operations);
     content.extend_from_slice(b"\nendstream");
 
-    assemble_pdf(&[
+    agentshim_core::tools::read::assemble_pdf(&[
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources \
@@ -79,29 +69,6 @@ pub fn pdf_full_page_image() -> Vec<u8> {
         image,
         content,
     ])
-}
-
-fn assemble_pdf(bodies: &[Vec<u8>]) -> Vec<u8> {
-    let mut pdf = b"%PDF-1.7\n".to_vec();
-    let mut offsets = vec![0_usize; bodies.len() + 1];
-    for (index, body) in bodies.iter().enumerate() {
-        let id = index + 1;
-        offsets[id] = pdf.len();
-        pdf.extend_from_slice(format!("{id} 0 obj\n").as_bytes());
-        pdf.extend_from_slice(body);
-        pdf.extend_from_slice(b"\nendobj\n");
-    }
-    let size = bodies.len() + 1;
-    let xref = pdf.len();
-    pdf.extend_from_slice(format!("xref\n0 {size}\n0000000000 65535 f \n").as_bytes());
-    for offset in offsets.iter().skip(1) {
-        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
-    }
-    pdf.extend_from_slice(
-        format!("trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n").as_bytes(),
-    );
-    pdf.extend_from_slice(format!("{xref}\n%%EOF\n").as_bytes());
-    pdf
 }
 
 pub fn jsonl_paths(directory: &Path) -> Vec<PathBuf> {

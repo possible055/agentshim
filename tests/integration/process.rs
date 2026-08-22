@@ -101,6 +101,9 @@ fn unix_outcome_uncertain_parent_fixture() {
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    // Safety: `pre_exec` runs the closure between `fork` and `exec`, so it may
+    // only call async-signal-safe functions; `setsid` is, and the closure
+    // performs no allocation.
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() == -1 {

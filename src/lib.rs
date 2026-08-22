@@ -9,8 +9,7 @@ mod server;
 pub use agentshim_core::{encoding, path, runtime, sorting, tools, traversal};
 
 pub use diagnostics::{
-    DiagnosticsConfig, DiagnosticsGuard, LogMode, LogStatus, PurgeReport, capacity_bytes, purge,
-    retention_days, status,
+    DiagnosticsConfig, DiagnosticsGuard, LogMode, capacity_bytes, purge, retention_days, status,
 };
 pub use output::{
     NEXT_OFFSET_FIELD, NEXT_START_LINE_FIELD, PARTIAL_MARKER, PDF_CURSOR_FIELD, bounded_diagnostic,
@@ -35,10 +34,7 @@ pub fn bash_report() -> Result<(std::path::PathBuf, String), String> {
     );
     engine.bash_runtime().map_err(|error| error.to_string())
 }
-pub use runtime::{
-    DEFAULT_PROCESS_CALLS, MAX_CONFIGURED_PROCESS_CALLS, MAX_READ_ONLY_CALLS,
-    RuntimeConfig as RuntimeLimits,
-};
+pub use runtime::{MAX_READ_ONLY_CALLS, RuntimeConfig as RuntimeLimits};
 pub use server::{AgentShim, AgentShimBuilder, ToolsListCorrelation};
 
 #[cfg(feature = "bench-internals")]

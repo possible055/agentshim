@@ -148,6 +148,9 @@ pub fn windows_component_eq(left: Component<'_>, right: Component<'_>) -> bool {
         let Ok(right_len) = i32::try_from(right.len()) else {
             return false;
         };
+        // Safety: both buffers outlive the call with lengths matching their
+        // slices; `CompareStringOrdinal` only reads them and is otherwise
+        // side-effect free.
         unsafe {
             CompareStringOrdinal(left.as_ptr(), left_len, right.as_ptr(), right_len, 1)
                 == CSTR_EQUAL
@@ -195,6 +198,8 @@ pub fn validate_root(path: &Path) -> std::io::Result<()> {
     input.push(0);
     let mut volume_path = vec![0_u16; 32_768];
     let volume_capacity = u32::try_from(volume_path.len()).expect("volume path buffer fits DWORD");
+    // Safety: `input` is NUL-terminated and `volume_path`'s length matches the
+    // capacity passed; the call only writes inside that buffer.
     if unsafe { GetVolumePathNameW(input.as_ptr(), volume_path.as_mut_ptr(), volume_capacity) } == 0
     {
         return Err(std::io::Error::last_os_error());
@@ -220,6 +225,7 @@ pub fn validate_root(path: &Path) -> std::io::Result<()> {
         return Ok(());
     }
 
+    // Safety: `volume_path` is NUL-terminated and outlives the read-only call.
     let drive_type = unsafe { GetDriveTypeW(volume_path.as_ptr()) };
     if drive_type != DRIVE_FIXED {
         return Err(std::io::Error::new(
@@ -229,6 +235,9 @@ pub fn validate_root(path: &Path) -> std::io::Result<()> {
     }
 
     let mut filesystem = [0_u16; 32];
+    // Safety: `volume_path` is NUL-terminated; the null_mut() parameters are
+    // explicitly optional per the API contract, and the `filesystem` pointer
+    // and length pair matches the buffer.
     let succeeded = unsafe {
         GetVolumeInformationW(
             volume_path.as_ptr(),
@@ -274,6 +283,8 @@ fn validate_windows_version() -> std::io::Result<()> {
             .map_err(|_| std::io::Error::other("OSVERSIONINFOW size overflow"))?,
         ..OSVERSIONINFOW::default()
     };
+    // Safety: the struct is fully initialized with `dwOSVersionInfoSize`
+    // matching its size; `RtlGetVersion` only writes into it.
     if unsafe { RtlGetVersion(&raw mut version) } < 0 {
         return Err(std::io::Error::other("RtlGetVersion failed"));
     }

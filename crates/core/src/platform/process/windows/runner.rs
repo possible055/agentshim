@@ -75,6 +75,10 @@ pub fn run(
 
     let mut command_line = launch.command_line;
     let mut process_info = PROCESS_INFORMATION::default();
+    // Safety: the application and command-line buffers are NUL-terminated wide
+    // strings owned by `launch`, the environment block stays alive for the
+    // call, the startup-info pointer matches `EXTENDED_STARTUPINFO_PRESENT`,
+    // and `process_info` is a valid out pointer.
     let created = unsafe {
         CreateProcessW(
             launch.application.as_ptr(),
@@ -238,6 +242,8 @@ pub fn spawn_io_threads(
     let failed = Arc::new(AtomicBool::new(false));
     let completion = ThreadCompletion::new();
     let capture_bytes = capture_bytes_per_stream(outputs.len(), capture_page_bytes);
+    // Safety: `GetOEMCP` is a pure query of the active code page with no side
+    // effects.
     let oem_code_page = (launcher == Launcher::CmdCompat).then(|| unsafe { GetOEMCP() });
     let stdin = input.filter(|input| !input.is_empty()).map(|input| {
         spawn_monitored(Arc::clone(&failed), completion.clone(), move || {

@@ -32,7 +32,7 @@ use super::response::tool_error;
 use super::{
     ToolsListCorrelation,
     catalog::tool_catalog,
-    dispatch::{ToolAdmissionFailure, shell_delegate},
+    dispatch::shell_delegate,
     response::{diagnostic_tool_error, resource_busy_with_message},
 };
 
@@ -485,38 +485,25 @@ impl ServerHandler for AgentShim {
         let (protocol, client_name, client_version) = Self::request_identity(&context);
         let has_cursor = request.is_some_and(|request| request.cursor.is_some());
         let result = self.configured_tools_result();
-        if let Some(correlation) = context.extensions.get::<ToolsListCorrelation>() {
-            tracing::info!(
-                target: "agentshim",
-                event = "tools_list",
-                phase = "protocol",
-                outcome = "success",
-                protocol,
-                client_name,
-                client_version,
-                request_id = correlation.0,
-                tool_count = TOOL_COUNT,
-                toolset = TOOLSET,
-                has_cursor,
-                cache_ttl_ms = TOOLS_CACHE_TTL_MS,
-                cache_scope = TOOLS_CACHE_SCOPE
-            );
-        } else {
-            tracing::info!(
-                target: "agentshim",
-                event = "tools_list",
-                phase = "protocol",
-                outcome = "success",
-                protocol,
-                client_name,
-                client_version,
-                tool_count = TOOL_COUNT,
-                toolset = TOOLSET,
-                has_cursor,
-                cache_ttl_ms = TOOLS_CACHE_TTL_MS,
-                cache_scope = TOOLS_CACHE_SCOPE
-            );
-        }
+        let request_id = context
+            .extensions
+            .get::<ToolsListCorrelation>()
+            .map(|correlation| correlation.0.clone());
+        tracing::info!(
+            target: "agentshim",
+            event = "tools_list",
+            phase = "protocol",
+            outcome = "success",
+            protocol,
+            client_name,
+            client_version,
+            request_id,
+            tool_count = TOOL_COUNT,
+            toolset = TOOLSET,
+            has_cursor,
+            cache_ttl_ms = TOOLS_CACHE_TTL_MS,
+            cache_scope = TOOLS_CACHE_SCOPE
+        );
         Ok(result)
     }
 
@@ -549,7 +536,7 @@ impl AgentShim {
     ) -> Result<CallToolResponse, McpError> {
         let admission = match self.try_admit_tool(&request) {
             Ok(admission) => admission,
-            Err(ToolAdmissionFailure::Process(error)) => {
+            Err(error) => {
                 return Ok(match error {
                     ProcessError::ResourceBusy(message) => {
                         resource_busy_with_message(budget, "bash", "detached", message)
@@ -650,5 +637,5 @@ fn shutdown_transaction(resources: &RuntimeResources, detached: &DetachedTrees) 
 }
 
 #[cfg(test)]
-#[path = "tests.rs"]
+#[path = "tests/mod.rs"]
 mod tests;

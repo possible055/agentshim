@@ -29,6 +29,15 @@ repos:
         args: ["--fix"]
         types: [python]
 
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.49.0
+    hooks:
+      - id: typos
+        # The upstream hook defaults to --write-changes, which silently
+        # applies single-suggestion corrections inside string literals and
+        # data assets. Check-only; corrections are applied deliberately.
+        args: [--force-exclude]
+
   - repo: local
     hooks:
       - id: uv-lock-check
@@ -71,20 +80,27 @@ repos:
         name: cargo fmt
         entry: cargo fmt --all -- --check
         language: system
-        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|tests/.*\.rs|benches/.*\.rs)$'
+        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|crates/.*\.(rs|toml)|tests/.*\.rs|benches/.*\.rs)$'
         pass_filenames: false
 
       - id: cargo-clippy
         name: cargo clippy
         entry: cargo clippy --all-targets -- -D warnings
         language: system
-        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|tests/.*\.rs|benches/.*\.rs)$'
+        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|crates/.*\.(rs|toml)|tests/.*\.rs|benches/.*\.rs)$'
+        pass_filenames: false
+
+      - id: cargo-machete
+        name: cargo machete
+        entry: cargo machete
+        language: system
+        files: '(^|/)Cargo\.(toml|lock)$'
         pass_filenames: false
 
       - id: cargo-test
         name: cargo test
-        entry: cargo test --locked
+        entry: cargo test --locked --tests
         language: system
         stages: [pre-push]
-        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|tests/.*\.rs)$'
+        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|crates/.*\.(rs|toml)|tests/.*\.rs)$'
         pass_filenames: false

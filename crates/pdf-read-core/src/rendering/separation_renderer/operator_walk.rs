@@ -23,19 +23,19 @@ pub(super) fn execute_separation_operators(
     let mut gs_stack = GraphicsStateStack::new();
     {
         let gs = gs_stack.current_mut();
-        if let Some(inh) = inherited {
-            gs.fill_color_space = inh.fill_color_space.clone();
-            gs.stroke_color_space = inh.stroke_color_space.clone();
-            gs.fill_color_cmyk = inh.fill_color_cmyk;
-            gs.stroke_color_cmyk = inh.stroke_color_cmyk;
+        if let Some(inherited) = inherited {
+            gs.fill_color_space = inherited.fill_color_space.clone();
+            gs.stroke_color_space = inherited.stroke_color_space.clone();
+            gs.fill_color_cmyk = inherited.fill_color_cmyk;
+            gs.stroke_color_cmyk = inherited.stroke_color_cmyk;
             // §8.10.1: inherit the caller's overprint state too. Without
             // this, an outer `gs` setting OP=true would be silently
             // dropped at the Form XObject boundary and the form's CMYK
             // content would knock out underlying inks against the
             // caller's intent.
-            gs.fill_overprint = inh.fill_overprint;
-            gs.stroke_overprint = inh.stroke_overprint;
-            gs.overprint_mode = inh.overprint_mode;
+            gs.fill_overprint = inherited.fill_overprint;
+            gs.stroke_overprint = inherited.stroke_overprint;
+            gs.overprint_mode = inherited.overprint_mode;
         } else {
             gs.fill_color_space = "DeviceGray".to_string();
             gs.stroke_color_space = "DeviceGray".to_string();
@@ -44,10 +44,10 @@ pub(super) fn execute_separation_operators(
         gs.stroke_color_rgb = (0.0, 0.0, 0.0);
     }
 
-    let initial_cs = if let Some(inh) = inherited {
+    let initial_cs = if let Some(inherited) = inherited {
         SeparationColorState {
-            fill_components: inh.fill_components.clone(),
-            stroke_components: inh.stroke_components.clone(),
+            fill_components: inherited.fill_components.clone(),
+            stroke_components: inherited.stroke_components.clone(),
         }
     } else {
         SeparationColorState::new()

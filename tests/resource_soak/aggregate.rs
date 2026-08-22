@@ -65,10 +65,7 @@ fn four_instance_aggregate_process_soak() {
         "measured_iterations": iterations,
         "burst_epoch_policy": "one aggregate batch per production burst epoch",
         "burst_quiet_ms": BURST_QUIET_MS,
-        "started_unix_ms": SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time")
-            .as_millis(),
+        "started_unix_ms": unix_ms_now(),
     }));
 
     let executable = env::current_exe().expect("integration test executable");
@@ -135,10 +132,7 @@ fn four_instance_aggregate_process_soak() {
                     "error_details": Value::Null,
                     "active_descendant_pids": active_descendant_pids,
                     "server_exit_statuses": server_exit_statuses,
-                    "finished_unix_ms": SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .expect("system time")
-                        .as_millis(),
+                    "finished_unix_ms": unix_ms_now(),
                 }));
                 panic!("aggregate children did not reach expected peak");
             }
@@ -188,10 +182,7 @@ fn four_instance_aggregate_process_soak() {
                 "response": failure.response,
                 "active_descendant_pids": active_descendant_pids,
                 "server_exit_statuses": server_exit_statuses,
-                "finished_unix_ms": SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .expect("system time")
-                    .as_millis(),
+                "finished_unix_ms": unix_ms_now(),
             }));
             panic!(
                 "{} request {} failed during aggregate iteration {}",
@@ -219,10 +210,7 @@ fn four_instance_aggregate_process_soak() {
                 "error_details": Value::Null,
                 "active_descendant_pids": active_descendant_pids,
                 "server_exit_statuses": server_exit_statuses,
-                "finished_unix_ms": SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .expect("system time")
-                    .as_millis(),
+                "finished_unix_ms": unix_ms_now(),
             }));
             panic!("aggregate descendants survived completion");
         }
@@ -293,11 +281,8 @@ fn four_instance_aggregate_process_soak() {
         "threads": metric_summary(&resource_samples, |sample| sample.threads),
         "resource_tail_growth_blocking": resource_growth,
         "thread_tail_growth_blocking": thread_growth,
-        "threshold_policy": "zero surviving descendants is blocking; resource and thread tail growth require net growth >= 3, slope >= 0.25 per iteration, and increases in at least half of tail transitions; memory growth is observational",
-        "finished_unix_ms": SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time")
-            .as_millis(),
+        "threshold_policy": THRESHOLD_POLICY,
+        "finished_unix_ms": unix_ms_now(),
     }));
     assert!(
         !resource_growth,

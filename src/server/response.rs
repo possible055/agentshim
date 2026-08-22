@@ -203,14 +203,15 @@ fn floor_char_boundary(text: &str, mut index: usize) -> usize {
     index
 }
 
+fn class_retryable(error_class: &str) -> bool {
+    matches!(error_class, "io" | "resource_timeout" | "resource_busy")
+}
+
 pub(super) trait DiagnosticError: Display {
     fn error_class(&self) -> &'static str;
 
     fn retryable(&self) -> bool {
-        matches!(
-            self.error_class(),
-            "io" | "resource_timeout" | "resource_busy"
-        )
+        class_retryable(self.error_class())
     }
 
     fn details(&self) -> Option<Value> {
@@ -223,10 +224,7 @@ impl DiagnosticError for crate::tools::read::ReadError {
         use crate::tools::read::ReadError;
         match self {
             ReadError::Validation(_) => "validation",
-            ReadError::Path(_)
-            | ReadError::NonUnicodePath
-            | ReadError::Directory
-            | ReadError::NotRegular => "path",
+            ReadError::Path(_) | ReadError::Directory | ReadError::NotRegular => "path",
             ReadError::Cancelled => "client_cancellation",
             ReadError::ResourceBusy { .. } => "resource_busy",
             ReadError::ResourceTimeout { .. } => "resource_timeout",
@@ -258,10 +256,7 @@ impl DiagnosticError for crate::tools::read::ReadError {
         matches!(
             self,
             crate::tools::read::ReadError::Output(crate::output::OutputError::BurstLimit)
-        ) || matches!(
-            self.error_class(),
-            "io" | "resource_timeout" | "resource_busy"
-        )
+        ) || class_retryable(self.error_class())
     }
 
     fn details(&self) -> Option<Value> {
@@ -348,10 +343,7 @@ impl DiagnosticError for crate::tools::glob::GlobError {
             self,
             crate::tools::glob::GlobError::MemoryBusy
                 | crate::tools::glob::GlobError::Output(crate::output::OutputError::BurstLimit)
-        ) || matches!(
-            self.error_class(),
-            "io" | "resource_timeout" | "resource_busy"
-        )
+        ) || class_retryable(self.error_class())
     }
 
     fn details(&self) -> Option<Value> {
@@ -395,10 +387,7 @@ impl DiagnosticError for crate::tools::grep::GrepError {
             GrepError::MemoryBusy | GrepError::Output(crate::output::OutputError::BurstLimit) => {
                 true
             }
-            other => matches!(
-                other.error_class(),
-                "io" | "resource_timeout" | "resource_busy"
-            ),
+            other => class_retryable(other.error_class()),
         }
     }
 
@@ -447,10 +436,7 @@ impl DiagnosticError for crate::tools::exec::ProcessError {
         match self {
             ProcessError::Unavailable(_)
             | ProcessError::Output(crate::output::OutputError::BurstLimit) => false,
-            other => matches!(
-                other.error_class(),
-                "io" | "resource_timeout" | "resource_busy"
-            ),
+            other => class_retryable(other.error_class()),
         }
     }
 
@@ -482,7 +468,7 @@ pub(super) fn classified_tool_error(
     message: impl Into<String>,
 ) -> CallToolResponse {
     tracing::error!(target: "agentshim", event = "tool_error", phase = "response", outcome = "error", error_class);
-    let retryable = matches!(error_class, "io" | "resource_timeout" | "resource_busy");
+    let retryable = class_retryable(error_class);
     tool_error(budget, error_class, retryable, message, None)
 }
 
@@ -503,23 +489,7 @@ pub(super) fn diagnostic_tool_error<E: DiagnosticError + ?Sized>(
 }
 
 #[cfg(test)]
-pub(super) fn blocking_response_for_test<E: DiagnosticError>(
-    tool: &str,
-    run_ms: u64,
-    result: Result<Result<crate::tools::ToolOutput, E>, tokio::task::JoinError>,
-    output_token_gate: &crate::output::OutputTokenGate,
-    cancellation: &CancellationToken,
-    output_budget: &CallOutputBudget,
-) -> CallToolResponse {
-    blocking_response(
-        tool,
-        run_ms,
-        result,
-        output_token_gate,
-        cancellation,
-        output_budget,
-    )
-}
+pub(super) use blocking_response as blocking_response_for_test;
 
 pub(super) fn blocking_response<E: DiagnosticError>(
     tool: &str,

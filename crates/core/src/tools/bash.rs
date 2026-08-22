@@ -1,8 +1,4 @@
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -172,7 +168,7 @@ impl BashRequest {
     }
 }
 
-fn invalid(message: impl Into<String>) -> ProcessError {
+pub(in crate::tools::bash) fn invalid(message: impl Into<String>) -> ProcessError {
     ProcessError::Validation(message.into())
 }
 
@@ -273,7 +269,6 @@ pub fn execute_output_with_budget(
 
 #[allow(
     clippy::too_many_arguments,
-    clippy::too_many_lines,
     reason = "foreground and detached Bash share one validated launch plan"
 )]
 pub(crate) fn execute_output_with_capture(
@@ -287,73 +282,27 @@ pub(crate) fn execute_output_with_capture(
     output_budget: &dyn crate::output::CallBudget,
     capture_sink: Option<&Arc<dyn spawn::CaptureSink>>,
 ) -> Result<ToolOutput, ProcessError> {
-    let started = std::time::Instant::now();
-    request.validate(timeout_ceiling_ms)?;
-    let deadline = started + timeout;
-    let pre_spawn_timeout_ms = if request.detach {
-        u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)
-    } else {
-        request.timeout_ms(timeout_ceiling_ms)
-    };
-    if cancellation.is_cancelled() {
-        return Err(ProcessError::Cancelled);
-    }
-    let runtime = match locator.resolve_before(cancellation, deadline) {
-        Ok(runtime) => runtime,
-        Err(LocateError::Cancelled) => return Err(ProcessError::Cancelled),
-        Err(LocateError::TimedOut) => {
-            return Err(ProcessError::TimeoutBeforeSpawn {
-                timeout_ms: pre_spawn_timeout_ms,
-            });
-        }
-        Err(LocateError::Unavailable(error)) => {
-            return Err(ProcessError::Unavailable(error.to_string()));
-        }
-    };
-    ensure_before_spawn(Some(deadline), pre_spawn_timeout_ms)?;
-    tracing::info!(target: "agentshim", event = "process_resolve", phase = "execution");
-    let cwd = spawn::resolve_cwd(root, request.cwd.as_deref()).map_err(invalid)?;
-    ensure_before_spawn(Some(deadline), pre_spawn_timeout_ms)?;
-    let resolved = ResolvedProgram {
-        absolute: runtime.executable.clone(),
-        executable: runtime.executable.clone(),
-        launcher: launcher_for(&runtime.executable)?,
-    };
-    ensure_before_spawn(Some(deadline), pre_spawn_timeout_ms)?;
-    let environment = bash_environment(&runtime, request.msys_argument_conversion);
-    let args = bash_args(&request.command);
-    if request.detach {
-        let launch = DetachedLaunch {
-            resolved: &resolved,
-            cwd: &cwd,
-            args: &args,
-            environment: &environment,
-        };
-        let admission = detached_admission.ok_or_else(|| {
-            ProcessError::ResourceBusy(
-                "detached bash request reached execution without a reserved slot".to_owned(),
-            )
-        })?;
-        return run_detached(
+    if !request.detach {
+        let prepared = prepare_bash_foreground(
             root,
-            admission,
+            locator,
             request,
-            &launch,
+            timeout,
+            timeout_ceiling_ms,
             cancellation,
-            output_budget,
-            Duration::from_millis(request.background_timeout_ms(timeout_ceiling_ms)),
-        );
+        )?;
+        return execute_prepared_bash(prepared, None, cancellation, output_budget, capture_sink);
     }
-    let prepared = PreparedBash {
-        resolved,
-        cwd,
-        args,
-        environment,
-        deadline,
-        request_timeout_ms: request.timeout_ms(timeout_ceiling_ms),
-        msys_retry_available: msys_retry_available(request),
-    };
-    execute_prepared_bash(prepared, None, cancellation, output_budget, capture_sink)
+    detached::execute_detached(
+        root,
+        locator,
+        detached_admission,
+        request,
+        timeout,
+        cancellation,
+        timeout_ceiling_ms,
+        output_budget,
+    )
 }
 
 /// One resolved foreground bash launch: the probed bash executable, its `-c`
@@ -390,6 +339,7 @@ pub(crate) fn prepare_bash_foreground(
             },
             LocateError::Unavailable(message) => ProcessError::Unavailable(message.to_string()),
         })?;
+    tracing::info!(target: "agentshim", event = "process_resolve", phase = "execution");
     let cwd = spawn::resolve_cwd(root, request.cwd.as_deref()).map_err(invalid)?;
     let resolved = ResolvedProgram {
         absolute: runtime.executable.clone(),
@@ -488,152 +438,6 @@ pub(crate) fn execute_prepared_bash(
         }
         Err(failure) => Err(failure.into_process_error(request_timeout_ms)),
     }
-}
-
-fn ensure_before_spawn(
-    deadline: Option<std::time::Instant>,
-    timeout_ms: u64,
-) -> Result<(), ProcessError> {
-    if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
-        Err(ProcessError::TimeoutBeforeSpawn { timeout_ms })
-    } else {
-        Ok(())
-    }
-}
-
-struct DetachedLaunch<'a> {
-    resolved: &'a ResolvedProgram,
-    cwd: &'a std::path::Path,
-    args: &'a [String],
-    environment: &'a EnvironmentPlan,
-}
-
-/// A detached tree binds its lifetime to the server instance rather than to this call, so the
-/// response reports only what the agent needs to find it again: the pid and the log file.
-#[allow(
-    clippy::too_many_lines,
-    reason = "detached launch admission and commit share one transaction"
-)]
-fn run_detached(
-    root: &Arc<RepositoryRoot>,
-    mut admission: DetachedAdmission,
-    request: &BashRequest,
-    launch: &DetachedLaunch<'_>,
-    cancellation: &CancellationToken,
-    output_budget: &dyn crate::output::CallBudget,
-    effective_timeout: Duration,
-) -> Result<ToolOutput, ProcessError> {
-    let DetachedLaunch {
-        resolved,
-        cwd,
-        args,
-        environment,
-    } = *launch;
-    let requested = request
-        .log_path
-        .as_deref()
-        .ok_or_else(|| invalid("detach requires a log_path inside the repository"))?;
-    let resolved_log = root
-        .resolve(std::path::Path::new(requested))
-        .map_err(|error| invalid(format!("invalid log_path: {error}")))?;
-    let log_path = resolved_log.absolute().to_owned();
-    verify_detached_response(
-        &detached_response(admission.job_id(), u32::MAX, &log_path),
-        cancellation,
-        output_budget,
-    )?;
-    admission.reserve_log_path(&log_path)?;
-    #[cfg(test)]
-    admission.before_open();
-    if cancellation.is_cancelled() {
-        return Err(ProcessError::Cancelled);
-    }
-    let log = detached::open_log(root, &resolved_log)?;
-    #[cfg(test)]
-    admission.after_open();
-    if cancellation.is_cancelled() {
-        return Err(ProcessError::Cancelled);
-    }
-    let plan = ExecPlan {
-        resolved,
-        cwd,
-        args,
-        environment,
-        stdin: None,
-        streams: Streams::Merged,
-        timeout: Duration::ZERO,
-        capture_page_bytes: output_budget.page_bytes(),
-    };
-    tracing::info!(target: "agentshim", event = "process_spawn", phase = "execution", detached = true);
-    #[cfg(test)]
-    if let Some(error) = admission.injected_spawn_error() {
-        return Err(error);
-    }
-    let tree = crate::platform::process::spawn_detached(&plan, environment, log.writer)?;
-    let spawned_at = std::time::Instant::now();
-    let pid = tree.pid();
-    let job_id = admission.job_id().to_owned();
-    let output = detached_response(&job_id, pid, &log_path);
-    // The spawn-to-commit window is the last place a cancellation or shutdown can race the
-    // call. A tree that executed user code must never be adopted by a stopped roster, so a
-    // rejection is rolled back here with a bounded, verified termination.
-    let rollback_deadline = admission.rollback_deadline();
-    let rejected =
-        if let Err(error) = verify_detached_response(&output, cancellation, output_budget) {
-            Some((tree, error))
-        } else if cancellation.is_cancelled() {
-            Some((tree, ProcessError::Cancelled))
-        } else if let Err(tree) = admission.retain(
-            tree,
-            log_path.clone(),
-            log.reader,
-            effective_timeout,
-            spawned_at,
-        ) {
-            Some((tree, ProcessError::Cancelled))
-        } else {
-            None
-        };
-    if let Some((mut tree, error)) = rejected {
-        tree.terminate_and_wait(rollback_deadline)?;
-        return Err(error);
-    }
-    Ok(output)
-}
-
-fn detached_response(job_id: &str, pid: u32, log_path: &Path) -> ToolOutput {
-    let text = format!(
-        "Detached: job_id={job_id} pid={pid} log=\"{}\" scope={}.",
-        diagnostic_path(log_path),
-        crate::tools::exec::containment_scope()
-    );
-    ToolOutput::new(text.clone()).with_structured(json!({
-        "tool": "bash",
-        "job": {
-            "jobId": job_id,
-            "pid": pid,
-        }
-    }))
-}
-
-fn verify_detached_response(
-    output: &ToolOutput,
-    cancellation: &CancellationToken,
-    output_budget: &dyn crate::output::CallBudget,
-) -> Result<(), ProcessError> {
-    if output.fits_content_and_call(output_budget, cancellation) {
-        return Ok(());
-    }
-    if cancellation.is_cancelled() {
-        return Err(ProcessError::Cancelled);
-    }
-    if output.encoded_len()
-        > crate::output::OutputLimits::for_content_within(&output.text, output_budget.page_bytes())
-            .bytes
-    {
-        return Err(crate::output::OutputError::RequiredContentTooLarge.into());
-    }
-    Err(crate::output::OutputError::BurstLimit.into())
 }
 
 fn expect_one(captures: Vec<Capture>) -> Capture {

@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# pre-commit prints hook results to stdout; redirect to stderr so editors
+# surface hook failures from UI-driven git operations.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ARGS=(hook-impl --config=.pre-commit-config.yaml --hook-type=pre-commit --hook-dir "$HERE" -- "$@")
+
+if command -v pre-commit >/dev/null 2>&1; then
+    exec pre-commit "${ARGS[@]}" 1>&2
+fi
+
+uv_python="$HOME/.local/share/uv/tools/pre-commit/bin/python"
+if [ -x "$uv_python" ]; then
+    exec "$uv_python" -m pre_commit "${ARGS[@]}" 1>&2
+fi
+
+echo 'pre-commit not found on PATH; install it or unset core.hooksPath' >&2
+exit 1

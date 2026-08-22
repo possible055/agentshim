@@ -40,8 +40,8 @@ pub mod text_processing;
 
 // Re-export main types
 pub use config::{
-    BoldMarkerBehavior, LogLevel, OutputConfig, ReadingOrderConfig, ReadingOrderStrategyType,
-    SpacingConfig, TextPipelineConfig, TjThresholdConfig, WordBoundaryMode,
+    BoldMarkerBehavior, OutputConfig, ReadingOrderConfig, ReadingOrderStrategyType, SpacingConfig,
+    TextPipelineConfig, TjThresholdConfig, WordBoundaryMode,
 };
 pub use converters::{MarkdownOutputConverter, OutputConverter};
 pub use ordered_span::{

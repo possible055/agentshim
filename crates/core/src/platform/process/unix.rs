@@ -108,6 +108,9 @@ pub fn spawn_detached_capture(
         .stdout(Stdio::from(write))
         .stderr(Stdio::from(duplicate));
     apply_environment(&mut command, environment);
+    // Safety: `pre_exec` runs the closure between `fork` and `exec`, so it may
+    // only call async-signal-safe functions; `setsid`, `prctl`, and `getppid`
+    // are, and the closure performs no allocation.
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() == -1 {
@@ -140,6 +143,11 @@ fn exit_label(status: std::process::ExitStatus) -> String {
     )
 }
 
+fn take_pipe<P>(slot: &mut Option<P>, name: &str) -> io::Result<P> {
+    slot.take()
+        .ok_or_else(|| io::Error::other(format!("child {name} pipe was not created")))
+}
+
 fn spawn_lifecycle(
     plan: &ExecPlan<'_>,
     capture_sink: Option<Arc<dyn CaptureSink>>,
@@ -157,6 +165,9 @@ fn spawn_lifecycle(
         });
     let merged_reader = configure_output(&mut command, plan.streams)?;
     apply_environment(&mut command, plan.environment);
+    // Safety: `pre_exec` runs the closure between `fork` and `exec`, so it may
+    // only call async-signal-safe functions; `setsid`, `prctl`, and `getppid`
+    // are, and the closure performs no allocation.
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() == -1 {
@@ -173,32 +184,23 @@ fn spawn_lifecycle(
     #[cfg(test)]
     fail_setup_for_tests(SetupFailurePoint::Spawn)?;
     let stdin = if input.is_some() {
-        let stdin = lifecycle
-            .child_mut()
-            .stdin
-            .take()
-            .ok_or_else(|| io::Error::other("child stdin pipe was not created"))?;
+        let stdin = File::from(OwnedFd::from(take_pipe(
+            &mut lifecycle.child_mut().stdin,
+            "stdin",
+        )?));
         #[cfg(test)]
         fail_setup_for_tests(SetupFailurePoint::Stdin)?;
-        Some(File::from(OwnedFd::from(stdin)))
+        Some(stdin)
     } else {
         None
     };
     let readers = if let Some(reader) = merged_reader {
         vec![reader]
     } else {
-        let stdout = lifecycle
-            .child_mut()
-            .stdout
-            .take()
-            .ok_or_else(|| io::Error::other("child stdout pipe was not created"))?;
+        let stdout = take_pipe(&mut lifecycle.child_mut().stdout, "stdout")?;
         #[cfg(test)]
         fail_setup_for_tests(SetupFailurePoint::Stdout)?;
-        let stderr = lifecycle
-            .child_mut()
-            .stderr
-            .take()
-            .ok_or_else(|| io::Error::other("child stderr pipe was not created"))?;
+        let stderr = take_pipe(&mut lifecycle.child_mut().stderr, "stderr")?;
         #[cfg(test)]
         fail_setup_for_tests(SetupFailurePoint::Stderr)?;
         vec![
@@ -597,6 +599,22 @@ fn set_nonblocking(file_descriptor: i32) -> io::Result<()> {
     Ok(())
 }
 
+/// Poll until the process group is gone or the deadline passes; `Ok(false)`
+/// means the deadline expired with the group still alive.
+fn wait_group_exit(process_group: i32, child: &mut Child, deadline: Instant) -> io::Result<bool> {
+    loop {
+        let _ = child.try_wait()?;
+        if !group_exists(process_group)? {
+            let _ = child.wait()?;
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn terminate(
     process_group: i32,
     child: &mut Child,
@@ -604,29 +622,15 @@ fn terminate(
 ) -> Result<(), ProcessError> {
     signal_group(process_group, libc::SIGTERM)?;
     let grace_deadline = (Instant::now() + TERM_GRACE).min(cleanup_deadline);
-    loop {
-        let _ = child.try_wait()?;
-        if !group_exists(process_group)? {
-            let _ = child.wait()?;
-            return Ok(());
-        }
-        if Instant::now() >= grace_deadline {
-            break;
-        }
-        thread::sleep(Duration::from_millis(10));
+    if wait_group_exit(process_group, child, grace_deadline)? {
+        return Ok(());
     }
 
     signal_group(process_group, libc::SIGKILL)?;
-    loop {
-        let _ = child.try_wait()?;
-        if !group_exists(process_group)? {
-            let _ = child.wait()?;
-            return Ok(());
-        }
-        if Instant::now() >= cleanup_deadline {
-            return Err(ProcessError::OutcomeUncertain);
-        }
-        thread::sleep(Duration::from_millis(10));
+    if wait_group_exit(process_group, child, cleanup_deadline)? {
+        Ok(())
+    } else {
+        Err(ProcessError::OutcomeUncertain)
     }
 }
 
@@ -665,11 +669,13 @@ pub fn group_exists(process_group: i32) -> io::Result<bool> {
 /// child must bail out before `exec`.
 #[cfg(target_os = "linux")]
 fn arm_parent_death_signal() -> io::Result<()> {
+    // Safety: `getppid` is a pure kernel query with no side effects.
     let ppid = unsafe { libc::getppid() };
     // SAFETY: PR_SET_PDEATHSIG with SIGKILL is a valid Linux prctl request.
     if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } == -1 {
         return Err(io::Error::last_os_error());
     }
+    // Safety: `getppid` is a pure kernel query with no side effects.
     if unsafe { libc::getppid() } != ppid {
         return Err(io::Error::other(
             "parent died before parent-death signal was armed",
@@ -695,6 +701,9 @@ pub fn spawn_detached(
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(duplicate));
     apply_environment(&mut command, environment);
+    // Safety: `pre_exec` runs the closure between `fork` and `exec`, so it may
+    // only call async-signal-safe functions; `setsid`, `prctl`, and `getppid`
+    // are, and the closure performs no allocation.
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() == -1 {
@@ -796,13 +805,12 @@ pub fn process_group_exists_for_tests(process_group: i32) -> bool {
     group_exists(process_group).unwrap_or(true)
 }
 
-#[cfg(test)]
 fn record_spawn_for_tests(process_group: i32) {
+    #[cfg(test)]
     LAST_SPAWNED_PROCESS_GROUP.set(Some(process_group));
+    #[cfg(not(test))]
+    let _ = process_group;
 }
-
-#[cfg(not(test))]
-fn record_spawn_for_tests(_process_group: i32) {}
 
 #[cfg(test)]
 fn fail_setup_for_tests(point: SetupFailurePoint) -> io::Result<()> {

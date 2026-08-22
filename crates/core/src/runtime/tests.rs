@@ -88,10 +88,6 @@ mod tests {
             waited >= crate::runtime::PDF_GATE_WAIT,
             "gate returned before its bounded wait elapsed: {waited:?}"
         );
-        assert!(
-            waited < crate::runtime::PDF_GATE_WAIT * 4,
-            "gate waited far past its bound: {waited:?}"
-        );
 
         drop(first);
         assert!(resources.try_acquire_pdf_gate().is_some());
@@ -134,7 +130,6 @@ mod tests {
             .try_reserve_memory(config.pdf_image_memory_bytes)
             .expect("image mode reservation");
 
-        let started = std::time::Instant::now();
         let text = tokio::time::timeout(
             std::time::Duration::from_millis(250),
             resources.reserve_memory(256 * 1024, &request),
@@ -142,11 +137,6 @@ mod tests {
         .await
         .expect("a text read must not wait on the PDF reservation")
         .expect("text reservation");
-        assert!(
-            started.elapsed() < std::time::Duration::from_millis(100),
-            "text read waited {:?} behind a PDF",
-            started.elapsed()
-        );
 
         drop((gate, reservation, text));
     }

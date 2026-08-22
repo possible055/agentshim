@@ -33,5 +33,7 @@ use request::{MAX_LINE_COUNT, TEXT_READ_MEMORY_BYTES};
 #[cfg(test)]
 #[path = "read/tests/mod.rs"]
 mod test_suite;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
+pub use test_support::*;
+#[cfg(any(test, feature = "test-hooks"))]
 mod test_support;

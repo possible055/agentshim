@@ -10,7 +10,9 @@ pub use request::GlobRequest;
 #[cfg(feature = "bench-internals")]
 pub use request::execute_profiled_with_traversal;
 #[cfg(any(test, feature = "bench-internals"))]
-pub use request::{GlobTraversal, execute, execute_with_traversal};
+pub use request::{
+    GlobTraversal, execute, execute_with_traversal, execute_with_traversal_and_budget,
+};
 pub(crate) use request::{execute_output_with_budget, memory_charge};
 
 #[cfg(test)]

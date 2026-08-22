@@ -124,6 +124,7 @@ pub(crate) struct BackgroundJob {
     finished: CancellationToken,
     artifacts: Arc<Mutex<Vec<ArtifactRecord>>>,
     inline_output_bytes: u64,
+    cancel_reason: Mutex<Option<String>>,
     done_tx: tokio::sync::watch::Sender<Option<NativeJobOutcome>>,
 }
 
@@ -168,7 +169,12 @@ impl BackgroundJob {
         self.stop(BackgroundStopCause::Shutdown);
     }
 
-    fn cancel_explicit(&self) {
+    fn cancel_explicit(&self, reason: Option<&str>) {
+        if let Some(reason) = reason
+            && let Ok(mut slot) = self.cancel_reason.lock()
+        {
+            slot.get_or_insert_with(|| reason.to_owned());
+        }
         self.stop(BackgroundStopCause::Explicit);
     }
 
@@ -245,7 +251,7 @@ fn drain_and_settle(job: Arc<BackgroundJob>, mut reader: std::fs::File) {
             Ok(n) => {
                 if let Err(error) = job.capture.append(0, &buf[..n]) {
                     capture_error = Some(error.to_string());
-                    job.cancel_explicit();
+                    job.cancel_explicit(None);
                     break;
                 }
                 let text = String::from_utf8_lossy(&buf[..n]);
@@ -259,7 +265,7 @@ fn drain_and_settle(job: Arc<BackgroundJob>, mut reader: std::fs::File) {
                     continue;
                 }
                 capture_error = Some(error.to_string());
-                job.cancel_explicit();
+                job.cancel_explicit(None);
                 break;
             }
         }
@@ -355,7 +361,6 @@ fn finish_published_job(
     complete: bool,
     records: Vec<ArtifactRecord>,
 ) {
-    let exit_code = tree_result.exit_code;
     let publish = should_publish(&records, complete, job.inline_output_bytes);
     let artifacts: Vec<ArtifactPublished> = if publish {
         if let Ok(mut table) = job.artifacts.lock() {
@@ -384,38 +389,8 @@ fn finish_published_job(
         }
     }
 
-    let (status, detail) = if let Some(error) = capture_error.as_ref() {
-        ("failed", error.clone())
-    } else if !tree_result.verified {
-        (
-            "failed",
-            format!(
-                "outcome uncertain after {}",
-                tree_result
-                    .cause
-                    .map_or("natural completion", background_stop_label)
-            ),
-        )
-    } else if tree_result.cause == Some(BackgroundStopCause::Timeout) {
-        (
-            "timed_out",
-            format!("background timeout elapsed after {} ms", job.timeout_ms()),
-        )
-    } else if tree_result.cause.is_some() {
-        (
-            "killed",
-            exit_code
-                .as_ref()
-                .map_or("terminated".to_owned(), |code| format!("exit code: {code}")),
-        )
-    } else if limit_exceeded {
-        ("failed", "capture limit exceeded".to_owned())
-    } else {
-        (
-            "completed",
-            format!("exit code: {}", exit_code.as_deref().unwrap_or("unknown")),
-        )
-    };
+    let (status, detail) =
+        job_status_detail(job, capture_error.as_deref(), &tree_result, limit_exceeded);
 
     let failure = if !tree_result.verified {
         Some(NativeFailure {
@@ -445,6 +420,7 @@ fn finish_published_job(
             details: Some(serde_json::json!({ "kind": "capture" })),
         })
     };
+    let exit_code = tree_result.exit_code;
     job.settle(NativeJobOutcome {
         status: status.to_owned(),
         detail,
@@ -463,6 +439,60 @@ const fn background_stop_label(cause: BackgroundStopCause) -> &'static str {
     }
 }
 
+fn job_status_detail(
+    job: &BackgroundJob,
+    capture_error: Option<&str>,
+    tree_result: &TreeResult,
+    limit_exceeded: bool,
+) -> (&'static str, String) {
+    let exit_code = tree_result.exit_code.as_ref();
+    if let Some(error) = capture_error {
+        return ("failed", error.to_owned());
+    }
+    if !tree_result.verified {
+        return (
+            "failed",
+            format!(
+                "outcome uncertain after {}",
+                tree_result
+                    .cause
+                    .map_or("natural completion", background_stop_label)
+            ),
+        );
+    }
+    if tree_result.cause == Some(BackgroundStopCause::Timeout) {
+        return (
+            "timed_out",
+            format!("background timeout elapsed after {} ms", job.timeout_ms()),
+        );
+    }
+    if tree_result.cause.is_some() {
+        let reason = job
+            .cancel_reason
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let base = exit_code.map_or("terminated".to_owned(), |code| {
+            format!("exit code: {}", code.as_str())
+        });
+        let detail = match reason.as_deref() {
+            Some(reason) => format!("{base} (cancel reason: {reason})"),
+            None => base,
+        };
+        return ("killed", detail);
+    }
+    if limit_exceeded {
+        return ("failed", "capture limit exceeded".to_owned());
+    }
+    (
+        "completed",
+        format!(
+            "exit code: {}",
+            exit_code.map_or("unknown", |code| code.as_str())
+        ),
+    )
+}
+
 /// Opaque handle to one native background bash job. The handle owns the process
 /// tree, the durable capture, and the live preview buffer; dropping or disposing
 /// it cancels the job and settles the `done` promise.
@@ -478,7 +508,7 @@ impl EngineJobHandle {
     /// terminate and lets the drain thread settle `done`.
     #[napi]
     pub fn cancel(&self, reason: String) -> Result<NativeVoidResult> {
-        self.job.cancel_explicit();
+        self.job.cancel_explicit(Some(reason.as_str()));
         let _ = reason;
         Ok(NativeVoidResult {
             value: true,
@@ -719,6 +749,7 @@ pub(crate) fn start_background_prepared(
         finished: CancellationToken::new(),
         artifacts: Arc::clone(&state.artifacts),
         inline_output_bytes: state.output_limits.capture_publish_bytes(),
+        cancel_reason: Mutex::new(None),
         done_tx,
     });
     {

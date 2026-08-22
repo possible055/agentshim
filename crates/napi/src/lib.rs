@@ -3,12 +3,16 @@
 //! One plugin-owned host runtime shares capacity across per-cwd repository engines while
 //! retaining explicit configuration, durable capture, managed jobs, and bounded teardown.
 
+mod artifacts;
 mod background;
 mod budget;
 mod capture;
 mod classify;
+mod config;
 mod engine;
+mod failures;
 mod process;
+mod tools;
 
 /// Module API version; hosts must exact-match before using any Engine capability.
 pub const API_VERSION: u32 = 5;

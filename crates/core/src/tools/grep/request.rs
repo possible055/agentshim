@@ -23,8 +23,6 @@ use crate::{
 pub const DEFAULT_LIMIT: usize = 200;
 const MAX_LIMIT: usize = 1_000;
 const MAX_CONTEXT: usize = 20;
-#[cfg(feature = "bench-internals")]
-pub const CANDIDATE_SOFT_TARGET_BYTES: usize = 64 * 1024 * 1024;
 pub const MEMORY_SOURCE_BYTES: usize = 256 * 1024;
 pub const SEARCH_HEAP_BYTES: usize = 8 * 1024 * 1024;
 pub const CAPTURE_MEMORY_BYTES: usize = 8 * 1024 * 1024;
@@ -99,7 +97,7 @@ impl GrepMemoryPolicy {
         self.base_lane_bytes().saturating_add(self.page_bytes)
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
+    #[cfg(test)]
     pub const fn candidate_limit_bytes(self) -> usize {
         self.request_bytes
             .saturating_sub(self.base_reservation_bytes())
@@ -254,14 +252,6 @@ impl GrepBenchmarkVariant {
             pathname_reopen,
         })
     }
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CandidatePolicy {
-    SoftTarget,
-    #[cfg(feature = "bench-internals")]
-    FatalCeiling,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
@@ -430,22 +420,14 @@ pub fn execute(
     lanes: usize,
     cancellation: &CancellationToken,
 ) -> Result<String, GrepError> {
-    with_benchmark_resources(lanes, |resources| {
-        execute_inner(
-            access,
-            request,
-            resources,
-            cancellation,
-            GrepExecution {
-                traversal: GrepTraversal::Adaptive,
-                variant: GrepBenchmarkVariant::default(),
-                profiler: &GrepProfiler::disabled(),
-                output_budget: &crate::output::TestCallBudget::default(),
-                memory: None,
-            },
-        )
-        .map(|result| result.text)
-    })
+    execute_with_variant(
+        access,
+        request,
+        lanes,
+        cancellation,
+        GrepTraversal::Adaptive,
+        GrepBenchmarkVariant::default(),
+    )
 }
 
 #[cfg(test)]
@@ -505,22 +487,14 @@ pub fn execute_with_traversal(
     cancellation: &CancellationToken,
     traversal: GrepTraversal,
 ) -> Result<String, GrepError> {
-    with_benchmark_resources(lanes, |resources| {
-        execute_inner(
-            access,
-            request,
-            resources,
-            cancellation,
-            GrepExecution {
-                traversal,
-                variant: GrepBenchmarkVariant::default(),
-                profiler: &GrepProfiler::disabled(),
-                output_budget: &crate::output::TestCallBudget::default(),
-                memory: None,
-            },
-        )
-        .map(|result| result.text)
-    })
+    execute_with_variant(
+        access,
+        request,
+        lanes,
+        cancellation,
+        traversal,
+        GrepBenchmarkVariant::default(),
+    )
 }
 
 #[cfg(any(test, feature = "bench-internals"))]

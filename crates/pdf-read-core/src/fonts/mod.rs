@@ -26,7 +26,7 @@ pub mod truetype_cmap;
 /// Type 1 font encoding parser for extracting built-in encoding from FontFile data.
 pub mod type1_encoding;
 
-pub use character_mapper::{CharacterMapper, PredefinedCMapConfig};
+pub use character_mapper::CharacterMapper;
 pub use cmap::{parse_tounicode_cmap, CMap, LazyCMap};
 pub use encoding_normalizer::EncodingNormalizer;
 pub use font_dict::{CIDSystemInfo, CIDToGIDMap, Encoding, FontInfo, VerticalMetrics};

@@ -21,22 +21,12 @@ autotests = true
 [dependencies]
 agentshim-core = { path = "crates/core" }
 base64 = "=0.22.1"
-cap-std = "=4.0.2"
-chardetng = "=1.0.0"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 agentshim-pdf-read = { path = "crates/pdf-read-core" }
 agentshim-gigatoken = { path = "crates/gigatoken-core" }
-encoding_rs = "0.8.35"
-globset = "0.4.16"
-grep-matcher = "0.1.9"
-grep-regex = "0.1.14"
-grep-searcher = "=0.1.17"
-ignore = "0.4.23"
-rayon = "=1.11.0"
 rmcp = { version = "=3.1.0", default-features = false, features = ["server", "transport-io"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.142"
-thiserror = "2.0.12"
 tokio = { version = "1.47.1", features = ["io-std", "macros", "rt-multi-thread", "sync", "time"] }
 tokio-util = "0.7.16"
 tracing = "0.1.44"
@@ -85,3 +75,4 @@ unsafe_op_in_unsafe_fn = "deny"
 [lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "deny"

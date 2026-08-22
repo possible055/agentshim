@@ -273,6 +273,8 @@ fn decode_mixed_utf8_oem(mut bytes: &[u8], code_page: u32) -> Option<String> {
                 output.push_str(std::str::from_utf8(&bytes[..valid]).ok()?);
                 let invalid = &bytes[valid..];
                 let fallback_len = if invalid.len() >= 2
+                    // Safety: a pure classification query that only receives the
+                    // code page and one byte by value.
                     && unsafe { IsDBCSLeadByteEx(code_page, invalid[0]) } != 0
                 {
                     2
@@ -295,6 +297,8 @@ fn decode_windows_code_page(bytes: &[u8], code_page: u32) -> Option<String> {
     use windows_sys::Win32::Globalization::{MB_ERR_INVALID_CHARS, MultiByteToWideChar};
 
     let input_len = i32::try_from(bytes.len()).ok()?;
+    // Safety: a null output pointer with zero length is the documented sizing
+    // mode, and the input pointer and length match the `bytes` slice.
     let required = unsafe {
         MultiByteToWideChar(
             code_page,
@@ -309,6 +313,8 @@ fn decode_windows_code_page(bytes: &[u8], code_page: u32) -> Option<String> {
         return None;
     }
     let mut wide = vec![0_u16; usize::try_from(required).ok()?];
+    // Safety: the output buffer holds exactly `required` units, matching the
+    // passed length, and the input pointer and length match the `bytes` slice.
     let written = unsafe {
         MultiByteToWideChar(
             code_page,

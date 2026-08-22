@@ -158,17 +158,7 @@ fn walk_filtered(
 ) -> Result<TraversalSummary, TraversalError> {
     prepare_walk(access, base)?;
 
-    let mut builder = WalkBuilder::new(base.absolute());
-    builder.follow_links(false).hidden(false).require_git(false);
-    if include_ignored {
-        builder.standard_filters(false).hidden(false);
-    } else {
-        builder
-            .standard_filters(true)
-            .hidden(false)
-            .require_git(false);
-    }
-    configure_entry_filter(&mut builder, access, base, literal_prefix);
+    let builder = configure_walk(base, include_ignored, access, literal_prefix);
 
     let mut summary = TraversalSummary {
         gitignore_filtered: !include_ignored,
@@ -185,17 +175,18 @@ fn walk_filtered(
                 continue;
             }
         };
-        if entry.depth() == 0 {
-            continue;
-        }
-        let Ok(key) = walked_key(access, base, entry.path()) else {
-            summary.record_escaped(lossy_path(entry.path()));
-            continue;
+        let key = match classify_entry(access, base, &entry) {
+            ClassifiedEntry::Admitted(key) => key,
+            ClassifiedEntry::Root => continue,
+            ClassifiedEntry::Escaped(path) => {
+                summary.record_escaped(path);
+                continue;
+            }
+            ClassifiedEntry::NonUnicode(path) => {
+                summary.record_non_unicode(path);
+                continue;
+            }
         };
-        if key.to_str().is_none() {
-            summary.record_non_unicode(lossy_path(&key));
-            continue;
-        }
         if visitor(TraversalEntry {
             key: &key,
             absolute: entry.path(),
@@ -206,6 +197,52 @@ fn walk_filtered(
         }
     }
     Ok(summary)
+}
+
+/// One shared `WalkBuilder` configuration for both traversal modes.
+fn configure_walk(
+    base: &ResolvedPath,
+    include_ignored: bool,
+    access: &FileAccess,
+    literal_prefix: Option<&Path>,
+) -> WalkBuilder {
+    let mut builder = WalkBuilder::new(base.absolute());
+    builder.follow_links(false).hidden(false).require_git(false);
+    if include_ignored {
+        builder.standard_filters(false).hidden(false);
+    } else {
+        builder
+            .standard_filters(true)
+            .hidden(false)
+            .require_git(false);
+    }
+    configure_entry_filter(&mut builder, access, base, literal_prefix);
+    builder
+}
+
+enum ClassifiedEntry<'entry> {
+    Root,
+    Escaped(String),
+    NonUnicode(String),
+    Admitted(Cow<'entry, Path>),
+}
+
+/// Per-entry preprocessing shared by both modes: skip the root, name the skip reason
+/// for escaped and non-Unicode keys, and admit the walk key when a visitor should see
+/// the entry. Recording the skips stays with each mode's summary type.
+fn classify_entry<'entry>(
+    access: &FileAccess,
+    base: &ResolvedPath,
+    entry: &'entry DirEntry,
+) -> ClassifiedEntry<'entry> {
+    if entry.depth() == 0 {
+        return ClassifiedEntry::Root;
+    }
+    match walked_key(access, base, entry.path()) {
+        Err(_) => ClassifiedEntry::Escaped(lossy_path(entry.path())),
+        Ok(key) if key.to_str().is_none() => ClassifiedEntry::NonUnicode(lossy_path(&key)),
+        Ok(key) => ClassifiedEntry::Admitted(key),
+    }
 }
 
 /// Traverse one admitted directory with parallel workers and bounded batches.
@@ -279,17 +316,7 @@ where
         return Err(TraversalError::Cancelled);
     }
 
-    let mut builder = WalkBuilder::new(base.absolute());
-    builder.follow_links(false).hidden(false).require_git(false);
-    if include_ignored {
-        builder.standard_filters(false).hidden(false);
-    } else {
-        builder
-            .standard_filters(true)
-            .hidden(false)
-            .require_git(false);
-    }
-    configure_entry_filter(&mut builder, access, base, literal_prefix);
+    let mut builder = configure_walk(base, include_ignored, access, literal_prefix);
     builder.threads(parallel.threads.max(1));
 
     let summary = AtomicTraversalSummary::default();
@@ -320,17 +347,18 @@ where
                     return WalkState::Continue;
                 }
             };
-            if entry.depth() == 0 {
-                return WalkState::Continue;
-            }
-            let Ok(key) = walked_key(access, base, entry.path()) else {
-                summary.record_escaped(lossy_path(entry.path()));
-                return WalkState::Continue;
+            let key = match classify_entry(access, base, &entry) {
+                ClassifiedEntry::Admitted(key) => key,
+                ClassifiedEntry::Root => return WalkState::Continue,
+                ClassifiedEntry::Escaped(path) => {
+                    summary.record_escaped(path);
+                    return WalkState::Continue;
+                }
+                ClassifiedEntry::NonUnicode(path) => {
+                    summary.record_non_unicode(path);
+                    return WalkState::Continue;
+                }
             };
-            if key.to_str().is_none() {
-                summary.record_non_unicode(lossy_path(&key));
-                return WalkState::Continue;
-            }
             if !prefilter(TraversalEntry {
                 key: &key,
                 absolute: entry.path(),
