@@ -286,9 +286,12 @@ mod tests {
         bad.append(0, &[0xFF, 0xFE]).unwrap();
         assert!(!bad.publish(true).unwrap()[0].valid_text);
 
-        let nul = CallCapture::create(&root, "session", "nul", &["output"], 1 << 20).unwrap();
-        nul.append(0, b"a\0b").unwrap();
-        assert!(!nul.publish(true).unwrap()[0].valid_text);
+        // `nul` is a reserved device name on Windows, so the capture id must
+        // avoid it while still exercising an embedded NUL byte.
+        let embedded_nul =
+            CallCapture::create(&root, "session", "embedded-nul", &["output"], 1 << 20).unwrap();
+        embedded_nul.append(0, b"a\0b").unwrap();
+        assert!(!embedded_nul.publish(true).unwrap()[0].valid_text);
         std::fs::remove_dir_all(&root).ok();
     }
 }
