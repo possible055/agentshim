@@ -24,11 +24,15 @@ use windows_sys::Win32::{
     System::{
         IO::{CancelSynchronousIo, CreateIoCompletionPort, GetQueuedCompletionStatus},
         JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-            JOBOBJECT_ASSOCIATE_COMPLETION_PORT, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_CPU_RATE_CONTROL_ENABLE,
+            JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+            JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOB_OBJECT_LIMIT_PROCESS_MEMORY, JOBOBJECT_ASSOCIATE_COMPLETION_PORT,
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectAssociateCompletionPortInformation,
-            JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
-            QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
+            JobObjectBasicAccountingInformation, JobObjectCpuRateControlInformation,
+            JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+            TerminateJobObject,
         },
         Pipes::CreatePipe,
         SystemInformation::GetSystemDirectoryW,
@@ -579,9 +583,7 @@ impl Lifecycle {
                 // Safety: the process handle is owned by this scope; the child
                 // is still suspended, so termination reaps a not-yet-running
                 // process.
-                unsafe {
-                    TerminateProcess(process.raw(), TERMINATION_EXIT_CODE);
-                }
+                terminate_primary_and_wait(&process);
                 return Err(error);
             }
         };
@@ -599,7 +601,7 @@ impl Lifecycle {
         self.pid
     }
 
-    pub fn install_job(&mut self) -> io::Result<()> {
+    pub fn install_job(&mut self, policy: super::super::WindowsJobLimits) -> io::Result<()> {
         if self.state != LifecycleState::SpawnedSuspended {
             return Err(io::Error::other(
                 "invalid lifecycle transition to JobAssigned",
@@ -607,9 +609,11 @@ impl Lifecycle {
         }
         // Safety: both null parameters are documented as optional defaults.
         let job = OwnedHandle::new(unsafe { CreateJobObjectW(null(), null()) })?;
-        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let limits = extended_job_limits(policy)?;
         set_job_information(job.raw(), JobObjectExtendedLimitInformation, &limits)?;
+        if let Some(cpu) = cpu_rate_control(policy) {
+            set_job_information(job.raw(), JobObjectCpuRateControlInformation, &cpu)?;
+        }
         // Safety: an invalid file handle with a null existing port is the
         // documented way to create a fresh completion port.
         let completion = OwnedHandle::new(unsafe {
@@ -771,26 +775,64 @@ impl Lifecycle {
     }
 }
 
+fn extended_job_limits(
+    policy: super::super::WindowsJobLimits,
+) -> io::Result<JOBOBJECT_EXTENDED_LIMIT_INFORMATION> {
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags =
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+    limits.BasicLimitInformation.ActiveProcessLimit = policy.active_process_limit;
+    if let Some(bytes) = policy.job_memory_bytes {
+        limits.JobMemoryLimit = usize::try_from(bytes)
+            .map_err(|_| io::Error::other("job memory limit does not fit this platform"))?;
+        limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
+    }
+    if let Some(bytes) = policy.process_memory_bytes {
+        limits.ProcessMemoryLimit = usize::try_from(bytes)
+            .map_err(|_| io::Error::other("process memory limit does not fit this platform"))?;
+        limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+    }
+    Ok(limits)
+}
+
+fn cpu_rate_control(
+    policy: super::super::WindowsJobLimits,
+) -> Option<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION> {
+    policy.cpu_rate_percent.map(|percent| {
+        let mut cpu = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION {
+            ControlFlags: JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
+            ..Default::default()
+        };
+        cpu.Anonymous.CpuRate = percent.saturating_mul(100);
+        cpu
+    })
+}
+
 impl Drop for Lifecycle {
     fn drop(&mut self) {
         if self.state == LifecycleState::Complete {
             return;
         }
-        // Safety: both handles are owned by this lifecycle and drop runs
-        // exactly once; the state machine selects the matching termination
-        // call, so each handle is terminated at most once.
-        unsafe {
-            if matches!(
-                self.state,
-                LifecycleState::JobAssigned | LifecycleState::Running
-            ) {
-                if let Some(job) = &self.job {
-                    TerminateJobObject(job.raw(), TERMINATION_EXIT_CODE);
-                }
-            } else if let Some(process) = &self.process {
-                TerminateProcess(process.raw(), TERMINATION_EXIT_CODE);
-            }
+        if matches!(
+            self.state,
+            LifecycleState::JobAssigned | LifecycleState::Running
+        ) {
+            let _ = self.terminate_and_wait();
+        } else if let Some(process) = &self.process {
+            terminate_primary_and_wait(process);
         }
+    }
+}
+
+fn terminate_primary_and_wait(process: &OwnedHandle) {
+    // Safety: the process handle is owned by the caller and remains valid until
+    // the asynchronous termination request has reached a terminal state.
+    unsafe {
+        TerminateProcess(process.raw(), TERMINATION_EXIT_CODE);
+        WaitForSingleObject(
+            process.raw(),
+            u32::try_from(CLEANUP_DEADLINE.as_millis()).unwrap_or(u32::MAX - 1),
+        );
     }
 }
 
@@ -847,5 +889,40 @@ impl Drop for OwnedHandle {
         unsafe {
             CloseHandle(self.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod job_policy_tests {
+    use super::*;
+
+    #[test]
+    fn job_policy_encodes_aggregate_process_and_cpu_limits() {
+        let policy = crate::platform::process::WindowsJobLimits {
+            job_memory_bytes: Some(160 * 1024 * 1024),
+            process_memory_bytes: Some(96 * 1024 * 1024),
+            active_process_limit: 7,
+            cpu_rate_percent: Some(25),
+        };
+        let limits = extended_job_limits(policy).expect("encoded limits");
+        assert_eq!(limits.BasicLimitInformation.ActiveProcessLimit, 7);
+        assert_ne!(
+            limits.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_JOB_MEMORY,
+            0
+        );
+        assert_ne!(
+            limits.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+            0
+        );
+        assert_eq!(limits.JobMemoryLimit, 160 * 1024 * 1024);
+        assert_eq!(limits.ProcessMemoryLimit, 96 * 1024 * 1024);
+
+        let cpu = cpu_rate_control(policy).expect("CPU limit");
+        assert_eq!(
+            cpu.ControlFlags,
+            JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP
+        );
+        // Safety: `cpu_rate_control` initializes the CpuRate arm immediately above.
+        assert_eq!(unsafe { cpu.Anonymous.CpuRate }, 2_500);
     }
 }

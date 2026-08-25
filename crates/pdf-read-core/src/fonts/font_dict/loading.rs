@@ -65,7 +65,7 @@ impl FontInfo {
             // user-defined CharProcs glyph-program model; the
             // standard glyph name registry doesn't apply, so
             // extraction may fall back to glyph-name heuristics.
-            crate::extractors::warnings::push_global_warning(
+            crate::extractors::warnings::push_scoped_warning(
                 crate::extractors::warnings::Warning {
                     category: crate::extractors::warnings::WarningCategory::Type3Font,
                     page: None,
@@ -335,7 +335,7 @@ impl FontInfo {
                 // Spec §9.10.2 "ToUnicode CMaps" describes the
                 // mapping; absent ToUnicode triggers the fallback
                 // chain (Encoding → AGL → CID-as-Unicode) per §9.10.3.
-                crate::extractors::warnings::push_global_warning(
+                crate::extractors::warnings::push_scoped_warning(
                     crate::extractors::warnings::Warning {
                         category: crate::extractors::warnings::WarningCategory::ToUnicodeMissing,
                         page: None,

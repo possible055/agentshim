@@ -37,11 +37,25 @@ pub fn run_after_read_hook() {}
 #[cfg(any(test, feature = "test-hooks"))]
 pub static FORCED_CHANGES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// Shortens the PDF mode runtime ceiling to 1 ms so the timeout path can be exercised
-/// without a five-second test.
+/// Shortens the PDF mode runtime ceiling to the configured milliseconds so timeout
+/// paths can be exercised without waiting for the production limit.
 #[cfg(any(test, feature = "test-hooks"))]
 pub static FORCED_PDF_RUNTIME_LIMIT: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(any(test, feature = "test-hooks"))]
+pub static FORCED_PDF_BLOCK_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn run_forced_pdf_block() {
+    let millis = FORCED_PDF_BLOCK_MS.load(std::sync::atomic::Ordering::SeqCst);
+    if millis > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(millis));
+    }
+}
+
+#[cfg(not(any(test, feature = "test-hooks")))]
+pub fn run_forced_pdf_block() {}
 
 #[cfg(any(test, feature = "test-hooks"))]
 pub fn forced_runtime_limit() -> Option<std::time::Duration> {

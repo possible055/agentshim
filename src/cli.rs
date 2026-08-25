@@ -9,16 +9,16 @@ use std::{
     time::Duration,
 };
 
-use agentshim::{
-    AgentShim, ClientProfile, MAX_READ_ONLY_CALLS, ReadScope, RuntimeLimits, bash_report,
-};
+use agentshim::{AgentShim, ClientProfile, ReadScope, RuntimeLimits, bash_report};
 use rmcp::{
     ServiceExt,
     service::{QuitReason, ServerInitializeError},
-    transport::{IntoTransport, stdio},
+    transport::stdio,
 };
 
-use self::transport::{DiagnosticTransport, ReceiveFrameReader, ShutdownReader, unix_epoch_millis};
+use self::transport::{
+    ReceiveFrameReader, ShutdownReader, monitored_stdio_transport, unix_epoch_millis,
+};
 
 mod transport;
 
@@ -195,12 +195,12 @@ pub(super) async fn run(config: RuntimeLimits, command: CliCommand) -> Result<()
             };
             tracing::info!(target: "agentshim", event = "server_start", phase = "lifecycle", read_scope = %read_scope, client_profile = %service.client_profile(), tool_output_tokens = service.tool_output_token_limit(), burst_tokens = service.burst_token_limit(), idle_timeout_secs = service.runtime_limits().idle_timeout.map(|timeout| timeout.as_secs()));
             let shutdown_token = service.shutdown_token();
-            let transport = (reader, stdout).into_transport();
             // Seed before transport polling starts so an instance whose client never
             // sends its first frame is still reclaimed after the configured timeout.
             let last_activity = Arc::new(AtomicU64::new(unix_epoch_millis()));
-            let (transport, transport_failure) = DiagnosticTransport::new(
-                transport,
+            let (transport, transport_failure) = monitored_stdio_transport(
+                reader,
+                stdout,
                 shutdown_token.clone(),
                 Arc::clone(&last_activity),
             );
@@ -323,12 +323,45 @@ async fn run_doctor(config: RuntimeLimits, options: &ServeOptions) -> Result<(),
     println!("root: {}", service.root_path().display());
     println!("protocol: 2026-07-28");
     println!("read scope: {}", service.read_scope());
-    println!("read-only calls: {MAX_READ_ONLY_CALLS}");
+    println!(
+        "read-only calls: {}",
+        service.runtime_limits().read_only_calls
+    );
     println!("process calls: {}", service.runtime_limits().process_calls);
     println!(
         "detached calls: {}",
         service.runtime_limits().detached_calls
     );
+    println!(
+        "detached log bytes per job: {}",
+        service.runtime_limits().detached_log_bytes
+    );
+    #[cfg(windows)]
+    {
+        let limits = service.runtime_limits().windows_job_limits;
+        println!(
+            "Windows Job active processes: {}",
+            limits.active_process_limit
+        );
+        println!(
+            "Windows Job memory bytes: {}",
+            limits
+                .job_memory_bytes
+                .map_or_else(|| "off".to_owned(), |bytes| bytes.to_string())
+        );
+        println!(
+            "Windows process memory bytes: {}",
+            limits
+                .process_memory_bytes
+                .map_or_else(|| "off".to_owned(), |bytes| bytes.to_string())
+        );
+        println!(
+            "Windows CPU hard cap percent: {}",
+            limits
+                .cpu_rate_percent
+                .map_or_else(|| "off".to_owned(), |percent| percent.to_string())
+        );
+    }
     println!(
         "background job timeout max: {}s",
         service

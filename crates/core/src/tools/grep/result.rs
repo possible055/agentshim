@@ -1,6 +1,7 @@
 pub struct PageLine {
     pub text: String,
     fallback: Option<String>,
+    sort_key: Option<ResultLineKey>,
 }
 
 impl PageLine {
@@ -8,6 +9,25 @@ impl PageLine {
         std::mem::size_of::<Self>()
             .saturating_add(self.text.len())
             .saturating_add(self.fallback.as_deref().map_or(0, str::len))
+            .saturating_add(self.sort_key.as_ref().map_or(0, ResultLineKey::charge))
+    }
+}
+
+#[derive(Eq, Ord, PartialEq, PartialOrd)]
+enum ResultLineKey {
+    Path(String),
+    Content {
+        path: String,
+        line: u64,
+        kind: RecordKind,
+    },
+}
+
+impl ResultLineKey {
+    fn charge(&self) -> usize {
+        match self {
+            Self::Path(path) | Self::Content { path, .. } => path.len(),
+        }
     }
 }
 
@@ -16,13 +36,21 @@ pub struct Page {
     pub seen_entries: usize,
     skips: SkipNotes,
     offset: usize,
+    retained_base_offset: usize,
     retain: usize,
     pub charged: usize,
     pub retaining: bool,
     pub scan_complete: bool,
     probe: usize,
     allow_early_retirement: bool,
+    order: ReductionOrder,
     traversal: TraversalSummary,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ReductionOrder {
+    Arrival,
+    DeterministicTopK,
 }
 
 impl Page {
@@ -30,6 +58,7 @@ impl Page {
         request: &GrepRequest,
         traversal: TraversalSummary,
         allow_early_retirement: bool,
+        deterministic_top_k: bool,
     ) -> Self {
         let offset = request.offset.unwrap_or(0);
         let limit = request.limit.unwrap_or(DEFAULT_LIMIT);
@@ -38,12 +67,22 @@ impl Page {
             seen_entries: 0,
             skips: SkipNotes::default(),
             offset,
-            retain: limit.saturating_add(1),
+            retained_base_offset: 0,
+            retain: if deterministic_top_k {
+                offset.saturating_add(limit).saturating_add(1)
+            } else {
+                limit.saturating_add(1)
+            },
             charged: 0,
             retaining: true,
             scan_complete: false,
             probe: offset.saturating_add(limit).saturating_add(1),
             allow_early_retirement,
+            order: if deterministic_top_k {
+                ReductionOrder::DeterministicTopK
+            } else {
+                ReductionOrder::Arrival
+            },
             traversal,
         }
     }
@@ -75,6 +114,12 @@ impl Page {
         } = outcome;
         debug_assert!(!retired, "retired outcomes must not reach the reducer");
         debug_assert!(retry.is_none(), "retry outcomes must not reach the reducer");
+        if self.order == ReductionOrder::DeterministicTopK
+            && self.seen_entries == 0
+            && self.lines.is_empty()
+        {
+            self.retained_base_offset = leading_skipped.min(self.offset);
+        }
         self.seen_entries = self.seen_entries.saturating_add(leading_skipped);
         if let Some(reason) = skip {
             if single_file {
@@ -86,16 +131,20 @@ impl Page {
                 return Ok(ReduceControl::Continue);
             }
         }
+        let deterministic = self.order == ReductionOrder::DeterministicTopK;
         match mode {
             GrepMode::Files if matched => {
-                self.push_entry_lazy(|| (display_outcome_path(path.as_deref()), None));
+                self.push_entry_lazy(|| {
+                    let path = display_outcome_path(path.as_deref());
+                    let key = deterministic.then(|| ResultLineKey::Path(path.clone()));
+                    (path, None, key)
+                });
             }
             GrepMode::Count if matched => {
                 self.push_entry_lazy(|| {
-                    (
-                        format!("{}:{occurrences}", display_outcome_path(path.as_deref())),
-                        None,
-                    )
+                    let path = display_outcome_path(path.as_deref());
+                    let key = deterministic.then(|| ResultLineKey::Path(path.clone()));
+                    (format!("{path}:{occurrences}"), None, key)
                 });
             }
             GrepMode::Content => {
@@ -114,12 +163,18 @@ impl Page {
                             "{absolute}{separator}{}{separator}{CONTENT_OMISSION}",
                             record.line
                         );
+                        let key = deterministic.then(|| ResultLineKey::Content {
+                            path: absolute.clone(),
+                            line: record.line,
+                            kind: record.kind,
+                        });
                         (
                             format!(
                                 "{absolute}{separator}{}{separator}{}",
                                 record.line, record.text
                             ),
                             Some(fallback),
+                            key,
                         )
                     });
                     if self.page_full() {
@@ -143,29 +198,40 @@ impl Page {
 
     #[cfg(test)]
     pub fn push_entry(&mut self, line: String, detailed_fallback: Option<String>) {
-        self.push_entry_lazy(|| (line, detailed_fallback));
+        self.push_entry_lazy(|| (line, detailed_fallback, None));
     }
 
-    fn push_entry_lazy(&mut self, build: impl FnOnce() -> (String, Option<String>)) {
-        if self.seen_entries >= self.offset && self.lines.len() < self.retain && self.retaining {
-            let (line, detailed_fallback) = build();
+    fn push_entry_lazy(
+        &mut self,
+        build: impl FnOnce() -> (String, Option<String>, Option<ResultLineKey>),
+    ) {
+        let should_consider = if self.order == ReductionOrder::DeterministicTopK {
+            self.retain > 0
+        } else {
+            self.seen_entries >= self.offset && self.lines.len() < self.retain && self.retaining
+        };
+        if should_consider {
+            let (line, detailed_fallback, sort_key) = build();
             let fallback = detailed_fallback.unwrap_or_else(|| GENERIC_OMISSION.to_owned());
-            if self.can_retain(&line, Some(&fallback)) {
-                self.retain_line(PageLine {
+            if self.can_retain_best(&line, Some(&fallback), sort_key.as_ref()) {
+                self.retain_best(PageLine {
                     text: line,
                     fallback: Some(fallback),
+                    sort_key,
                 });
             } else if fallback != GENERIC_OMISSION
-                && self.can_retain(&fallback, Some(GENERIC_OMISSION))
+                && self.can_retain_best(&fallback, Some(GENERIC_OMISSION), sort_key.as_ref())
             {
-                self.retain_line(PageLine {
+                self.retain_best(PageLine {
                     text: fallback,
                     fallback: Some(GENERIC_OMISSION.to_owned()),
+                    sort_key,
                 });
-            } else if self.can_retain(GENERIC_OMISSION, None) {
-                self.retain_line(PageLine {
+            } else if self.can_retain_best(GENERIC_OMISSION, None, sort_key.as_ref()) {
+                self.retain_best(PageLine {
                     text: GENERIC_OMISSION.to_owned(),
                     fallback: None,
+                    sort_key,
                 });
             } else {
                 self.retaining = false;
@@ -185,22 +251,78 @@ impl Page {
         )
     }
 
-    fn can_retain(&self, text: &str, fallback: Option<&str>) -> bool {
+    fn can_retain_best(
+        &self,
+        text: &str,
+        fallback: Option<&str>,
+        sort_key: Option<&ResultLineKey>,
+    ) -> bool {
+        if self.order == ReductionOrder::DeterministicTopK
+            && self.lines.len() >= self.retain
+            && self.lines.last().is_some_and(|largest| {
+                compare_result_lines(sort_key, text, largest.sort_key.as_ref(), &largest.text)
+                    != Ordering::Less
+            })
+        {
+            return false;
+        }
         let charge = std::mem::size_of::<PageLine>()
             .saturating_add(text.len())
-            .saturating_add(fallback.map_or(0, str::len));
-        self.charged.saturating_add(charge) <= PAGE_MEMORY_BYTES
+            .saturating_add(fallback.map_or(0, str::len))
+            .saturating_add(sort_key.map_or(0, ResultLineKey::charge));
+        let replaced =
+            if self.order == ReductionOrder::DeterministicTopK && self.lines.len() >= self.retain {
+                self.lines.last().map_or(0, PageLine::charge)
+            } else {
+                0
+            };
+        self.charged.saturating_sub(replaced).saturating_add(charge) <= PAGE_MEMORY_BYTES
     }
 
-    fn retain_line(&mut self, line: PageLine) {
+    fn retain_best(&mut self, line: PageLine) {
+        if self.order == ReductionOrder::DeterministicTopK
+            && self.lines.len() >= self.retain
+            && let Some(removed) = self.lines.pop()
+        {
+            self.charged = self.charged.saturating_sub(removed.charge());
+        }
         self.charged = self.charged.saturating_add(line.charge());
-        self.lines.push(line);
+        if self.order == ReductionOrder::DeterministicTopK {
+            let index = self
+                .lines
+                .binary_search_by(|existing| compare_page_lines(existing, &line))
+                .unwrap_or_else(|index| index);
+            self.lines.insert(index, line);
+        } else {
+            self.lines.push(line);
+        }
     }
 
     fn combined_skips(&self) -> SkipNotes {
         let mut notes = self.skips.clone();
         notes.merge(&self.traversal.skips);
         notes
+    }
+}
+
+fn compare_page_lines(left: &PageLine, right: &PageLine) -> Ordering {
+    compare_result_lines(
+        left.sort_key.as_ref(),
+        &left.text,
+        right.sort_key.as_ref(),
+        &right.text,
+    )
+}
+
+fn compare_result_lines(
+    left_key: Option<&ResultLineKey>,
+    left_text: &str,
+    right_key: Option<&ResultLineKey>,
+    right_text: &str,
+) -> Ordering {
+    match (left_key, right_key) {
+        (Some(left), Some(right)) => left.cmp(right).then_with(|| left_text.cmp(right_text)),
+        _ => left_text.cmp(right_text),
     }
 }
 
@@ -262,10 +384,16 @@ pub fn render_with_budget(
     output_budget: &dyn crate::output::CallBudget,
 ) -> Result<ToolOutput, GrepError> {
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT);
-    let available = page.lines.len().min(limit);
+    let retained_offset = if page.order == ReductionOrder::DeterministicTopK {
+        page.offset.saturating_sub(page.retained_base_offset)
+    } else {
+        0
+    };
+    let available = page.lines.len().saturating_sub(retained_offset).min(limit);
     let limits = OutputLimits::for_content_parts_within(
         page.lines
             .iter()
+            .skip(retained_offset)
             .take(available)
             .map(|line| line.text.as_str()),
         output_budget.page_bytes(),
@@ -300,7 +428,7 @@ pub fn render_with_budget(
         };
         let mut formatter = OutputFormatter::new(header, tail, limits)?;
         let mut shown = 0_usize;
-        for line in page.lines.iter().take(cap) {
+        for line in page.lines.iter().skip(retained_offset).take(cap) {
             if formatter.try_push_line(&line.text, cancellation)? {
                 shown += 1;
                 continue;
@@ -322,7 +450,7 @@ pub fn render_with_budget(
             return Ok(output);
         }
         if cap == 1
-            && let Some(fallback) = page.lines[0].fallback.as_deref()
+            && let Some(fallback) = page.lines[retained_offset].fallback.as_deref()
         {
             let tail = page_tail(
                 &notes,
@@ -363,3 +491,33 @@ use super::{
         PAGE_MEMORY_BYTES,
     },
 };
+use std::cmp::Ordering;
+
+#[cfg(test)]
+mod result_order_tests {
+    use super::*;
+
+    #[test]
+    fn structured_order_does_not_parse_numeric_filename_segments() {
+        let first = PageLine {
+            text: "file-10-a.rs:10:needle".to_owned(),
+            fallback: None,
+            sort_key: Some(ResultLineKey::Content {
+                path: "file-10-a.rs".to_owned(),
+                line: 10,
+                kind: RecordKind::Match,
+            }),
+        };
+        let second = PageLine {
+            text: "file-2-z.rs:2:needle".to_owned(),
+            fallback: None,
+            sort_key: Some(ResultLineKey::Content {
+                path: "file-2-z.rs".to_owned(),
+                line: 2,
+                kind: RecordKind::Match,
+            }),
+        };
+
+        assert_eq!(compare_page_lines(&first, &second), Ordering::Less);
+    }
+}

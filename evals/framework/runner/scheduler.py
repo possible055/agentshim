@@ -167,7 +167,10 @@ class BenchmarkRunner:
         if burst_quiet_seconds is not None:
             self.burst_quiet_seconds = burst_quiet_seconds
         else:
-            self.burst_quiet_seconds = 0.0 if suite in ("macro", "agentic") else 2.1
+            # Every suite waits out the 2s burst quiet period before each sample or
+            # warp round so the shared burst budget resets. The sleep happens before
+            # measurement starts and does not pollute recorded durations.
+            self.burst_quiet_seconds = 2.1
 
         self.monitor: BaseMonitor = create_resource_monitor()
         self.adapters: dict[str, TargetAdapter] = {}

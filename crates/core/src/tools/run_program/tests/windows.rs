@@ -203,3 +203,215 @@ fn windows_timeout_terminates_grandchild_job_tree() {
         "grandchild process survived job termination"
     );
 }
+
+#[cfg(windows)]
+#[test]
+fn windows_memory_limit_child_fixture() {
+    if env::var("AGENTSHIM_PROCESS_FIXTURE").as_deref() != Ok("memory") {
+        return;
+    }
+    let mut allocation = Vec::with_capacity(256 * 1024 * 1024);
+    allocation.resize(256 * 1024 * 1024, 1_u8);
+    std::hint::black_box(allocation);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_job_memory_limit_fixture() {
+    let Ok(kind) = env::var("AGENTSHIM_PROCESS_FIXTURE") else {
+        return;
+    };
+    if kind == "job-memory-child" {
+        let allocation = vec![1_u8; 96 * 1024 * 1024];
+        std::hint::black_box(allocation);
+        return;
+    }
+    if kind != "job-memory-parent" {
+        return;
+    }
+    let allocation = vec![1_u8; 96 * 1024 * 1024];
+    let status = Command::new(env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "tools::run_program::tests::windows::windows_job_memory_limit_fixture",
+            "--nocapture",
+        ])
+        .env("AGENTSHIM_PROCESS_FIXTURE", "job-memory-child")
+        .status()
+        .expect("run aggregate-memory child");
+    std::hint::black_box(allocation);
+    assert!(status.success(), "aggregate-memory child was limited");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_cpu_limit_child_fixture() {
+    if env::var("AGENTSHIM_PROCESS_FIXTURE").as_deref() != Ok("cpu") {
+        return;
+    }
+    let started = std::time::Instant::now();
+    while started.elapsed() < Duration::from_millis(100) {
+        std::hint::spin_loop();
+    }
+    println!("CPU policy fixture completed");
+}
+
+#[cfg(windows)]
+fn assert_nonzero_exit_report(output: &str, context: &str) {
+    let exit = output
+        .lines()
+        .find(|line| line.starts_with("Exit code: "))
+        .unwrap_or_else(|| panic!("{context} omitted the exit diagnostic: {output}"));
+    let code = exit
+        .strip_prefix("Exit code: ")
+        .and_then(|code| code.parse::<u32>().ok())
+        .unwrap_or_else(|| panic!("{context} did not report a numeric exit: {output}"));
+    assert_ne!(code, 0, "{context} unexpectedly succeeded");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_active_process_limit_blocks_a_grandchild() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+    let pid_file = fixture.path().join("limited-grandchild.pid");
+    let executable = env::current_exe().expect("test executable");
+    let mut limited = request(executable.to_string_lossy().into_owned());
+    limited.args = vec![
+        "--exact".to_owned(),
+        "tools::run_program::tests::windows::windows_grandchild_parent_fixture".to_owned(),
+        "--nocapture".to_owned(),
+    ];
+    limited
+        .env
+        .insert("AGENTSHIM_PROCESS_FIXTURE".to_owned(), "parent".to_owned());
+    limited.env.insert(
+        "AGENTSHIM_PROCESS_PID_FILE".to_owned(),
+        pid_file.to_string_lossy().into_owned(),
+    );
+    let policy = crate::platform::process::WindowsJobLimits {
+        active_process_limit: 1,
+        ..Default::default()
+    };
+
+    let output = crate::platform::process::with_windows_job_limits_for_test(policy, || {
+        execute(
+            &root,
+            &ProcessResolver::capture(),
+            &limited,
+            Duration::from_secs(5),
+            &CancellationToken::new(),
+        )
+    })
+    .expect("primary process report");
+
+    assert_nonzero_exit_report(&output, "active-process limit");
+    assert!(
+        !pid_file.exists(),
+        "limited job created a grandchild PID file"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_process_memory_limit_refuses_an_oversized_allocation() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+    let executable = env::current_exe().expect("test executable");
+    let mut limited = request(executable.to_string_lossy().into_owned());
+    limited.args = vec![
+        "--exact".to_owned(),
+        "tools::run_program::tests::windows::windows_memory_limit_child_fixture".to_owned(),
+        "--nocapture".to_owned(),
+    ];
+    limited
+        .env
+        .insert("AGENTSHIM_PROCESS_FIXTURE".to_owned(), "memory".to_owned());
+    let policy = crate::platform::process::WindowsJobLimits {
+        process_memory_bytes: Some(64 * 1024 * 1024),
+        ..Default::default()
+    };
+
+    let output = crate::platform::process::with_windows_job_limits_for_test(policy, || {
+        execute(
+            &root,
+            &ProcessResolver::capture(),
+            &limited,
+            Duration::from_secs(5),
+            &CancellationToken::new(),
+        )
+    })
+    .expect("limited process report");
+
+    assert_nonzero_exit_report(&output, "per-process memory limit");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_job_memory_limit_refuses_aggregate_allocations() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+    let executable = env::current_exe().expect("test executable");
+    let mut limited = request(executable.to_string_lossy().into_owned());
+    limited.args = vec![
+        "--exact".to_owned(),
+        "tools::run_program::tests::windows::windows_job_memory_limit_fixture".to_owned(),
+        "--nocapture".to_owned(),
+    ];
+    limited.env.insert(
+        "AGENTSHIM_PROCESS_FIXTURE".to_owned(),
+        "job-memory-parent".to_owned(),
+    );
+    let policy = crate::platform::process::WindowsJobLimits {
+        job_memory_bytes: Some(160 * 1024 * 1024),
+        ..Default::default()
+    };
+
+    let output = crate::platform::process::with_windows_job_limits_for_test(policy, || {
+        execute(
+            &root,
+            &ProcessResolver::capture(),
+            &limited,
+            Duration::from_secs(10),
+            &CancellationToken::new(),
+        )
+    })
+    .expect("aggregate-limited process report");
+
+    assert_nonzero_exit_report(&output, "aggregate job memory limit");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_cpu_hard_cap_is_accepted_by_the_job() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+    let executable = env::current_exe().expect("test executable");
+    let mut limited = request(executable.to_string_lossy().into_owned());
+    limited.args = vec![
+        "--exact".to_owned(),
+        "tools::run_program::tests::windows::windows_cpu_limit_child_fixture".to_owned(),
+        "--nocapture".to_owned(),
+    ];
+    limited
+        .env
+        .insert("AGENTSHIM_PROCESS_FIXTURE".to_owned(), "cpu".to_owned());
+    let policy = crate::platform::process::WindowsJobLimits {
+        cpu_rate_percent: Some(25),
+        ..Default::default()
+    };
+
+    let output = crate::platform::process::with_windows_job_limits_for_test(policy, || {
+        execute(
+            &root,
+            &ProcessResolver::capture(),
+            &limited,
+            Duration::from_secs(5),
+            &CancellationToken::new(),
+        )
+    })
+    .expect("CPU-limited process report");
+
+    assert!(output.contains("CPU policy fixture completed"));
+    assert!(output.contains("Exit code: 0"));
+}

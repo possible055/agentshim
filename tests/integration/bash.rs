@@ -302,6 +302,70 @@ fn detached_job_status_and_termination_work_over_real_stdio_at_capacity() {
     session.close();
 }
 
+const DETACHED_LOG_QUOTA_TEST_BYTES: u64 = 1024 * 1024;
+const DETACHED_LOG_WRITE_BLOCK_BYTES: u64 = 65_536;
+
+#[test]
+fn detached_log_quota_terminates_the_owned_tree() {
+    if agentshim::bash_report().is_err() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("fixture");
+    let mut session = TestSession::builder()
+        .root(fixture.path())
+        .burst_tokens(32_768)
+        .env(
+            "AGENTSHIM_DETACHED_LOG_BYTES",
+            DETACHED_LOG_QUOTA_TEST_BYTES.to_string(),
+        )
+        .spawn();
+    session.send(&modern_request(1, "server/discover", empty_params()));
+    assert_eq!(session.receive()["id"], 1);
+    let detached = session.call_tool(
+        2,
+        "bash",
+        json!({
+            "command": "while :; do head -c 65536 /dev/zero; sleep 0.01; done",
+            "detach": true,
+            "log_path": "quota.log"
+        }),
+    );
+    assert_eq!(detached["result"]["isError"], false);
+    let job_id = response_text(&detached)
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("job_id="))
+        .expect("job_id")
+        .to_owned();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut request_id = 3;
+    loop {
+        let status = session.call_tool(
+            request_id,
+            "bash_status",
+            json!({ "job_id": job_id, "tail_bytes": 0 }),
+        );
+        if response_text(&status).contains("State: log_quota_exceeded") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "log quota monitor did not terminate the job: {}",
+            response_text(&status)
+        );
+        request_id += 1;
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let bytes = std::fs::metadata(fixture.path().join("quota.log"))
+        .expect("quota log")
+        .len();
+    assert!(
+        bytes <= DETACHED_LOG_QUOTA_TEST_BYTES + 2 * DETACHED_LOG_WRITE_BLOCK_BYTES,
+        "log quota overshoot was {bytes} bytes"
+    );
+    session.close();
+}
+
 #[test]
 fn missing_bash_is_non_retryable_over_real_stdio() {
     let fixture = tempfile::tempdir().expect("fixture");

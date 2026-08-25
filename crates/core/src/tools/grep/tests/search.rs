@@ -56,7 +56,12 @@ fn file_change_race_skips_only_that_file_with_deterministic_summary() {
     )
     .expect("stable outcome");
 
-    let mut page = Page::new(&query, crate::traversal::TraversalSummary::default(), false);
+    let mut page = Page::new(
+        &query,
+        crate::traversal::TraversalSummary::default(),
+        false,
+        false,
+    );
     page.reduce(changed_outcome, GrepMode::Content, false)
         .expect("reduce changed");
     page.reduce(stable_outcome, GrepMode::Content, false)
@@ -125,7 +130,12 @@ fn directory_search_lists_binary_and_changed_reasons_without_dropping_other_hits
     assert_eq!(changed_outcome.skip, Some(SkipReason::ChangedWhileSearched));
     assert_eq!(binary_outcome.skip, Some(SkipReason::Binary));
 
-    let mut page = Page::new(&query, crate::traversal::TraversalSummary::default(), false);
+    let mut page = Page::new(
+        &query,
+        crate::traversal::TraversalSummary::default(),
+        false,
+        false,
+    );
     page.reduce(changed_outcome, GrepMode::Content, false)
         .expect("reduce changed");
     page.reduce(binary_outcome, GrepMode::Content, false)
@@ -169,7 +179,12 @@ fn single_file_change_is_an_explicit_changed_error() {
     )
     .expect("changed outcome");
 
-    let mut page = Page::new(&query, crate::traversal::TraversalSummary::default(), false);
+    let mut page = Page::new(
+        &query,
+        crate::traversal::TraversalSummary::default(),
+        false,
+        false,
+    );
     assert!(matches!(
         page.reduce(outcome, GrepMode::Content, true),
         Err(GrepError::Unsearchable(SkipReason::ChangedWhileSearched))

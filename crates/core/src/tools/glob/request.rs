@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     path::{FileAccess, PathError, ResolvedPath},
-    runtime::{FileWorkCredit, FileWorkPool, RuntimeResources},
+    runtime::{FileWorkCredit, RuntimeResources},
     tools::ToolOutput,
     traversal::{
         ParallelTraversal, ParallelTraversalCallbacks, TraversalControl, TraversalEntry,
@@ -313,7 +313,7 @@ fn execute_inner_with_traversal(
     output_budget: &dyn crate::output::CallBudget,
 ) -> Result<ToolOutput, GlobError> {
     let file_work_pool = resources.file_work_pool();
-    let _file_work_request = file_work_pool.begin_request();
+    let file_work_request = file_work_pool.begin_request();
     let setup_span = profiler.span(GlobStage::Setup);
     request.validate()?;
     let matcher = GlobBuilder::new(&request.pattern)
@@ -326,7 +326,7 @@ fn execute_inner_with_traversal(
     let literal_prefix = crate::traversal::literal_path_prefix(&request.pattern);
     let base_input = request.path.as_deref().unwrap_or(".");
     let base = access.resolve(Path::new(base_input))?;
-    let selection = select_glob_traversal(access, &base, traversal, &file_work_pool);
+    let selection = select_glob_traversal(access, &base, traversal, &file_work_request);
     let traversal = selection.traversal;
     let offset = request.offset.unwrap_or(0);
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT);
@@ -334,7 +334,7 @@ fn execute_inner_with_traversal(
         store: BoundedCollector::new(MAX_MATCHES, resources.config().glob_memory_bytes, memory)?,
         total: 0,
         scan_stopped: false,
-        early_stop: offset == 0,
+        early_stop: offset == 0 && traversal_is_serial(traversal),
         probe: offset.saturating_add(limit).saturating_add(1),
         terminal_error: None,
     };
@@ -420,11 +420,20 @@ struct GlobTraversalSelection {
     threads: usize,
 }
 
+fn traversal_is_serial(traversal: GlobTraversal) -> bool {
+    match traversal {
+        GlobTraversal::Serial => true,
+        #[cfg(any(test, feature = "bench-internals"))]
+        GlobTraversal::SerialLiteralPrefix => true,
+        _ => false,
+    }
+}
+
 fn select_glob_traversal(
     access: &FileAccess,
     base: &ResolvedPath,
     requested: GlobTraversal,
-    pool: &FileWorkPool,
+    request: &crate::runtime::FileWorkRequest,
 ) -> GlobTraversalSelection {
     let wants_parallel = match requested {
         GlobTraversal::Adaptive => prefer_parallel_root(access, base),
@@ -436,7 +445,7 @@ fn select_glob_traversal(
         GlobTraversal::SerialLiteralPrefix => false,
     };
     let credits = if wants_parallel {
-        pool.try_credits(pool.extra_capacity())
+        request.try_credits(request.pool_capacity())
     } else {
         Vec::new()
     };

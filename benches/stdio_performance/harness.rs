@@ -39,13 +39,24 @@ impl Session {
     }
 
     pub(super) fn read(&mut self, id: u64) -> Value {
+        self.read_path(id, "Cargo.toml")
+    }
+
+    pub(super) fn read_path(&mut self, id: u64, path: &str) -> Value {
+        self.send_read(id, path);
+        let response = self.receive_tool_response("read");
+        assert_eq!(response["id"], id);
+        response["result"].clone()
+    }
+
+    fn send_read(&mut self, id: u64, path: &str) {
         let request = json!({
             "jsonrpc": "2.0",
             "id": id,
             "method": "tools/call",
             "params": {
                 "name": "read",
-                "arguments": { "path": "Cargo.toml", "line_count": 1000 },
+                "arguments": { "path": path, "line_count": 1000 },
                 "_meta": {
                     "io.modelcontextprotocol/protocolVersion": "2026-07-28",
                     "io.modelcontextprotocol/clientInfo": {
@@ -60,11 +71,6 @@ impl Session {
         serde_json::to_writer(&mut *stdin, &request).expect("request");
         stdin.write_all(b"\n").expect("request newline");
         stdin.flush().expect("request flush");
-        let mut response = String::new();
-        self.stdout.read_line(&mut response).expect("response");
-        let response: Value = serde_json::from_str(&response).expect("JSON-RPC response");
-        assert_eq!(response["id"], id);
-        response["result"].clone()
     }
 
     pub(super) fn grep(&mut self, id: u64, glob: &str, mode: &str) -> Value {
@@ -128,6 +134,41 @@ impl Session {
         serde_json::to_writer(&mut *stdin, &request).expect("grep request");
         stdin.write_all(b"\n").expect("grep request newline");
         stdin.flush().expect("grep request flush");
+    }
+
+    pub(super) fn mixed_grep_and_read(
+        &mut self,
+        grep_id: u64,
+        read_id: u64,
+        glob: &str,
+        mode: &str,
+        expected_grep: &Value,
+    ) -> (f64, f64) {
+        let started = Instant::now();
+        self.send_grep(grep_id, glob, mode);
+        self.send_read(read_id, "templates/ordinary-000000.rs");
+        let mut grep_ms = None;
+        let mut read_ms = None;
+        for _ in 0..2 {
+            let response = self.receive_tool_response("mixed grep/read");
+            let id = response["id"].as_u64().expect("mixed response id");
+            if id == grep_id {
+                assert_eq!(
+                    response["result"], *expected_grep,
+                    "mixed grep output changed"
+                );
+                grep_ms = Some(started.elapsed().as_secs_f64() * 1_000.0);
+            } else if id == read_id {
+                assert_eq!(response["result"]["isError"], false, "mixed read failed");
+                read_ms = Some(started.elapsed().as_secs_f64() * 1_000.0);
+            } else {
+                panic!("unexpected mixed response {id}");
+            }
+        }
+        (
+            read_ms.expect("read completed"),
+            grep_ms.expect("grep completed"),
+        )
     }
 
     pub(super) fn run_process(&mut self, id: u64) -> Value {

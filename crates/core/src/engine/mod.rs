@@ -117,11 +117,12 @@ impl ToolEngine {
                     &self.resources,
                 )
             })?;
-        let worker = self
-            .resources
-            .acquire_worker(&context.cancellation)
-            .await
-            .map_err(|_| read::ReadError::Cancelled)?;
+        let mut worker = Some(
+            self.resources
+                .acquire_worker(&context.cancellation)
+                .await
+                .map_err(|_| read::ReadError::Cancelled)?,
+        );
         let open_file = self
             .resources
             .acquire_open_file(&context.cancellation)
@@ -131,7 +132,6 @@ impl ToolEngine {
         let (cancellation, _relay) =
             relayed_cancellation(&context.cancellation, self.resources.shutdown_token());
         let budgets = read::PdfMemoryBudgets::from_config(&self.resources.config());
-        let timed_out = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut pdf_admission: Option<(OwnedSemaphorePermit, OwnedSemaphorePermit)> = None;
         let mut deadline = None;
         let mut result = None;
@@ -170,6 +170,7 @@ impl ToolEngine {
                         Some(self.acquire_pdf_admission(&prepared, &cancellation).await?);
                 }
                 deadline = prepared.runtime_limit();
+                drop(worker.take());
             } else {
                 text_memory = Some(
                     self.resources
@@ -185,37 +186,64 @@ impl ToolEngine {
             let output_budget = Arc::clone(&context.output_budget);
             let execute_span = span.clone();
             let started = Instant::now();
-            let timer = deadline.map(|limit| {
-                let token = cancellation.clone();
-                let expired = Arc::clone(&timed_out);
-                tokio::spawn(async move {
-                    tokio::time::sleep(limit).await;
-                    expired.store(true, std::sync::atomic::Ordering::SeqCst);
-                    token.cancel();
+            let executed = if let Some(limit) = deadline {
+                let (gate, memory) = pdf_admission
+                    .take()
+                    .expect("PDF execution retains its gate and memory reservation");
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                std::thread::Builder::new()
+                    .name("agentshim-pdf".to_owned())
+                    .spawn(move || {
+                        let result = execute_span.in_scope(|| {
+                            read::run_forced_pdf_block();
+                            read::execute_prepared_with_budget(
+                                &access,
+                                &execute_request,
+                                prepared,
+                                &execute_cancellation,
+                                output_budget.as_ref(),
+                            )
+                        });
+                        let _ = sender.send((result, gate, memory));
+                    })
+                    .map_err(|error| read::ReadError::Worker(error.to_string()))?;
+                match tokio::time::timeout(limit, receiver).await {
+                    Ok(Ok((result, gate, memory))) => {
+                        pdf_admission = Some((gate, memory));
+                        result
+                    }
+                    Ok(Err(_)) => {
+                        return Err(read::ReadError::Worker(
+                            "dedicated PDF worker stopped without a result".to_owned(),
+                        ));
+                    }
+                    Err(_) => {
+                        cancellation.cancel();
+                        return Err(read::ReadError::ResourceTimeout {
+                            limit,
+                            elapsed: started.elapsed(),
+                        });
+                    }
+                }
+            } else {
+                tokio::task::spawn_blocking(move || {
+                    execute_span.in_scope(|| {
+                        read::execute_prepared_with_budget(
+                            &access,
+                            &execute_request,
+                            prepared,
+                            &execute_cancellation,
+                            output_budget.as_ref(),
+                        )
+                    })
                 })
-            });
-            let executed = tokio::task::spawn_blocking(move || {
-                execute_span.in_scope(|| {
-                    read::execute_prepared_with_budget(
-                        &access,
-                        &execute_request,
-                        prepared,
-                        &execute_cancellation,
-                        output_budget.as_ref(),
-                    )
-                })
-            })
-            .await;
-            if let Some(timer) = timer {
-                timer.abort();
-            }
-            let executed = executed.map_err(|error| read::ReadError::Worker(error.to_string()))?;
+                .await
+                .map_err(|error| read::ReadError::Worker(error.to_string()))?
+            };
             drop(text_memory);
 
             let elapsed = started.elapsed();
-            if timed_out.load(std::sync::atomic::Ordering::SeqCst)
-                || deadline.is_some_and(|limit| elapsed > limit)
-            {
+            if deadline.is_some_and(|limit| elapsed > limit) {
                 return Err(read::ReadError::ResourceTimeout {
                     limit: deadline.unwrap_or_default(),
                     elapsed,
@@ -228,6 +256,14 @@ impl ToolEngine {
                 }
                 Ok(read::Attempt::Changed) if attempt_index == 0 => {
                     tracing::warn!(target: "agentshim", event = "read_retry", phase = "execution", outcome = "degraded_success", reason = "file_changed");
+                    if worker.is_none() {
+                        worker = Some(
+                            self.resources
+                                .acquire_worker(&cancellation)
+                                .await
+                                .map_err(|_| read::ReadError::Cancelled)?,
+                        );
+                    }
                 }
                 Ok(read::Attempt::Changed) => {
                     result = Some(Err(read::ReadError::Changed));
@@ -298,14 +334,6 @@ impl ToolEngine {
         request: grep::GrepRequest,
         context: OperationContext,
     ) -> Result<ToolOutput, grep::GrepError> {
-        let grep_admission = self.resources.try_admit_grep().ok_or_else(|| {
-            cancelled_or_busy(
-                grep::GrepError::Cancelled,
-                grep::GrepError::ResourceBusy("grep_concurrency"),
-                &context.cancellation,
-                &self.resources,
-            )
-        })?;
         let admission = self
             .try_read_only_admission(&context.cancellation)
             .ok_or_else(|| {
@@ -328,7 +356,7 @@ impl ToolEngine {
         self.spawn_budgeted_search(
             &context,
             charge,
-            vec![grep_admission, admission, open_file],
+            vec![admission, open_file],
             || grep::GrepError::Cancelled,
             grep::GrepError::Worker,
             move |cancellation, output_budget, reservation| {
@@ -663,9 +691,15 @@ mod tests {
     use crate::{
         output::TestCallBudget,
         path::{ReadScope, RepositoryRoot},
-        runtime::{MAX_READ_ONLY_CALLS, RuntimeCapacity, RuntimeConfig, RuntimeResources},
+        runtime::{RuntimeCapacity, RuntimeConfig, RuntimeResources},
         tools::{
-            exec::ProcessError, glob::GlobRequest, grep::GrepRequest, read::ReadRequest,
+            exec::ProcessError,
+            glob::GlobRequest,
+            grep::GrepRequest,
+            read::{
+                FORCED_PDF_BLOCK_MS, FORCED_PDF_RUNTIME_LIMIT, ReadError, ReadRequest,
+                global_read_state_guard, pdf_with_text,
+            },
             run_program::ProcessRequest,
         },
     };
@@ -765,7 +799,7 @@ mod tests {
         );
         let second = ToolEngine::new(root, ReadScope::Normal, second_resources);
 
-        let occupied = (0..MAX_READ_ONLY_CALLS)
+        let occupied = (0..first_resources.config().read_only_calls)
             .map(|_| {
                 first_resources
                     .try_admit_read_only()
@@ -828,6 +862,48 @@ mod tests {
         ));
         assert!(!resources.has_in_flight_calls());
         drop(worker);
+    }
+
+    #[test]
+    fn pdf_timeout_returns_before_the_dedicated_worker_finishes() {
+        let _state = global_read_state_guard();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let fixture = tempfile::tempdir().expect("fixture");
+                std::fs::write(fixture.path().join("blocked.pdf"), pdf_with_text()).expect("PDF");
+                std::fs::write(fixture.path().join("notes.md"), "still responsive\n")
+                    .expect("text");
+                let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+                let resources = RuntimeResources::new(RuntimeConfig::for_tests(1));
+                let engine = ToolEngine::new(root, ReadScope::Normal, resources.clone());
+                FORCED_PDF_RUNTIME_LIMIT.store(20, std::sync::atomic::Ordering::SeqCst);
+                FORCED_PDF_BLOCK_MS.store(250, std::sync::atomic::Ordering::SeqCst);
+
+                let started = std::time::Instant::now();
+                let result = engine.read(read_request("blocked.pdf"), context()).await;
+                assert!(matches!(result, Err(ReadError::ResourceTimeout { .. })));
+                assert!(
+                    started.elapsed() < Duration::from_millis(150),
+                    "request waited for the blocked PDF worker"
+                );
+                assert_eq!(resources.available_pdf_slots(), 0);
+                let text = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    engine.read(read_request("notes.md"), context()),
+                )
+                .await
+                .expect("text read was not blocked")
+                .expect("text read");
+                assert!(text.text.contains("still responsive"));
+
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                assert_eq!(resources.available_pdf_slots(), 1);
+                FORCED_PDF_BLOCK_MS.store(0, std::sync::atomic::Ordering::SeqCst);
+                FORCED_PDF_RUNTIME_LIMIT.store(0, std::sync::atomic::Ordering::SeqCst);
+            });
     }
 
     #[tokio::test]

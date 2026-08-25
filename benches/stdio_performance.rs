@@ -28,6 +28,8 @@ const BENCH_WORKTREE_ENV: &str = "AGENTSHIM_BENCH_WORKTREE";
 const COLD_LIMIT_ENV: &str = "AGENTSHIM_BENCH_MAX_STDIO_COLD_MS";
 const P95_LIMIT_ENV: &str = "AGENTSHIM_BENCH_MAX_STDIO_P95_MS";
 const PROCESS_LIMIT_ENV: &str = "AGENTSHIM_BENCH_MAX_PROCESS_MS";
+const PROCESS_CONCURRENT_P95_LIMIT_ENV: &str = "AGENTSHIM_BENCH_MAX_PROCESS_CONCURRENT_P95_MS";
+const PROCESS_CONCURRENT_FAIRNESS_LIMIT: f64 = 4.0;
 
 #[path = "stdio_performance/harness.rs"]
 mod harness;
@@ -89,7 +91,7 @@ fn benchmark_mcp_grep() {
     }
     warm_ms.sort_by(f64::total_cmp);
 
-    let concurrent = [1_usize, 8]
+    let concurrent = [1_usize, 8, 16]
         .into_iter()
         .enumerate()
         .map(|(index, calls)| {
@@ -97,17 +99,44 @@ fn benchmark_mcp_grep() {
                 session.grep_batch(100 + index as u64 * 32, calls, &glob, mode, &expected);
             completion_ms.sort_by(f64::total_cmp);
             let elapsed_ms = completion_ms.last().copied().unwrap_or_default();
+            let fastest_ms = completion_ms.first().copied().unwrap_or_default();
+            let slowest_fastest_ratio = if fastest_ms == 0.0 {
+                1.0
+            } else {
+                elapsed_ms / fastest_ms
+            };
+            let fairness_limit = if calls <= 8 { 2.25 } else { 5.0 };
+            assert!(
+                slowest_fastest_ratio <= fairness_limit,
+                "{calls} concurrent grep calls exceeded the {fairness_limit}x fairness ratio: \
+                 {slowest_fastest_ratio:.3}"
+            );
             json!({
                 "calls": calls,
                 "elapsed_ms": elapsed_ms,
                 "completion_p50_ms": percentile(&completion_ms, 50, 100),
                 "completion_p95_ms": percentile(&completion_ms, 95, 100),
+                "completion_p99_ms": percentile(&completion_ms, 99, 100),
+                "slowest_fastest_ratio": slowest_fastest_ratio,
+                "slowest_fastest_ratio_limit": fairness_limit,
                 "throughput_per_second": f64::from(u32::try_from(calls).expect("bounded calls"))
                     / (elapsed_ms / 1_000.0),
                 "completion_ms": completion_ms,
             })
         })
         .collect::<Vec<_>>();
+    let small_read_started = Instant::now();
+    let small_read = session.read_path(900, "templates/ordinary-000000.rs");
+    assert_eq!(small_read["isError"], false, "small read baseline failed");
+    let small_read_baseline_ms = small_read_started.elapsed().as_secs_f64() * 1_000.0;
+    let (mixed_small_read_ms, mixed_large_grep_ms) =
+        session.mixed_grep_and_read(901, 902, &glob, mode, &expected);
+    let mixed_small_read_limit_ms = (small_read_baseline_ms * 2.0).max(20.0);
+    assert!(
+        mixed_small_read_ms <= mixed_small_read_limit_ms,
+        "small read took {mixed_small_read_ms:.3} ms beside grep; limit is \
+         {mixed_small_read_limit_ms:.3} ms"
+    );
     let resources = resources.finish();
     assert!(
         resources.peak_working_set_bytes < 1024 * 1024 * 1024,
@@ -143,6 +172,12 @@ fn benchmark_mcp_grep() {
             "p95_ms": percentile(&warm_ms, 95, 100),
             "p99_ms": percentile(&warm_ms, 99, 100),
             "concurrent": concurrent,
+            "mixed_large_grep_small_read": {
+                "small_read_baseline_ms": small_read_baseline_ms,
+                "small_read_ms": mixed_small_read_ms,
+                "small_read_limit_ms": mixed_small_read_limit_ms,
+                "large_grep_ms": mixed_large_grep_ms,
+            },
             "output_bytes": expected.to_string().len(),
             "output_equivalent": true,
             "resources": {
@@ -299,16 +334,38 @@ fn benchmark_mode(mode: &str) {
     let process_started = Instant::now();
     let process_output = session.run_process(WARM_SAMPLES as u64 + 2);
     let process_ms = process_started.elapsed().as_secs_f64() * 1_000.0;
+    let process_concurrent_p95_limit_ms = configured_limit(PROCESS_CONCURRENT_P95_LIMIT_ENV, 350.0);
     let process_concurrent = [1_usize, 8, 16]
         .into_iter()
         .enumerate()
         .map(|(index, calls)| {
             let mut completion_ms = session.run_process_batch(100 + index as u64 * 32, calls);
             completion_ms.sort_by(f64::total_cmp);
+            let completion_p95_ms = percentile(&completion_ms, 95, 100);
+            let fastest_ms = completion_ms.first().copied().unwrap_or_default();
+            let slowest_ms = completion_ms.last().copied().unwrap_or_default();
+            let slowest_fastest_ratio = if fastest_ms == 0.0 {
+                1.0
+            } else {
+                slowest_ms / fastest_ms
+            };
+            assert!(
+                completion_p95_ms <= process_concurrent_p95_limit_ms,
+                "stdio {mode} {calls}-call process P95 {completion_p95_ms:.3} ms exceeds \
+                 {process_concurrent_p95_limit_ms:.3} ms"
+            );
+            assert!(
+                slowest_fastest_ratio <= PROCESS_CONCURRENT_FAIRNESS_LIMIT,
+                "stdio {mode} {calls}-call process fairness ratio \
+                 {slowest_fastest_ratio:.3} exceeds {PROCESS_CONCURRENT_FAIRNESS_LIMIT:.3}"
+            );
             json!({
                 "calls": calls,
                 "completion_p50_ms": percentile(&completion_ms, 50, 100),
-                "completion_p95_ms": percentile(&completion_ms, 95, 100),
+                "completion_p95_ms": completion_p95_ms,
+                "completion_p95_limit_ms": process_concurrent_p95_limit_ms,
+                "slowest_fastest_ratio": slowest_fastest_ratio,
+                "slowest_fastest_ratio_limit": PROCESS_CONCURRENT_FAIRNESS_LIMIT,
                 "completion_ms": completion_ms,
             })
         })
@@ -344,6 +401,7 @@ fn benchmark_mode(mode: &str) {
             "cold_limit_ms": cold_limit_ms,
             "p95_limit_ms": p95_limit_ms,
             "process_limit_ms": process_limit_ms,
+            "process_concurrent_p95_limit_ms": process_concurrent_p95_limit_ms,
             "output_equivalent": true,
             "process_ms": process_ms,
             "process_concurrent": process_concurrent,

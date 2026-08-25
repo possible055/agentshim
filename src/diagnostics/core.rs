@@ -39,6 +39,8 @@ pub(super) const RETENTION_DAYS: u64 = 30;
 pub(super) const LINE_BYTES: usize = 8 * 1024;
 pub(super) const MAINTENANCE_RETRY: Duration = Duration::from_secs(60);
 const DIAGNOSTIC_BYTES: usize = 2 * 1024;
+const WRITER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const WRITER_JOIN_POLL: Duration = Duration::from_millis(5);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum LogMode {
@@ -252,6 +254,44 @@ pub(super) struct QueuedBatch {
     pub(super) charge: usize,
 }
 
+pub(super) struct QueueMetrics {
+    pub(super) batches: AtomicUsize,
+    pub(super) bytes: AtomicUsize,
+    #[cfg(test)]
+    writer_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+impl QueueMetrics {
+    fn new() -> Self {
+        Self {
+            batches: AtomicUsize::new(0),
+            bytes: AtomicUsize::new(0),
+            #[cfg(test)]
+            writer_hook: Mutex::new(None),
+        }
+    }
+
+    #[cfg(test)]
+    fn set_writer_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .writer_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(super) fn run_writer_hook(&self) {
+        let hook = self
+            .writer_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+}
+
 struct Recorder {
     mode: LogMode,
     instance_id: String,
@@ -259,7 +299,7 @@ struct Recorder {
     sender: SyncSender<QueuedBatch>,
     writer: Option<Arc<LazyWriter>>,
     dropped: Arc<AtomicU64>,
-    queued_bytes: Arc<AtomicUsize>,
+    queue: Arc<QueueMetrics>,
 }
 
 impl Recorder {
@@ -330,7 +370,8 @@ impl Recorder {
         let lost = batch_loss_count(&batch);
         let charge = batch.len().saturating_mul(LINE_BYTES);
         if self
-            .queued_bytes
+            .queue
+            .bytes
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
                 queued
                     .checked_add(charge)
@@ -341,13 +382,15 @@ impl Recorder {
             self.dropped.fetch_add(lost, Ordering::Relaxed);
             return;
         }
+        self.queue.batches.fetch_add(1, Ordering::AcqRel);
         match self.sender.try_send(QueuedBatch {
             records: batch,
             charge,
         }) {
             Ok(()) => {}
             Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
-                self.queued_bytes.fetch_sub(charge, Ordering::AcqRel);
+                self.queue.batches.fetch_sub(1, Ordering::AcqRel);
+                self.queue.bytes.fetch_sub(charge, Ordering::AcqRel);
                 self.dropped.fetch_add(lost, Ordering::Relaxed);
             }
         }
@@ -367,7 +410,7 @@ struct LazyWriter {
     started: AtomicBool,
     shutdown: Arc<AtomicBool>,
     dropped: Arc<AtomicU64>,
-    queued_bytes: Arc<AtomicUsize>,
+    queue: Arc<QueueMetrics>,
     warned: AtomicBool,
 }
 
@@ -377,7 +420,7 @@ impl LazyWriter {
         instance_id: String,
         receiver: Receiver<QueuedBatch>,
         dropped: Arc<AtomicU64>,
-        queued_bytes: Arc<AtomicUsize>,
+        queue: Arc<QueueMetrics>,
     ) -> Self {
         Self {
             directory,
@@ -386,7 +429,7 @@ impl LazyWriter {
             started: AtomicBool::new(false),
             shutdown: Arc::new(AtomicBool::new(false)),
             dropped,
-            queued_bytes,
+            queue,
             warned: AtomicBool::new(false),
         }
     }
@@ -429,7 +472,7 @@ impl LazyWriter {
         let directory = self.directory.clone();
         let instance_id = self.instance_id.clone();
         let dropped = Arc::clone(&self.dropped);
-        let queued_bytes = Arc::clone(&self.queued_bytes);
+        let queue = Arc::clone(&self.queue);
         let shutdown = Arc::clone(&self.shutdown);
         let writer = thread::Builder::new()
             .name("agentshim-log-writer".to_owned())
@@ -440,7 +483,7 @@ impl LazyWriter {
                     &instance_id,
                     &receiver,
                     &dropped,
-                    &queued_bytes,
+                    &queue,
                     &shutdown,
                     &mut warned,
                 );
@@ -462,6 +505,23 @@ impl LazyWriter {
     }
 
     fn shutdown(&self) {
+        let started = std::time::Instant::now();
+        if !self.shutdown_with_timeout(WRITER_SHUTDOWN_TIMEOUT) {
+            eprintln!(
+                "{}",
+                crate::output::bounded_diagnostic(&format!(
+                    "agentshim diagnostics writer shutdown outcome_uncertain: \
+                     writer_state=blocked queued_batches={} queued_bytes={} \
+                     shutdown_elapsed_ms={}",
+                    self.queue.batches.load(Ordering::Acquire),
+                    self.queue.bytes.load(Ordering::Acquire),
+                    started.elapsed().as_millis()
+                ))
+            );
+        }
+    }
+
+    fn shutdown_with_timeout(&self, timeout: Duration) -> bool {
         self.shutdown.store(true, Ordering::Release);
         let writer = {
             let mut state = self
@@ -473,10 +533,23 @@ impl LazyWriter {
                 WriterState::Pending(_) | WriterState::Disabled => None,
             }
         };
-        if let Some(writer) = writer {
-            let _ = writer.join();
-        }
+        writer.is_none_or(|writer| join_writer_until(writer, timeout))
     }
+}
+
+fn join_writer_until(writer: thread::JoinHandle<()>, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while !writer.is_finished() {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(
+            deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .min(WRITER_JOIN_POLL),
+        );
+    }
+    writer.join().is_ok()
 }
 
 #[derive(Clone)]
@@ -593,14 +666,14 @@ impl DiagnosticsGuard {
         }
         let (sender, receiver) = mpsc::sync_channel::<QueuedBatch>(CHANNEL_BATCHES);
         let dropped = Arc::new(AtomicU64::new(0));
-        let queued_bytes = Arc::new(AtomicUsize::new(0));
+        let queue = Arc::new(QueueMetrics::new());
         let instance_id = Uuid::new_v4().to_string();
         let writer = Arc::new(LazyWriter::new(
             config.directory.clone(),
             instance_id.clone(),
             receiver,
             Arc::clone(&dropped),
-            Arc::clone(&queued_bytes),
+            Arc::clone(&queue),
         ));
         if config.mode == LogMode::All {
             writer.start()?;
@@ -612,7 +685,7 @@ impl DiagnosticsGuard {
             sender,
             writer: Some(Arc::clone(&writer)),
             dropped,
-            queued_bytes,
+            queue,
         });
         let layer = DiagnosticsLayer::new(recorder);
         Ok((

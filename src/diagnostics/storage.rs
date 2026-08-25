@@ -3,7 +3,7 @@ use std::{
     io::{self, BufRead, BufReader, Write},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{Receiver, RecvTimeoutError},
     },
     thread,
@@ -15,8 +15,9 @@ use serde_json::{Value, json};
 
 use super::core::{
     DAY_BYTES, DiagnosticsConfig, EVENT_DAY_BYTES, HISTORICAL_BYTES, LINE_BYTES, LOCK_RETRY,
-    LOCK_WAIT, LogMode, MAINTENANCE_RETRY, MAX_BATCH_RECORDS, PART_BYTES, QueuedBatch,
-    RETENTION_DAYS, Record, TOTAL_BYTES, WRITER_BATCH_WAIT, base_record, batch_loss_count,
+    LOCK_WAIT, LogMode, MAINTENANCE_RETRY, MAX_BATCH_RECORDS, PART_BYTES, QueueMetrics,
+    QueuedBatch, RETENTION_DAYS, Record, TOTAL_BYTES, WRITER_BATCH_WAIT, base_record,
+    batch_loss_count,
 };
 
 pub(super) fn writer_loop(
@@ -24,7 +25,7 @@ pub(super) fn writer_loop(
     instance_id: &str,
     receiver: &Receiver<QueuedBatch>,
     dropped: &AtomicU64,
-    queued_bytes: &AtomicUsize,
+    queue: &QueueMetrics,
     shutdown: &AtomicBool,
     warned: &mut bool,
 ) {
@@ -44,7 +45,10 @@ pub(super) fn writer_loop(
                 }
             },
         };
-        queued_bytes.fetch_sub(first.charge, Ordering::AcqRel);
+        queue.batches.fetch_sub(1, Ordering::AcqRel);
+        queue.bytes.fetch_sub(first.charge, Ordering::AcqRel);
+        #[cfg(test)]
+        queue.run_writer_hook();
         let mut records = first.records;
         let deadline = Instant::now() + WRITER_BATCH_WAIT;
         while records.len() < MAX_BATCH_RECORDS {
@@ -53,11 +57,12 @@ pub(super) fn writer_loop(
             };
             match receiver.recv_timeout(remaining) {
                 Ok(next) => {
-                    queued_bytes.fetch_sub(next.charge, Ordering::AcqRel);
                     if records.len().saturating_add(next.records.len()) > MAX_BATCH_RECORDS {
                         pending = Some(next);
                         break;
                     }
+                    queue.batches.fetch_sub(1, Ordering::AcqRel);
+                    queue.bytes.fetch_sub(next.charge, Ordering::AcqRel);
                     records.extend(next.records);
                 }
                 Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,

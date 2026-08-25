@@ -90,7 +90,7 @@ pub fn spawn_detached_capture(
     }
     drop(attributes);
     let mut lifecycle = Lifecycle::new(process_info)?;
-    lifecycle.install_job()?;
+    lifecycle.install_job(super::super::configured_windows_job_limits()?)?;
     lifecycle.resume()?;
     let pid = process_info.dwProcessId;
     let (job, process) = lifecycle.release_detached_handles();
@@ -161,7 +161,7 @@ pub fn spawn_detached(
     }
     drop(attributes);
     let mut lifecycle = Lifecycle::new(process_info)?;
-    lifecycle.install_job()?;
+    lifecycle.install_job(super::super::configured_windows_job_limits()?)?;
     lifecycle.resume()?;
     let pid = process_info.dwProcessId;
     let (job, process) = lifecycle.release_detached_handles();

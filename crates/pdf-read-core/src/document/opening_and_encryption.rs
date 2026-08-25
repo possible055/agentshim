@@ -5,11 +5,23 @@ use super::*;
 impl PdfDocument {
     #[cfg(test)]
     pub(crate) fn from_bytes(data: Vec<u8>) -> Result<Self> {
+        let warnings = Arc::new(crate::extractors::warnings::WarningSink::new());
+        crate::extractors::warnings::with_warning_sink(&warnings, || {
+            Self::from_bytes_with_warning_sink(data, warnings.clone())
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_bytes_with_warning_sink(
+        data: Vec<u8>,
+        warnings: Arc<crate::extractors::warnings::WarningSink>,
+    ) -> Result<Self> {
         let reader = PdfReader::Memory(BufReader::new(Cursor::new(data)));
         Self::open_from_reader(
             reader,
             DEFAULT_OBJECT_CACHE_MAX_BYTES,
             DEFAULT_XOBJECT_CACHE_MAX_ENTRIES,
+            warnings,
         )
     }
 
@@ -17,12 +29,14 @@ impl PdfDocument {
         mut file: File,
         object_cache_bytes: usize,
         xobject_cache_entries: usize,
+        warnings: Arc<crate::extractors::warnings::WarningSink>,
     ) -> Result<Self> {
         file.seek(SeekFrom::Start(0))?;
         Self::open_from_reader(
             PdfReader::File(BufReader::new(file)),
             object_cache_bytes,
             xobject_cache_entries,
+            warnings,
         )
     }
 
@@ -30,6 +44,7 @@ impl PdfDocument {
         mut reader: PdfReader,
         object_cache_bytes: usize,
         xobject_cache_entries: usize,
+        warnings: Arc<crate::extractors::warnings::WarningSink>,
     ) -> Result<Self> {
         // Parse header with lenient mode by default (handle PDFs with binary prefixes)
         let (major, minor, header_offset) = parse_header(&mut reader, true)?;
@@ -209,7 +224,7 @@ impl PdfDocument {
             article_threads_cache: Mutex::new(None),
             output_intent_cmyk_profile_cache: Mutex::new(None),
             accumulated_warnings: Mutex::new(Vec::new()),
-            warning_sink: crate::extractors::warnings::WarningSink::new(),
+            warning_sink: warnings,
         };
 
         // Seed any SYNTHETIC recovery objects (a Catalog / page-tree root rebuilt

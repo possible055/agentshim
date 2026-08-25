@@ -18,7 +18,7 @@ mod tests {
                 append_native_argv0, finish_batch_command_line, finish_native_command_line,
                 settle_threads_with_deadlines,
             },
-            runner::{FAILURE_POINT, FailurePoint, run, spawn_io_threads},
+            runner::{FAILURE_POINT, FailurePoint, LAST_SPAWNED_PID, run, spawn_io_threads},
         },
         tools::exec::{
             capture::drain,
@@ -226,13 +226,15 @@ mod tests {
                 timeout: Duration::from_secs(5),
                 capture_page_bytes: crate::output::MODEL_BYTE_LIMIT,
             };
+            LAST_SPAWNED_PID.with(|spawned| spawned.set(None));
             FAILURE_POINT.with(|configured| configured.set(Some(point)));
             let result = run(&plan, &tokio_util::sync::CancellationToken::new(), None);
             FAILURE_POINT.with(|configured| configured.set(None));
             assert!(result.is_err(), "failure point {point:?} was not exercised");
-            if let Ok(pid) = std::fs::read_to_string(&pid_file) {
-                assert_process_is_gone(pid.trim().parse().expect("pid integer"));
-            }
+            let pid = LAST_SPAWNED_PID
+                .with(std::cell::Cell::take)
+                .expect("spawned child PID");
+            assert_process_is_stopped(pid);
         }
     }
 
@@ -243,22 +245,31 @@ mod tests {
         assert!(error.to_string().contains("not implemented"));
     }
 
-    fn assert_process_is_gone(pid: u32) {
+    fn assert_process_is_stopped(pid: u32) {
         use windows_sys::Win32::{
             Foundation::CloseHandle,
-            System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+            System::Threading::{
+                GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            },
         };
 
+        const STILL_ACTIVE_EXIT_CODE: u32 = 259;
         // Safety: a pure query-open of a PID this test owns; the handle is
         // closed exactly once when the open succeeded.
         let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-        if !handle.is_null() {
-            // Safety: the handle was just returned by `OpenProcess` and is
-            // closed exactly once here.
-            unsafe {
-                CloseHandle(handle);
-            }
+        if handle.is_null() {
+            return;
         }
-        assert!(handle.is_null(), "injected failure left child {pid} alive");
+        let mut exit_code = STILL_ACTIVE_EXIT_CODE;
+        // Safety: the process handle and exit-code pointer remain valid for the call.
+        let succeeded = unsafe { GetExitCodeProcess(handle, &raw mut exit_code) } != 0;
+        // Safety: the handle was returned by `OpenProcess` and is closed exactly once.
+        unsafe {
+            CloseHandle(handle);
+        }
+        assert!(
+            succeeded && exit_code != STILL_ACTIVE_EXIT_CODE,
+            "injected failure left child {pid} running"
+        );
     }
 }

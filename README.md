@@ -162,7 +162,7 @@ Terminate the complete server-owned tree through `bash` itself:
 { "action": "terminate", "job_id": "bash-550e8400-e29b-41d4-a716-446655440000" }
 ```
 
-Up to 16 detached trees may be active. `timeout_ms` is measured from successful process-tree spawn; omitted values use `AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX`, while explicit values may only shorten it. Deadline expiry actively terminates the complete tree and records `timed_out`. The instance retains the latest 32 terminal records, each with at most 16 KiB of final log tail; IDs do not survive reconnect or restart, and there is no list API. The full log remains available through `read(log_path)` and terminal eviction never deletes it.
+Up to 16 detached trees may be active. `timeout_ms` is measured from successful process-tree spawn; omitted values use `AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX`, while explicit values may only shorten it. Deadline expiry actively terminates the complete tree and records `timed_out`. A log that exceeds `AGENTSHIM_DETACHED_LOG_BYTES` terminates its tree and records `log_quota_exceeded`. The instance retains the latest 32 terminal records, each with at most 16 KiB of final log tail; IDs do not survive reconnect or restart, and there is no list API. The full bounded log remains available through `read(log_path)` and terminal eviction never deletes it.
 
 ### Windows Bash argument conversion
 
@@ -198,6 +198,7 @@ The response tells you how far it got and how to continue. A document that mixes
 | `CODEX_MCP_PROTOCOL_VERSION` | — | MCP protocol version advertised to Codex. |
 | `AGENTSHIM_PROCESS_CALLS` | `16` | Per-instance concurrent process-call limit; 1–32. |
 | `AGENTSHIM_DETACHED_CALLS` | `16` | Per-instance live detached `bash` trees; 1–16. |
+| `AGENTSHIM_DETACHED_LOG_BYTES` | `67108864` | Per-job detached log termination threshold; 1048576–4294967296. Exceeding it terminates the owned process tree; an in-flight write block may extend the final file past the threshold. |
 | `AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX` | `1800` | Maximum detached/background Bash runtime in seconds; 600–14400. Omitted job timeouts use this value and explicit timeouts may only shorten it. |
 | `AGENTSHIM_OUTPUT_BYTES` | `32000` | Per-call output ceiling in bytes; 4096–262144. |
 | `AGENTSHIM_BURST_TOKENS` | profile default | Shared projected model-token budget; 2048–32768. |
@@ -207,10 +208,18 @@ The response tells you how far it got and how to continue. A document that mixes
 | `AGENTSHIM_GLOB_MEMORY_BYTES` | `33554432` | Per-call hard limit for retained `glob` matches. |
 | `AGENTSHIM_PDF_TEXT_MEMORY_BYTES` | `67108864` | Per-call memory budget for `auto`/`text` PDF reads. |
 | `AGENTSHIM_PDF_IMAGE_MEMORY_BYTES` | `100663296` | Per-call memory budget for `image` PDF reads. |
+| `AGENTSHIM_WINDOWS_ACTIVE_PROCESS_LIMIT` | `32` | Windows Job Object active-process hard limit per foreground or detached tree; 1–256. |
+| `AGENTSHIM_WINDOWS_JOB_MEMORY_BYTES` | off | Optional Windows Job Object aggregate committed-memory hard limit; 67108864–17179869184. |
+| `AGENTSHIM_WINDOWS_PROCESS_MEMORY_BYTES` | off | Optional Windows Job Object per-process committed-memory hard limit; 67108864–17179869184. |
+| `AGENTSHIM_WINDOWS_CPU_RATE_PERCENT` | off | Optional Windows Job Object CPU hard cap; 1–100 percent. Windows throttles the Job at this rate rather than terminating it. |
 | `AGENTSHIM_BASH` | probed | Absolute path to a GNU bash. In the DSH adapter, the same key set in plugin config `env` also drives load-time bash discovery, so it need not be preset on the host process. |
 | `AGENTSHIM_LOG_MODE` | `errors` | One of `off`, `errors`, `all`. |
 | `AGENTSHIM_LOG_DIR` | platform default | Override the log directory with an absolute path. |
 | `AGENTSHIM_RESPECT_GITIGNORE` | `false` | When `true`, `grep` and `glob` apply `.gitignore` / `.ignore` filters. Omitted `include_ignored` follows this default. Because the caller cannot read this setting, an empty result under active filtering ends with a line recommending `include_ignored=true`. `.git` and `node_modules`, `target`, `.venv`, `venv`, `dist`, `build`, `__pycache__` stay excluded either way. Binary, output-budget, and memory limits still apply. |
+
+The shared 256 MiB runtime memory value is an internal soft reservation target, not a process RSS limit. PDF and search code also enforce their documented per-call limits. Child processes are outside that target; on Windows their optional hard limits are the Job Object settings above.
+
+The stdio transport admits at most 256 requests and 16 MiB of serialized request data without completed responses. Exceeding either backlog limit shuts down the instance instead of retaining more handlers. Five seconds without stdout write progress also shuts down the instance so the host can restart it.
 
 The idle watchdog rechecks the activity timestamp after confirming quiescence before it
 cancels the existing graceful-shutdown token. A request arriving in the final interval

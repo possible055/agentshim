@@ -1,4 +1,4 @@
-use std::fs::File;
+use std::{fs::File, sync::Arc};
 
 use crate::budget::PdfResourceLimits;
 use crate::converters::ConversionOptions;
@@ -227,6 +227,7 @@ pub struct RenderedPage {
 /// An immutable, file-backed PDF document for `agentshim` reads.
 pub struct PdfReadDocument {
     document: PdfDocument,
+    warnings: Arc<crate::extractors::warnings::WarningSink>,
 }
 
 impl PdfReadDocument {
@@ -240,12 +241,16 @@ impl PdfReadDocument {
                 limits.max_input_bytes
             )));
         }
-        let document = PdfDocument::from_file_with_limits(
-            file,
-            limits.object_cache_bytes,
-            limits.xobject_cache_entries,
-        )?;
-        Ok(Self { document })
+        let warnings = Arc::new(crate::extractors::warnings::WarningSink::new());
+        let document = crate::extractors::warnings::with_warning_sink(&warnings, || {
+            PdfDocument::from_file_with_limits(
+                file,
+                limits.object_cache_bytes,
+                limits.xobject_cache_entries,
+                warnings.clone(),
+            )
+        })?;
+        Ok(Self { document, warnings })
     }
 
     #[cfg(test)]
@@ -258,13 +263,16 @@ impl PdfReadDocument {
                 limits.max_input_bytes
             )));
         }
-        let document = PdfDocument::from_bytes(bytes)?;
-        Ok(Self { document })
+        let warnings = Arc::new(crate::extractors::warnings::WarningSink::new());
+        let document = crate::extractors::warnings::with_warning_sink(&warnings, || {
+            PdfDocument::from_bytes_with_warning_sink(bytes, warnings.clone())
+        })?;
+        Ok(Self { document, warnings })
     }
 
     /// Return the number of pages.
     pub fn page_count(&self) -> Result<usize> {
-        self.document.page_count().map_err(Into::into)
+        self.in_warning_scope(|document| document.page_count().map_err(Into::into))
     }
 
     /// Drop per-page scratch held from earlier pages.
@@ -273,20 +281,24 @@ impl PdfReadDocument {
     /// redone. A single forward pass never revisits a page, so once it is committed that
     /// scratch is only occupying the call budget.
     pub fn release_page_scratch(&self) {
-        self.document.release_page_scratch();
-        crate::budget::release_page_markdown();
+        self.in_warning_scope(|document| {
+            document.release_page_scratch();
+            crate::budget::release_page_markdown();
+        });
     }
 
     /// Extract one zero-based page as Markdown.
     pub fn page_to_markdown(&self, page_index: usize, options: &MarkdownOptions) -> Result<String> {
-        let mut conversion = ConversionOptions::default();
-        conversion.preserve_layout = false;
-        conversion.detect_headings = options.detect_headings;
-        conversion.extract_tables = options.extract_tables;
-        conversion.include_form_fields = options.include_form_fields;
-        let markdown = self.document.to_markdown(page_index, &conversion)?;
-        crate::budget::check_page_markdown(markdown.len())?;
-        Ok(markdown)
+        self.in_warning_scope(|document| {
+            let mut conversion = ConversionOptions::default();
+            conversion.preserve_layout = false;
+            conversion.detect_headings = options.detect_headings;
+            conversion.extract_tables = options.extract_tables;
+            conversion.include_form_fields = options.include_form_fields;
+            let markdown = document.to_markdown(page_index, &conversion)?;
+            crate::budget::check_page_markdown(markdown.len())?;
+            Ok(markdown)
+        })
     }
 
     /// Extract a bounded window of one page's Markdown, starting at a byte offset.
@@ -345,53 +357,57 @@ impl PdfReadDocument {
 
     /// Judge one page's text usability, independent of anything visual.
     pub fn assess_page_text(&self, page_index: usize) -> Result<PageTextAssessment> {
-        self.document
-            .assess_page_text(page_index)
-            .map_err(Into::into)
+        self.in_warning_scope(|document| document.assess_page_text(page_index).map_err(Into::into))
     }
 
     /// Judge what one page draws, from operators and resource dictionaries only.
     ///
     /// Never decompresses an image or rasterises, so it is safe on the text path.
     pub fn assess_page_visual(&self, page_index: usize) -> Result<PageVisualAssessment> {
-        self.document
-            .assess_page_visual(page_index)
-            .map_err(Into::into)
+        self.in_warning_scope(|document| {
+            document.assess_page_visual(page_index).map_err(Into::into)
+        })
     }
 
     /// Return visible geometry for one zero-based page.
     pub fn page_info(&self, page_index: usize) -> Result<PageInfo> {
-        let info = self.document.get_page_info(page_index)?;
-        let visible = info.crop_box.unwrap_or(info.media_box);
-        Ok(PageInfo {
-            width_points: visible.width,
-            height_points: visible.height,
-            rotation_degrees: info.rotation,
+        self.in_warning_scope(|document| {
+            let info = document.get_page_info(page_index)?;
+            let visible = info.crop_box.unwrap_or(info.media_box);
+            Ok(PageInfo {
+                width_points: visible.width,
+                height_points: visible.height,
+                rotation_degrees: info.rotation,
+            })
         })
     }
 
     /// Render one zero-based page as PNG within fixed pixel bounds.
     pub fn render_page_fit(&self, page_index: usize, limits: RenderLimits) -> Result<RenderedPage> {
-        let (width, height) = self.render_dimensions(page_index, limits)?;
-        // Estimated before the surface exists: RGBA output plus one scratch copy of the
-        // same size, which is what the rasteriser peaks at. Checking after allocation
-        // would already have spent what the check is meant to refuse.
-        let surface_bytes = u64::from(width)
-            .saturating_mul(u64::from(height))
-            .saturating_mul(4)
-            .saturating_mul(2);
-        crate::budget::check_render_surface(usize::try_from(surface_bytes).unwrap_or(usize::MAX))?;
-        crate::budget::check_cancelled()?;
-        let options = RenderOptions::with_dpi(RENDER_DPI as u32);
-        let rendered = render_page_fit(&self.document, page_index, width, height, &options)?;
-        // The surface is gone once the page is encoded; holding its bytes against the
-        // call total would make the second page of a render look like the first plus one.
-        crate::budget::release_render_surface();
-        crate::metrics::record_render(rendered.width, rendered.height, rendered.data.len());
-        Ok(RenderedPage {
-            png: rendered.data,
-            width_pixels: rendered.width,
-            height_pixels: rendered.height,
+        self.in_warning_scope(|document| {
+            let (width, height) = self.render_dimensions(page_index, limits)?;
+            // Estimated before the surface exists: RGBA output plus one scratch copy of the
+            // same size, which is what the rasteriser peaks at. Checking after allocation
+            // would already have spent what the check is meant to refuse.
+            let surface_bytes = u64::from(width)
+                .saturating_mul(u64::from(height))
+                .saturating_mul(4)
+                .saturating_mul(2);
+            crate::budget::check_render_surface(
+                usize::try_from(surface_bytes).unwrap_or(usize::MAX),
+            )?;
+            crate::budget::check_cancelled()?;
+            let options = RenderOptions::with_dpi(RENDER_DPI as u32);
+            let rendered = render_page_fit(document, page_index, width, height, &options)?;
+            // The surface is gone once the page is encoded; holding its bytes against the
+            // call total would make the second page of a render look like the first plus one.
+            crate::budget::release_render_surface();
+            crate::metrics::record_render(rendered.width, rendered.height, rendered.data.len());
+            Ok(RenderedPage {
+                png: rendered.data,
+                width_pixels: rendered.width,
+                height_pixels: rendered.height,
+            })
         })
     }
 
@@ -433,6 +449,10 @@ impl PdfReadDocument {
         let height = (height_points * scale).floor().max(1.0) as u32;
         Ok((width, height))
     }
+
+    fn in_warning_scope<T>(&self, work: impl FnOnce(&PdfDocument) -> T) -> T {
+        crate::extractors::warnings::with_warning_sink(&self.warnings, || work(&self.document))
+    }
 }
 
 fn validate_parser_limits(limits: ParserLimits) -> Result<()> {
@@ -445,4 +465,51 @@ fn validate_parser_limits(limits: ParserLimits) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn free_function_warnings_reach_the_document_structured_surface() {
+        let document = PdfReadDocument::from_bytes(warning_pdf(), ParserLimits::default())
+            .expect("warning PDF opens");
+        let _ = document.page_to_markdown(0, &MarkdownOptions::default());
+
+        let warnings = document.document.take_structured_warnings();
+        assert!(warnings.iter().any(|warning| {
+            warning.category == crate::extractors::warnings::WarningCategory::SpecViolation
+                && warning.message.contains("No newline after stream keyword")
+        }));
+        assert_eq!(
+            document.warnings.len(),
+            0,
+            "both surfaces must share one sink"
+        );
+    }
+
+    fn warning_pdf() -> Vec<u8> {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let objects = [
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".as_slice(),
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n".as_slice(),
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << >> /Contents 4 0 R >>\nendobj\n".as_slice(),
+            b"4 0 obj\n<< /Length 3 >>\nstreamABC\nendstream\nendobj\n".as_slice(),
+        ];
+        let mut offsets = Vec::with_capacity(objects.len());
+        for object in objects {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(object);
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 5\n0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!("trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+        pdf
+    }
 }

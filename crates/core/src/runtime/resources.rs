@@ -5,8 +5,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     config::{
-        MAX_OPEN_FILES, MAX_PDF_CALLS, MAX_READ_ONLY_CALLS, MEMORY_GROWTH_BYTES,
-        MEMORY_PERMIT_BYTES, PDF_GATE_WAIT, RuntimeConfig,
+        MAX_OPEN_FILES, MAX_PDF_CALLS, MEMORY_GROWTH_BYTES, MEMORY_PERMIT_BYTES, PDF_GATE_WAIT,
+        RuntimeConfig,
     },
     file_work::FileWorkPool,
 };
@@ -15,7 +15,6 @@ use super::{
 pub struct RuntimeCapacity {
     config: RuntimeConfig,
     read_only_calls: Arc<Semaphore>,
-    grep_calls: Arc<Semaphore>,
     worker_lanes: Arc<Semaphore>,
     open_files: Arc<Semaphore>,
     process_calls: Arc<Semaphore>,
@@ -82,8 +81,7 @@ impl RuntimeCapacity {
     pub fn new(config: RuntimeConfig) -> Self {
         Self {
             config,
-            read_only_calls: Arc::new(Semaphore::new(MAX_READ_ONLY_CALLS)),
-            grep_calls: Arc::new(Semaphore::new(config.grep_concurrent_calls)),
+            read_only_calls: Arc::new(Semaphore::new(config.read_only_calls)),
             worker_lanes: Arc::new(Semaphore::new(config.worker_lanes)),
             open_files: Arc::new(Semaphore::new(MAX_OPEN_FILES)),
             process_calls: Arc::new(Semaphore::new(config.process_calls)),
@@ -152,7 +150,7 @@ impl RuntimeResources {
     /// killed mid-call.
     #[must_use]
     pub fn has_in_flight_calls(&self) -> bool {
-        self.capacity.read_only_calls.available_permits() < MAX_READ_ONLY_CALLS
+        self.capacity.read_only_calls.available_permits() < self.config().read_only_calls
             || self.capacity.process_calls.available_permits() < self.config().process_calls
     }
 
@@ -172,7 +170,7 @@ impl RuntimeResources {
         self.wait_for_process_quiescence(deadline)
             && wait_for_permits(
                 &self.capacity.read_only_calls,
-                MAX_READ_ONLY_CALLS,
+                self.config().read_only_calls,
                 deadline,
             )
     }
@@ -192,17 +190,6 @@ impl RuntimeResources {
             .clone()
             .try_acquire_owned()
             .ok()?;
-        if self.shutdown.is_cancelled() {
-            return None;
-        }
-        Some(permit)
-    }
-
-    pub(crate) fn try_admit_grep(&self) -> Option<OwnedSemaphorePermit> {
-        if self.shutdown.is_cancelled() {
-            return None;
-        }
-        let permit = self.capacity.grep_calls.clone().try_acquire_owned().ok()?;
         if self.shutdown.is_cancelled() {
             return None;
         }

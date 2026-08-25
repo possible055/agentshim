@@ -1,3 +1,5 @@
+use std::collections::BinaryHeap;
+
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -10,7 +12,7 @@ use crate::{
 
 use super::request::{DEFAULT_LIMIT, GlobError, GlobRequest, MAX_MATCHES, PATH_OMISSION};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct GlobMatch {
     pub absolute: String,
     pub charge: usize,
@@ -18,7 +20,7 @@ pub struct GlobMatch {
 
 pub struct BoundedCollector {
     capacity: usize,
-    matches: Vec<GlobMatch>,
+    matches: BinaryHeap<GlobMatch>,
     charged: usize,
     memory_limit: usize,
     reservation: Option<MemoryReservation>,
@@ -30,7 +32,7 @@ impl BoundedCollector {
         memory_limit: usize,
         mut reservation: Option<MemoryReservation>,
     ) -> Result<Self, GlobError> {
-        let matches = Vec::with_capacity(capacity);
+        let matches = BinaryHeap::with_capacity(capacity);
         let charged = matches
             .capacity()
             .saturating_mul(std::mem::size_of::<GlobMatch>());
@@ -53,12 +55,23 @@ impl BoundedCollector {
     }
 
     pub fn admit(&mut self, path: &ResolvedPath) -> Result<(), GlobError> {
-        if self.matches.len() >= self.capacity {
-            return Ok(());
-        }
         let absolute = crate::path::display_path(path.absolute());
         let charge = absolute.capacity();
-        let total = self.charged.saturating_add(charge);
+        let replaced_charge = if self.matches.len() >= self.capacity {
+            let Some(largest) = self.matches.peek() else {
+                return Ok(());
+            };
+            if absolute >= largest.absolute {
+                return Ok(());
+            }
+            largest.charge
+        } else {
+            0
+        };
+        let total = self
+            .charged
+            .saturating_sub(replaced_charge)
+            .saturating_add(charge);
         if total > self.memory_limit {
             return Err(GlobError::Memory);
         }
@@ -68,6 +81,9 @@ impl BoundedCollector {
             .is_some_and(|reservation| !reservation.try_grow_to(total))
         {
             return Err(GlobError::MemoryBusy);
+        }
+        if replaced_charge > 0 {
+            self.matches.pop();
         }
         self.matches.push(GlobMatch { absolute, charge });
         self.charged = total;
@@ -83,7 +99,7 @@ impl BoundedCollector {
     }
 
     pub fn into_order(self) -> Vec<GlobMatch> {
-        self.matches
+        self.matches.into_sorted_vec()
     }
 }
 

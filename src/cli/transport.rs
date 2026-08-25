@@ -3,11 +3,11 @@ use std::{
     io,
     pin::Pin,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     task::{Context, Poll},
-    time::SystemTime,
+    time::{Duration, Instant, SystemTime},
 };
 
 use agentshim::ToolsListCorrelation;
@@ -15,15 +15,19 @@ use rmcp::{
     RoleServer,
     model::{ClientNotification, ClientRequest, GetExtensions, JsonRpcMessage, RequestId},
     service::{RxJsonRpcMessage, TxJsonRpcMessage},
-    transport::Transport,
+    transport::{IntoTransport, Transport},
 };
-use tokio::io::{AsyncRead, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub(super) const MAX_RECEIVE_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TOOLS_LIST_CORRELATIONS: usize = 256;
 const MAX_CORRELATION_REQUEST_ID_BYTES: usize = 256;
+const MAX_PENDING_MCP_REQUESTS: usize = 256;
+const MAX_PENDING_MCP_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+const MCP_WRITE_STALL_TIMEOUT: Duration = Duration::from_secs(5);
+const MCP_WRITE_STALL_POLL: Duration = Duration::from_millis(100);
 
 pub(super) struct ReceiveFrameReader<R> {
     inner: R,
@@ -89,6 +93,52 @@ fn frame_too_large() -> io::Error {
     )
 }
 
+pub(super) struct ProgressWriter<W> {
+    inner: W,
+    last_progress: Arc<AtomicU64>,
+}
+
+impl<W> ProgressWriter<W> {
+    pub(super) fn new(inner: W) -> (Self, Arc<AtomicU64>) {
+        let last_progress = Arc::new(AtomicU64::new(monotonic_millis()));
+        (
+            Self {
+                inner,
+                last_progress: Arc::clone(&last_progress),
+            },
+            last_progress,
+        )
+    }
+}
+
+impl<W: AsyncWrite + Unpin> AsyncWrite for ProgressWriter<W> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let result = Pin::new(&mut self.inner).poll_write(context, buffer);
+        if matches!(&result, Poll::Ready(Ok(written)) if *written > 0) {
+            self.last_progress
+                .store(monotonic_millis(), Ordering::Release);
+        }
+        result
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(context)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(context)
+    }
+}
+
+fn monotonic_millis() -> u64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    u64::try_from(EPOCH.get_or_init(Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
 pub(super) struct ShutdownReader<R> {
     pub(super) inner: R,
     pub(super) shutdown: CancellationToken,
@@ -139,9 +189,42 @@ impl TransportFailure {
 pub(super) struct DiagnosticTransport<T> {
     inner: T,
     correlations: Arc<Mutex<CorrelationTracker>>,
+    backlog: Arc<Mutex<RequestBacklog>>,
     failure: TransportFailure,
     shutdown: CancellationToken,
     last_activity: Arc<AtomicU64>,
+    write_progress: Arc<AtomicU64>,
+}
+
+#[derive(Default)]
+struct RequestBacklog {
+    entries: HashMap<RequestId, usize>,
+    bytes: usize,
+}
+
+impl RequestBacklog {
+    fn try_insert(&mut self, id: RequestId, bytes: usize) -> bool {
+        if self.entries.contains_key(&id)
+            || self.entries.len() >= MAX_PENDING_MCP_REQUESTS
+            || self.bytes.saturating_add(bytes) > MAX_PENDING_MCP_REQUEST_BYTES
+        {
+            return false;
+        }
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.entries.insert(id, bytes);
+        true
+    }
+
+    fn remove(&mut self, id: &RequestId) {
+        if let Some(bytes) = self.entries.remove(id) {
+            self.bytes = self.bytes.saturating_sub(bytes);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+    }
 }
 
 /// Wall-clock milliseconds for the idle watchdog's activity tracker. Wall clock rather
@@ -205,23 +288,58 @@ impl CorrelationTracker {
 }
 
 impl<T> DiagnosticTransport<T> {
+    #[cfg(test)]
     pub(super) fn new(
         inner: T,
         shutdown: CancellationToken,
         last_activity: Arc<AtomicU64>,
+    ) -> (Self, TransportFailure) {
+        Self::new_with_write_progress(
+            inner,
+            shutdown,
+            last_activity,
+            Arc::new(AtomicU64::new(monotonic_millis())),
+        )
+    }
+
+    pub(super) fn new_with_write_progress(
+        inner: T,
+        shutdown: CancellationToken,
+        last_activity: Arc<AtomicU64>,
+        write_progress: Arc<AtomicU64>,
     ) -> (Self, TransportFailure) {
         let failure = TransportFailure(Arc::new(AtomicBool::new(false)));
         (
             Self {
                 inner,
                 correlations: Arc::new(Mutex::new(CorrelationTracker::default())),
+                backlog: Arc::new(Mutex::new(RequestBacklog::default())),
                 failure: failure.clone(),
                 shutdown,
                 last_activity,
+                write_progress,
             },
             failure,
         )
     }
+}
+
+pub(super) fn monitored_stdio_transport<R, W>(
+    reader: R,
+    writer: W,
+    shutdown: CancellationToken,
+    last_activity: Arc<AtomicU64>,
+) -> (
+    impl Transport<RoleServer, Error = io::Error> + 'static,
+    TransportFailure,
+)
+where
+    R: AsyncRead + Send + Unpin + 'static,
+    W: AsyncWrite + Send + Unpin + 'static,
+{
+    let (writer, write_progress) = ProgressWriter::new(writer);
+    let transport = (reader, writer).into_transport();
+    DiagnosticTransport::new_with_write_progress(transport, shutdown, last_activity, write_progress)
 }
 
 impl<T> Transport<RoleServer> for DiagnosticTransport<T>
@@ -245,11 +363,37 @@ where
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(id)
         });
+        let backlog = Arc::clone(&self.backlog);
         let failure = self.failure.clone();
         let shutdown = self.shutdown.clone();
+        let write_progress = Arc::clone(&self.write_progress);
         let send = self.inner.send(item);
         async move {
-            let result = send.await;
+            tokio::pin!(send);
+            let result = loop {
+                tokio::select! {
+                    result = &mut send => break result,
+                    () = tokio::time::sleep(MCP_WRITE_STALL_POLL) => {
+                        let stalled_ms = monotonic_millis().saturating_sub(
+                            write_progress.load(Ordering::Acquire),
+                        );
+                        if stalled_ms >= u64::try_from(MCP_WRITE_STALL_TIMEOUT.as_millis())
+                            .unwrap_or(u64::MAX)
+                        {
+                            break Err(io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                "MCP stdout write made no progress before the deadline",
+                            ));
+                        }
+                    }
+                }
+            };
+            if let Some(id) = &response_id {
+                backlog
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(id);
+            }
             match (&result, correlation) {
                 (Ok(()), Some(request_id)) if successful_response => {
                     tracing::info!(target: "agentshim", event = "tools_list_sent", phase = "transport", outcome = "success", request_id);
@@ -272,6 +416,9 @@ where
 
     fn receive(&mut self) -> impl Future<Output = Option<RxJsonRpcMessage<RoleServer>>> + Send {
         let correlations = Arc::clone(&self.correlations);
+        let backlog = Arc::clone(&self.backlog);
+        let failure = self.failure.clone();
+        let shutdown = self.shutdown.clone();
         let last_activity = Arc::clone(&self.last_activity);
         let receive = self.inner.receive();
         async move {
@@ -281,6 +428,33 @@ where
             // needs; `None` means the transport closed, which cancels the token anyway.
             if message.is_some() {
                 last_activity.store(unix_epoch_millis(), Ordering::Release);
+            }
+            if let Some(JsonRpcMessage::Request(request)) = &mut message {
+                let bytes = serde_json::to_vec(&request)
+                    .map_or(MAX_RECEIVE_FRAME_BYTES, |encoded| encoded.len());
+                let (admitted, pending_requests, pending_bytes) = {
+                    let mut backlog = backlog
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let admitted = backlog.try_insert(request.id.clone(), bytes);
+                    (admitted, backlog.entries.len(), backlog.bytes)
+                };
+                if !admitted {
+                    failure.0.store(true, Ordering::Release);
+                    shutdown.cancel();
+                    tracing::error!(
+                        target: "agentshim",
+                        event = "mcp_request_backlog_exceeded",
+                        phase = "transport",
+                        outcome = "shutdown",
+                        error_class = "resource_busy",
+                        pending_requests,
+                        pending_bytes,
+                        request_limit = MAX_PENDING_MCP_REQUESTS,
+                        request_bytes_limit = MAX_PENDING_MCP_REQUEST_BYTES
+                    );
+                    return None;
+                }
             }
             match &mut message {
                 Some(JsonRpcMessage::Request(request))
@@ -307,6 +481,10 @@ where
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .remove(id);
+                        backlog
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .remove(id);
                     }
                 }
                 _ => {}
@@ -317,6 +495,10 @@ where
 
     fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
         self.correlations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.backlog
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
@@ -344,7 +526,8 @@ mod tests {
 
     use super::{
         CorrelationTracker, DiagnosticTransport, MAX_CORRELATION_REQUEST_ID_BYTES,
-        MAX_TOOLS_LIST_CORRELATIONS,
+        MAX_PENDING_MCP_REQUEST_BYTES, MAX_PENDING_MCP_REQUESTS, MAX_TOOLS_LIST_CORRELATIONS,
+        RequestBacklog,
     };
 
     struct TestTransport {
@@ -447,6 +630,22 @@ mod tests {
 
         assert_eq!(tracker.entries.len(), 1);
         assert_eq!(tracker.remove(&request_id(1)).as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn request_backlog_is_bounded_by_items_bytes_and_unique_ids() {
+        let mut backlog = RequestBacklog::default();
+        for id in 0..MAX_PENDING_MCP_REQUESTS {
+            assert!(
+                backlog.try_insert(RequestId::Number(i64::try_from(id).expect("bounded ID")), 1)
+            );
+        }
+        assert!(!backlog.try_insert(RequestId::Number(10_000), 1));
+
+        let mut bytes = RequestBacklog::default();
+        assert!(bytes.try_insert(request_id(1), MAX_PENDING_MCP_REQUEST_BYTES));
+        assert!(!bytes.try_insert(request_id(2), 1));
+        assert!(!bytes.try_insert(request_id(1), 0));
     }
 
     #[tokio::test]
@@ -566,6 +765,13 @@ mod tests {
                 .lock()
                 .expect("tracker")
                 .insert(request_id(1), "correlation".to_owned());
+            assert!(
+                transport
+                    .backlog
+                    .lock()
+                    .expect("backlog")
+                    .try_insert(request_id(1), 1)
+            );
 
             let send = transport.send(message);
             assert!(
@@ -576,7 +782,16 @@ mod tests {
                     .entries
                     .is_empty()
             );
+            assert_eq!(transport.backlog.lock().expect("backlog").entries.len(), 1);
             send.await.expect("send");
+            assert!(
+                transport
+                    .backlog
+                    .lock()
+                    .expect("backlog")
+                    .entries
+                    .is_empty()
+            );
         }
     }
 

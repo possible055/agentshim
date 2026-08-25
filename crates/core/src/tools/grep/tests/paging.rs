@@ -257,7 +257,12 @@ fn oversized_first_result_is_omitted_and_pagination_advances() {
 #[test]
 fn page_retention_stays_within_its_memory_budget() {
     let query = request("needle");
-    let mut page = Page::new(&query, crate::traversal::TraversalSummary::default(), false);
+    let mut page = Page::new(
+        &query,
+        crate::traversal::TraversalSummary::default(),
+        false,
+        false,
+    );
     for index in 0..1_000 {
         page.push_entry(
             format!("{index}:{}", "x".repeat(20_000)),

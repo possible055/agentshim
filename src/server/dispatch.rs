@@ -427,20 +427,36 @@ impl AgentShim {
             return;
         };
         tokio::spawn(async move {
-            let event = agentshim_core::runtime::deadline::wait(
-                registration.deadline(),
-                registration.finished(),
-                shutdown,
-            )
-            .await;
-            if event != agentshim_core::runtime::deadline::DeadlineEvent::Expired {
-                return;
-            }
-            if let Ok(StopStart::Accepted(work)) =
-                detached.begin_stop(registration.job_id(), StopCause::Timeout)
-            {
-                std::mem::drop(tokio::task::spawn_blocking(move || work.run()));
-            }
+            std::mem::drop(tokio::task::spawn_blocking(move || {
+                const POLL: std::time::Duration = std::time::Duration::from_millis(5);
+                let cause = loop {
+                    if registration.finished().is_cancelled() || shutdown.is_cancelled() {
+                        return;
+                    }
+                    match registration.log_quota_exceeded() {
+                        Ok(true) => break StopCause::LogQuota,
+                        Ok(false) => {}
+                        Err(error) => {
+                            tracing::error!(target: "agentshim", event = "detached_log_quota_monitor", phase = "lifecycle", outcome = "uncertain", error_class = "io", io_kind = ?error.kind());
+                            break StopCause::LogQuotaMonitor;
+                        }
+                    }
+                    if std::time::Instant::now() >= registration.deadline() {
+                        break StopCause::Timeout;
+                    }
+                    std::thread::sleep(
+                        registration
+                            .deadline()
+                            .saturating_duration_since(std::time::Instant::now())
+                            .min(POLL),
+                    );
+                };
+                if let Ok(StopStart::Accepted(work)) =
+                    detached.begin_stop(registration.job_id(), cause)
+                {
+                    work.run();
+                }
+            }));
         });
     }
 

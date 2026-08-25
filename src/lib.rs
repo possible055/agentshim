@@ -34,7 +34,10 @@ pub fn bash_report() -> Result<(std::path::PathBuf, String), String> {
     );
     engine.bash_runtime().map_err(|error| error.to_string())
 }
-pub use runtime::{MAX_READ_ONLY_CALLS, RuntimeConfig as RuntimeLimits};
+pub use agentshim_core::platform::process::WindowsJobLimits;
+pub use runtime::{
+    DEFAULT_READ_ONLY_CALLS, MAX_CONFIGURED_READ_ONLY_CALLS, RuntimeConfig as RuntimeLimits,
+};
 pub use server::{AgentShim, AgentShimBuilder, ToolsListCorrelation};
 
 #[cfg(feature = "bench-internals")]

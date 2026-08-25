@@ -23,9 +23,19 @@ _GREP_PATTERN_KEYS = ("pattern", "query")
 _GREP_GLOB_KEYS = ("glob", "include", "filePattern")
 _GREP_LIMIT_KEYS = ("limit", "head_limit", "max_results")
 _GREP_SUMMARY_KEYS = ("summary_only", "summary")
+_GREP_FIXED_KEYS = ("fixed_strings", "fixedStrings", "literal")
 _GLOB_PATH_KEYS = ("path", "directory")
 _GLOB_LIMIT_KEYS = ("limit", "head_limit", "max_results")
 _BASH_TIMEOUT_KEYS = ("timeout_ms", "timeout")
+
+# Punctuation metacharacters across Rust regex and JavaScript RegExp; escaping
+# any of them is valid in both, which lets a literal workload be expressed to
+# regex-only targets without changing what is searched.
+_REGEX_LITERAL_METACHARS = frozenset(r"\.+*?()|[]{}^$#&-~")
+
+
+def escape_regex_literal(pattern: str) -> str:
+    return "".join("\\" + ch if ch in _REGEX_LITERAL_METACHARS else ch for ch in pattern)
 
 
 @dataclass
@@ -43,6 +53,7 @@ class ExternalToolMap:
     grep_mode: str | None = "mode"
     grep_limit: str | None = "limit"
     grep_summary: str | None = None
+    grep_fixed: str | None = "fixed_strings"
     glob_path: str = "path"
     glob_limit: str | None = "limit"
     bash_timeout: str | None = "timeout_ms"
@@ -123,6 +134,7 @@ def bind_tools(listed_tools: list[dict[str, Any]], fallback: ExternalToolMap) ->
         bound.grep_mode = _first_present(properties, ("mode",))
         bound.grep_limit = _first_present(properties, _GREP_LIMIT_KEYS)
         bound.grep_summary = _first_present(properties, _GREP_SUMMARY_KEYS)
+        bound.grep_fixed = _first_present(properties, _GREP_FIXED_KEYS)
 
     glob_tool = _pick_tool(listed, _GLOB_ALIASES)
     if glob_tool is None:
@@ -331,7 +343,13 @@ class McpStdioAdapter(TargetAdapter):
         if case != "smart":
             args.setdefault("case", case)
         if fixed_strings:
-            args.setdefault("fixed_strings", True)
+            if self.tools.grep_fixed:
+                args[self.tools.grep_fixed] = True
+            else:
+                # Regex-only target: an unknown parameter would be silently
+                # ignored, so the same literal workload is sent as an escaped
+                # regex instead.
+                args[self.tools.grep_pattern] = escape_regex_literal(pattern)
         return self.require_client().call_tool(self.tools.grep_tool, args, timeout_s=timeout_s)
 
     def invoke_glob(

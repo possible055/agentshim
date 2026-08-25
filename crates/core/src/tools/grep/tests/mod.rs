@@ -254,7 +254,12 @@ fn token_dense_matches_preserve_pagination_and_model_budget() {
 #[test]
 fn partial_pages_keep_the_shown_offset_under_burst_and_item_ceilings() {
     let query = request("needle");
-    let mut page = Page::new(&query, crate::traversal::TraversalSummary::default(), false);
+    let mut page = Page::new(
+        &query,
+        crate::traversal::TraversalSummary::default(),
+        false,
+        false,
+    );
     page.mark_complete();
     for index in 0..80 {
         page.push_entry(

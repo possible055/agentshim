@@ -83,6 +83,10 @@ pub struct GrepStageTimings {
     pub candidate_slash_path_bytes: usize,
     pub candidate_slash_path_capacity: usize,
     pub lanes: usize,
+    pub queued_outcome_items: usize,
+    pub queued_outcome_bytes: usize,
+    pub queued_outcome_items_high_water: usize,
+    pub queued_outcome_bytes_high_water: usize,
     pub speculative_lease_requested_bytes: usize,
     pub speculative_lease_granted_bytes: usize,
     pub capture_exact_retries: usize,
@@ -157,6 +161,10 @@ pub struct GrepProfileCounters {
     candidate_slash_path_bytes: std::sync::atomic::AtomicUsize,
     candidate_slash_path_capacity: std::sync::atomic::AtomicUsize,
     lanes: std::sync::atomic::AtomicUsize,
+    queued_outcome_items: std::sync::atomic::AtomicUsize,
+    queued_outcome_bytes: std::sync::atomic::AtomicUsize,
+    queued_outcome_items_high_water: std::sync::atomic::AtomicUsize,
+    queued_outcome_bytes_high_water: std::sync::atomic::AtomicUsize,
     speculative_lease_requested_bytes: std::sync::atomic::AtomicUsize,
     speculative_lease_granted_bytes: std::sync::atomic::AtomicUsize,
     capture_exact_retries: std::sync::atomic::AtomicUsize,
@@ -218,6 +226,10 @@ impl Default for GrepProfileCounters {
             candidate_slash_path_bytes: std::sync::atomic::AtomicUsize::new(0),
             candidate_slash_path_capacity: std::sync::atomic::AtomicUsize::new(0),
             lanes: std::sync::atomic::AtomicUsize::new(0),
+            queued_outcome_items: std::sync::atomic::AtomicUsize::new(0),
+            queued_outcome_bytes: std::sync::atomic::AtomicUsize::new(0),
+            queued_outcome_items_high_water: std::sync::atomic::AtomicUsize::new(0),
+            queued_outcome_bytes_high_water: std::sync::atomic::AtomicUsize::new(0),
             speculative_lease_requested_bytes: std::sync::atomic::AtomicUsize::new(0),
             speculative_lease_granted_bytes: std::sync::atomic::AtomicUsize::new(0),
             capture_exact_retries: std::sync::atomic::AtomicUsize::new(0),
@@ -299,6 +311,38 @@ impl GrepProfiler {
                 |current| Some(current.saturating_add(requested)),
             );
         }
+    }
+
+    pub fn record_outcome_queued(&self, bytes: usize) {
+        let Self::Enabled(counters) = self else {
+            return;
+        };
+        let items = counters
+            .queued_outcome_items
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            .saturating_add(1);
+        let bytes = counters
+            .queued_outcome_bytes
+            .fetch_add(bytes, std::sync::atomic::Ordering::AcqRel)
+            .saturating_add(bytes);
+        counters
+            .queued_outcome_items_high_water
+            .fetch_max(items, std::sync::atomic::Ordering::Relaxed);
+        counters
+            .queued_outcome_bytes_high_water
+            .fetch_max(bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn record_outcome_released(&self, bytes: usize) {
+        let Self::Enabled(counters) = self else {
+            return;
+        };
+        counters
+            .queued_outcome_items
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        counters
+            .queued_outcome_bytes
+            .fetch_sub(bytes, std::sync::atomic::Ordering::AcqRel);
     }
 
     pub fn record_retry(&self, capture: bool, ceiling: usize, success: bool) {
@@ -469,6 +513,10 @@ impl GrepProfiler {
             candidate_slash_path_bytes: load_usize(&counters.candidate_slash_path_bytes),
             candidate_slash_path_capacity: load_usize(&counters.candidate_slash_path_capacity),
             lanes: load_usize(&counters.lanes),
+            queued_outcome_items: load_usize(&counters.queued_outcome_items),
+            queued_outcome_bytes: load_usize(&counters.queued_outcome_bytes),
+            queued_outcome_items_high_water: load_usize(&counters.queued_outcome_items_high_water),
+            queued_outcome_bytes_high_water: load_usize(&counters.queued_outcome_bytes_high_water),
             speculative_lease_requested_bytes: load_usize(
                 &counters.speculative_lease_requested_bytes,
             ),
@@ -612,6 +660,14 @@ impl GrepProfiler {
     }
 
     pub fn record_speculative_lease(&self, _requested: usize, _granted: bool) {
+        let _ = self;
+    }
+
+    pub fn record_outcome_queued(&self, _bytes: usize) {
+        let _ = self;
+    }
+
+    pub fn record_outcome_released(&self, _bytes: usize) {
         let _ = self;
     }
 

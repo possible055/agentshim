@@ -28,6 +28,8 @@ pub struct NativeHostOptions {
     pub tool_timeout_shelf_ms: Option<u32>,
     /// Maximum background job runtime, resolved by the embedding host.
     pub background_job_timeout_max_ms: Option<u32>,
+    /// Read-only admission capacity (read/glob/grep) for the shared runtime.
+    pub read_only_calls: Option<u32>,
     /// Explicit child environment; the Engine never reads the host ambient
     /// environment on its own.
     pub env: Option<Vec<EnvEntry>>,
@@ -48,6 +50,29 @@ pub(crate) struct NativeEngineConfig {
     pub(crate) capture_root: std::path::PathBuf,
     pub(crate) capture_max_bytes: u64,
     pub(crate) capture_cleanup_session_end: bool,
+}
+
+fn configured_read_only_calls(value: Option<u32>) -> Result<usize> {
+    value.map_or_else(
+        || Ok(agentshim_core::runtime::DEFAULT_READ_ONLY_CALLS),
+        |value| {
+            usize::try_from(value)
+                .ok()
+                .filter(|configured| {
+                    (1..=agentshim_core::runtime::MAX_CONFIGURED_READ_ONLY_CALLS)
+                        .contains(configured)
+                })
+                .ok_or_else(|| {
+                    Error::new(
+                        napi::Status::InvalidArg,
+                        format!(
+                            "readOnlyCalls must be an integer from 1 to {}",
+                            agentshim_core::runtime::MAX_CONFIGURED_READ_ONLY_CALLS
+                        ),
+                    )
+                })
+        },
+    )
 }
 
 impl NativeEngineConfig {
@@ -126,6 +151,7 @@ impl NativeEngineConfig {
         let mut runtime = agentshim_core::runtime::RuntimeConfig::for_host_defaults();
         runtime.tool_timeout_shelf = shelf;
         runtime.background_job_timeout_max = background_timeout_max;
+        runtime.read_only_calls = configured_read_only_calls(options.read_only_calls)?;
         Ok((
             Self {
                 output_limits: NativeOutputLimits::new(options.page_budget_bytes),

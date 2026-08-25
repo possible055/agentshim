@@ -81,6 +81,7 @@ pub enum JobState {
     Completed,
     Terminated,
     TimedOut,
+    LogQuotaExceeded,
     OutcomeUncertain,
 }
 
@@ -94,6 +95,7 @@ impl JobState {
             Self::Completed => "completed",
             Self::Terminated => "terminated",
             Self::TimedOut => "timed_out",
+            Self::LogQuotaExceeded => "log_quota_exceeded",
             Self::OutcomeUncertain => "outcome_uncertain",
         }
     }

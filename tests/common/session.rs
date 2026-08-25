@@ -124,6 +124,11 @@ impl TestSessionBuilder {
         command
             .env_remove("AGENTSHIM_PROCESS_CALLS")
             .env_remove("AGENTSHIM_DETACHED_CALLS")
+            .env_remove("AGENTSHIM_DETACHED_LOG_BYTES")
+            .env_remove("AGENTSHIM_WINDOWS_ACTIVE_PROCESS_LIMIT")
+            .env_remove("AGENTSHIM_WINDOWS_JOB_MEMORY_BYTES")
+            .env_remove("AGENTSHIM_WINDOWS_PROCESS_MEMORY_BYTES")
+            .env_remove("AGENTSHIM_WINDOWS_CPU_RATE_PERCENT")
             .env_remove("AGENTSHIM_BASH")
             .env_remove("AGENTSHIM_BURST_TOKENS")
             .env_remove("AGENTSHIM_IDLE_TIMEOUT");

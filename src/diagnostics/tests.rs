@@ -9,7 +9,7 @@ use tracing_subscriber::prelude::*;
 use super::*;
 use crate::diagnostics::storage::{
     WriterMaintenance, append_rotated, list_logs, log_path, parse_log_date, purge_directory,
-    serialize_batch, status, write_batch, write_shutdown_summary,
+    serialize_batch, status, write_batch, write_shutdown_summary, writer_loop,
 };
 
 fn record(event: &str) -> Record {
@@ -30,6 +30,100 @@ fn mode_parser_is_strict() {
     assert_eq!("errors".parse::<LogMode>().expect("mode"), LogMode::Errors);
     assert_eq!("all".parse::<LogMode>().expect("mode"), LogMode::All);
     assert!("debug".parse::<LogMode>().is_err());
+}
+
+#[test]
+fn blocked_writer_join_has_a_deadline() {
+    let directory = tempfile::tempdir().expect("diagnostic directory");
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let queue = Arc::new(QueueMetrics::new());
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    let release = Arc::new(std::sync::Barrier::new(2));
+    let writer_entered = Arc::clone(&entered);
+    let writer_release = Arc::clone(&release);
+    queue.set_writer_hook(Arc::new(move || {
+        writer_entered.wait();
+        writer_release.wait();
+    }));
+    let writer = LazyWriter::new(
+        directory.path().to_path_buf(),
+        "blocked-writer".to_owned(),
+        receiver,
+        Arc::new(AtomicU64::new(0)),
+        Arc::clone(&queue),
+    );
+    writer.start().expect("start real writer");
+    queue.batches.fetch_add(1, Ordering::AcqRel);
+    queue.bytes.fetch_add(LINE_BYTES, Ordering::AcqRel);
+    sender
+        .send(QueuedBatch {
+            records: vec![record("blocked_writer")],
+            charge: LINE_BYTES,
+        })
+        .expect("queue batch");
+    entered.wait();
+
+    let started = std::time::Instant::now();
+    assert!(!writer.shutdown_with_timeout(Duration::from_millis(20)));
+    assert!(started.elapsed() < Duration::from_millis(100));
+    assert_eq!(queue.batches.load(Ordering::Acquire), 0);
+    assert_eq!(queue.bytes.load(Ordering::Acquire), 0);
+
+    release.wait();
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while list_logs(directory.path()).expect("list logs").is_empty()
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!list_logs(directory.path()).expect("list logs").is_empty());
+}
+
+#[test]
+fn completed_writer_is_joined() {
+    let writer = std::thread::spawn(|| {});
+    assert!(join_writer_until(writer, Duration::from_secs(1)));
+}
+
+#[test]
+fn pending_writer_batch_keeps_queue_metrics_balanced() {
+    let directory = tempfile::tempdir().expect("diagnostic directory");
+    let (sender, receiver) = mpsc::sync_channel(2);
+    let queue = QueueMetrics::new();
+    let first_records = vec![record("first"); MAX_BATCH_RECORDS - 1];
+    let second_records = vec![record("second"); 2];
+    let first_charge = first_records.len() * LINE_BYTES;
+    let second_charge = second_records.len() * LINE_BYTES;
+    queue.batches.store(2, Ordering::Release);
+    queue
+        .bytes
+        .store(first_charge + second_charge, Ordering::Release);
+    sender
+        .send(QueuedBatch {
+            records: first_records,
+            charge: first_charge,
+        })
+        .expect("queue first batch");
+    sender
+        .send(QueuedBatch {
+            records: second_records,
+            charge: second_charge,
+        })
+        .expect("queue second batch");
+    drop(sender);
+
+    writer_loop(
+        directory.path(),
+        "pending-batch",
+        &receiver,
+        &AtomicU64::new(0),
+        &queue,
+        &AtomicBool::new(false),
+        &mut false,
+    );
+
+    assert_eq!(queue.batches.load(Ordering::Acquire), 0);
+    assert_eq!(queue.bytes.load(Ordering::Acquire), 0);
 }
 
 #[test]
@@ -184,7 +278,7 @@ fn purge_keeps_today_and_removes_expired_logs() {
 
 fn test_recorder(mode: LogMode, capacity: usize) -> (Recorder, mpsc::Receiver<QueuedBatch>) {
     let (sender, receiver) = mpsc::sync_channel(capacity);
-    let queued_bytes = Arc::new(AtomicUsize::new(0));
+    let queue = Arc::new(QueueMetrics::new());
     (
         Recorder {
             mode,
@@ -193,7 +287,7 @@ fn test_recorder(mode: LogMode, capacity: usize) -> (Recorder, mpsc::Receiver<Qu
             sender,
             writer: None,
             dropped: Arc::new(AtomicU64::new(0)),
-            queued_bytes,
+            queue,
         },
         receiver,
     )

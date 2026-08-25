@@ -1,11 +1,11 @@
 use std::{env, ffi::OsStr, io, time::Duration};
 
-pub const MAX_READ_ONLY_CALLS: usize = 16;
+pub const DEFAULT_READ_ONLY_CALLS: usize = 16;
+pub const MAX_CONFIGURED_READ_ONLY_CALLS: usize = 32;
 pub const MAX_SEARCH_LANES: usize = 16;
 pub const DEFAULT_WORKER_LANES: usize = 4;
 pub const MAX_OPEN_FILES: usize = 64;
 pub const DEFAULT_PROCESS_CALLS: usize = 16;
-pub const DEFAULT_GREP_CONCURRENT_CALLS: usize = 2;
 pub const MAX_CONFIGURED_PROCESS_CALLS: usize = 32;
 pub const DEFAULT_MEMORY_BYTES: usize = 256 * 1024 * 1024;
 pub const DEFAULT_GREP_MEMORY_BYTES: usize = 256 * 1024 * 1024;
@@ -35,6 +35,7 @@ pub const PDF_IMAGE_RUNTIME_LIMIT: Duration = Duration::from_secs(10);
 const HOST_BLOCKING_THREADS: usize = 2;
 const WORKER_ENV: &str = "AGENTSHIM_IO_WORKERS";
 const PROCESS_CALLS_ENV: &str = "AGENTSHIM_PROCESS_CALLS";
+const READ_ONLY_CALLS_ENV: &str = "AGENTSHIM_READ_ONLY_CALLS";
 const TOOL_TIMEOUT_SHELF_ENV: &str = "AGENTSHIM_TOOL_TIMEOUT_SHELF";
 pub const BACKGROUND_JOB_TIMEOUT_MAX_ENV: &str = "AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX";
 const IDLE_TIMEOUT_ENV: &str = "AGENTSHIM_IDLE_TIMEOUT";
@@ -67,8 +68,10 @@ pub struct RuntimeConfig {
     pub scheduler_threads: usize,
     pub blocking_threads: usize,
     pub process_calls: usize,
-    pub grep_concurrent_calls: usize,
+    pub read_only_calls: usize,
     pub detached_calls: usize,
+    pub detached_log_bytes: u64,
+    pub windows_job_limits: crate::platform::process::WindowsJobLimits,
     pub output_bytes: usize,
     pub grep_memory_bytes: usize,
     pub glob_memory_bytes: usize,
@@ -95,10 +98,16 @@ impl RuntimeConfig {
         Self {
             worker_lanes,
             scheduler_threads: default_scheduler_threads(available),
-            blocking_threads: blocking_threads(process_calls, detached_calls),
+            blocking_threads: blocking_threads(
+                process_calls,
+                DEFAULT_READ_ONLY_CALLS,
+                detached_calls,
+            ),
             process_calls,
-            grep_concurrent_calls: DEFAULT_GREP_CONCURRENT_CALLS,
+            read_only_calls: DEFAULT_READ_ONLY_CALLS,
             detached_calls,
+            detached_log_bytes: crate::tools::bash::detached::DEFAULT_DETACHED_LOG_BYTES,
+            windows_job_limits: crate::platform::process::WindowsJobLimits::default(),
             output_bytes: crate::output::MODEL_BYTE_LIMIT,
             grep_memory_bytes: DEFAULT_GREP_MEMORY_BYTES,
             glob_memory_bytes: DEFAULT_GLOB_MEMORY_BYTES,
@@ -135,8 +144,12 @@ impl RuntimeConfig {
                 })?,
         };
         let process_calls = parse_process_calls(env::var_os(PROCESS_CALLS_ENV).as_deref())?;
+        let read_only_calls = parse_read_only_calls(env::var_os(READ_ONLY_CALLS_ENV).as_deref())?;
         let detached_calls = crate::tools::bash::detached::parse_detached_calls(
             env::var_os(crate::tools::bash::detached::DETACHED_CALLS_ENV).as_deref(),
+        )?;
+        let detached_log_bytes = crate::tools::bash::detached::parse_detached_log_bytes(
+            env::var_os(crate::tools::bash::detached::DETACHED_LOG_BYTES_ENV).as_deref(),
         )?;
         let grep_memory_bytes = parse_tool_memory_bytes(
             env::var_os(GREP_MEMORY_BYTES_ENV).as_deref(),
@@ -171,6 +184,10 @@ impl RuntimeConfig {
         let idle_timeout = parse_idle_timeout(env::var_os(IDLE_TIMEOUT_ENV).as_deref())?;
         let respect_gitignore =
             parse_respect_gitignore(env::var_os(RESPECT_GITIGNORE_ENV).as_deref())?;
+        #[cfg(windows)]
+        let windows_job_limits = crate::platform::process::WindowsJobLimits::from_env()?;
+        #[cfg(not(windows))]
+        let windows_job_limits = crate::platform::process::WindowsJobLimits::default();
         // A per-call reservation larger than the pool it is drawn from could never be
         // satisfied, so the call would fail at admission on every attempt.
         for (environment, bytes) in [
@@ -190,10 +207,12 @@ impl RuntimeConfig {
         Ok(Self {
             worker_lanes,
             scheduler_threads: default_scheduler_threads(available),
-            blocking_threads: blocking_threads(process_calls, detached_calls),
+            blocking_threads: blocking_threads(process_calls, read_only_calls, detached_calls),
             process_calls,
-            grep_concurrent_calls: DEFAULT_GREP_CONCURRENT_CALLS,
+            read_only_calls,
             detached_calls,
+            detached_log_bytes,
+            windows_job_limits,
             output_bytes: crate::output::parse_configured_byte_limit(
                 env::var_os(crate::output::OUTPUT_BYTES_ENV).as_deref(),
             )?,
@@ -294,6 +313,25 @@ pub fn parse_process_calls(value: Option<&OsStr>) -> io::Result<usize> {
     }
 }
 
+pub fn parse_read_only_calls(value: Option<&OsStr>) -> io::Result<usize> {
+    match value {
+        None => Ok(DEFAULT_READ_ONLY_CALLS),
+        Some(value) => value
+            .to_str()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| (1..=MAX_CONFIGURED_READ_ONLY_CALLS).contains(value))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "{READ_ONLY_CALLS_ENV} must be an integer from 1 to \
+                         {MAX_CONFIGURED_READ_ONLY_CALLS}"
+                    ),
+                )
+            }),
+    }
+}
+
 pub fn parse_respect_gitignore(value: Option<&OsStr>) -> io::Result<bool> {
     match value {
         None => Ok(false),
@@ -382,8 +420,12 @@ pub fn parse_idle_timeout(value: Option<&OsStr>) -> io::Result<Option<Duration>>
     }
 }
 
-pub fn blocking_threads(process_calls: usize, detached_calls: usize) -> usize {
-    process_calls + MAX_READ_ONLY_CALLS + detached_calls + HOST_BLOCKING_THREADS
+pub fn blocking_threads(
+    process_calls: usize,
+    read_only_calls: usize,
+    detached_calls: usize,
+) -> usize {
+    process_calls + read_only_calls + detached_calls + HOST_BLOCKING_THREADS
 }
 
 pub fn default_worker_lanes(available: usize) -> usize {

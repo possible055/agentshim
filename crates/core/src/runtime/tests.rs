@@ -3,19 +3,18 @@ mod tests {
     use std::ffi::{OsStr, OsString};
 
     use crate::runtime::{
-        DEFAULT_BACKGROUND_JOB_TIMEOUT_MAX, DEFAULT_GLOB_MEMORY_BYTES,
-        DEFAULT_GREP_CONCURRENT_CALLS, DEFAULT_GREP_MEMORY_BYTES, DEFAULT_MEMORY_BYTES,
-        DEFAULT_PDF_IMAGE_MEMORY_BYTES, DEFAULT_PDF_TEXT_MEMORY_BYTES, DEFAULT_PROCESS_CALLS,
-        DEFAULT_TOOL_TIMEOUT_SHELF, GLOB_MEMORY_BYTES_ENV, GREP_MEMORY_BYTES_ENV,
-        MAX_BACKGROUND_JOB_TIMEOUT_MAX, MAX_IDLE_TIMEOUT, MAX_PDF_IMAGE_MEMORY_BYTES,
-        MAX_PDF_TEXT_MEMORY_BYTES, MAX_READ_ONLY_CALLS, MAX_TOOL_MEMORY_BYTES,
-        MAX_TOOL_TIMEOUT_SHELF, MIN_IDLE_TIMEOUT, MIN_PDF_IMAGE_MEMORY_BYTES,
-        MIN_PDF_TEXT_MEMORY_BYTES, MIN_TOOL_MEMORY_BYTES, MemoryReservation,
-        PDF_IMAGE_MEMORY_BYTES_ENV, PDF_TEXT_MEMORY_BYTES_ENV, RESPECT_GITIGNORE_ENV,
-        RuntimeConfig, RuntimeResources, blocking_threads, global_memory_bytes,
-        parse_background_job_timeout_max, parse_idle_timeout, parse_memory_bytes_in_range,
-        parse_process_calls, parse_respect_gitignore, parse_tool_memory_bytes,
-        parse_tool_timeout_shelf,
+        DEFAULT_BACKGROUND_JOB_TIMEOUT_MAX, DEFAULT_GLOB_MEMORY_BYTES, DEFAULT_GREP_MEMORY_BYTES,
+        DEFAULT_MEMORY_BYTES, DEFAULT_PDF_IMAGE_MEMORY_BYTES, DEFAULT_PDF_TEXT_MEMORY_BYTES,
+        DEFAULT_PROCESS_CALLS, DEFAULT_READ_ONLY_CALLS, DEFAULT_TOOL_TIMEOUT_SHELF,
+        GLOB_MEMORY_BYTES_ENV, GREP_MEMORY_BYTES_ENV, MAX_BACKGROUND_JOB_TIMEOUT_MAX,
+        MAX_CONFIGURED_READ_ONLY_CALLS, MAX_IDLE_TIMEOUT, MAX_PDF_IMAGE_MEMORY_BYTES,
+        MAX_PDF_TEXT_MEMORY_BYTES, MAX_TOOL_MEMORY_BYTES, MAX_TOOL_TIMEOUT_SHELF, MIN_IDLE_TIMEOUT,
+        MIN_PDF_IMAGE_MEMORY_BYTES, MIN_PDF_TEXT_MEMORY_BYTES, MIN_TOOL_MEMORY_BYTES,
+        MemoryReservation, PDF_IMAGE_MEMORY_BYTES_ENV, PDF_TEXT_MEMORY_BYTES_ENV,
+        RESPECT_GITIGNORE_ENV, RuntimeConfig, RuntimeResources, blocking_threads,
+        global_memory_bytes, parse_background_job_timeout_max, parse_idle_timeout,
+        parse_memory_bytes_in_range, parse_process_calls, parse_read_only_calls,
+        parse_respect_gitignore, parse_tool_memory_bytes, parse_tool_timeout_shelf,
     };
     use tokio_util::sync::CancellationToken;
 
@@ -183,6 +182,23 @@ mod tests {
     }
 
     #[test]
+    fn read_only_call_configuration_is_bounded() {
+        assert_eq!(
+            parse_read_only_calls(None).expect("default read-only calls"),
+            DEFAULT_READ_ONLY_CALLS
+        );
+        assert_eq!(
+            parse_read_only_calls(Some(OsStr::new("32"))).expect("maximum read-only calls"),
+            MAX_CONFIGURED_READ_ONLY_CALLS
+        );
+        for value in ["0", "33", "-1", "many"] {
+            let error = parse_read_only_calls(Some(OsStr::new(value)))
+                .expect_err("invalid read-only calls");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
+    }
+
+    #[test]
     fn tool_timeout_shelf_defaults_and_bounds_match_the_documented_range() {
         assert_eq!(
             parse_tool_timeout_shelf(None).expect("default shelf"),
@@ -333,13 +349,13 @@ mod tests {
 
         let first_request = pool.begin_request();
         let second_request = pool.begin_request();
-        let first_share = pool.try_credits(2);
-        let second_share = pool.try_credits(1);
+        let first_share = first_request.try_credits(2);
+        let second_share = second_request.try_credits(1);
         assert_eq!(first_share.len(), 2);
         assert_eq!(second_share.len(), 1);
         drop((first_share, second_share));
         drop(second_request);
-        assert_eq!(pool.try_credits(2).len(), 2);
+        assert_eq!(first_request.try_credits(2).len(), 2);
         drop(first_request);
 
         let inline = RuntimeResources::new(RuntimeConfig::for_tests(1)).file_work_pool();
@@ -430,7 +446,7 @@ mod tests {
     #[test]
     fn class_admission_is_fail_fast_independent_and_recovers_on_drop() {
         let resources = RuntimeResources::new(RuntimeConfig::for_tests(1));
-        let read_permits = (0..MAX_READ_ONLY_CALLS)
+        let read_permits = (0..DEFAULT_READ_ONLY_CALLS)
             .map(|_| resources.try_admit_read_only().expect("read admission"))
             .collect::<Vec<_>>();
         let process_permits = (0..DEFAULT_PROCESS_CALLS)
@@ -460,15 +476,22 @@ mod tests {
     }
 
     #[test]
-    fn grep_concurrent_calls_admission_limit() {
-        let resources = RuntimeResources::new(RuntimeConfig::for_tests(1));
-        let permits = (0..DEFAULT_GREP_CONCURRENT_CALLS)
-            .map(|_| resources.try_admit_grep().expect("grep admission"))
+    fn read_only_admission_uses_the_runtime_configuration() {
+        let mut config = RuntimeConfig::for_tests(1);
+        config.read_only_calls = 2;
+        config.blocking_threads = blocking_threads(
+            config.process_calls,
+            config.read_only_calls,
+            config.detached_calls,
+        );
+        let resources = RuntimeResources::new(config);
+        let permits = (0..2)
+            .map(|_| resources.try_admit_read_only().expect("read admission"))
             .collect::<Vec<_>>();
 
-        assert!(resources.try_admit_grep().is_none());
+        assert!(resources.try_admit_read_only().is_none());
         drop(permits);
-        assert!(resources.try_admit_grep().is_some());
+        assert!(resources.try_admit_read_only().is_some());
     }
 
     #[tokio::test]
@@ -488,7 +511,11 @@ mod tests {
     async fn process_admission_recovers_after_task_cancellation() {
         let mut config = RuntimeConfig::for_tests(1);
         config.process_calls = 1;
-        config.blocking_threads = blocking_threads(config.process_calls, config.detached_calls);
+        config.blocking_threads = blocking_threads(
+            config.process_calls,
+            config.read_only_calls,
+            config.detached_calls,
+        );
         let resources = RuntimeResources::new(config);
         let permit = resources.try_admit_process().expect("process admission");
         let task = tokio::spawn(async move {
@@ -510,7 +537,11 @@ mod tests {
     fn process_admission_uses_the_runtime_configuration() {
         let mut config = RuntimeConfig::for_tests(1);
         config.process_calls = 2;
-        config.blocking_threads = blocking_threads(config.process_calls, config.detached_calls);
+        config.blocking_threads = blocking_threads(
+            config.process_calls,
+            config.read_only_calls,
+            config.detached_calls,
+        );
         let resources = RuntimeResources::new(config);
         let permits = (0..2)
             .map(|_| resources.try_admit_process().expect("process admission"))

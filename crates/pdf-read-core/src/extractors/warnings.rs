@@ -1,6 +1,6 @@
 //! Structured warning surface.
 //!
-//! `PdfDocument::flatten_warnings()` returns the warnings raised since
+//! `PdfDocument::structured_warnings()` returns the warnings raised since
 //! the document was opened, as a list of structured `Warning` records.
 //! Callers who want diagnostics as data (rather than stderr text from
 //! `log::warn!`) opt in to this surface. The existing `log::warn!`
@@ -10,7 +10,10 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::{
+    cell::RefCell,
+    sync::{Arc, Mutex},
+};
 
 /// A single structured warning raised during PDF processing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,60 +82,40 @@ impl WarningCategory {
 /// lifetime. Backed by a `Mutex<Vec<Warning>>` so multi-threaded usage
 /// (e.g. parallel-page extraction) doesn't lose warnings to a data race.
 ///
-/// One sink per document. The document holds it in an `Arc` so worker
-/// threads can clone it.
+/// A scoped caller may hold it in an `Arc` so free-function producers on the
+/// same worker thread can route warnings without process-global retention.
 #[derive(Debug, Default)]
 pub struct WarningSink {
     warnings: Mutex<Vec<Warning>>,
 }
 
-/// global process-wide structured-warning sink for
-/// the seven highest-frequency `log::warn!` sites that live in free
-/// functions (where `&PdfDocument` is not available to push to a
-/// per-document sink). Sites currently routed through this global
-/// sink:
-///
-/// - `src/parser.rs::read_stream_data` (SPEC VIOLATION / Stream
-///   /Length mismatch)
-/// - `src/content/parser.rs::*` (operator-cap exceeded)
-/// - `src/fonts/font_dict.rs::*` (Type0 ToUnicode missing, Type 3
-///   font detected)
-///
-/// Callers retrieve via [`drain_global_warnings`] OR through
-/// `PdfDocument::flatten_warnings()` which merges global +
-/// per-document warnings.
-///
-/// Process-wide scope means warnings from concurrent extractions on
-/// different `PdfDocument` instances appear together in the snapshot.
-/// For per-document isolation, use the per-document sink directly
-/// via `PdfDocument::push_structured_warning`.
-static GLOBAL_WARNING_SINK: Mutex<Vec<Warning>> = Mutex::new(Vec::new());
+thread_local! {
+    static WARNING_SCOPES: RefCell<Vec<Arc<WarningSink>>> = const { RefCell::new(Vec::new()) };
+}
 
-/// Push a structured warning into the process-wide sink. Called by
-/// free-function log sites that can't access a `&PdfDocument`.
-pub fn push_global_warning(warning: Warning) {
-    if let Ok(mut v) = GLOBAL_WARNING_SINK.lock() {
-        v.push(warning);
+struct WarningScope;
+
+impl Drop for WarningScope {
+    fn drop(&mut self) {
+        WARNING_SCOPES.with(|scopes| {
+            scopes.borrow_mut().pop();
+        });
     }
 }
 
-/// Drain the process-wide structured-warning sink, returning a snapshot
-/// and clearing the underlying storage. Used by
-/// `PdfDocument::flatten_warnings` to surface free-function warnings
-/// alongside per-document ones.
-pub fn drain_global_warnings() -> Vec<Warning> {
-    GLOBAL_WARNING_SINK
-        .lock()
-        .map(|mut v| std::mem::take(&mut *v))
-        .unwrap_or_default()
+pub(crate) fn with_warning_sink<T>(sink: &Arc<WarningSink>, work: impl FnOnce() -> T) -> T {
+    WARNING_SCOPES.with(|scopes| scopes.borrow_mut().push(Arc::clone(sink)));
+    let _scope = WarningScope;
+    work()
 }
 
-/// Snapshot the global sink without draining (for tests / observability).
-pub fn snapshot_global_warnings() -> Vec<Warning> {
-    GLOBAL_WARNING_SINK
-        .lock()
-        .map(|v| v.clone())
-        .unwrap_or_default()
+/// Route a warning from a free function to the document currently executing on this thread.
+pub(crate) fn push_scoped_warning(warning: Warning) {
+    WARNING_SCOPES.with(|scopes| {
+        if let Some(sink) = scopes.borrow().last() {
+            sink.push(warning);
+        }
+    });
 }
 
 impl WarningSink {
@@ -285,5 +268,34 @@ mod tests {
             h.join().unwrap();
         }
         assert_eq!(sink.len(), 10);
+    }
+
+    #[test]
+    fn scoped_warnings_are_isolated_and_released() {
+        let first = Arc::new(WarningSink::new());
+        let second = Arc::new(WarningSink::new());
+        let weak = Arc::downgrade(&first);
+
+        with_warning_sink(&first, || {
+            push_scoped_warning(Warning {
+                category: WarningCategory::SpecViolation,
+                page: None,
+                message: "first".to_owned(),
+                spec_section: None,
+            });
+            with_warning_sink(&second, || {
+                push_scoped_warning(Warning {
+                    category: WarningCategory::Font,
+                    page: None,
+                    message: "second".to_owned(),
+                    spec_section: None,
+                });
+            });
+        });
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        drop(first);
+        assert!(weak.upgrade().is_none());
     }
 }

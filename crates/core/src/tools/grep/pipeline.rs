@@ -4,15 +4,16 @@ use std::{
     time::Duration,
 };
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
+use crossbeam_channel::{Receiver, RecvTimeoutError, SendTimeoutError, Sender};
 use grep_regex::RegexMatcher;
 use grep_searcher::Searcher;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     output::SkipReason,
     path::{FileAccess, ResolvedPath},
-    runtime::{FileWorkPool, MemoryReservation, RuntimeResources},
+    runtime::{FileWorkCredit, FileWorkPool, FileWorkRequest, MemoryReservation, RuntimeResources},
     traversal::{
         OwnedTraversalEntry, ParallelTraversal, ParallelTraversalCallbacks, TraversalControl,
         TraversalEntry, TraversalSummary, prefer_parallel_root, walk, walk_parallel_batched,
@@ -36,6 +37,43 @@ use super::{
 
 type SearchResult = Result<FileOutcome, GrepError>;
 
+struct QueuedOutcome {
+    result: Option<SearchResult>,
+    _memory: OwnedSemaphorePermit,
+    _credit: FileWorkCredit,
+    profiler: GrepProfiler,
+    bytes: usize,
+}
+
+impl QueuedOutcome {
+    fn new(
+        result: SearchResult,
+        memory: OwnedSemaphorePermit,
+        credit: FileWorkCredit,
+        profiler: GrepProfiler,
+        bytes: usize,
+    ) -> Self {
+        profiler.record_outcome_queued(bytes);
+        Self {
+            result: Some(result),
+            _memory: memory,
+            _credit: credit,
+            profiler,
+            bytes,
+        }
+    }
+
+    fn take_result(&mut self) -> SearchResult {
+        self.result.take().expect("queued outcome consumed once")
+    }
+}
+
+impl Drop for QueuedOutcome {
+    fn drop(&mut self) {
+        self.profiler.record_outcome_released(self.bytes);
+    }
+}
+
 type SharedPipelineState = Arc<Mutex<PipelineState>>;
 
 struct PipelineState {
@@ -57,7 +95,7 @@ struct PipelineContext {
     profiler: GrepProfiler,
     resources: RuntimeResources,
     memory: GrepMemoryPolicy,
-    candidate_bytes: usize,
+    file_work_request: FileWorkRequest,
 }
 
 /// Search candidates as they are discovered and stop the traversal when the page is full.
@@ -83,7 +121,8 @@ pub fn pipelined_search(
     variant: GrepBenchmarkVariant,
     profiler: &GrepProfiler,
     resources: &RuntimeResources,
-    _memory: Option<MemoryReservation>,
+    file_work_request: &FileWorkRequest,
+    request_memory: Option<MemoryReservation>,
 ) -> Result<Page, GrepError> {
     let single_file = access.metadata_kind(base)?.is_file;
     let pool = resources.file_work_pool();
@@ -98,10 +137,15 @@ pub fn pipelined_search(
         profiler: profiler.clone(),
         resources: resources.clone(),
         memory: plan.memory,
-        candidate_bytes: 0,
+        file_work_request: file_work_request.clone(),
     };
     let state = Arc::new(Mutex::new(PipelineState {
-        page: Page::new(request, TraversalSummary::default(), plan.allow_early_stop),
+        page: Page::new(
+            request,
+            TraversalSummary::default(),
+            plan.allow_early_stop,
+            !single_file && pool.extra_capacity() > 0,
+        ),
         pending: 0,
         candidate_count: 0,
         stopped: false,
@@ -109,7 +153,9 @@ pub fn pipelined_search(
     }));
     profiler.set_workload(0, lanes);
 
-    let (sender, receiver) = crossbeam_channel::unbounded();
+    let outcome_bytes = plan.memory.speculative_batch_bytes(plan.mode, 1).max(1);
+    let queue_capacity = outcome_queue_capacity(plan.memory.request_bytes, outcome_bytes, &pool);
+    let (sender, receiver) = crossbeam_channel::bounded(queue_capacity);
     if single_file {
         search_single_file(base, glob, request, &context, &state);
     } else {
@@ -152,6 +198,7 @@ pub fn pipelined_search(
     }
     let reported_lanes = lanes.clamp(1, state.candidate_count.max(1));
     profiler.set_workload(state.candidate_count, reported_lanes);
+    drop(request_memory);
     Ok(state.page)
 }
 
@@ -203,8 +250,8 @@ fn traverse(
     request: &GrepRequest,
     context: &PipelineContext,
     state: &SharedPipelineState,
-    sender: &Sender<SearchResult>,
-    receiver: &Receiver<SearchResult>,
+    sender: &Sender<QueuedOutcome>,
+    receiver: &Receiver<QueuedOutcome>,
     pool: &Arc<FileWorkPool>,
 ) -> Result<TraversalSummary, GrepError> {
     let selected = resolve_traversal(access, base, requested, pool);
@@ -345,8 +392,8 @@ fn visit_entry(
     request: &GrepRequest,
     context: &PipelineContext,
     state: &mut PipelineState,
-    sender: &Sender<SearchResult>,
-    receiver: &Receiver<SearchResult>,
+    sender: &Sender<QueuedOutcome>,
+    receiver: &Receiver<QueuedOutcome>,
     pool: &FileWorkPool,
 ) -> TraversalControl {
     if state.stopped {
@@ -397,8 +444,8 @@ fn schedule_candidate(
     candidate: &Candidate,
     request: &GrepRequest,
     context: &PipelineContext,
-    sender: &Sender<SearchResult>,
-    receiver: &Receiver<SearchResult>,
+    sender: &Sender<QueuedOutcome>,
+    receiver: &Receiver<QueuedOutcome>,
     pool: &FileWorkPool,
 ) -> bool {
     loop {
@@ -424,10 +471,10 @@ fn schedule_candidate(
 fn try_dispatch(
     candidate: &Candidate,
     context: &PipelineContext,
-    sender: &Sender<SearchResult>,
+    sender: &Sender<QueuedOutcome>,
     pool: &FileWorkPool,
 ) -> bool {
-    let Some(credit) = pool.try_credit() else {
+    let Some(credit) = context.file_work_request.try_credit() else {
         return false;
     };
     let Some(open_file) = context.resources.try_acquire_open_file() else {
@@ -449,8 +496,20 @@ fn try_dispatch(
             run_candidate(&candidate, &context)
         }))
         .unwrap_or_else(|_| Err(GrepError::Worker("grep worker panicked".to_owned())));
-        drop((open_file, memory, credit));
-        let _ = sender.send(result);
+        drop(open_file);
+        let mut outcome =
+            QueuedOutcome::new(result, memory, credit, context.profiler.clone(), charge);
+        loop {
+            match sender.send_timeout(outcome, Duration::from_millis(10)) {
+                Ok(()) | Err(SendTimeoutError::Disconnected(_)) => break,
+                Err(SendTimeoutError::Timeout(returned)) => {
+                    outcome = returned;
+                    if context.cancellation.is_cancelled() {
+                        break;
+                    }
+                }
+            }
+        }
     };
     if pool.spawn(credit, job).is_err() {
         return false;
@@ -460,16 +519,18 @@ fn try_dispatch(
 
 fn receive_one(
     state: &mut PipelineState,
-    receiver: &Receiver<SearchResult>,
+    receiver: &Receiver<QueuedOutcome>,
     request: &GrepRequest,
     context: &PipelineContext,
 ) -> Result<(), GrepError> {
     loop {
         match receiver.recv_timeout(Duration::from_millis(10)) {
-            Ok(outcome) => {
+            Ok(mut outcome) => {
                 state.pending = state.pending.saturating_sub(1);
                 if !state.stopped {
-                    reduce_candidate(state, outcome, None, request, false, context);
+                    let result = outcome.take_result();
+                    drop(outcome);
+                    reduce_candidate(state, result, None, request, false, context);
                 }
                 return Ok(());
             }
@@ -485,7 +546,7 @@ fn receive_one(
 
 fn drain_pending(
     state: &SharedPipelineState,
-    receiver: &Receiver<SearchResult>,
+    receiver: &Receiver<QueuedOutcome>,
     context: &PipelineContext,
     request: &GrepRequest,
     single_file: bool,
@@ -498,7 +559,7 @@ fn drain_pending(
         if pending == 0 {
             return Ok(());
         }
-        let outcome = loop {
+        let mut outcome = loop {
             match receiver.recv_timeout(Duration::from_millis(10)) {
                 Ok(outcome) => break outcome,
                 Err(RecvTimeoutError::Timeout) if context.cancellation.is_cancelled() => {
@@ -513,7 +574,9 @@ fn drain_pending(
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.pending = state.pending.saturating_sub(1);
         if !state.stopped {
-            reduce_candidate(&mut state, outcome, None, request, single_file, context);
+            let result = outcome.take_result();
+            drop(outcome);
+            reduce_candidate(&mut state, result, None, request, single_file, context);
         }
     }
 }
@@ -602,9 +665,7 @@ fn run_isolated_retry(
         retry_context.plan.skip = skip;
         retry_context.plan.probe = probe;
     }
-    let large_heap = retry_context
-        .memory
-        .large_search_heap_ceiling(retry_context.candidate_bytes);
+    let large_heap = retry_context.memory.large_search_heap_ceiling();
     let extra_memory = if reason == RetryReason::HeapLimit {
         let additional = large_heap.saturating_sub(retry_context.memory.base_search_heap_bytes);
         if additional == 0 {
@@ -660,4 +721,26 @@ fn record_error(state: &mut PipelineState, context: &PipelineContext, error: Gre
     }
     state.stopped = true;
     context.retirement.cancel();
+}
+
+fn outcome_queue_capacity(
+    request_bytes: usize,
+    outcome_bytes: usize,
+    pool: &FileWorkPool,
+) -> usize {
+    let byte_capacity = request_bytes.div_ceil(outcome_bytes.max(1)).max(1);
+    pool.extra_capacity().max(1).min(byte_capacity)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outcome_queue_is_bounded_by_workers_and_bytes() {
+        let pool = FileWorkPool::new(16);
+        assert_eq!(outcome_queue_capacity(8 * 1024, 4 * 1024, &pool), 2);
+        assert_eq!(outcome_queue_capacity(8 * 1024, 16 * 1024, &pool), 1);
+        assert_eq!(outcome_queue_capacity(usize::MAX, 1, &pool), 15);
+    }
 }

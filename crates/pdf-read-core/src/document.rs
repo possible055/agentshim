@@ -619,7 +619,7 @@ pub struct PdfDocument {
     /// (via [`PdfDocument::structured_warnings`]) instead of parsing
     /// stderr text. The existing String-list `accumulated_warnings`
     /// stays for back-compat.
-    warning_sink: crate::extractors::warnings::WarningSink,
+    warning_sink: std::sync::Arc<crate::extractors::warnings::WarningSink>,
 }
 
 // Compile-time verification that PdfDocument is Send + Sync.

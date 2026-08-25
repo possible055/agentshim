@@ -167,19 +167,22 @@ impl ToolEngine {
             inner,
             memory_charge,
         } = prepared;
+        let windows_job_limits = self.resources.config().windows_job_limits;
         self.spawn_prepared_process(
             inner.deadline,
             inner.request_timeout_ms,
             memory_charge,
             &context,
             move |cancellation, output_budget| {
-                run_program::execute_prepared_run_program(
-                    inner,
-                    wrapped_argv.as_deref(),
-                    cancellation,
-                    output_budget,
-                    capture_sink.as_ref(),
-                )
+                crate::platform::process::with_windows_job_limits(windows_job_limits, || {
+                    run_program::execute_prepared_run_program(
+                        inner,
+                        wrapped_argv.as_deref(),
+                        cancellation,
+                        output_budget,
+                        capture_sink.as_ref(),
+                    )
+                })
             },
         )
         .await
@@ -197,19 +200,22 @@ impl ToolEngine {
             memory_charge,
             ..
         } = prepared;
+        let windows_job_limits = self.resources.config().windows_job_limits;
         self.spawn_prepared_process(
             inner.deadline,
             inner.request_timeout_ms,
             memory_charge,
             &context,
             move |cancellation, output_budget| {
-                bash::execute_prepared_bash(
-                    inner,
-                    wrapped_argv.as_deref(),
-                    cancellation,
-                    output_budget,
-                    capture_sink.as_ref(),
-                )
+                crate::platform::process::with_windows_job_limits(windows_job_limits, || {
+                    bash::execute_prepared_bash(
+                        inner,
+                        wrapped_argv.as_deref(),
+                        cancellation,
+                        output_budget,
+                        capture_sink.as_ref(),
+                    )
+                })
             },
         )
         .await
@@ -258,20 +264,24 @@ impl ToolEngine {
         let root = Arc::clone(&self.root);
         let locator = self.bash_locator.clone();
         let output_budget = Arc::clone(&context.output_budget);
+        let windows_job_limits = self.resources.config().windows_job_limits;
         let span = tracing::Span::current();
         self.relayed_blocking(&context, ProcessError::Worker, move |cancellation| {
             span.in_scope(|| {
-                let result = bash::execute_output_with_capture(
-                    &root,
-                    &locator,
-                    Some(admission),
-                    &request,
-                    remaining,
-                    cancellation,
-                    background_timeout_max_ms,
-                    output_budget.as_ref(),
-                    None,
-                );
+                let result =
+                    crate::platform::process::with_windows_job_limits(windows_job_limits, || {
+                        bash::execute_output_with_capture(
+                            &root,
+                            &locator,
+                            Some(admission),
+                            &request,
+                            remaining,
+                            cancellation,
+                            background_timeout_max_ms,
+                            output_budget.as_ref(),
+                            None,
+                        )
+                    });
                 if result.is_ok() {
                     on_commit();
                 }
@@ -339,8 +349,10 @@ impl ToolEngine {
             timeout: Duration::ZERO,
             capture_page_bytes: context.output_budget.page_bytes(),
         };
-        let (mut tree, reader) =
-            crate::platform::process::spawn_detached_capture(&plan, &environment)?;
+        let (mut tree, reader) = crate::platform::process::with_windows_job_limits(
+            self.resources.config().windows_job_limits,
+            || crate::platform::process::spawn_detached_capture(&plan, &environment),
+        )?;
         let spawned_at = Instant::now();
         if context.cancellation.is_cancelled() || self.resources.shutdown_token().is_cancelled() {
             tree.terminate_and_wait(Instant::now() + crate::tools::exec::spawn::CLEANUP_DEADLINE)?;

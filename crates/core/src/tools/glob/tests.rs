@@ -62,6 +62,42 @@ mod tests {
     }
 
     #[test]
+    fn parallel_top_k_is_deterministic_past_the_page_probe() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        for index in 0..1_500 {
+            let shard = fixture.path().join(format!("shard-{}", index % 8));
+            fs::create_dir_all(&shard).expect("shard");
+            fs::write(shard.join(format!("file-{index:04}.rs")), b"source").expect("file");
+        }
+        let root = access(fixture.path());
+        let mut query = request("**/*.rs");
+        query.limit = Some(1_000);
+        let cancellation = CancellationToken::new();
+        let expected = execute_with_traversal(
+            &root,
+            &query,
+            TEST_LANES,
+            &cancellation,
+            GlobTraversal::ParallelBatched,
+        )
+        .expect("parallel glob");
+
+        for _ in 0..4 {
+            assert_eq!(
+                execute_with_traversal(
+                    &root,
+                    &query,
+                    TEST_LANES,
+                    &cancellation,
+                    GlobTraversal::ParallelBatched,
+                )
+                .expect("parallel glob"),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn an_empty_gitignore_filtered_scan_recommends_the_retry_flag() {
         let fixture = tempfile::tempdir().expect("fixture");
         fs::write(fixture.path().join(".gitignore"), "hidden.rs\n").expect("ignore file");
@@ -382,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn glob_early_stop_at_limit() {
+    fn glob_parallel_page_scans_for_deterministic_top_k() {
         let fixture = tempfile::tempdir().expect("fixture");
         for index in 0..32 {
             fs::write(fixture.path().join(format!("file-{index:02}.rs")), "source")
@@ -395,9 +431,19 @@ mod tests {
         let output =
             execute(&root, &query, TEST_LANES, &CancellationToken::new()).expect("early-stop glob");
 
-        assert!(output.contains("Scan stopped: page limit reached;"));
+        assert!(!output.contains("Scan stopped: page limit reached;"));
         assert!(output.contains("Partial: next_offset=2"));
         assert!(result_lines(&output).len() <= 2);
+
+        let serial = execute_with_traversal(
+            &root,
+            &query,
+            1,
+            &CancellationToken::new(),
+            GlobTraversal::Serial,
+        )
+        .expect("serial early-stop glob");
+        assert!(serial.contains("Scan stopped: page limit reached;"));
     }
 
     #[cfg(feature = "bench-internals")]

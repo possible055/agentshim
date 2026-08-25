@@ -4,6 +4,25 @@ fn pdf_fixture() -> Vec<u8> {
     agentshim_core::tools::read::minimal_pdf(b"BT /F1 18 Tf 20 150 Td (PDF gate probe) Tj ET")
 }
 
+struct ForcedPdfHooks;
+
+impl ForcedPdfHooks {
+    fn install(runtime_limit_ms: u64, block_ms: u64) -> Self {
+        crate::tools::read::FORCED_PDF_RUNTIME_LIMIT
+            .store(runtime_limit_ms, std::sync::atomic::Ordering::SeqCst);
+        crate::tools::read::FORCED_PDF_BLOCK_MS
+            .store(block_ms, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for ForcedPdfHooks {
+    fn drop(&mut self) {
+        crate::tools::read::FORCED_PDF_RUNTIME_LIMIT.store(0, std::sync::atomic::Ordering::SeqCst);
+        crate::tools::read::FORCED_PDF_BLOCK_MS.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 #[test]
 fn occupied_pdf_gate_rejects_pdf_without_blocking_text_reads() {
     let fixture = tempfile::tempdir().expect("fixture");
@@ -61,19 +80,17 @@ fn a_file_changed_retry_holds_the_pdf_gate_instead_of_re_taking_it() {
     assert_eq!(server.tool_engine.available_pdf_slots_for_test(), 1);
 }
 
-// The ceiling is enforced by cancelling at the same checkpoints client cancellation
-// uses, because `spawn_blocking` cannot be preempted. A cancellation the server
-// initiated must surface as `resource_timeout`, not as the client's cancellation.
+// The ceiling returns control to the client without preempting the dedicated PDF
+// worker. That worker must retain its permits until it actually stops.
 #[test]
-fn a_mode_runtime_ceiling_reports_resource_timeout_and_frees_the_gate() {
+fn a_mode_runtime_ceiling_reports_resource_timeout_and_retains_permits_until_completion() {
     let _serialised = crate::tools::read::global_read_state_guard();
     let fixture = tempfile::tempdir().expect("fixture");
     fs::write(fixture.path().join("document.pdf"), pdf_fixture()).expect("pdf");
     let server = AgentShim::from_path(fixture.path()).expect("server");
 
-    crate::tools::read::FORCED_PDF_RUNTIME_LIMIT.store(1, std::sync::atomic::Ordering::SeqCst);
+    let _hooks = ForcedPdfHooks::install(20, 250);
     let response = read_path_call(&server, "document.pdf");
-    crate::tools::read::FORCED_PDF_RUNTIME_LIMIT.store(0, std::sync::atomic::Ordering::SeqCst);
 
     let details = error_details(response);
     assert_eq!(details["code"], "resource_timeout");
@@ -82,13 +99,29 @@ fn a_mode_runtime_ceiling_reports_resource_timeout_and_frees_the_gate() {
     assert_eq!(details["details"]["partial_output"], false);
     assert_eq!(
         server.tool_engine.available_pdf_slots_for_test(),
-        1,
-        "a timed-out call must release the gate"
+        0,
+        "the running worker released the gate before it stopped"
     );
     assert!(
-        server.tool_engine.available_memory_bytes_for_test()
-            == server.runtime_limits().memory_bytes,
-        "a timed-out call must release its reservation"
+        server.tool_engine.available_memory_bytes_for_test() < server.runtime_limits().memory_bytes,
+        "the running worker released its reservation before it stopped"
+    );
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while server.tool_engine.available_pdf_slots_for_test() == 0
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(
+        server.tool_engine.available_pdf_slots_for_test(),
+        1,
+        "the completed worker did not release the gate"
+    );
+    assert_eq!(
+        server.tool_engine.available_memory_bytes_for_test(),
+        server.runtime_limits().memory_bytes,
+        "the completed worker did not release its reservation"
     );
 }
 

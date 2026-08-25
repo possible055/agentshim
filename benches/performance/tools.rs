@@ -4,7 +4,7 @@ use super::configuration::{
 };
 use super::fixtures::{mmap_trace, reset_mmap_trace};
 use super::reporting::{
-    GrepProfileEmission, emit_grep_profile, measure, nanos_to_ms, warm_samples,
+    GrepProfileEmission, emit_grep_profile, measure, measure_with, nanos_to_ms, warm_samples,
 };
 use super::{
     Arc, CancellationToken, FileAccess, GLOB_PATTERN_ENV, GLOB_PROFILE_ONLY_ENV,
@@ -47,16 +47,22 @@ pub(super) fn benchmark_tools(
             ("glob_parallel_256", GlobTraversal::ParallelBatched),
             ("glob_adaptive", GlobTraversal::Adaptive),
         ] {
-            measure(scope, operation, files, || {
-                glob::execute_with_traversal(
-                    access,
-                    &glob_request(directory),
-                    std::thread::available_parallelism().map_or(1, usize::from),
-                    &cancellation,
-                    traversal,
-                )
-                .expect("glob benchmark")
-            });
+            measure_with(
+                scope,
+                operation,
+                files,
+                || {
+                    glob::execute_with_traversal(
+                        access,
+                        &glob_request(directory),
+                        std::thread::available_parallelism().map_or(1, usize::from),
+                        &cancellation,
+                        traversal,
+                    )
+                    .expect("glob benchmark")
+                },
+                unordered_lines_equivalent,
+            );
         }
     }
     if std::env::var_os(GLOB_VARIANTS_ONLY_ENV).is_some_and(|value| value == "1") {
@@ -85,15 +91,21 @@ pub(super) fn benchmark_tools(
                 }
             }
         } else {
-            measure(scope, &format!("grep_lanes_{lanes}"), files, || {
-                grep::execute(
-                    access,
-                    &grep_request(directory, files),
-                    lanes,
-                    &cancellation,
-                )
-                .expect("grep benchmark")
-            });
+            measure_with(
+                scope,
+                &format!("grep_lanes_{lanes}"),
+                files,
+                || {
+                    grep::execute(
+                        access,
+                        &grep_request(directory, files),
+                        lanes,
+                        &cancellation,
+                    )
+                    .expect("grep benchmark")
+                },
+                unordered_lines_equivalent,
+            );
         }
     }
     if std::env::var_os(GREP_PROFILE_ENV).is_some_and(|value| value == "1") {
@@ -103,6 +115,20 @@ pub(super) fn benchmark_tools(
         return;
     }
     benchmark_read(access, read_path, &cancellation, files, scope);
+}
+
+fn unordered_lines_equivalent(left: &str, right: &str) -> bool {
+    let result_line = |line: &&str| {
+        !line.starts_with("Partial:")
+            && *line != "Complete."
+            && !line.starts_with("Skipped")
+            && !line.starts_with("Scan stopped:")
+    };
+    let mut left = left.lines().filter(result_line).collect::<Vec<_>>();
+    let mut right = right.lines().filter(result_line).collect::<Vec<_>>();
+    left.sort_unstable();
+    right.sort_unstable();
+    left == right
 }
 
 pub(super) fn benchmark_read(

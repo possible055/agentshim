@@ -293,10 +293,8 @@ fn parse_stream_data<'a>(
             Accepting in lenient mode for compatibility. \
             PDF Spec: ISO 32000-1:2008, Section 7.3.8.1";
         log::warn!("{}", msg);
-        // push into the process-wide structured sink
-        // so callers can retrieve via `flatten_warnings()` instead of
-        // parsing stderr from `log::warn`.
-        crate::extractors::warnings::push_global_warning(crate::extractors::warnings::Warning {
+        // Keep the structured diagnostic associated with the active document call.
+        crate::extractors::warnings::push_scoped_warning(crate::extractors::warnings::Warning {
             category: crate::extractors::warnings::WarningCategory::SpecViolation,
             page: None,
             message: msg.to_string(),
@@ -308,7 +306,7 @@ fn parse_stream_data<'a>(
         let msg = "SPEC VIOLATION: No newline after stream keyword (should be CRLF or LF). \
             PDF Spec: ISO 32000-1:2008, Section 7.3.8.1";
         log::warn!("{}", msg);
-        crate::extractors::warnings::push_global_warning(crate::extractors::warnings::Warning {
+        crate::extractors::warnings::push_scoped_warning(crate::extractors::warnings::Warning {
             category: crate::extractors::warnings::WarningCategory::SpecViolation,
             page: None,
             message: msg.to_string(),
@@ -342,7 +340,7 @@ fn parse_stream_data<'a>(
                 length
             );
             log::warn!("{}", msg);
-            crate::extractors::warnings::push_global_warning(
+            crate::extractors::warnings::push_scoped_warning(
                 crate::extractors::warnings::Warning {
                     category: crate::extractors::warnings::WarningCategory::SpecViolation,
                     page: None,

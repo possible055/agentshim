@@ -46,6 +46,7 @@ pub enum FailurePoint {
 #[cfg(test)]
 thread_local! {
     pub static FAILURE_POINT: std::cell::Cell<Option<FailurePoint>> = const { std::cell::Cell::new(None) };
+    pub static LAST_SPAWNED_PID: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -104,6 +105,8 @@ pub fn run(
     let mut lifecycle = Lifecycle::new(process_info)
         .map_err(|error| ProcessError::from(io_context("create lifecycle", &error)))?;
     #[cfg(test)]
+    LAST_SPAWNED_PID.with(|pid| pid.set(Some(lifecycle.primary_pid())));
+    #[cfg(test)]
     inject_failure(FailurePoint::SpawnedSuspended).map_err(ProcessError::Io)?;
     let PreparedStdio {
         stdin: stdin_pipe,
@@ -120,7 +123,7 @@ pub fn run(
     }
 
     lifecycle
-        .install_job()
+        .install_job(super::super::configured_windows_job_limits()?)
         .map_err(|error| ProcessError::from(io_context("install job", &error)))?;
     lifecycle
         .resume()

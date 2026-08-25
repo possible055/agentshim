@@ -83,6 +83,7 @@ export interface NativeHostOptions {
   readonly readScope?: 'normal' | 'unrestricted'
   readonly toolTimeoutShelfMs?: number
   readonly backgroundJobTimeoutMaxMs?: number
+  readonly readOnlyCalls?: number
   readonly env?: ReadonlyArray<{ key: string; value: string }>
   readonly captureRoot?: string
   readonly captureMaxBytes?: number

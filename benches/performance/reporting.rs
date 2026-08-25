@@ -60,6 +60,8 @@ pub(super) fn emit_grep_profile(emission: &GrepProfileEmission<'_>) {
                 "candidate_soft_target_crossings": stages.candidate_soft_target_crossings,
                 "speculative_lease_requested_bytes": stages.speculative_lease_requested_bytes,
                 "speculative_lease_granted_bytes": stages.speculative_lease_granted_bytes,
+                "queued_outcome_items_high_water": stages.queued_outcome_items_high_water,
+                "queued_outcome_bytes_high_water": stages.queued_outcome_bytes_high_water,
                 "capture_exact_retries": stages.capture_exact_retries,
                 "heap_limit_retries": stages.heap_limit_retries,
                 "retry_successes": stages.retry_successes,
@@ -126,6 +128,10 @@ pub(super) fn full_grep_profile_json(emission: &GrepProfileEmission<'_>) -> serd
         "candidate_retained_memory_bytes": stages.candidate_retained_memory_bytes,
         "candidate_vec_capacity": stages.candidate_vec_capacity,
         "candidate_soft_target_crossings": stages.candidate_soft_target_crossings,
+        "queued_outcome_items": stages.queued_outcome_items,
+        "queued_outcome_bytes": stages.queued_outcome_bytes,
+        "queued_outcome_items_high_water": stages.queued_outcome_items_high_water,
+        "queued_outcome_bytes_high_water": stages.queued_outcome_bytes_high_water,
         "candidate_path_bytes": {
             "key": stages.candidate_key_bytes,
             "capability_key": stages.candidate_capability_key_bytes,
@@ -180,6 +186,7 @@ pub(super) fn full_grep_profile_json(emission: &GrepProfileEmission<'_>) -> serd
             "render_copy": stages.render_copy_bytes,
             "speculative_lease_requested": stages.speculative_lease_requested_bytes,
             "speculative_lease_granted": stages.speculative_lease_granted_bytes,
+            "queued_outcome_high_water": stages.queued_outcome_bytes_high_water,
         },
         "retries": {
             "capture_exact": stages.capture_exact_retries,

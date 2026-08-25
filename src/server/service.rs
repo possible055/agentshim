@@ -209,7 +209,10 @@ impl AgentShimBuilder {
         Ok(AgentShim {
             tool_engine,
             root,
-            detached: DetachedTrees::new(runtime.detached_calls),
+            detached: DetachedTrees::with_log_quota(
+                runtime.detached_calls,
+                runtime.detached_log_bytes,
+            ),
             resources,
             output_token_gate,
             burst_output_gate,

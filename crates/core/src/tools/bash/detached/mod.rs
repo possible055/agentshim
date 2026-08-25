@@ -30,8 +30,12 @@ use hooks::SharedHooks;
 pub(in crate::tools::bash) use launch::execute_detached;
 
 pub const DETACHED_CALLS_ENV: &str = "AGENTSHIM_DETACHED_CALLS";
+pub const DETACHED_LOG_BYTES_ENV: &str = "AGENTSHIM_DETACHED_LOG_BYTES";
 pub const DEFAULT_DETACHED_CALLS: usize = 16;
 pub const MAX_DETACHED_CALLS: usize = 16;
+pub const DEFAULT_DETACHED_LOG_BYTES: u64 = 64 * 1024 * 1024;
+const MIN_DETACHED_LOG_BYTES: u64 = 1024 * 1024;
+const MAX_DETACHED_LOG_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 pub const TERMINAL_RETENTION: usize = 32;
 const QUIESCE_SLICE: Duration = Duration::from_millis(20);
 
@@ -47,6 +51,25 @@ pub fn parse_detached_calls(value: Option<&OsStr>) -> io::Result<usize> {
                     io::ErrorKind::InvalidInput,
                     format!(
                         "{DETACHED_CALLS_ENV} must be an integer from 1 to {MAX_DETACHED_CALLS}"
+                    ),
+                )
+            }),
+    }
+}
+
+pub fn parse_detached_log_bytes(value: Option<&OsStr>) -> io::Result<u64> {
+    match value {
+        None => Ok(DEFAULT_DETACHED_LOG_BYTES),
+        Some(value) => value
+            .to_str()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| (MIN_DETACHED_LOG_BYTES..=MAX_DETACHED_LOG_BYTES).contains(value))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "{DETACHED_LOG_BYTES_ENV} must be an integer from \
+                         {MIN_DETACHED_LOG_BYTES} to {MAX_DETACHED_LOG_BYTES}"
                     ),
                 )
             }),
@@ -70,6 +93,8 @@ enum ActivePhase {
 pub enum StopCause {
     Explicit,
     Timeout,
+    LogQuota,
+    LogQuotaMonitor,
     Shutdown,
 }
 
@@ -78,6 +103,8 @@ impl StopCause {
         match self {
             Self::Explicit => "explicit",
             Self::Timeout => "timeout",
+            Self::LogQuota => "log_quota",
+            Self::LogQuotaMonitor => "log_quota_monitor",
             Self::Shutdown => "shutdown",
         }
     }
@@ -103,6 +130,7 @@ enum TerminalState {
     Terminated,
     TimedOut,
     OutcomeUncertain,
+    LogQuotaExceeded,
 }
 
 impl TerminalState {
@@ -112,6 +140,7 @@ impl TerminalState {
             Self::Terminated => JobState::Terminated,
             Self::TimedOut => JobState::TimedOut,
             Self::OutcomeUncertain => JobState::OutcomeUncertain,
+            Self::LogQuotaExceeded => JobState::LogQuotaExceeded,
         }
     }
 }
@@ -145,6 +174,7 @@ struct Roster {
 #[derive(Clone)]
 pub struct DetachedTrees {
     capacity: usize,
+    log_quota_bytes: u64,
     state: Arc<Mutex<Roster>>,
     changed: Arc<Condvar>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -160,8 +190,14 @@ enum RefreshOutcome {
 impl DetachedTrees {
     #[must_use]
     pub fn new(capacity: usize) -> Self {
+        Self::with_log_quota(capacity, DEFAULT_DETACHED_LOG_BYTES)
+    }
+
+    #[must_use]
+    pub fn with_log_quota(capacity: usize, log_quota_bytes: u64) -> Self {
         Self {
             capacity: capacity.clamp(1, MAX_DETACHED_CALLS),
+            log_quota_bytes: log_quota_bytes.clamp(MIN_DETACHED_LOG_BYTES, MAX_DETACHED_LOG_BYTES),
             state: Arc::new(Mutex::new(Roster::default())),
             changed: Arc::new(Condvar::new()),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -531,6 +567,8 @@ impl DetachedTrees {
                 job_id: job.job_id.clone(),
                 deadline: job.deadline,
                 finished: job.finished.clone(),
+                log_reader: Arc::clone(&job.log_reader),
+                log_quota_bytes: self.log_quota_bytes,
             })
     }
 
@@ -615,6 +653,7 @@ impl TerminationWork {
                 .terminate_and_wait(deadline)
             {
                 Ok(()) if self.cause == StopCause::Timeout => TerminalState::TimedOut,
+                Ok(()) if self.cause == StopCause::LogQuota => TerminalState::LogQuotaExceeded,
                 Ok(()) => TerminalState::Terminated,
                 Err(_) => TerminalState::OutcomeUncertain,
             }
@@ -664,6 +703,8 @@ pub struct DeadlineRegistration {
     job_id: String,
     deadline: Instant,
     finished: CancellationToken,
+    log_reader: Arc<File>,
+    log_quota_bytes: u64,
 }
 
 impl DeadlineRegistration {
@@ -677,6 +718,12 @@ impl DeadlineRegistration {
 
     pub fn finished(&self) -> CancellationToken {
         self.finished.clone()
+    }
+
+    pub fn log_quota_exceeded(&self) -> io::Result<bool> {
+        self.log_reader
+            .metadata()
+            .map(|metadata| metadata.len() > self.log_quota_bytes)
     }
 }
 

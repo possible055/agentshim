@@ -119,10 +119,9 @@ impl GrepMemoryPolicy {
         }
     }
 
-    pub fn large_search_heap_ceiling(self, candidate_bytes: usize) -> usize {
+    pub fn large_search_heap_ceiling(self) -> usize {
         const LARGE_SEARCH_CAP_BYTES: usize = 256 * 1024 * 1024;
         self.request_bytes
-            .saturating_sub(candidate_bytes)
             .saturating_sub(self.capture_bytes)
             .saturating_sub(self.page_bytes)
             .saturating_sub(self.memory_source_bytes)
@@ -683,7 +682,7 @@ fn execute_inner(
     } = execution;
     let memory_policy = GrepMemoryPolicy::new(resources.config().grep_memory_bytes);
     let file_work_pool = resources.file_work_pool();
-    let _file_work_request = file_work_pool.begin_request();
+    let file_work_request = file_work_pool.begin_request();
     let setup_span = profiler.span(GrepStage::Setup);
     request.validate()?;
     let matcher = Arc::new(build_matcher(request)?);
@@ -716,7 +715,8 @@ fn execute_inner(
         .saturating_add(1);
     let allow_early_stop = !single_file
         && request.offset.unwrap_or(0) == 0
-        && matches!(mode, GrepMode::Content | GrepMode::Files);
+        && matches!(mode, GrepMode::Content | GrepMode::Files)
+        && file_work_request.pool_capacity() == 0;
     let plan = SearchPlan {
         mode,
         context: request.context_lines.unwrap_or(0),
@@ -746,6 +746,7 @@ fn execute_inner(
         variant,
         profiler,
         resources,
+        &file_work_request,
         memory,
     )
     .map_err(normalize_cancellation)?;
