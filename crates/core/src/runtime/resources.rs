@@ -18,6 +18,7 @@ pub struct RuntimeCapacity {
     worker_lanes: Arc<Semaphore>,
     open_files: Arc<Semaphore>,
     process_calls: Arc<Semaphore>,
+    background_calls: Arc<Semaphore>,
     memory: Arc<Semaphore>,
     pdf_calls: Arc<Semaphore>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -85,6 +86,7 @@ impl RuntimeCapacity {
             worker_lanes: Arc::new(Semaphore::new(config.worker_lanes)),
             open_files: Arc::new(Semaphore::new(MAX_OPEN_FILES)),
             process_calls: Arc::new(Semaphore::new(config.process_calls)),
+            background_calls: Arc::new(Semaphore::new(config.detached_calls)),
             memory: Arc::new(Semaphore::new(config.memory_bytes / MEMORY_PERMIT_BYTES)),
             pdf_calls: Arc::new(Semaphore::new(MAX_PDF_CALLS)),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -173,6 +175,11 @@ impl RuntimeResources {
                 self.config().read_only_calls,
                 deadline,
             )
+            && wait_for_permits(
+                &self.capacity.background_calls,
+                self.config().detached_calls,
+                deadline,
+            )
     }
 
     #[must_use]
@@ -205,6 +212,24 @@ impl RuntimeResources {
         let permit = self
             .capacity
             .process_calls
+            .clone()
+            .try_acquire_owned()
+            .ok()?;
+        if self.shutdown.is_cancelled() {
+            return None;
+        }
+        Some(permit)
+    }
+
+    /// Acquire one host-wide background-process slot without queueing.
+    #[must_use]
+    pub fn try_admit_background(&self) -> Option<OwnedSemaphorePermit> {
+        if self.shutdown.is_cancelled() {
+            return None;
+        }
+        let permit = self
+            .capacity
+            .background_calls
             .clone()
             .try_acquire_owned()
             .ok()?;
@@ -375,5 +400,28 @@ async fn acquire(
         permit = semaphore.clone().acquire_many_owned(permits) => {
             permit.map_err(|_| AcquireError::Cancelled)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RuntimeCapacity, RuntimeResources};
+    use crate::runtime::RuntimeConfig;
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn background_capacity_is_shared_by_resources() {
+        let mut config = RuntimeConfig::for_tests(1);
+        config.detached_calls = 1;
+        let capacity = Arc::new(RuntimeCapacity::new(config));
+        let first =
+            RuntimeResources::from_capacity(Arc::clone(&capacity), CancellationToken::new());
+        let second = RuntimeResources::from_capacity(capacity, CancellationToken::new());
+
+        let permit = first.try_admit_background().expect("first admission");
+        assert!(second.try_admit_background().is_none());
+        drop(permit);
+        assert!(second.try_admit_background().is_some());
     }
 }

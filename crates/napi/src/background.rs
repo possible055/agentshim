@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     io::Read,
     sync::{
         Arc, Mutex,
@@ -73,28 +74,38 @@ pub struct NativeJobOutcomeResult {
 }
 
 struct LiveBuffer {
-    text: String,
+    bytes: VecDeque<u8>,
     dropped_bytes: u64,
 }
 
 impl LiveBuffer {
     fn new() -> Self {
         Self {
-            text: String::new(),
+            bytes: VecDeque::new(),
             dropped_bytes: 0,
         }
     }
 
-    fn push(&mut self, chunk: &str) {
-        self.text.push_str(chunk);
-        let bytes = self.text.len();
-        if bytes <= LIVE_BUFFER_BYTES {
+    fn push(&mut self, chunk: &[u8]) {
+        if chunk.len() >= LIVE_BUFFER_BYTES {
+            self.dropped_bytes = self
+                .dropped_bytes
+                .saturating_add(self.bytes.len() as u64)
+                .saturating_add((chunk.len() - LIVE_BUFFER_BYTES) as u64);
+            self.bytes.clear();
+            self.bytes.extend(&chunk[chunk.len() - LIVE_BUFFER_BYTES..]);
             return;
         }
-        let overflow = bytes - LIVE_BUFFER_BYTES;
-        self.dropped_bytes += overflow as u64;
-        let cut = self.text.char_indices().nth(overflow).map_or(0, |(i, _)| i);
-        self.text = self.text[cut..].to_owned();
+        let overflow = self
+            .bytes
+            .len()
+            .saturating_add(chunk.len())
+            .saturating_sub(LIVE_BUFFER_BYTES);
+        if overflow > 0 {
+            self.bytes.drain(..overflow);
+            self.dropped_bytes = self.dropped_bytes.saturating_add(overflow as u64);
+        }
+        self.bytes.extend(chunk);
     }
 
     fn drain(&mut self) -> String {
@@ -106,8 +117,9 @@ impl LiveBuffer {
                 self.dropped_bytes
             )
         };
-        let value = marker + &self.text;
-        self.text.clear();
+        let text = String::from_utf8_lossy(self.bytes.make_contiguous());
+        let value = marker + &text;
+        self.bytes.clear();
         self.dropped_bytes = 0;
         value
     }
@@ -126,6 +138,7 @@ pub(crate) struct BackgroundJob {
     inline_output_bytes: u64,
     cancel_reason: Mutex<Option<String>>,
     done_tx: tokio::sync::watch::Sender<Option<NativeJobOutcome>>,
+    background_permit: Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -153,6 +166,10 @@ impl BackgroundJob {
         if self.settled.swap(true, Ordering::SeqCst) {
             return;
         }
+        self.background_permit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         self.finished.cancel();
         let _ = self.done_tx.send(Some(outcome));
     }
@@ -254,9 +271,8 @@ fn drain_and_settle(job: Arc<BackgroundJob>, mut reader: std::fs::File) {
                     job.cancel_explicit(None);
                     break;
                 }
-                let text = String::from_utf8_lossy(&buf[..n]);
                 if let Ok(mut live) = job.live.lock() {
-                    live.push(&text);
+                    live.push(&buf[..n]);
                 }
             }
             Err(error) => {
@@ -289,7 +305,7 @@ fn finish_job(job: &BackgroundJob, capture_error: Option<String>) {
             };
             let detail = format!("{code}: {error}");
             if let Ok(mut live) = job.live.lock() {
-                live.push(&format!("\n[agentshim job failed: {detail}]\n"));
+                live.push(format!("\n[agentshim job failed: {detail}]\n").as_bytes());
             }
             job.settle(NativeJobOutcome {
                 status: "failed".to_owned(),
@@ -376,16 +392,19 @@ fn finish_published_job(
         && let Ok(mut live) = job.live.lock()
     {
         for artifact in &artifacts {
-            live.push(&format!(
-                "\n[agentshim raw capture: {} ({} bytes, {})]\n",
-                artifact.path,
-                artifact.bytes,
-                if artifact.complete {
-                    "complete"
-                } else {
-                    "incomplete"
-                }
-            ));
+            live.push(
+                format!(
+                    "\n[agentshim raw capture: {} ({} bytes, {})]\n",
+                    artifact.path,
+                    artifact.bytes,
+                    if artifact.complete {
+                        "complete"
+                    } else {
+                        "incomplete"
+                    }
+                )
+                .as_bytes(),
+            );
         }
     }
 
@@ -679,6 +698,19 @@ fn arm_deadline(job: &Arc<BackgroundJob>, shutdown: CancellationToken) {
     }));
 }
 
+fn try_admit_background(
+    state: &EngineState,
+) -> std::result::Result<tokio::sync::OwnedSemaphorePermit, NativeFailure> {
+    state.resources.try_admit_background().ok_or_else(|| {
+        NativeFailure::new(
+            "AGENTSHIM_RESOURCE_BUSY",
+            "background process capacity is busy",
+            true,
+            Some(serde_json::json!({ "resource": "background_process" })),
+        )
+    })
+}
+
 pub(crate) fn start_background_prepared(
     state: &EngineState,
     call_id: String,
@@ -692,6 +724,7 @@ pub(crate) fn start_background_prepared(
     if cancellation.is_cancelled() {
         return Err(NativeFailure::cancelled("background_prepare"));
     }
+    let background_permit = try_admit_background(state)?;
     let prepared = state.take_bash(&handle)?;
     let context = agentshim_core::OperationContext::new(
         cancellation.clone(),
@@ -751,6 +784,7 @@ pub(crate) fn start_background_prepared(
         inline_output_bytes: state.output_limits.capture_publish_bytes(),
         cancel_reason: Mutex::new(None),
         done_tx,
+        background_permit: Mutex::new(Some(background_permit)),
     });
     {
         let mut backgrounds = state
@@ -787,4 +821,22 @@ pub(crate) fn start_background_prepared(
         job,
         drain_thread: Mutex::new(Some(drain_thread)),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LIVE_BUFFER_BYTES, LiveBuffer};
+
+    #[test]
+    fn live_buffer_keeps_latest_utf8_bytes_with_exact_omission_count() {
+        let mut live = LiveBuffer::new();
+        live.push(&vec![b'x'; LIVE_BUFFER_BYTES - 1]);
+        live.push("🦀".as_bytes());
+
+        let output = live.drain();
+        assert!(output.starts_with(
+            "[agentshim: 3 live output bytes were omitted from this view; the raw capture artifact is lossless]\n"
+        ));
+        assert!(output.ends_with('🦀'));
+    }
 }

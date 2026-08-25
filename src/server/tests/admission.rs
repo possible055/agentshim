@@ -263,6 +263,8 @@ async fn detached_timeout_stops_the_tree_without_status_polling() {
         return;
     }
     let fixture = tempfile::tempdir().expect("fixture");
+    let marker = fixture.path().join("marker.txt");
+    fs::write(&marker, "").expect("create marker");
     let server = AgentShim::from_path(fixture.path()).expect("server");
     let request: CallToolRequestParams = serde_json::from_value(json!({
         "name": "bash",
@@ -270,7 +272,7 @@ async fn detached_timeout_stops_the_tree_without_status_polling() {
             "command": "while :; do printf x >> marker.txt; sleep 0.02; done",
             "detach": true,
             "log_path": "timeout.log",
-            "timeout_ms": 100
+            "timeout_ms": 1000
         }
     }))
     .expect("timeout request");
@@ -296,14 +298,11 @@ async fn detached_timeout_stops_the_tree_without_status_polling() {
         .find_map(|part| part.strip_prefix("job_id="))
         .expect("detached job id");
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    let first_len = fs::metadata(fixture.path().join("marker.txt"))
-        .expect("marker")
-        .len();
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let first_len = fs::metadata(&marker).expect("marker").len();
+    assert!(first_len > 0, "detached command did not run before timeout");
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    let second_len = fs::metadata(fixture.path().join("marker.txt"))
-        .expect("stable marker")
-        .len();
+    let second_len = fs::metadata(&marker).expect("stable marker").len();
     let snapshot = server.detached.status(job_id, 0).expect("timed out status");
     assert_eq!(
         snapshot.state,

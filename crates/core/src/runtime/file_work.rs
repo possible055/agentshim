@@ -15,7 +15,6 @@ pub struct FileWorkPool {
     credits: Arc<FileWorkCredits>,
     poisoned: Arc<AtomicBool>,
     poison_warning_emitted: Arc<AtomicBool>,
-    active_requests: Arc<AtomicUsize>,
 }
 
 impl FileWorkPool {
@@ -32,7 +31,6 @@ impl FileWorkPool {
             }),
             poisoned,
             poison_warning_emitted,
-            active_requests: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -63,7 +61,6 @@ impl FileWorkPool {
                 Ok(_) => {
                     return Some(FileWorkCredit {
                         credits: Arc::clone(&self.credits),
-                        request_held: None,
                     });
                 }
                 Err(observed) => available = observed,
@@ -81,19 +78,6 @@ impl FileWorkPool {
             credits.push(credit);
         }
         credits
-    }
-
-    #[must_use]
-    pub fn begin_request(self: &Arc<Self>) -> FileWorkRequest {
-        self.active_requests.fetch_add(1, Ordering::AcqRel);
-        FileWorkRequest {
-            pool: Arc::clone(self),
-            active_requests: Arc::clone(&self.active_requests),
-            held: Arc::new(AtomicUsize::new(0)),
-            _registration: Arc::new(FileWorkRequestRegistration {
-                active_requests: Arc::clone(&self.active_requests),
-            }),
-        }
     }
 
     pub fn spawn<J>(&self, credit: FileWorkCredit, job: J) -> Result<(), (FileWorkCredit, J)>
@@ -160,10 +144,6 @@ impl fmt::Debug for FileWorkPool {
             .debug_struct("FileWorkPool")
             .field("extra_capacity", &self.extra_capacity())
             .field("poisoned", &self.poisoned.load(Ordering::Acquire))
-            .field(
-                "active_requests",
-                &self.active_requests.load(Ordering::Acquire),
-            )
             .finish_non_exhaustive()
     }
 }
@@ -175,85 +155,11 @@ struct FileWorkCredits {
 
 pub struct FileWorkCredit {
     credits: Arc<FileWorkCredits>,
-    request_held: Option<Arc<AtomicUsize>>,
-}
-
-#[derive(Clone)]
-pub struct FileWorkRequest {
-    pool: Arc<FileWorkPool>,
-    active_requests: Arc<AtomicUsize>,
-    held: Arc<AtomicUsize>,
-    _registration: Arc<FileWorkRequestRegistration>,
-}
-
-struct FileWorkRequestRegistration {
-    active_requests: Arc<AtomicUsize>,
-}
-
-impl FileWorkRequest {
-    #[must_use]
-    pub fn pool_capacity(&self) -> usize {
-        self.pool.extra_capacity()
-    }
-
-    #[must_use]
-    pub fn try_credit(&self) -> Option<FileWorkCredit> {
-        let capacity = self.pool.extra_capacity();
-        if capacity == 0 || self.pool.poisoned.load(Ordering::Acquire) {
-            return None;
-        }
-        let active = self.active_requests.load(Ordering::Acquire).max(1);
-        let share = capacity.div_ceil(active).max(1);
-        let mut held = self.held.load(Ordering::Acquire);
-        loop {
-            if held >= share {
-                return None;
-            }
-            match self.held.compare_exchange_weak(
-                held,
-                held + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => break,
-                Err(observed) => held = observed,
-            }
-        }
-        let Some(mut credit) = self.pool.try_credit() else {
-            self.held.fetch_sub(1, Ordering::AcqRel);
-            return None;
-        };
-        credit.request_held = Some(Arc::clone(&self.held));
-        Some(credit)
-    }
-
-    #[must_use]
-    pub fn try_credits(&self, maximum: usize) -> Vec<FileWorkCredit> {
-        let mut credits = Vec::with_capacity(maximum.min(self.pool.extra_capacity()));
-        while credits.len() < maximum {
-            let Some(credit) = self.try_credit() else {
-                break;
-            };
-            credits.push(credit);
-        }
-        credits
-    }
 }
 
 impl Drop for FileWorkCredit {
     fn drop(&mut self) {
-        if let Some(held) = &self.request_held {
-            let previous = held.fetch_sub(1, Ordering::AcqRel);
-            debug_assert!(previous > 0);
-        }
         let previous = self.credits.available.fetch_add(1, Ordering::Release);
         debug_assert!(previous < self.credits.capacity);
-    }
-}
-
-impl Drop for FileWorkRequestRegistration {
-    fn drop(&mut self) {
-        let previous = self.active_requests.fetch_sub(1, Ordering::AcqRel);
-        debug_assert!(previous > 0);
     }
 }

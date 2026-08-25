@@ -244,19 +244,6 @@ fn windows_job_memory_limit_fixture() {
 }
 
 #[cfg(windows)]
-#[test]
-fn windows_cpu_limit_child_fixture() {
-    if env::var("AGENTSHIM_PROCESS_FIXTURE").as_deref() != Ok("cpu") {
-        return;
-    }
-    let started = std::time::Instant::now();
-    while started.elapsed() < Duration::from_millis(100) {
-        std::hint::spin_loop();
-    }
-    println!("CPU policy fixture completed");
-}
-
-#[cfg(windows)]
 fn assert_nonzero_exit_report(output: &str, context: &str) {
     let exit = output
         .lines()
@@ -290,7 +277,7 @@ fn windows_active_process_limit_blocks_a_grandchild() {
         pid_file.to_string_lossy().into_owned(),
     );
     let policy = crate::platform::process::WindowsJobLimits {
-        active_process_limit: 1,
+        active_process_limit: Some(1),
         ..Default::default()
     };
 
@@ -379,39 +366,4 @@ fn windows_job_memory_limit_refuses_aggregate_allocations() {
     .expect("aggregate-limited process report");
 
     assert_nonzero_exit_report(&output, "aggregate job memory limit");
-}
-
-#[cfg(windows)]
-#[test]
-fn windows_cpu_hard_cap_is_accepted_by_the_job() {
-    let fixture = tempfile::tempdir().expect("fixture");
-    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
-    let executable = env::current_exe().expect("test executable");
-    let mut limited = request(executable.to_string_lossy().into_owned());
-    limited.args = vec![
-        "--exact".to_owned(),
-        "tools::run_program::tests::windows::windows_cpu_limit_child_fixture".to_owned(),
-        "--nocapture".to_owned(),
-    ];
-    limited
-        .env
-        .insert("AGENTSHIM_PROCESS_FIXTURE".to_owned(), "cpu".to_owned());
-    let policy = crate::platform::process::WindowsJobLimits {
-        cpu_rate_percent: Some(25),
-        ..Default::default()
-    };
-
-    let output = crate::platform::process::with_windows_job_limits_for_test(policy, || {
-        execute(
-            &root,
-            &ProcessResolver::capture(),
-            &limited,
-            Duration::from_secs(5),
-            &CancellationToken::new(),
-        )
-    })
-    .expect("CPU-limited process report");
-
-    assert!(output.contains("CPU policy fixture completed"));
-    assert!(output.contains("Exit code: 0"));
 }

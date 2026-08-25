@@ -197,6 +197,7 @@ Git Bash 在启动 Windows 原生程序前，会转换看起来像 POSIX 路径�
 | --- | --- | --- |
 | `CODEX_MCP_PROTOCOL_VERSION` | — | 向 Codex 声明的 MCP 协议版本。 |
 | `AGENTSHIM_PROCESS_CALLS` | `16` | 每个实例的进程调用并行上限；1–32。 |
+| `AGENTSHIM_READ_ONLY_CALLS` | `16` | 每个实例的 `read`／`glob`／`grep` 调用并行上限；1–32。 |
 | `AGENTSHIM_DETACHED_CALLS` | `16` | 每个实例存活中的 detached `bash` 进程树数量；1–16。 |
 | `AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX` | `1800` | detached／background Bash 的最长运行时间（秒）；600–14400。省略的 job timeout 使用此值，显式值只能缩短它。 |
 | `AGENTSHIM_OUTPUT_BYTES` | `32000` | 每次呼叫的输出上限（字节）；4096–262144。 |
@@ -204,13 +205,18 @@ Git Bash 在启动 Windows 原生程序前，会转换看起来像 POSIX 路径�
 | `AGENTSHIM_TOOL_TIMEOUT_SHELF` | `600` | 服务端会保持低于此 shelf 值，以便客户端的 `tool_timeout_sec` 在服务端自身 Timeout 之后触发。有效最长执行时间为 shelf 减 10 秒；15–3600。 |
 | `AGENTSHIM_IDLE_TIMEOUT` | 关闭 | 仅 `codex` profile 的空闲关闭秒数；1–86400。入站 JSON-RPC 消息重置 deadline，活跃的前景呼叫或 detached 进程树会推迟关闭。 |
 | `AGENTSHIM_GREP_MEMORY_BYTES` | `268435456` | 每次 `grep` 呼叫保留候选项目的内存硬上限。 |
-| `AGENTSHIM_GLOB_MEMORY_BYTES` | `33554432` | 每次 `glob` 呼叫保留匹配项目的内存硬上限。 |
+| `AGENTSHIM_GLOB_MEMORY_BYTES` | `67108864` | 每次 `glob` 呼叫保留匹配项目的内存硬上限。 |
 | `AGENTSHIM_PDF_TEXT_MEMORY_BYTES` | `67108864` | `auto`/`text` 模式 PDF 读取的每次呼叫内存预算。 |
 | `AGENTSHIM_PDF_IMAGE_MEMORY_BYTES` | `100663296` | `image` 模式 PDF 读取的每次呼叫内存预算。 |
+| `AGENTSHIM_WINDOWS_ACTIVE_PROCESS_LIMIT` | 关闭 | 可选的 Windows Job Object 单棵前景或 detached 进程树 active-process 硬上限；1–256。 |
+| `AGENTSHIM_WINDOWS_JOB_MEMORY_BYTES` | 关闭 | 可选的 Windows Job Object aggregate committed-memory 硬上限；67108864–17179869184。 |
+| `AGENTSHIM_WINDOWS_PROCESS_MEMORY_BYTES` | 关闭 | 可选的 Windows Job Object 单进程 committed-memory 硬上限；67108864–17179869184。 |
 | `AGENTSHIM_BASH` | 自动探测 | GNU bash 的绝对路径。在 DSH adapter 中，plugin config `env` 段里设定的同名键也会在加载时驱动 bash 探测，因此无需在 host process 环境中预设。 |
 | `AGENTSHIM_LOG_MODE` | `errors` | 取值 `off`、`errors`、`all` 之一。 |
 | `AGENTSHIM_LOG_DIR` | 平台默认 | 用绝对路径覆盖日志目录。 |
 | `AGENTSHIM_RESPECT_GITIGNORE` | `false` | 设为 `true` 时，`grep` 与 `glob` 才套用 `.gitignore`／`.ignore`。省略 `include_ignored` 时跟随此默认值。由于调用方读不到这项设定，过滤生效且结果为空时，响应末尾会附上一行建议改用 `include_ignored=true`。`.git` 以及 `node_modules`、`target`、`.venv`、`venv`、`dist`、`build`、`__pycache__` 无论开关都排除。binary、输出预算与内存上限仍会挡住内容。 |
+
+在 Windows 上使用 DSH adapter 时，上述三个 `AGENTSHIM_WINDOWS_*` Job Object 设定会从 plugin 的显式 `env` 配置读取为 host policy，同时也会传给 child process。native host 不会读取自身的 ambient process environment。
 
 空闲看门狗在确认静默后会再次复核活动时间戳，然后才取消既有的优雅关闭 token。在这次复核与取消之间的最后窗口内到达的请求，仍可能与关闭发生竞态；启用看门狗即接受这一狭窄的边界条件。
 

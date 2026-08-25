@@ -347,17 +347,6 @@ mod tests {
         drop(credits);
         assert_eq!(pool.available_credits(), 3);
 
-        let first_request = pool.begin_request();
-        let second_request = pool.begin_request();
-        let first_share = first_request.try_credits(2);
-        let second_share = second_request.try_credits(1);
-        assert_eq!(first_share.len(), 2);
-        assert_eq!(second_share.len(), 1);
-        drop((first_share, second_share));
-        drop(second_request);
-        assert_eq!(first_request.try_credits(2).len(), 2);
-        drop(first_request);
-
         let inline = RuntimeResources::new(RuntimeConfig::for_tests(1)).file_work_pool();
         assert_eq!(inline.extra_capacity(), 0);
         assert!(inline.try_credit().is_none());
@@ -460,19 +449,6 @@ mod tests {
         assert!(resources.try_admit_process().is_none());
         drop(process_permits);
         assert!(resources.try_admit_process().is_some());
-    }
-
-    #[test]
-    fn file_work_pool_allows_concurrent_requests() {
-        let resources = RuntimeResources::new(RuntimeConfig::for_tests(3));
-        let pool = resources.file_work_pool();
-        let _first_request = pool.begin_request();
-        let _second_request = pool.begin_request();
-
-        let first_share = pool.try_credits(1);
-        let second_share = pool.try_credits(1);
-        assert_eq!(first_share.len(), 1);
-        assert_eq!(second_share.len(), 1);
     }
 
     #[test]

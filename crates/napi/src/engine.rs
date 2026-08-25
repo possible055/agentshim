@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     ffi::c_void,
     future::Future,
+    io::Write,
     ptr,
     sync::{
         Arc,
@@ -67,6 +68,7 @@ pub(crate) struct EngineState {
     pub(crate) root: Arc<agentshim_core::path::RepositoryRoot>,
     pub(crate) access: Arc<agentshim_core::path::FileAccess>,
     pub(crate) tool_engine: agentshim_core::ToolEngine,
+    pub(crate) resources: agentshim_core::runtime::RuntimeResources,
     pub(crate) output_limits: NativeOutputLimits,
     pub(crate) timeout_ceiling_ms: u64,
     pub(crate) background_timeout_max_ms: u64,
@@ -246,25 +248,54 @@ unsafe extern "C" fn start_native_cleanup(
     let cleanup = unsafe { Box::from_raw(data.cast::<NativeCleanupHook>()) };
     let engines = cleanup.lifetime.begin_cleanup();
     let hook = hook as usize;
-    std::thread::spawn(move || {
-        assert!(
-            cleanup.lifetime.wait_for_cleanup(&engines),
-            "native environment cleanup did not quiesce within 10 seconds"
-        );
-        // Safety: the handle was issued by the runtime that invoked this hook,
-        // and removing it from the draining thread is the documented way to
-        // complete an async cleanup hook.
-        let status = unsafe {
-            napi::sys::napi_remove_async_cleanup_hook(
-                hook as napi::sys::napi_async_cleanup_hook_handle,
-            )
-        };
-        assert_eq!(
-            status,
-            napi::sys::Status::napi_ok,
-            "failed to complete native environment cleanup"
-        );
-    });
+    let drain = std::thread::Builder::new()
+        .name("agentshim-native-cleanup".to_owned())
+        .spawn(move || {
+            let settled = cleanup.lifetime.wait_for_cleanup(&engines);
+            complete_native_cleanup(settled, || {
+                // Safety: the handle was issued by the runtime that invoked this hook,
+                // and removing it from the draining thread is the documented way to
+                // complete an async cleanup hook.
+                unsafe {
+                    napi::sys::napi_remove_async_cleanup_hook(
+                        hook as napi::sys::napi_async_cleanup_hook_handle,
+                    )
+                }
+            });
+        });
+    if let Err(error) = drain {
+        complete_native_cleanup(false, || {
+            // Safety: the handle was issued by the runtime that invoked this hook,
+            // and completing immediately is the only available fail-safe after
+            // the cleanup thread could not be created.
+            unsafe {
+                napi::sys::napi_remove_async_cleanup_hook(
+                    hook as napi::sys::napi_async_cleanup_hook_handle,
+                )
+            }
+        });
+        write_cleanup_diagnostic(format_args!(
+            "agentshim: failed to start native cleanup thread: {error}; outcome uncertain"
+        ));
+    }
+}
+
+fn complete_native_cleanup(settled: bool, remove: impl FnOnce() -> napi::sys::napi_status) {
+    let status = remove();
+    if !settled {
+        write_cleanup_diagnostic(format_args!(
+            "agentshim: native environment cleanup did not quiesce within 10 seconds; outcome uncertain"
+        ));
+    }
+    if status != napi::sys::Status::napi_ok {
+        write_cleanup_diagnostic(format_args!(
+            "agentshim: failed to complete native environment cleanup: {status:?}"
+        ));
+    }
+}
+
+fn write_cleanup_diagnostic(arguments: std::fmt::Arguments<'_>) {
+    let _ = writeln!(std::io::stderr().lock(), "{arguments}");
 }
 
 fn register_native_cleanup(env: &Env, lifetime: Arc<NativeHostLifetime>) -> Result<()> {
@@ -337,13 +368,17 @@ impl Engine {
             Arc::clone(&lifetime.capacity),
             shutdown.clone(),
         );
-        let tool_engine =
-            agentshim_core::ToolEngine::new(Arc::clone(&root), config.read_scope, resources)
-                .with_process_environment(config.process_environment.clone());
+        let tool_engine = agentshim_core::ToolEngine::new(
+            Arc::clone(&root),
+            config.read_scope,
+            resources.clone(),
+        )
+        .with_process_environment(config.process_environment.clone());
         let state = Arc::new(EngineState {
             root,
             access,
             tool_engine,
+            resources,
             output_limits: config.output_limits.clone(),
             timeout_ceiling_ms: config.timeout_ceiling_ms,
             background_timeout_max_ms: config.background_timeout_max_ms,
@@ -758,4 +793,19 @@ fn poll_until_settled(
         std::thread::sleep(interval);
     }
     settled()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::complete_native_cleanup;
+
+    #[test]
+    fn cleanup_completion_runs_after_an_uncertain_wait() {
+        let mut removed = false;
+        complete_native_cleanup(false, || {
+            removed = true;
+            napi::sys::Status::napi_ok
+        });
+        assert!(removed);
+    }
 }

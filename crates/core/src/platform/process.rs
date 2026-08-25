@@ -7,29 +7,15 @@ use std::{ffi::OsStr, io};
 pub const WINDOWS_JOB_MEMORY_BYTES_ENV: &str = "AGENTSHIM_WINDOWS_JOB_MEMORY_BYTES";
 pub const WINDOWS_PROCESS_MEMORY_BYTES_ENV: &str = "AGENTSHIM_WINDOWS_PROCESS_MEMORY_BYTES";
 pub const WINDOWS_ACTIVE_PROCESS_LIMIT_ENV: &str = "AGENTSHIM_WINDOWS_ACTIVE_PROCESS_LIMIT";
-pub const WINDOWS_CPU_RATE_PERCENT_ENV: &str = "AGENTSHIM_WINDOWS_CPU_RATE_PERCENT";
 const MIN_WINDOWS_MEMORY_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_WINDOWS_MEMORY_BYTES: u64 = 16 * 1024 * 1024 * 1024;
-const DEFAULT_WINDOWS_ACTIVE_PROCESS_LIMIT: u32 = 32;
 const MAX_WINDOWS_ACTIVE_PROCESS_LIMIT: u32 = 256;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WindowsJobLimits {
     pub job_memory_bytes: Option<u64>,
     pub process_memory_bytes: Option<u64>,
-    pub active_process_limit: u32,
-    pub cpu_rate_percent: Option<u32>,
-}
-
-impl Default for WindowsJobLimits {
-    fn default() -> Self {
-        Self {
-            job_memory_bytes: None,
-            process_memory_bytes: None,
-            active_process_limit: DEFAULT_WINDOWS_ACTIVE_PROCESS_LIMIT,
-            cpu_rate_percent: None,
-        }
-    }
+    pub active_process_limit: Option<u32>,
 }
 
 impl WindowsJobLimits {
@@ -38,15 +24,13 @@ impl WindowsJobLimits {
             std::env::var_os(WINDOWS_JOB_MEMORY_BYTES_ENV).as_deref(),
             std::env::var_os(WINDOWS_PROCESS_MEMORY_BYTES_ENV).as_deref(),
             std::env::var_os(WINDOWS_ACTIVE_PROCESS_LIMIT_ENV).as_deref(),
-            std::env::var_os(WINDOWS_CPU_RATE_PERCENT_ENV).as_deref(),
         )
     }
 
-    fn from_values(
+    pub fn from_values(
         job_memory: Option<&OsStr>,
         process_memory: Option<&OsStr>,
         active_processes: Option<&OsStr>,
-        cpu_percent: Option<&OsStr>,
     ) -> io::Result<Self> {
         Ok(Self {
             job_memory_bytes: parse_optional_u64(
@@ -66,18 +50,12 @@ impl WindowsJobLimits {
                 WINDOWS_ACTIVE_PROCESS_LIMIT_ENV,
                 1,
                 MAX_WINDOWS_ACTIVE_PROCESS_LIMIT,
-            )?
-            .unwrap_or(DEFAULT_WINDOWS_ACTIVE_PROCESS_LIMIT),
-            cpu_rate_percent: parse_optional_u32(
-                cpu_percent,
-                WINDOWS_CPU_RATE_PERCENT_ENV,
-                1,
-                100,
             )?,
         })
     }
 }
 
+#[cfg(windows)]
 pub(crate) fn configured_windows_job_limits() -> io::Result<WindowsJobLimits> {
     if let Some(limits) = WINDOWS_JOB_LIMITS_OVERRIDE.with(std::cell::Cell::get) {
         return Ok(limits);
@@ -85,21 +63,25 @@ pub(crate) fn configured_windows_job_limits() -> io::Result<WindowsJobLimits> {
     WindowsJobLimits::from_env()
 }
 
+#[cfg(windows)]
 thread_local! {
     static WINDOWS_JOB_LIMITS_OVERRIDE: std::cell::Cell<Option<WindowsJobLimits>> = const { std::cell::Cell::new(None) };
 }
 
+#[cfg(windows)]
 struct WindowsJobLimitsRestore<'a> {
     current: &'a std::cell::Cell<Option<WindowsJobLimits>>,
     previous: Option<WindowsJobLimits>,
 }
 
+#[cfg(windows)]
 impl Drop for WindowsJobLimitsRestore<'_> {
     fn drop(&mut self) {
         self.current.set(self.previous);
     }
 }
 
+#[cfg(windows)]
 pub(crate) fn with_windows_job_limits<T>(limits: WindowsJobLimits, work: impl FnOnce() -> T) -> T {
     WINDOWS_JOB_LIMITS_OVERRIDE.with(|current| {
         let previous = current.replace(Some(limits));
@@ -108,7 +90,12 @@ pub(crate) fn with_windows_job_limits<T>(limits: WindowsJobLimits, work: impl Fn
     })
 }
 
-#[cfg(test)]
+#[cfg(not(windows))]
+pub(crate) fn with_windows_job_limits<T>(_limits: WindowsJobLimits, work: impl FnOnce() -> T) -> T {
+    work()
+}
+
+#[cfg(all(test, windows))]
 pub(crate) use with_windows_job_limits as with_windows_job_limits_for_test;
 
 fn parse_optional_u64(
@@ -173,9 +160,8 @@ mod limits_tests {
 
     #[test]
     fn windows_job_limits_are_bounded_and_opt_in() {
-        let defaults = WindowsJobLimits::from_values(None, None, None, None).expect("defaults");
+        let defaults = WindowsJobLimits::from_values(None, None, None).expect("defaults");
         assert_eq!(defaults, WindowsJobLimits::default());
-        assert!(WindowsJobLimits::from_values(None, None, None, Some(OsStr::new("0"))).is_err());
-        assert!(WindowsJobLimits::from_values(None, None, Some(OsStr::new("257")), None).is_err());
+        assert!(WindowsJobLimits::from_values(None, None, Some(OsStr::new("257"))).is_err());
     }
 }

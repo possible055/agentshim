@@ -682,7 +682,6 @@ fn execute_inner(
     } = execution;
     let memory_policy = GrepMemoryPolicy::new(resources.config().grep_memory_bytes);
     let file_work_pool = resources.file_work_pool();
-    let file_work_request = file_work_pool.begin_request();
     let setup_span = profiler.span(GrepStage::Setup);
     request.validate()?;
     let matcher = Arc::new(build_matcher(request)?);
@@ -716,7 +715,7 @@ fn execute_inner(
     let allow_early_stop = !single_file
         && request.offset.unwrap_or(0) == 0
         && matches!(mode, GrepMode::Content | GrepMode::Files)
-        && file_work_request.pool_capacity() == 0;
+        && file_work_pool.extra_capacity() == 0;
     let plan = SearchPlan {
         mode,
         context: request.context_lines.unwrap_or(0),
@@ -746,7 +745,6 @@ fn execute_inner(
         variant,
         profiler,
         resources,
-        &file_work_request,
         memory,
     )
     .map_err(normalize_cancellation)?;

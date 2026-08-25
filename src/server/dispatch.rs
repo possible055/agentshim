@@ -428,7 +428,7 @@ impl AgentShim {
         };
         tokio::spawn(async move {
             std::mem::drop(tokio::task::spawn_blocking(move || {
-                const POLL: std::time::Duration = std::time::Duration::from_millis(5);
+                const POLL: std::time::Duration = std::time::Duration::from_millis(50);
                 let cause = loop {
                     if registration.finished().is_cancelled() || shutdown.is_cancelled() {
                         return;

@@ -313,7 +313,6 @@ fn execute_inner_with_traversal(
     output_budget: &dyn crate::output::CallBudget,
 ) -> Result<ToolOutput, GlobError> {
     let file_work_pool = resources.file_work_pool();
-    let file_work_request = file_work_pool.begin_request();
     let setup_span = profiler.span(GlobStage::Setup);
     request.validate()?;
     let matcher = GlobBuilder::new(&request.pattern)
@@ -326,7 +325,7 @@ fn execute_inner_with_traversal(
     let literal_prefix = crate::traversal::literal_path_prefix(&request.pattern);
     let base_input = request.path.as_deref().unwrap_or(".");
     let base = access.resolve(Path::new(base_input))?;
-    let selection = select_glob_traversal(access, &base, traversal, &file_work_request);
+    let selection = select_glob_traversal(access, &base, traversal, &file_work_pool);
     let traversal = selection.traversal;
     let offset = request.offset.unwrap_or(0);
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT);
@@ -433,7 +432,7 @@ fn select_glob_traversal(
     access: &FileAccess,
     base: &ResolvedPath,
     requested: GlobTraversal,
-    request: &crate::runtime::FileWorkRequest,
+    pool: &crate::runtime::FileWorkPool,
 ) -> GlobTraversalSelection {
     let wants_parallel = match requested {
         GlobTraversal::Adaptive => prefer_parallel_root(access, base),
@@ -445,7 +444,7 @@ fn select_glob_traversal(
         GlobTraversal::SerialLiteralPrefix => false,
     };
     let credits = if wants_parallel {
-        request.try_credits(request.pool_capacity())
+        pool.try_credits(pool.extra_capacity())
     } else {
         Vec::new()
     };

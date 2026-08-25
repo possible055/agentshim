@@ -341,7 +341,9 @@ async fn run_doctor(config: RuntimeLimits, options: &ServeOptions) -> Result<(),
         let limits = service.runtime_limits().windows_job_limits;
         println!(
             "Windows Job active processes: {}",
-            limits.active_process_limit
+            limits
+                .active_process_limit
+                .map_or_else(|| "off".to_owned(), |limit| limit.to_string())
         );
         println!(
             "Windows Job memory bytes: {}",
@@ -354,12 +356,6 @@ async fn run_doctor(config: RuntimeLimits, options: &ServeOptions) -> Result<(),
             limits
                 .process_memory_bytes
                 .map_or_else(|| "off".to_owned(), |bytes| bytes.to_string())
-        );
-        println!(
-            "Windows CPU hard cap percent: {}",
-            limits
-                .cpu_rate_percent
-                .map_or_else(|| "off".to_owned(), |percent| percent.to_string())
         );
     }
     println!(

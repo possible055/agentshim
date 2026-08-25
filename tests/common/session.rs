@@ -128,7 +128,6 @@ impl TestSessionBuilder {
             .env_remove("AGENTSHIM_WINDOWS_ACTIVE_PROCESS_LIMIT")
             .env_remove("AGENTSHIM_WINDOWS_JOB_MEMORY_BYTES")
             .env_remove("AGENTSHIM_WINDOWS_PROCESS_MEMORY_BYTES")
-            .env_remove("AGENTSHIM_WINDOWS_CPU_RATE_PERCENT")
             .env_remove("AGENTSHIM_BASH")
             .env_remove("AGENTSHIM_BURST_TOKENS")
             .env_remove("AGENTSHIM_IDLE_TIMEOUT");

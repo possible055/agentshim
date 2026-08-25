@@ -197,6 +197,7 @@ The response tells you how far it got and how to continue. A document that mixes
 | --- | --- | --- |
 | `CODEX_MCP_PROTOCOL_VERSION` | — | MCP protocol version advertised to Codex. |
 | `AGENTSHIM_PROCESS_CALLS` | `16` | Per-instance concurrent process-call limit; 1–32. |
+| `AGENTSHIM_READ_ONLY_CALLS` | `16` | Per-instance concurrent `read`/`glob`/`grep` call limit; 1–32. |
 | `AGENTSHIM_DETACHED_CALLS` | `16` | Per-instance live detached `bash` trees; 1–16. |
 | `AGENTSHIM_DETACHED_LOG_BYTES` | `67108864` | Per-job detached log termination threshold; 1048576–4294967296. Exceeding it terminates the owned process tree; an in-flight write block may extend the final file past the threshold. |
 | `AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX` | `1800` | Maximum detached/background Bash runtime in seconds; 600–14400. Omitted job timeouts use this value and explicit timeouts may only shorten it. |
@@ -205,19 +206,20 @@ The response tells you how far it got and how to continue. A document that mixes
 | `AGENTSHIM_TOOL_TIMEOUT_SHELF` | `600` | The shelf value the server stays below so the client's `tool_timeout_sec` fires after the server's own Timeout. Effective max execution time is shelf minus 10 seconds; 15–3600. |
 | `AGENTSHIM_IDLE_TIMEOUT` | off | Idle shutdown in seconds for the `codex` profile only; 1–86400. Inbound JSON-RPC messages reset the deadline, and active foreground calls or detached trees defer shutdown. |
 | `AGENTSHIM_GREP_MEMORY_BYTES` | `268435456` | Per-call hard limit for retained `grep` candidates. |
-| `AGENTSHIM_GLOB_MEMORY_BYTES` | `33554432` | Per-call hard limit for retained `glob` matches. |
+| `AGENTSHIM_GLOB_MEMORY_BYTES` | `67108864` | Per-call hard limit for retained `glob` matches. |
 | `AGENTSHIM_PDF_TEXT_MEMORY_BYTES` | `67108864` | Per-call memory budget for `auto`/`text` PDF reads. |
 | `AGENTSHIM_PDF_IMAGE_MEMORY_BYTES` | `100663296` | Per-call memory budget for `image` PDF reads. |
-| `AGENTSHIM_WINDOWS_ACTIVE_PROCESS_LIMIT` | `32` | Windows Job Object active-process hard limit per foreground or detached tree; 1–256. |
+| `AGENTSHIM_WINDOWS_ACTIVE_PROCESS_LIMIT` | off | Optional Windows Job Object active-process hard limit per foreground or detached tree; 1–256. |
 | `AGENTSHIM_WINDOWS_JOB_MEMORY_BYTES` | off | Optional Windows Job Object aggregate committed-memory hard limit; 67108864–17179869184. |
 | `AGENTSHIM_WINDOWS_PROCESS_MEMORY_BYTES` | off | Optional Windows Job Object per-process committed-memory hard limit; 67108864–17179869184. |
-| `AGENTSHIM_WINDOWS_CPU_RATE_PERCENT` | off | Optional Windows Job Object CPU hard cap; 1–100 percent. Windows throttles the Job at this rate rather than terminating it. |
 | `AGENTSHIM_BASH` | probed | Absolute path to a GNU bash. In the DSH adapter, the same key set in plugin config `env` also drives load-time bash discovery, so it need not be preset on the host process. |
 | `AGENTSHIM_LOG_MODE` | `errors` | One of `off`, `errors`, `all`. |
 | `AGENTSHIM_LOG_DIR` | platform default | Override the log directory with an absolute path. |
 | `AGENTSHIM_RESPECT_GITIGNORE` | `false` | When `true`, `grep` and `glob` apply `.gitignore` / `.ignore` filters. Omitted `include_ignored` follows this default. Because the caller cannot read this setting, an empty result under active filtering ends with a line recommending `include_ignored=true`. `.git` and `node_modules`, `target`, `.venv`, `venv`, `dist`, `build`, `__pycache__` stay excluded either way. Binary, output-budget, and memory limits still apply. |
 
 The shared 256 MiB runtime memory value is an internal soft reservation target, not a process RSS limit. PDF and search code also enforce their documented per-call limits. Child processes are outside that target; on Windows their optional hard limits are the Job Object settings above.
+
+For the DSH adapter on Windows, the three `AGENTSHIM_WINDOWS_*` Job Object settings above are read from the plugin's explicit `env` configuration as host policy as well as being passed to child processes. The native host does not consult its ambient process environment.
 
 The stdio transport admits at most 256 requests and 16 MiB of serialized request data without completed responses. Exceeding either backlog limit shuts down the instance instead of retaining more handlers. Five seconds without stdout write progress also shuts down the instance so the host can restart it.
 

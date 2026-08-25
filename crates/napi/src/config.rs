@@ -75,6 +75,23 @@ fn configured_read_only_calls(value: Option<u32>) -> Result<usize> {
     )
 }
 
+#[cfg(windows)]
+fn configured_windows_job_limits(
+    env: &[(String, String)],
+) -> Result<agentshim_core::platform::process::WindowsJobLimits> {
+    let value = |key: &str| {
+        env.iter()
+            .find(|(candidate, _)| candidate == key)
+            .map(|(_, value)| std::ffi::OsStr::new(value))
+    };
+    agentshim_core::platform::process::WindowsJobLimits::from_values(
+        value(agentshim_core::platform::process::WINDOWS_JOB_MEMORY_BYTES_ENV),
+        value(agentshim_core::platform::process::WINDOWS_PROCESS_MEMORY_BYTES_ENV),
+        value(agentshim_core::platform::process::WINDOWS_ACTIVE_PROCESS_LIMIT_ENV),
+    )
+    .map_err(|error| Error::new(napi::Status::InvalidArg, error.to_string()))
+}
+
 impl NativeEngineConfig {
     pub(crate) fn new(
         options: NativeHostOptions,
@@ -123,6 +140,8 @@ impl NativeEngineConfig {
             .iter()
             .find(|(key, _)| key == agentshim_core::tools::bash::BASH_OVERRIDE_ENV)
             .map(|(_, value)| std::ffi::OsString::from(value));
+        #[cfg(windows)]
+        let windows_job_limits = configured_windows_job_limits(&env)?;
         let process_environment = agentshim_core::ProcessEnvironment::new(env, bash_override)
             .map_err(|error| Error::new(napi::Status::InvalidArg, error.to_string()))?;
         let capture_root = options.capture_root.map_or_else(
@@ -152,6 +171,10 @@ impl NativeEngineConfig {
         runtime.tool_timeout_shelf = shelf;
         runtime.background_job_timeout_max = background_timeout_max;
         runtime.read_only_calls = configured_read_only_calls(options.read_only_calls)?;
+        #[cfg(windows)]
+        {
+            runtime.windows_job_limits = windows_job_limits;
+        }
         Ok((
             Self {
                 output_limits: NativeOutputLimits::new(options.page_budget_bytes),
@@ -166,5 +189,28 @@ impl NativeEngineConfig {
             },
             runtime,
         ))
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::configured_windows_job_limits;
+
+    #[test]
+    fn explicit_environment_configures_windows_job_policy() {
+        let env = vec![
+            (
+                agentshim_core::platform::process::WINDOWS_JOB_MEMORY_BYTES_ENV.to_owned(),
+                (128 * 1024 * 1024_u64).to_string(),
+            ),
+            (
+                agentshim_core::platform::process::WINDOWS_ACTIVE_PROCESS_LIMIT_ENV.to_owned(),
+                "12".to_owned(),
+            ),
+        ];
+
+        let limits = configured_windows_job_limits(&env).expect("Windows Job policy");
+        assert_eq!(limits.job_memory_bytes, Some(128 * 1024 * 1024));
+        assert_eq!(limits.active_process_limit, Some(12));
     }
 }

@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     output::SkipReason,
     path::{FileAccess, ResolvedPath},
-    runtime::{FileWorkCredit, FileWorkPool, FileWorkRequest, MemoryReservation, RuntimeResources},
+    runtime::{FileWorkCredit, FileWorkPool, MemoryReservation, RuntimeResources},
     traversal::{
         OwnedTraversalEntry, ParallelTraversal, ParallelTraversalCallbacks, TraversalControl,
         TraversalEntry, TraversalSummary, prefer_parallel_root, walk, walk_parallel_batched,
@@ -95,7 +95,6 @@ struct PipelineContext {
     profiler: GrepProfiler,
     resources: RuntimeResources,
     memory: GrepMemoryPolicy,
-    file_work_request: FileWorkRequest,
 }
 
 /// Search candidates as they are discovered and stop the traversal when the page is full.
@@ -121,7 +120,6 @@ pub fn pipelined_search(
     variant: GrepBenchmarkVariant,
     profiler: &GrepProfiler,
     resources: &RuntimeResources,
-    file_work_request: &FileWorkRequest,
     request_memory: Option<MemoryReservation>,
 ) -> Result<Page, GrepError> {
     let single_file = access.metadata_kind(base)?.is_file;
@@ -137,7 +135,6 @@ pub fn pipelined_search(
         profiler: profiler.clone(),
         resources: resources.clone(),
         memory: plan.memory,
-        file_work_request: file_work_request.clone(),
     };
     let state = Arc::new(Mutex::new(PipelineState {
         page: Page::new(
@@ -474,7 +471,7 @@ fn try_dispatch(
     sender: &Sender<QueuedOutcome>,
     pool: &FileWorkPool,
 ) -> bool {
-    let Some(credit) = context.file_work_request.try_credit() else {
+    let Some(credit) = pool.try_credit() else {
         return false;
     };
     let Some(open_file) = context.resources.try_acquire_open_file() else {
