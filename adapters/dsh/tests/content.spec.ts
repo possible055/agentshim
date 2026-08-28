@@ -103,6 +103,32 @@ describe('materializeContent', () => {
     expect(deferContext).not.toHaveBeenCalled()
   })
 
+  it('preserves originalDimensions on normalized images from DSH 0.1.2-alpha.1 attachment store', async () => {
+    const saveImages = vi.fn(async () => [
+      {
+        attachmentId: 'att-norm',
+        mediaType: 'image/png',
+        bytes: 70,
+        width: 500,
+        height: 500,
+        originalDimensions: { width: 4000, height: 4000 },
+      },
+    ])
+    const attachments = stubAttachments({ saveImages })
+    const exec = stubExec({ agent: routedAgent() })
+    const blocks = await materializeContent(stubContext({ attachments, llm: stubLlm(['image']) }), exec, [
+      { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
+    ])
+    expect(blocks).toHaveLength(1)
+    expect(blocks[0]).toMatchObject({
+      type: 'image',
+      attachment: {
+        attachmentId: 'att-norm',
+        originalDimensions: { width: 4000, height: 4000 },
+      },
+    })
+  })
+
   it('persists validated images and manually defers under rc.6 legacy host without saveImages', async () => {
     const attachments = stubAttachments()
     const deferContext = vi.fn()

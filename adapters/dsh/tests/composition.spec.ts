@@ -4,7 +4,11 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import * as llm from '@deepseek-ai/dsh-llm'
+const createCallId = (llm as { ToolCallId?: (id: string) => any; CallId?: (id: string) => any }).ToolCallId
+  ?? (llm as { ToolCallId?: (id: string) => any; CallId?: (id: string) => any }).CallId
+  ?? ((id: string) => id)
+const CallId = createCallId
 import { bindScopeParent, createScope } from '@deepseek-ai/dsh-scope'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -20,6 +24,7 @@ import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as agentshim from '../src/index.ts'
 import type { Config } from '../src/index.ts'
 import { PUBLIC_TOOL_NAMES } from '../src/contracts.ts'
+import { isModernDsh, promptSections, pwshSectionOrder } from '../src/tools.ts'
 
 const builtNativeDll = fileURLToPath(new URL(
   process.platform === 'win32'
@@ -1322,5 +1327,28 @@ describe('DSH native contracts', () => {
     expect(result.isError).toBe(true)
     expect(result.error?.info).toMatchObject({ code: 'AGENTSHIM_IMAGE_ROUTE_UNSUPPORTED' })
     expect(result.error?.message).toContain('pdf_mode: "text"')
+  })
+
+  it('generates correct section orders for both DSH 0.1.2-alpha.1 modern mode and legacy mode', () => {
+    expect(typeof isModernDsh()).toBe('boolean')
+    const modern = promptSections(true)
+    const modernMap = new Map(modern.map(s => [s.name, s.order]))
+    expect(modernMap.get('tool:bash')).toBe(1000)
+    expect(modernMap.get('tool:run_program')).toBe(1005)
+    expect(modernMap.get('tool:read')).toBe(1100)
+    expect(modernMap.get('tool:glob')).toBe(1400)
+    expect(modernMap.get('tool:grep')).toBe(1500)
+    expect(modernMap.get('tool:bash_status')).toBe(1605)
+    expect(pwshSectionOrder(true)).toBe(1010)
+
+    const legacy = promptSections(false)
+    const legacyMap = new Map(legacy.map(s => [s.name, s.order]))
+    expect(legacyMap.get('tool:read')).toBe(100)
+    expect(legacyMap.get('tool:glob')).toBe(103)
+    expect(legacyMap.get('tool:grep')).toBe(104)
+    expect(legacyMap.get('tool:run_program')).toBe(104.5)
+    expect(legacyMap.get('tool:bash')).toBe(105)
+    expect(legacyMap.get('tool:bash_status')).toBe(105.5)
+    expect(pwshSectionOrder(false)).toBe(105)
   })
 })

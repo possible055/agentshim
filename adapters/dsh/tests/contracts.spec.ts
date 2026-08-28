@@ -5,6 +5,7 @@ import {
   bashParameters,
   bashStatusParameters,
   PUBLIC_TOOL_NAMES,
+  readOutputSchema,
   readParameters,
 } from '../src/contracts.ts'
 
@@ -44,6 +45,19 @@ describe('native public contracts', () => {
     expect(publicShape(bashStatusParameters)).toEqual({
       fields: [...divergence.bash_status.dsh.fields].sort(),
       required: [...divergence.bash_status.dsh.required].sort(),
+    })
+  })
+
+  it('declares attachment originalDimensions in readOutputSchema for DSH 0.1.2-alpha.1 compatibility', () => {
+    const properties = (readOutputSchema as { properties: { attachments: { items: { properties: Record<string, unknown> } } } }).properties
+    const attachmentProperties = properties.attachments.items.properties
+    expect(attachmentProperties).toHaveProperty('originalDimensions')
+    expect(attachmentProperties.originalDimensions).toMatchObject({
+      type: 'object',
+      properties: {
+        width: { type: 'integer' },
+        height: { type: 'integer' },
+      },
     })
   })
 })

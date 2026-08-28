@@ -5,7 +5,7 @@
 ## Requirements
 
 - Node.js `^22.19.0 || >=24.0.0`.
-- The DSH `0.1.0-rc.6`, `0.1.0-rc.7`, `0.1.0-rc.8`, or `0.1.1-rc.1` package family.
+- The DSH `0.1.0-rc.6`, `0.1.0-rc.7`, `0.1.0-rc.8`, `0.1.1-rc.1`, `0.1.1-rc.2`, or `0.1.2-alpha.1` package family.
 - A local filesystem provider for the configured root.
 - One supported platform: Windows x64 MSVC, macOS ARM64, Linux x64 glibc, or Linux ARM64 glibc.
 - Background Bash requires `ctx.jobs` and a job controller.

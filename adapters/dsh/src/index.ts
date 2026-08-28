@@ -5,7 +5,7 @@ import z from '@deepseek-ai/schemastery'
 import { MIN_TOOL_CALL_TIMEOUT_MS, resolvePluginConfig } from './config.ts'
 import type { ResolvedPluginConfig } from './config.ts'
 import { assertLocalFileSystem } from './policy.ts'
-import { buildToolDefinitions, promptSections, RESTRICT_CANDIDATES } from './tools.ts'
+import { buildToolDefinitions, promptSections, pwshSectionOrder, RESTRICT_CANDIDATES } from './tools.ts'
 import { PUBLIC_TOOL_NAMES } from './contracts.ts'
 import { BackgroundJobManager } from './jobs.ts'
 import { backgroundJobTimeoutMaxMs, loadNativeAddon, nativeEngineEnv, nativeLoadFailureError } from './native.ts'
@@ -145,7 +145,7 @@ function installAgentTools(
         }
       }
       if (present.includes('pwsh')) {
-        disposers.push(agent.ctx.systemPrompt.section({ name: 'tool:pwsh', order: 105, text: '' }))
+        disposers.push(agent.ctx.systemPrompt.section({ name: 'tool:pwsh', order: pwshSectionOrder(), text: '' }))
       }
     } catch (error) {
       for (let index = disposers.length - 1; index >= 0; index--) {

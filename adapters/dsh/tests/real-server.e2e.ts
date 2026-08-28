@@ -8,7 +8,11 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import WorkerThreadCodeRuntime from '@deepseek-ai/dsh-code-runtime-worker-thread'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import * as llm from '@deepseek-ai/dsh-llm'
+const createCallId = (llm as { ToolCallId?: (id: string) => any; CallId?: (id: string) => any }).ToolCallId
+  ?? (llm as { ToolCallId?: (id: string) => any; CallId?: (id: string) => any }).CallId
+  ?? ((id: string) => id)
+const CallId = createCallId
 import { createScope } from '@deepseek-ai/dsh-scope'
 import ShellExecutor from '@deepseek-ai/dsh-shell'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'

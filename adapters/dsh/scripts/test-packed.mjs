@@ -92,7 +92,8 @@ try {
   await writeFile(join(consumer, 'smoke.mjs'), `
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import * as llm from '@deepseek-ai/dsh-llm'
+const createCallId = llm.ToolCallId ?? llm.CallId ?? (id => id)
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import { bindScopeParent, createScope } from '@deepseek-ai/dsh-scope'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -144,7 +145,7 @@ assert.notEqual(replacement?.description, 'inherited read')
 assert.match(replacement?.description ?? '', /numbered lines/)
 const result = await ctx.tools.execute({
   signal: new AbortController().signal,
-  callId: CallId('packed-read'),
+  callId: createCallId('packed-read'),
   name: 'read',
   arguments: { path: 'notes.txt' },
   agent,

@@ -90,6 +90,13 @@ repos:
         files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|crates/.*\.(rs|toml)|tests/.*\.rs|benches/.*\.rs)$'
         pass_filenames: false
 
+      - id: cargo-clippy-linux
+        name: cargo clippy (linux target)
+        entry: cargo clippy --target x86_64-unknown-linux-gnu --all-targets -- -D warnings
+        language: system
+        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|crates/.*\.(rs|toml)|tests/.*\.rs|benches/.*\.rs)$'
+        pass_filenames: false
+
       - id: cargo-machete
         name: cargo machete
         entry: cargo machete

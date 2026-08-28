@@ -5,7 +5,7 @@ import { JobId } from '@deepseek-ai/dsh-jobs'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolCallView, ToolDefinition, ToolResultView, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { ResolvedPluginConfig } from './config.ts'
-import { materializeReadAttachments } from './content.ts'
+import { getDshPackageVersion, materializeReadAttachments } from './content.ts'
 import {
   beginReadObservation,
   completeReadObservation,
@@ -445,7 +445,25 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
   return new Map(PUBLIC_TOOL_NAMES.map(name => [name, definitions[name]]))
 }
 
-export function promptSections(): ReadonlyArray<{ readonly name: string; readonly order: number; readonly text: string }> {
+export function isModernDsh(): boolean {
+  const version = getDshPackageVersion()
+  if (version !== undefined && (version.startsWith('0.1.0-rc') || version.startsWith('0.1.1-rc'))) {
+    return false
+  }
+  return true
+}
+
+export function promptSections(isModern = isModernDsh()): ReadonlyArray<{ readonly name: string; readonly order: number; readonly text: string }> {
+  if (isModern) {
+    return [
+      { name: 'tool:bash', order: 1000, text: 'Use run_in_background=true for long-running work.' },
+      { name: 'tool:run_program', order: 1005, text: 'Prefer run_program for single executables with literal arguments; use bash only when shell composition is required.' },
+      { name: 'tool:read', order: 1100, text: 'Continue truncated reads by passing next_start_line as start_line.' },
+      { name: 'tool:glob', order: 1400, text: 'Continue truncated glob results by passing next_offset as offset.' },
+      { name: 'tool:grep', order: 1500, text: 'Continue truncated grep results by passing next_offset as offset.' },
+      { name: 'tool:bash_status', order: 1605, text: 'Use bash_status to check the lifecycle status of a background Bash job.' },
+    ]
+  }
   return [
     { name: 'tool:read', order: 100, text: 'Continue truncated reads by passing next_start_line as start_line.' },
     { name: 'tool:glob', order: 103, text: 'Continue truncated glob results by passing next_offset as offset.' },
@@ -454,6 +472,10 @@ export function promptSections(): ReadonlyArray<{ readonly name: string; readonl
     { name: 'tool:bash', order: 105, text: 'Use run_in_background=true for long-running work.' },
     { name: 'tool:bash_status', order: 105.5, text: 'Use bash_status to check the lifecycle status of a background Bash job.' },
   ]
+}
+
+export function pwshSectionOrder(isModern = isModernDsh()): number {
+  return isModern ? 1010 : 105
 }
 
 export const RESTRICT_CANDIDATES = [...PUBLIC_TOOL_NAMES, 'pwsh'] as const
