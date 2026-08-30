@@ -36,6 +36,14 @@ cargo check --locked -p agentshim-pdf-read --all-targets --no-default-features -
 
 ## Local hooks
 
+The hooks require Gitleaks 8.30.1 and cargo-deny 0.20.2 as system tools. Install cargo-deny with the pinned Rust-compatible version and install Gitleaks from its release assets, then verify both commands are available:
+
+```console
+cargo install --locked cargo-deny --version 0.20.2
+cargo deny --version
+gitleaks version
+```
+
 Hook wrappers live in `scripts/hooks/` and redirect pre-commit output to stderr so editor-driven commits and pushes surface hook failures instead of hiding them in the Git output channel. Enable them per clone:
 
 ```console
@@ -43,6 +51,12 @@ git config core.hooksPath scripts/hooks
 ```
 
 The wrappers replace `pre-commit install`; hooks generated into `.git/hooks` are ignored once `core.hooksPath` is set.
+
+Pre-commit blocks formatting, native Clippy, unused dependencies, dependency policy violations, and staged secrets. The structural Clippy audit reports cognitive-complexity findings above 30 without blocking; it covers the root, core, N-API, and gigatoken crates and deliberately excludes the retained upstream PDF source. Pre-push runs Linux-target Clippy and the complete locked test suite, including documentation tests.
+
+The dependency gate rejects vulnerabilities, unsound advisories, wildcard registry requirements, unknown sources, and unapproved licenses. Unmaintained advisories do not block this gate because the retained PDF dependency graph currently has no safe replacement for every such crate.
+
+Stable releases run cargo-semver-checks 0.44.0 against the latest reachable stable tag for the `agentshim` and `agentshim-core` public Rust APIs. Prereleases skip that gate because their APIs may still change before the stable release.
 
 ## Test isolation
 

@@ -257,10 +257,11 @@ pub fn validate_root(path: &Path) -> std::io::Result<()> {
         .iter()
         .position(|unit| *unit == 0)
         .unwrap_or(filesystem.len());
-    if !String::from_utf16_lossy(&filesystem[..length]).eq_ignore_ascii_case("NTFS") {
+    let filesystem = String::from_utf16_lossy(&filesystem[..length]);
+    if !is_supported_windows_filesystem(&filesystem) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "Windows repository root must use NTFS",
+            "Windows repository root must use NTFS or ReFS",
         ));
     }
     validated_volumes
@@ -268,6 +269,11 @@ pub fn validate_root(path: &Path) -> std::io::Result<()> {
         .map_err(|_| std::io::Error::other("validated volume cache is unavailable"))?
         .push(volume_path);
     Ok(())
+}
+
+#[cfg(windows)]
+fn is_supported_windows_filesystem(filesystem: &str) -> bool {
+    filesystem.eq_ignore_ascii_case("NTFS") || filesystem.eq_ignore_ascii_case("ReFS")
 }
 
 #[cfg(windows)]
@@ -295,4 +301,19 @@ fn validate_windows_version() -> std::io::Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::is_supported_windows_filesystem;
+
+    #[test]
+    fn supports_ntfs_and_refs_only() {
+        for filesystem in ["NTFS", "ntfs", "ReFS", "refs"] {
+            assert!(is_supported_windows_filesystem(filesystem));
+        }
+        for filesystem in ["FAT32", "exFAT", ""] {
+            assert!(!is_supported_windows_filesystem(filesystem));
+        }
+    }
 }

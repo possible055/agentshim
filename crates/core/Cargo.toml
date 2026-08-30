@@ -7,7 +7,7 @@ license = "Apache-2.0"
 description = "Host-neutral repository and process tool engine"
 
 [dependencies]
-agentshim-pdf-read = { path = "../pdf-read-core" }
+agentshim-pdf-read = { version = "0.1.0", path = "../pdf-read-core" }
 base64 = "=0.22.1"
 cap-std = "=4.0.2"
 chardetng = "=1.0.0"
@@ -47,6 +47,7 @@ unsafe_op_in_unsafe_fn = "deny"
 [lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+allow_attributes_without_reason = "deny"
 undocumented_unsafe_blocks = "deny"
 # Public documentation is being tightened alongside the typed host API.
 missing_errors_doc = "allow"

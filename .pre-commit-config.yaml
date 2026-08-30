@@ -20,6 +20,12 @@ repos:
         exclude: '\.rs$'
       - id: detect-private-key
 
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks-system
+        pass_filenames: false
+
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.3
     hooks:
@@ -90,12 +96,13 @@ repos:
         files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|crates/.*\.(rs|toml)|tests/.*\.rs|benches/.*\.rs)$'
         pass_filenames: false
 
-      - id: cargo-clippy-linux
-        name: cargo clippy (linux target)
-        entry: cargo clippy --target x86_64-unknown-linux-gnu --all-targets -- -D warnings
+      - id: cargo-structural-audit
+        name: cargo structural audit
+        entry: cargo clippy -p agentshim -p agentshim-core -p agentshim-napi -p agentshim-gigatoken --lib --bins --no-deps -- -W clippy::cognitive-complexity
         language: system
-        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|crates/.*\.(rs|toml)|tests/.*\.rs|benches/.*\.rs)$'
+        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|clippy\.toml|src/.*\.rs|crates/(core|napi|gigatoken-core)/.*\.(rs|toml))$'
         pass_filenames: false
+        verbose: true
 
       - id: cargo-machete
         name: cargo machete
@@ -104,9 +111,24 @@ repos:
         files: '(^|/)Cargo\.(toml|lock)$'
         pass_filenames: false
 
+      - id: cargo-deny
+        name: cargo deny
+        entry: cargo deny check advisories bans licenses sources
+        language: system
+        files: '(^|/)(Cargo\.(toml|lock)|deny\.toml)$'
+        pass_filenames: false
+
+      - id: cargo-clippy-linux
+        name: cargo clippy (linux target)
+        entry: cargo clippy --target x86_64-unknown-linux-gnu --all-targets -- -D warnings
+        language: system
+        stages: [pre-push]
+        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|crates/.*\.(rs|toml)|tests/.*\.rs|benches/.*\.rs)$'
+        pass_filenames: false
+
       - id: cargo-test
         name: cargo test
-        entry: cargo test --locked --tests
+        entry: cargo test --locked
         language: system
         stages: [pre-push]
         files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|crates/.*\.(rs|toml)|tests/.*\.rs)$'

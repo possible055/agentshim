@@ -25,7 +25,7 @@ jobs:
   preflight:
     name: Preflight
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     outputs:
       commit_sha: ${{ steps.release.outputs.commit_sha }}
       version: ${{ steps.release.outputs.version }}
@@ -210,6 +210,30 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "npm_dist_tag=$npm_dist_tag" >> "$GITHUB_OUTPUT"
           echo "native_api=$native_api" >> "$GITHUB_OUTPUT"
+
+      - name: Install cargo-semver-checks
+        if: ${{ !contains(steps.release.outputs.version, '-') }}
+        run: cargo install --locked cargo-semver-checks --version 0.44.0
+      - name: Check stable Rust API compatibility
+        if: ${{ !contains(steps.release.outputs.version, '-') }}
+        shell: bash
+        env:
+          CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
+        run: |
+          set -euo pipefail
+          baseline_tag="$(git tag --merged HEAD --list 'v[0-9]*' | sed '/-/d' | sort -V | tail -n 1)"
+          if [[ -z "$baseline_tag" ]]; then
+            echo "no prior stable release tag; skipping the initial SemVer comparison"
+            exit 0
+          fi
+          echo "checking agentshim and agentshim-core against $baseline_tag"
+          cargo semver-checks check-release \
+            --package agentshim \
+            --package agentshim-core \
+            --baseline-rev "$baseline_tag"
+      - name: Skip prerelease Rust API compatibility
+        if: ${{ contains(steps.release.outputs.version, '-') }}
+        run: echo "prerelease ${{ steps.release.outputs.version }} may change public APIs; skipping the stable SemVer gate"
 
   package:
     name: Package ${{ matrix.target }}

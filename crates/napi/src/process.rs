@@ -310,7 +310,10 @@ pub(crate) fn process_outcome_result(
 }
 
 #[napi(object)]
-#[allow(clippy::struct_excessive_bools)] // mirrors the TS NativeProcessOutcome wire contract
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "the fields mirror the TypeScript NativeProcessOutcome wire contract"
+)]
 pub struct ProcessOutcome {
     pub text: String,
     pub child_nonzero: bool,

@@ -180,6 +180,9 @@ update_cargo_manifest() {
             sub(/"[^"]+"/, "\"" version "\"")
             changed=1
         }
+        $0 ~ /^agentshim-core[[:space:]]*=/ && $0 ~ /version[[:space:]]*=[[:space:]]*"[^"]+"/ {
+            sub(/version[[:space:]]*=[[:space:]]*"[^"]+"/, "version = \"" version "\"")
+        }
         { print }
         END { if (!changed) exit 1 }
     ' "$target_manifest" > "$tmp_manifest" || {

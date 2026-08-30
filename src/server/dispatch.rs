@@ -333,8 +333,10 @@ impl AgentShim {
         }
     }
 
-    // Admission, detached ownership, execution, and final verification share one lifetime.
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "admission, detached ownership, execution, and verification share one lifetime"
+    )]
     async fn call_bash_run(
         &self,
         bash_request: BashRequest,

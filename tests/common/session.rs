@@ -209,7 +209,10 @@ impl TestSession {
         Self::builder().root(root).read_scope("normal").spawn()
     }
 
-    #[allow(dead_code)] // Used by the separately compiled opt-in resource_soak runner.
+    #[allow(
+        dead_code,
+        reason = "used by the separately compiled opt-in resource_soak runner"
+    )]
     pub fn pid(&self) -> u32 {
         self.child.id()
     }

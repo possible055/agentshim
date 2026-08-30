@@ -81,7 +81,10 @@ fn stdin_eof_cancels_in_flight_process_and_exits_server() {
 
 #[cfg(unix)]
 #[test]
-#[allow(clippy::zombie_processes)] // The fixture must exit without waiting so the helper escapes its session.
+#[allow(
+    clippy::zombie_processes,
+    reason = "the fixture exits without waiting so the helper escapes its session"
+)]
 fn unix_outcome_uncertain_parent_fixture() {
     if std::env::var("AGENTSHIM_OUTCOME_UNCERTAIN_FIXTURE").as_deref() != Ok("parent") {
         return;

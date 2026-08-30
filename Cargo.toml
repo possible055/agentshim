@@ -19,11 +19,11 @@ description = "High-performance, capability-aware repository tools and process e
 autotests = true
 
 [dependencies]
-agentshim-core = { path = "crates/core" }
+agentshim-core = { version = "0.1.5", path = "crates/core" }
 base64 = "=0.22.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
-agentshim-pdf-read = { path = "crates/pdf-read-core" }
-agentshim-gigatoken = { path = "crates/gigatoken-core" }
+agentshim-pdf-read = { version = "0.1.0", path = "crates/pdf-read-core" }
+agentshim-gigatoken = { version = "0.1.0", path = "crates/gigatoken-core" }
 rmcp = { version = "=3.1.4", default-features = false, features = ["server", "transport-io"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.142"
@@ -40,7 +40,7 @@ windows-sys = { version = "0.61.0", features = ["Wdk_System_SystemServices", "Wi
 libc = "0.2.172"
 
 [dev-dependencies]
-agentshim-core = { path = "crates/core", features = ["test-hooks"] }
+agentshim-core = { version = "0.1.5", path = "crates/core", features = ["test-hooks"] }
 log = "0.4.27"
 tempfile = "3.20.0"
 
@@ -75,4 +75,5 @@ unsafe_op_in_unsafe_fn = "deny"
 [lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+allow_attributes_without_reason = "deny"
 undocumented_unsafe_blocks = "deny"

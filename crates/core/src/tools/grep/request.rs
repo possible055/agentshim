@@ -33,8 +33,10 @@ pub const GENERIC_OMISSION: &str = "[grep result omitted: exceeds output budget]
 pub const CONTENT_OMISSION: &str = "[line text omitted: exceeds output budget]";
 
 #[derive(Clone, Copy, Debug)]
-// Repeating the unit prevents memory-budget fields from being combined as unitless values.
-#[allow(clippy::struct_field_names)]
+#[allow(
+    clippy::struct_field_names,
+    reason = "unit suffixes prevent memory-budget fields from being combined as unitless values"
+)]
 pub struct GrepMemoryPolicy {
     pub request_bytes: usize,
     pub base_search_heap_bytes: usize,
@@ -664,8 +666,10 @@ struct GrepExecution<'a> {
     output_budget: &'a dyn crate::output::CallBudget,
 }
 
-// The reservation must outlive candidate collection, search, and rendering as one operation.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the reservation must span candidate collection, search, and rendering"
+)]
 fn execute_inner(
     access: &Arc<FileAccess>,
     request: &GrepRequest,

@@ -11,9 +11,10 @@ pub(crate) use burst_gate::{
 };
 pub(crate) use token_gate::{GateDecision, OutputTokenGate, structured_result_fits_model_budget};
 
-// Re-exported to keep the crate-internal `crate::output::` paths stable across test and
-// non-test builds; not every item is referenced in both.
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "re-exports keep crate-internal output paths stable across build profiles"
+)]
 pub use agentshim_core::output::{
     CALL_OUTPUT_TOKEN_LIMIT, MAX_OUTPUT_BYTES, MIN_OUTPUT_BYTES, MODEL_BYTE_LIMIT,
     NEXT_OFFSET_FIELD, NEXT_START_LINE_FIELD, OUTPUT_BYTES_ENV, OutputError, OutputFormatter,

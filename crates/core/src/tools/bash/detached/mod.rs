@@ -578,7 +578,13 @@ impl DetachedTrees {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    #[cfg_attr(not(test), allow(clippy::unused_self))]
+    #[cfg_attr(
+        not(test),
+        allow(
+            clippy::unused_self,
+            reason = "test builds inject roster-owned liveness failures"
+        )
+    )]
     fn observation(
         &self,
         tree: &mut DetachedTree,

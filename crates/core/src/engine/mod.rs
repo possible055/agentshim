@@ -412,7 +412,10 @@ impl ToolEngine {
     /// One admission-to-worker pipeline for the read-only search tools: admit the
     /// caller's permits, take a worker and the tool's memory charge, then run the
     /// search on the blocking pool under a shutdown-relayed cancellation token.
-    #[allow(clippy::type_complexity)]
+    #[allow(
+        clippy::type_complexity,
+        reason = "the generic closure keeps read-only tools on one admission pipeline"
+    )]
     async fn spawn_budgeted_search<E, F>(
         &self,
         context: &OperationContext,

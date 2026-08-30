@@ -94,6 +94,20 @@ function Set-PackageVersion {
         $Content.Substring($match.Groups[1].Index + $match.Groups[1].Length)
 }
 
+function Set-LocalDependencyVersion {
+    param(
+        [Parameter(Mandatory)][string]$Content,
+        [Parameter(Mandatory)][string]$Dependency,
+        [Parameter(Mandatory)][string]$NewVersion
+    )
+
+    $pattern = '(?m)^(' + [regex]::Escape($Dependency) + '\s*=\s*\{[^\r\n}]*\bversion\s*=\s*")[^"]+(")'
+    return [regex]::Replace($Content, $pattern, {
+        param($match)
+        $match.Groups[1].Value + $NewVersion + $match.Groups[2].Value
+    })
+}
+
 function Update-CargoManifestVersion {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -102,6 +116,7 @@ function Update-CargoManifestVersion {
 
     $content = [IO.File]::ReadAllText($Path)
     $updated = Set-PackageVersion -Content $content -NewVersion $NewVersion
+    $updated = Set-LocalDependencyVersion -Content $updated -Dependency "agentshim-core" -NewVersion $NewVersion
     [IO.File]::WriteAllText($Path, $updated, [Text.UTF8Encoding]::new($false))
 }
 

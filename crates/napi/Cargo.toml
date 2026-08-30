@@ -10,7 +10,7 @@ description = "Native agentshim engine for in-process DSH hosts"
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-agentshim-core = { path = "../core" }
+agentshim-core = { version = "0.1.5", path = "../core" }
 base64 = "=0.22.1"
 napi = { version = "=3.12.1", default-features = false, features = ["napi8", "async", "tokio_rt", "error_anyhow", "serde-json"] }
 napi-derive = "=3.6.3"
@@ -28,6 +28,7 @@ unsafe_op_in_unsafe_fn = "deny"
 [lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+allow_attributes_without_reason = "deny"
 undocumented_unsafe_blocks = "deny"
 # napi hands numbers over as f64 and strings by value; byte counts and argv are
 # therefore structurally cast at the boundary.

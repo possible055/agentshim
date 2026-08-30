@@ -235,7 +235,10 @@ fn search_single_file(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the traversal dependencies make pipeline and resource ownership explicit"
+)]
 fn traverse(
     access: &Arc<FileAccess>,
     base: &ResolvedPath,
