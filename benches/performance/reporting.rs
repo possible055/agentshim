@@ -94,8 +94,10 @@ pub(super) fn emit_grep_profile(emission: &GrepProfileEmission<'_>) {
     println!("{}", full_grep_profile_json(emission));
 }
 
-// Keeping the complete benchmark schema together makes emitted fields auditable as one contract.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "keeping the complete benchmark schema together makes emitted fields auditable as one contract"
+)]
 pub(super) fn full_grep_profile_json(emission: &GrepProfileEmission<'_>) -> serde_json::Value {
     let stages = &emission.profile.timings;
     let fingerprint = emission.fingerprint;

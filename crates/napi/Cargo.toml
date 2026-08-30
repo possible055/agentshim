@@ -1,6 +1,6 @@
 [package]
 name = "agentshim-napi"
-version = "0.1.5"
+version = "0.1.6-alpha.1"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -10,7 +10,7 @@ description = "Native agentshim engine for in-process DSH hosts"
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-agentshim-core = { version = "0.1.5", path = "../core" }
+agentshim-core = { version = "0.1.6-alpha.1", path = "../core" }
 base64 = "=0.22.1"
 napi = { version = "=3.12.1", default-features = false, features = ["napi8", "async", "tokio_rt", "error_anyhow", "serde-json"] }
 napi-derive = "=3.6.3"

@@ -335,8 +335,10 @@ pub(super) fn slope(values: &[u64]) -> f64 {
 }
 
 pub(super) fn metric_as_f64(value: u64) -> f64 {
-    // Resource metrics remain far below f64's exact integer range on supported runners.
-    #[allow(clippy::cast_precision_loss)]
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "resource metrics remain far below f64 exact integer range on supported runners"
+    )]
     let value = value as f64;
     value
 }

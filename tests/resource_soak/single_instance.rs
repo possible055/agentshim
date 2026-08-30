@@ -3,7 +3,10 @@ use super::*;
 
 #[test]
 #[ignore = "manual resource soak; run with --ignored --nocapture"]
-#[allow(clippy::too_many_lines)] // The ignored fixture records one complete mixed soak scenario.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the ignored fixture records one complete mixed soak scenario"
+)]
 fn mixed_workload_resource_soak() {
     let iterations = iteration_count();
     assert!(
@@ -143,7 +146,10 @@ fn mixed_workload_resource_soak() {
 
 #[test]
 #[ignore = "manual detached Bash resource soak; run with --ignored --nocapture"]
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the ignored fixture records one complete detached bash soak scenario"
+)]
 fn detached_job_status_retention_and_termination_soak() {
     if agentshim::bash_report().is_err() {
         return;

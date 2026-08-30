@@ -20,7 +20,10 @@ fn pending_process_child_fixture() {
 
 #[test]
 #[ignore = "manual four-instance aggregate process soak; run with --ignored --nocapture"]
-#[allow(clippy::too_many_lines)] // The ignored fixture records one complete aggregate soak scenario.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the ignored fixture records one complete aggregate soak scenario"
+)]
 fn four_instance_aggregate_process_soak() {
     const INSTANCE_COUNT: usize = 4;
     const CALLS_PER_INSTANCE: usize = 16;

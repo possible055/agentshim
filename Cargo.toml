@@ -11,7 +11,7 @@ resolver = "3"
 
 [package]
 name = "agentshim"
-version = "0.1.5"
+version = "0.1.6-alpha.1"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -19,7 +19,7 @@ description = "High-performance, capability-aware repository tools and process e
 autotests = true
 
 [dependencies]
-agentshim-core = { version = "0.1.5", path = "crates/core" }
+agentshim-core = { version = "0.1.6-alpha.1", path = "crates/core" }
 base64 = "=0.22.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 agentshim-pdf-read = { version = "0.1.0", path = "crates/pdf-read-core" }
@@ -40,7 +40,7 @@ windows-sys = { version = "0.61.0", features = ["Wdk_System_SystemServices", "Wi
 libc = "0.2.172"
 
 [dev-dependencies]
-agentshim-core = { version = "0.1.5", path = "crates/core", features = ["test-hooks"] }
+agentshim-core = { version = "0.1.6-alpha.1", path = "crates/core", features = ["test-hooks"] }
 log = "0.4.27"
 tempfile = "3.20.0"
 

@@ -528,8 +528,10 @@ mod platform {
 
     use super::ProcessSample;
 
-    // Keep the same fallible sampling interface as the supported platforms.
-    #[allow(clippy::unnecessary_wraps)]
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "keep fallible sampling interface matching supported platforms"
+    )]
     pub fn sample(_pid: u32) -> io::Result<ProcessSample> {
         Ok(ProcessSample::default())
     }
