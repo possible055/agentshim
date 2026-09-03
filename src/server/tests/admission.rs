@@ -91,7 +91,7 @@ fn detached_admission_reserves_before_blocking_scheduling_and_fails_fast() {
 fn foreground_saturation_does_not_consume_detached_capacity() {
     let fixture = tempfile::tempdir().expect("fixture");
     let mut runtime = crate::runtime::RuntimeConfig::for_tests(1);
-    runtime.process_calls = 1;
+    runtime.foreground_calls = 1;
     runtime.detached_calls = 1;
     let server = AgentShim::builder(fixture.path())
         .expect("builder")
@@ -100,10 +100,10 @@ fn foreground_saturation_does_not_consume_detached_capacity() {
         .expect("server");
     let foreground = server
         .resources
-        .try_admit_process_for_test()
+        .try_admit_foreground_for_test()
         .expect("foreground admission");
 
-    assert!(server.resources.try_admit_process_for_test().is_none());
+    assert!(server.resources.try_admit_foreground_for_test().is_none());
     let detached = server
         .try_admit_tool(&detached_request())
         .expect("detached admission remains independent");
@@ -112,10 +112,10 @@ fn foreground_saturation_does_not_consume_detached_capacity() {
 }
 
 #[test]
-fn detached_control_bypasses_process_and_detached_capacity() {
+fn detached_control_bypasses_foreground_and_detached_capacity() {
     let fixture = tempfile::tempdir().expect("fixture");
     let mut runtime = crate::runtime::RuntimeConfig::for_tests(1);
-    runtime.process_calls = 1;
+    runtime.foreground_calls = 1;
     runtime.detached_calls = 1;
     let server = AgentShim::builder(fixture.path())
         .expect("builder")
@@ -124,7 +124,7 @@ fn detached_control_bypasses_process_and_detached_capacity() {
         .expect("server");
     let _foreground = server
         .resources
-        .try_admit_process_for_test()
+        .try_admit_foreground_for_test()
         .expect("foreground admission");
     let _detached = server.detached.admit().expect("detached reservation");
 
@@ -418,7 +418,7 @@ async fn shutdown_waits_for_foreground_owners_to_release() {
     let server = AgentShim::from_path(fixture.path()).expect("server");
     let permit = server
         .resources
-        .try_admit_process_for_test()
+        .try_admit_foreground_for_test()
         .expect("one foreground permit");
 
     let shutdown = server.clone();

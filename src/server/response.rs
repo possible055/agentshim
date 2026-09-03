@@ -246,6 +246,13 @@ impl DiagnosticError for crate::tools::read::ReadError {
                 // its own is the client's.
                 agentshim_pdf_read::PdfReadErrorKind::Cancelled => "client_cancellation",
             },
+            ReadError::Office(error) => match error.kind() {
+                agentshim_office_read::OfficeReadErrorKind::Invalid => "office_invalid",
+                agentshim_office_read::OfficeReadErrorKind::Unsupported => "office_unsupported",
+                agentshim_office_read::OfficeReadErrorKind::ResourceLimit => "resource_limit",
+                agentshim_office_read::OfficeReadErrorKind::Cancelled => "client_cancellation",
+                agentshim_office_read::OfficeReadErrorKind::Io => "io",
+            },
             ReadError::Io(_) | ReadError::Decode(_) | ReadError::Binary | ReadError::Changed => {
                 "io"
             }
@@ -296,6 +303,15 @@ impl DiagnosticError for crate::tools::read::ReadError {
                     "observed": limit.observed_bytes
                 })
             }),
+            ReadError::Office(agentshim_office_read::OfficeReadError::ResourceLimit {
+                resource,
+                limit,
+                observed,
+            }) => Some(json!({
+                "resource": resource,
+                "limit_bytes": limit,
+                "observed": observed
+            })),
             ReadError::Output(crate::output::OutputError::BurstLimit) => Some(json!({
                 "reason": "burst_limit",
                 "retry_after_ms": 2000
@@ -555,22 +571,6 @@ pub(super) fn blocking_response<E: DiagnosticError>(
             format!("{tool} worker failed: {error}"),
         ),
     }
-}
-
-/// Admission runs before the per-call tracing span exists, so the tool and the admission class
-/// are logged explicitly here; without them a saturated server cannot be told apart from a
-/// saturated read-only pool in diagnostics.
-pub(super) fn resource_busy(
-    budget: &CallOutputBudget,
-    tool: &str,
-    admission: &'static str,
-) -> CallToolResponse {
-    resource_busy_with_message(
-        budget,
-        tool,
-        admission,
-        format!("{tool} {admission} capacity is busy; retry the request later"),
-    )
 }
 
 pub(super) fn resource_busy_with_message(

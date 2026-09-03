@@ -105,12 +105,12 @@ impl ToolEngine {
     ) -> Result<ToolOutput, read::ReadError> {
         let queued = Instant::now();
         let admission = self
-            .try_read_only_admission(&context.cancellation)
+            .try_foreground_admission(&context.cancellation)
             .ok_or_else(|| {
                 cancelled_or_busy(
                     read::ReadError::Cancelled,
                     read::ReadError::ResourceBusy {
-                        resource: "read_only",
+                        resource: "foreground",
                         retry_after: None,
                     },
                     &context.cancellation,
@@ -131,8 +131,8 @@ impl ToolEngine {
         trace_capacity_acquired(queued);
         let (cancellation, _relay) =
             relayed_cancellation(&context.cancellation, self.resources.shutdown_token());
-        let budgets = read::PdfMemoryBudgets::from_config(&self.resources.config());
-        let mut pdf_admission: Option<(OwnedSemaphorePermit, OwnedSemaphorePermit)> = None;
+        let budgets = read::DocumentMemoryBudgets::from_config(&self.resources.config());
+        let mut structured_admission: Option<(OwnedSemaphorePermit, OwnedSemaphorePermit)> = None;
         let mut deadline = None;
         let mut result = None;
         let span = tracing::Span::current();
@@ -164,10 +164,12 @@ impl ToolEngine {
             };
 
             let mut text_memory = None;
-            if prepared.pdf_mode().is_some() {
-                if pdf_admission.is_none() {
-                    pdf_admission =
-                        Some(self.acquire_pdf_admission(&prepared, &cancellation).await?);
+            if prepared.structured_document() {
+                if structured_admission.is_none() {
+                    structured_admission = Some(
+                        self.acquire_structured_document_admission(&prepared, &cancellation)
+                            .await?,
+                    );
                 }
                 deadline = prepared.runtime_limit();
                 drop(worker.take());
@@ -186,16 +188,19 @@ impl ToolEngine {
             let output_budget = Arc::clone(&context.output_budget);
             let execute_span = span.clone();
             let started = Instant::now();
+            let is_pdf = prepared.pdf_mode().is_some();
             let executed = if let Some(limit) = deadline {
-                let (gate, memory) = pdf_admission
-                    .take()
-                    .expect("PDF execution retains its gate and memory reservation");
+                let (gate, memory) = structured_admission.take().expect(
+                    "structured-document execution retains its gate and memory reservation",
+                );
                 let (sender, receiver) = tokio::sync::oneshot::channel();
                 std::thread::Builder::new()
-                    .name("agentshim-pdf".to_owned())
+                    .name("agentshim-document".to_owned())
                     .spawn(move || {
                         let result = execute_span.in_scope(|| {
-                            read::run_forced_pdf_block();
+                            if is_pdf {
+                                read::run_forced_pdf_block();
+                            }
                             read::execute_prepared_with_budget(
                                 &access,
                                 &execute_request,
@@ -209,7 +214,7 @@ impl ToolEngine {
                     .map_err(|error| read::ReadError::Worker(error.to_string()))?;
                 match tokio::time::timeout(limit, receiver).await {
                     Ok(Ok((result, gate, memory))) => {
-                        pdf_admission = Some((gate, memory));
+                        structured_admission = Some((gate, memory));
                         result
                     }
                     Ok(Err(_)) => {
@@ -278,7 +283,7 @@ impl ToolEngine {
 
         drop((admission, worker, open_file));
         let output = result.expect("read attempt loop always produces a result")?;
-        Ok(if let Some((gate, memory)) = pdf_admission {
+        Ok(if let Some((gate, memory)) = structured_admission {
             output.retain_resources(crate::runtime::resources::OutputLease::new(vec![
                 gate, memory,
             ]))
@@ -293,11 +298,11 @@ impl ToolEngine {
         context: OperationContext,
     ) -> Result<ToolOutput, glob::GlobError> {
         let admission = self
-            .try_read_only_admission(&context.cancellation)
+            .try_foreground_admission(&context.cancellation)
             .ok_or_else(|| {
                 cancelled_or_busy(
                     glob::GlobError::Cancelled,
-                    glob::GlobError::ResourceBusy("read_only"),
+                    glob::GlobError::ResourceBusy("foreground"),
                     &context.cancellation,
                     &self.resources,
                 )
@@ -335,11 +340,11 @@ impl ToolEngine {
         context: OperationContext,
     ) -> Result<ToolOutput, grep::GrepError> {
         let admission = self
-            .try_read_only_admission(&context.cancellation)
+            .try_foreground_admission(&context.cancellation)
             .ok_or_else(|| {
                 cancelled_or_busy(
                     grep::GrepError::Cancelled,
-                    grep::GrepError::ResourceBusy("read_only"),
+                    grep::GrepError::ResourceBusy("foreground"),
                     &context.cancellation,
                     &self.resources,
                 )
@@ -376,17 +381,21 @@ impl ToolEngine {
         .await
     }
 
-    async fn acquire_pdf_admission(
+    async fn acquire_structured_document_admission(
         &self,
         prepared: &read::PreparedRead,
         cancellation: &CancellationToken,
     ) -> Result<(OwnedSemaphorePermit, OwnedSemaphorePermit), read::ReadError> {
-        let Some(gate) = self.resources.acquire_pdf_gate(cancellation).await else {
+        let Some(gate) = self
+            .resources
+            .acquire_structured_document_gate(cancellation)
+            .await
+        else {
             if cancellation.is_cancelled() || self.resources.shutdown_token().is_cancelled() {
                 return Err(read::ReadError::Cancelled);
             }
             return Err(read::ReadError::ResourceBusy {
-                resource: "pdf_concurrency",
+                resource: "structured_document_concurrency",
                 retry_after: Some(crate::runtime::PDF_GATE_WAIT),
             });
         };
@@ -399,17 +408,17 @@ impl ToolEngine {
         Ok((gate, memory))
     }
 
-    fn try_read_only_admission(
+    fn try_foreground_admission(
         &self,
         cancellation: &CancellationToken,
     ) -> Option<OwnedSemaphorePermit> {
         if cancellation.is_cancelled() {
             return None;
         }
-        self.resources.try_admit_read_only()
+        self.resources.try_admit_foreground()
     }
 
-    /// One admission-to-worker pipeline for the read-only search tools: admit the
+    /// One admission-to-worker pipeline for the search tools: admit the
     /// caller's permits, take a worker and the tool's memory charge, then run the
     /// search on the blocking pool under a shutdown-relayed cancellation token.
     #[allow(
@@ -510,13 +519,6 @@ impl ToolEngine {
         F: FnOnce(CancellationToken) -> T + Send + 'static,
     {
         let queued = Instant::now();
-        let admission = self.try_read_only_admission(&cancellation).ok_or_else(|| {
-            if cancellation.is_cancelled() || self.resources.shutdown_token().is_cancelled() {
-                AuxiliaryError::Cancelled
-            } else {
-                AuxiliaryError::Busy
-            }
-        })?;
         let worker = self
             .resources
             .acquire_worker(&cancellation)
@@ -532,7 +534,7 @@ impl ToolEngine {
             relayed_cancellation(&cancellation, self.resources.shutdown_token());
         tokio::task::spawn_blocking(move || {
             let result = work(cancellation);
-            drop((admission, worker, memory));
+            drop((worker, memory));
             result
         })
         .await
@@ -565,8 +567,6 @@ impl ToolEngine {
 
 #[derive(Debug, thiserror::Error)]
 pub enum AuxiliaryError {
-    #[error("read-only capacity is busy")]
-    Busy,
     #[error("auxiliary read-only work was cancelled")]
     Cancelled,
     #[error("auxiliary read-only worker failed: {0}")]
@@ -633,6 +633,9 @@ impl CancellationClassified for read::ReadError {
             | read::ReadError::Cancelled => true,
             read::ReadError::Pdf(error) => {
                 error.kind() == agentshim_pdf_read::PdfReadErrorKind::Cancelled
+            }
+            read::ReadError::Office(error) => {
+                error.kind() == agentshim_office_read::OfficeReadErrorKind::Cancelled
             }
             _ => false,
         }
@@ -723,6 +726,7 @@ mod tests {
             pdf_mode: None,
             pages: None,
             pdf_cursor: None,
+            office_cursor: None,
         }
     }
 
@@ -802,17 +806,17 @@ mod tests {
         );
         let second = ToolEngine::new(root, ReadScope::Normal, second_resources);
 
-        let occupied = (0..first_resources.config().read_only_calls)
+        let occupied = (0..first_resources.config().foreground_calls)
             .map(|_| {
                 first_resources
-                    .try_admit_read_only()
-                    .expect("read-only fixture admission")
+                    .try_admit_foreground()
+                    .expect("foreground fixture admission")
             })
             .collect::<Vec<_>>();
         assert!(matches!(
             second.read(read_request("notes.md"), context()).await,
             Err(crate::tools::read::ReadError::ResourceBusy {
-                resource: "read_only",
+                resource: "foreground",
                 ..
             })
         ));
@@ -914,7 +918,7 @@ mod tests {
         let fixture = tempfile::tempdir().expect("fixture");
         let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
         let mut config = RuntimeConfig::for_tests(1);
-        config.process_calls = 1;
+        config.foreground_calls = 1;
         let resources = RuntimeResources::new(config);
         let engine = ToolEngine::new(root, ReadScope::Normal, resources.clone());
         let request = |timeout_ms| ProcessRequest {
@@ -930,11 +934,11 @@ mod tests {
             timeout_ms: Some(timeout_ms),
         };
         let occupied = resources
-            .try_admit_process_for_test()
-            .expect("occupied process slot");
+            .try_admit_foreground_for_test()
+            .expect("occupied foreground slot");
         let prepared = engine
             .prepare_run_program(&request(1_000), 10_000, &context())
-            .expect("prepare does not need process admission");
+            .expect("prepare does not need foreground admission");
         assert!(matches!(
             engine
                 .spawn_run_program(prepared, None, context(), None)

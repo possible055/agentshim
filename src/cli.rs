@@ -324,10 +324,9 @@ async fn run_doctor(config: RuntimeLimits, options: &ServeOptions) -> Result<(),
     println!("protocol: 2026-07-28");
     println!("read scope: {}", service.read_scope());
     println!(
-        "read-only calls: {}",
-        service.runtime_limits().read_only_calls
+        "foreground calls: {}",
+        service.runtime_limits().foreground_calls
     );
-    println!("process calls: {}", service.runtime_limits().process_calls);
     println!(
         "detached calls: {}",
         service.runtime_limits().detached_calls

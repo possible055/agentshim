@@ -26,6 +26,8 @@ mod diagnostics;
 mod process;
 #[path = "integration/protocol.rs"]
 mod protocol;
+#[path = "integration/read_office.rs"]
+mod read_office;
 #[path = "integration/read_pdf.rs"]
 mod read_pdf;
 #[path = "integration/runtime_config.rs"]

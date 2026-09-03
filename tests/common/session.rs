@@ -18,7 +18,7 @@ pub struct TestSessionBuilder {
     idle_timeout_secs: Option<u64>,
     log_mode: Option<&'static str>,
     log_dir: Option<PathBuf>,
-    process_calls: Option<usize>,
+    foreground_calls: Option<usize>,
     detached_calls: Option<usize>,
     burst_tokens: Option<usize>,
     output_bytes: Option<usize>,
@@ -41,7 +41,7 @@ impl TestSessionBuilder {
             idle_timeout_secs: None,
             log_mode: None,
             log_dir: None,
-            process_calls: None,
+            foreground_calls: None,
             detached_calls: None,
             burst_tokens: None,
             output_bytes: None,
@@ -80,8 +80,8 @@ impl TestSessionBuilder {
         self
     }
 
-    pub fn process_calls(mut self, calls: usize) -> Self {
-        self.process_calls = Some(calls);
+    pub fn foreground_calls(mut self, calls: usize) -> Self {
+        self.foreground_calls = Some(calls);
         self
     }
 
@@ -122,7 +122,7 @@ impl TestSessionBuilder {
         command.current_dir(&self.root);
 
         command
-            .env_remove("AGENTSHIM_PROCESS_CALLS")
+            .env_remove("AGENTSHIM_FOREGROUND_CALLS")
             .env_remove("AGENTSHIM_DETACHED_CALLS")
             .env_remove("AGENTSHIM_DETACHED_LOG_BYTES")
             .env_remove("AGENTSHIM_WINDOWS_ACTIVE_PROCESS_LIMIT")
@@ -141,8 +141,8 @@ impl TestSessionBuilder {
         if let Some(ref log_dir) = self.log_dir {
             command.env("AGENTSHIM_LOG_DIR", log_dir);
         }
-        if let Some(process_calls) = self.process_calls {
-            command.env("AGENTSHIM_PROCESS_CALLS", process_calls.to_string());
+        if let Some(foreground_calls) = self.foreground_calls {
+            command.env("AGENTSHIM_FOREGROUND_CALLS", foreground_calls.to_string());
         }
         if let Some(detached_calls) = self.detached_calls {
             command.env("AGENTSHIM_DETACHED_CALLS", detached_calls.to_string());

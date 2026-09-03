@@ -53,7 +53,7 @@ pub struct ProcessRequest {
 }
 
 impl ProcessRequest {
-    /// Validate all scalar and environment constraints before process admission.
+    /// Validate all scalar and environment constraints before foreground admission.
     ///
     /// # Errors
     ///

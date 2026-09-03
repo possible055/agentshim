@@ -616,7 +616,7 @@ fn shutdown_transaction(resources: &RuntimeResources, detached: &DetachedTrees) 
             }
         }
     });
-    let foreground_quiesced = resources.wait_for_process_quiescence(deadline);
+    let foreground_quiesced = resources.wait_for_foreground_quiescence(deadline);
     let reservations_drained = detached.wait_until_quiesced(deadline);
     remaining.extend(detached.shutdown_unverified_pids());
     remaining.sort_unstable();

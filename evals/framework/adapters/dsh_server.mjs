@@ -102,9 +102,12 @@ const engineOptions = {
   readScope: "normal",
   pageBudgetBytes: 500000,
 };
-const configuredReadOnlyCalls = Number.parseInt(process.env.BENCH_READ_ONLY_CALLS ?? "", 10);
-if (Number.isInteger(configuredReadOnlyCalls)) {
-  engineOptions.readOnlyCalls = configuredReadOnlyCalls;
+const configuredForegroundCalls = Number.parseInt(
+  process.env.BENCH_FOREGROUND_CALLS ?? "",
+  10,
+);
+if (Number.isInteger(configuredForegroundCalls)) {
+  engineOptions.foregroundCalls = configuredForegroundCalls;
 }
 
 // NativeHostRuntime is the single capacity owner; engines are created through

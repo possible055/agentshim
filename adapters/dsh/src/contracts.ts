@@ -13,6 +13,7 @@ export const readParameters = {
   pages: { type: 'string', description: 'PDF page or inclusive page range, such as "3" or "1-5".' },
   pdf_mode: { type: 'string', enum: ['auto', 'text', 'image'], description: 'PDF output mode.' },
   pdf_cursor: { type: 'string', description: 'Opaque continuation cursor returned by a previous PDF read.' },
+  office_cursor: { type: 'string', description: 'Opaque continuation cursor returned by a previous Office read.' },
   start_line: { type: 'integer', description: 'One-based first line.' },
 } as const satisfies ParameterSchemaSpec
 

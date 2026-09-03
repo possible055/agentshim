@@ -1,6 +1,7 @@
 mod cursor;
 mod fingerprint;
 mod hooks;
+mod office;
 mod pdf;
 mod prepared;
 mod request;
@@ -12,7 +13,7 @@ pub use fingerprint::FileFingerprint;
 #[cfg(feature = "bench-internals")]
 pub use fingerprint::{FingerprintMetrics, fingerprint_metrics, reset_fingerprint_metrics};
 pub(crate) use prepared::{
-    Attempt, PdfMemoryBudgets, PreparedRead, execute_prepared_with_budget, prepare,
+    Attempt, DocumentMemoryBudgets, PreparedRead, execute_prepared_with_budget, prepare,
 };
 pub use request::PdfMode;
 #[cfg(any(test, feature = "bench-internals"))]

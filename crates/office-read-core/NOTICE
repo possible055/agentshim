@@ -1,0 +1,17 @@
+agentshim-office-read
+
+This crate is a modified, read-only derivative of OfficeOxide / office_oxide.
+It is not the official OfficeOxide product and uses a different package name.
+
+Upstream work:
+OfficeOxide
+Copyright (c) 2026 Yury Fedoseev and the OfficeOxide project contributors
+
+Upstream repository: https://github.com/yfedoseev/office_oxide
+Upstream version: v0.1.8
+Upstream commit: 744b25be7f79ad333ffe68a11b2a39856846cdf3
+
+The derivative is distributed under Apache License 2.0. OfficeOxide and
+office_oxide are trademarks of Yury Fedoseev; those names are used here only
+to identify the origin of the source. This project is not endorsed by or
+affiliated with the upstream project.

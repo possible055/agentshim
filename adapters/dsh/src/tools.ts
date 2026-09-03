@@ -65,6 +65,7 @@ function nativeReadArgs(args: Record<string, unknown>): NativeReadArgs {
     ...(args.pages === undefined ? {} : { pages: args.pages as string }),
     ...(args.pdf_mode === undefined ? {} : { pdfMode: args.pdf_mode as 'auto' | 'text' | 'image' }),
     ...(args.pdf_cursor === undefined ? {} : { pdfCursor: args.pdf_cursor as string }),
+    ...(args.office_cursor === undefined ? {} : { officeCursor: args.office_cursor as string }),
     ...(args.artifact_offset === undefined ? {} : { artifactOffset: args.artifact_offset as number }),
   }
 }
@@ -247,7 +248,7 @@ async function executeProcessNative(
   }
 }
 
-function validateReadArgs(args: Record<string, unknown> & { path: string; line_count?: number; start_line?: number; pages?: string; pdf_cursor?: string; artifact_offset?: number }): void {
+function validateReadArgs(args: Record<string, unknown> & { path: string; line_count?: number; start_line?: number; pages?: string; pdf_cursor?: string; office_cursor?: string; artifact_offset?: number }): void {
   assertExactKeys(args, Object.keys(readParameters))
   assertNonEmpty(args.path, 'path')
   assertIntegerRange(args.line_count, 'line_count', 1, 2000)
@@ -256,6 +257,7 @@ function validateReadArgs(args: Record<string, unknown> & { path: string; line_c
     throw new HarnessError('invalid arguments: pages must be a positive page or inclusive range', 'INVALID_ARGS')
   }
   if (args.pdf_cursor !== undefined) assertNonEmpty(args.pdf_cursor, 'pdf_cursor')
+  if (args.office_cursor !== undefined) assertNonEmpty(args.office_cursor, 'office_cursor')
   assertIntegerRange(args.artifact_offset, 'artifact_offset', 0)
 }
 

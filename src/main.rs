@@ -30,7 +30,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    tracing::info!(target: "agentshim", event = "runtime_config", phase = "startup", counters = %format!("process_calls={},detached_calls={},read_only_calls={},worker_lanes={},blocking_threads={},grep_memory_bytes={},glob_memory_bytes={},memory_bytes={}", config.process_calls, config.detached_calls, config.read_only_calls, config.worker_lanes, config.blocking_threads, config.grep_memory_bytes, config.glob_memory_bytes, config.memory_bytes));
+    tracing::info!(target: "agentshim", event = "runtime_config", phase = "startup", counters = %format!("foreground_calls={},detached_calls={},worker_lanes={},blocking_threads={},grep_memory_bytes={},glob_memory_bytes={},memory_bytes={}", config.foreground_calls, config.detached_calls, config.worker_lanes, config.blocking_threads, config.grep_memory_bytes, config.glob_memory_bytes, config.memory_bytes));
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(config.scheduler_threads)
         .max_blocking_threads(config.blocking_threads)

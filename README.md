@@ -9,13 +9,13 @@ AgentShim gives coding agents a small, focused set of tools for working with sou
 - **Bounded file access.** `read`, `grep`, and `glob` stay inside your repository by default, with optional access to Codex skill and plugin directories.
 - **Managed long-running Bash.** `run_program` takes one executable and literal arguments. `bash` handles POSIX composition and can detach work under an instance-bound `job_id`; `bash_status` reports lifecycle, primary exit status, and a bounded log tail, while `bash` can terminate the complete owned tree.
 - **Cross-platform.** Full support for Windows x86-64, with compatibility release assets for Linux x86-64, Linux ARM64, and macOS Apple Silicon.
-- **Reads PDFs.** `read` detects PDFs by content, not extension, and returns page text or rendered images with continuation cursors for long documents.
+- **Reads structured documents.** `read` returns PDF page text or rendered images and Markdown for DOCX, XLSX, PPTX, DOC, XLS, and PPT, with continuation cursors for long documents.
 
 ## Tools
 
 | Tool | Description |
 | --- | --- |
-| `read` | Read source files with line numbers. Supports UTF-8, BOM-detected UTF-16, and WHATWG encoding labels. Also reads PDFs. |
+| `read` | Read source files with line numbers. Supports UTF-8, BOM-detected UTF-16, WHATWG encoding labels, PDFs, and six Office formats. |
 | `grep` | Search file contents with Rust regex or literal strings. |
 | `glob` | Find files. Gitignored files are included by default; `.git` and common large directories stay excluded. |
 | `run_program` | Run one program with a literal argument list, without a shell. |
@@ -189,15 +189,18 @@ Page counts bound the work of one call:
 | `auto`, `text` | first 10 pages | 20 pages |
 | `image` | page 1 | 4 pages |
 
-The response tells you how far it got and how to continue. A document that mixes readable and image-only pages is a success: readable pages come back as Markdown, the rest become placeholders. One instance runs at most one PDF call at a time; a second concurrent call returns a retryable `resource_busy`.
+The response tells you how far it got and how to continue. A document that mixes readable and image-only pages is a success: readable pages come back as Markdown, the rest become placeholders. One instance runs at most one structured-document call at a time; a second concurrent PDF or Office call returns a retryable `resource_busy`.
+
+### Reading Office documents
+
+`read` accepts DOCX, XLSX, PPTX, DOC, XLS, and PPT paths and returns Markdown. The extension selects the Office candidate family, while the ZIP content type or CFB stream signature determines the actual format. Office inputs reject text and PDF parameters. A partial response carries an opaque `office_cursor`; replay it verbatim with the same path. PDF and Office reads share one structured-document slot, so they cannot hold their large memory reservations concurrently.
 
 ### Environment variables
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `CODEX_MCP_PROTOCOL_VERSION` | — | MCP protocol version advertised to Codex. |
-| `AGENTSHIM_PROCESS_CALLS` | `16` | Per-instance concurrent process-call limit; 1–32. |
-| `AGENTSHIM_READ_ONLY_CALLS` | `16` | Per-instance concurrent `read`/`glob`/`grep` call limit; 1–32. |
+| `AGENTSHIM_FOREGROUND_CALLS` | `16` | Shared per-instance limit for concurrent `read`, `glob`, `grep`, `run_program`, and foreground `bash` calls; 1–32. |
 | `AGENTSHIM_DETACHED_CALLS` | `16` | Per-instance live detached `bash` trees; 1–16. |
 | `AGENTSHIM_DETACHED_LOG_BYTES` | `67108864` | Per-job detached log termination threshold; 1048576–4294967296. Exceeding it terminates the owned process tree; an in-flight write block may extend the final file past the threshold. |
 | `AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX` | `1800` | Maximum detached/background Bash runtime in seconds; 600–14400. Omitted job timeouts use this value and explicit timeouts may only shorten it. |
@@ -247,6 +250,7 @@ Records contain identifiers, phases, outcomes, timings, and error classes — ne
 ## Acknowledgments
 
 - [PDFOxide](https://github.com/yfedoseev/pdf_oxide) — PDF reading backend
+- [OfficeOxide](https://github.com/yfedoseev/office_oxide) — source of the selectively derived Office readers
 - [Gigatoken](https://github.com/marcelroed/gigatoken) — token counting backend
 - [FastCtx](https://github.com/yc-duan/fastctx) — design and benchmarking reference for `read`, `grep`, and `glob`
 - [Linux Do](https://linux.do/) — forum community that inspired the initial idea for this project

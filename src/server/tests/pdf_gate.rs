@@ -41,7 +41,10 @@ fn occupied_pdf_gate_rejects_pdf_without_blocking_text_reads() {
 
     let error = error_details(read_path_call(&server, "document.pdf"));
     assert_eq!(error["code"], "resource_busy");
-    assert_eq!(error["details"]["permit"], "pdf_concurrency");
+    assert_eq!(
+        error["details"]["permit"],
+        "structured_document_concurrency"
+    );
     assert_eq!(
         error["details"]["retry_after_ms"],
         json!(u64::try_from(crate::runtime::PDF_GATE_WAIT.as_millis()).expect("bound"))

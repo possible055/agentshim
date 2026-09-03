@@ -100,6 +100,7 @@ impl Engine {
                 .map_err(|error| napi_failure("read", error))?,
             pages: args.pages,
             pdf_cursor: args.pdf_cursor,
+            office_cursor: args.office_cursor,
         };
         let output = tool_engine
             .read(
@@ -256,6 +257,7 @@ pub struct ReadArgs {
     pub pages: Option<String>,
     pub pdf_mode: Option<String>,
     pub pdf_cursor: Option<String>,
+    pub office_cursor: Option<String>,
     pub artifact_offset: Option<f64>,
 }
 

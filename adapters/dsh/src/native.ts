@@ -51,6 +51,7 @@ export interface NativeReadArgs {
   readonly pages?: string
   readonly pdfMode?: 'auto' | 'text' | 'image'
   readonly pdfCursor?: string
+  readonly officeCursor?: string
   readonly artifactOffset?: number
 }
 
@@ -83,7 +84,7 @@ export interface NativeHostOptions {
   readonly readScope?: 'normal' | 'unrestricted'
   readonly toolTimeoutShelfMs?: number
   readonly backgroundJobTimeoutMaxMs?: number
-  readonly readOnlyCalls?: number
+  readonly foregroundCalls?: number
   readonly env?: ReadonlyArray<{ key: string; value: string }>
   readonly captureRoot?: string
   readonly captureMaxBytes?: number

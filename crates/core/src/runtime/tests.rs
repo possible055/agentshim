@@ -3,18 +3,18 @@ mod tests {
     use std::ffi::{OsStr, OsString};
 
     use crate::runtime::{
-        DEFAULT_BACKGROUND_JOB_TIMEOUT_MAX, DEFAULT_GLOB_MEMORY_BYTES, DEFAULT_GREP_MEMORY_BYTES,
-        DEFAULT_MEMORY_BYTES, DEFAULT_PDF_IMAGE_MEMORY_BYTES, DEFAULT_PDF_TEXT_MEMORY_BYTES,
-        DEFAULT_PROCESS_CALLS, DEFAULT_READ_ONLY_CALLS, DEFAULT_TOOL_TIMEOUT_SHELF,
-        GLOB_MEMORY_BYTES_ENV, GREP_MEMORY_BYTES_ENV, MAX_BACKGROUND_JOB_TIMEOUT_MAX,
-        MAX_CONFIGURED_READ_ONLY_CALLS, MAX_IDLE_TIMEOUT, MAX_PDF_IMAGE_MEMORY_BYTES,
-        MAX_PDF_TEXT_MEMORY_BYTES, MAX_TOOL_MEMORY_BYTES, MAX_TOOL_TIMEOUT_SHELF, MIN_IDLE_TIMEOUT,
+        DEFAULT_BACKGROUND_JOB_TIMEOUT_MAX, DEFAULT_FOREGROUND_CALLS, DEFAULT_GLOB_MEMORY_BYTES,
+        DEFAULT_GREP_MEMORY_BYTES, DEFAULT_MEMORY_BYTES, DEFAULT_PDF_IMAGE_MEMORY_BYTES,
+        DEFAULT_PDF_TEXT_MEMORY_BYTES, DEFAULT_TOOL_TIMEOUT_SHELF, GLOB_MEMORY_BYTES_ENV,
+        GREP_MEMORY_BYTES_ENV, MAX_BACKGROUND_JOB_TIMEOUT_MAX, MAX_CONFIGURED_FOREGROUND_CALLS,
+        MAX_IDLE_TIMEOUT, MAX_PDF_IMAGE_MEMORY_BYTES, MAX_PDF_TEXT_MEMORY_BYTES,
+        MAX_TOOL_MEMORY_BYTES, MAX_TOOL_TIMEOUT_SHELF, MIN_IDLE_TIMEOUT,
         MIN_PDF_IMAGE_MEMORY_BYTES, MIN_PDF_TEXT_MEMORY_BYTES, MIN_TOOL_MEMORY_BYTES,
         MemoryReservation, PDF_IMAGE_MEMORY_BYTES_ENV, PDF_TEXT_MEMORY_BYTES_ENV,
         RESPECT_GITIGNORE_ENV, RuntimeConfig, RuntimeResources, blocking_threads,
-        global_memory_bytes, parse_background_job_timeout_max, parse_idle_timeout,
-        parse_memory_bytes_in_range, parse_process_calls, parse_read_only_calls,
-        parse_respect_gitignore, parse_tool_memory_bytes, parse_tool_timeout_shelf,
+        global_memory_bytes, parse_background_job_timeout_max, parse_foreground_calls,
+        parse_idle_timeout, parse_memory_bytes_in_range, parse_respect_gitignore,
+        parse_tool_memory_bytes, parse_tool_timeout_shelf,
     };
     use tokio_util::sync::CancellationToken;
 
@@ -165,35 +165,22 @@ mod tests {
     }
 
     #[test]
-    fn process_call_configuration_is_bounded() {
+    fn foreground_call_configuration_is_bounded() {
         assert_eq!(
-            parse_process_calls(None).expect("default process calls"),
-            DEFAULT_PROCESS_CALLS
+            parse_foreground_calls(None).expect("default foreground calls"),
+            DEFAULT_FOREGROUND_CALLS
         );
         assert_eq!(
-            parse_process_calls(Some(OsStr::new("1"))).expect("minimum process calls"),
+            parse_foreground_calls(Some(OsStr::new("1"))).expect("minimum foreground calls"),
             1
         );
-        for value in ["0", "33", "-1", "many"] {
-            let error =
-                parse_process_calls(Some(OsStr::new(value))).expect_err("invalid process calls");
-            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        }
-    }
-
-    #[test]
-    fn read_only_call_configuration_is_bounded() {
         assert_eq!(
-            parse_read_only_calls(None).expect("default read-only calls"),
-            DEFAULT_READ_ONLY_CALLS
-        );
-        assert_eq!(
-            parse_read_only_calls(Some(OsStr::new("32"))).expect("maximum read-only calls"),
-            MAX_CONFIGURED_READ_ONLY_CALLS
+            parse_foreground_calls(Some(OsStr::new("32"))).expect("maximum foreground calls"),
+            MAX_CONFIGURED_FOREGROUND_CALLS
         );
         for value in ["0", "33", "-1", "many"] {
-            let error = parse_read_only_calls(Some(OsStr::new(value)))
-                .expect_err("invalid read-only calls");
+            let error = parse_foreground_calls(Some(OsStr::new(value)))
+                .expect_err("invalid foreground calls");
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         }
     }
@@ -433,98 +420,76 @@ mod tests {
     }
 
     #[test]
-    fn class_admission_is_fail_fast_independent_and_recovers_on_drop() {
+    fn foreground_admission_is_fail_fast_and_recovers_on_drop() {
         let resources = RuntimeResources::new(RuntimeConfig::for_tests(1));
-        let read_permits = (0..DEFAULT_READ_ONLY_CALLS)
-            .map(|_| resources.try_admit_read_only().expect("read admission"))
-            .collect::<Vec<_>>();
-        let process_permits = (0..DEFAULT_PROCESS_CALLS)
-            .map(|_| resources.try_admit_process().expect("process admission"))
+        let permits = (0..DEFAULT_FOREGROUND_CALLS)
+            .map(|_| {
+                resources
+                    .try_admit_foreground()
+                    .expect("foreground admission")
+            })
             .collect::<Vec<_>>();
 
-        assert!(resources.try_admit_read_only().is_none());
-        assert!(resources.try_admit_process().is_none());
-        drop(read_permits);
-        assert!(resources.try_admit_read_only().is_some());
-        assert!(resources.try_admit_process().is_none());
-        drop(process_permits);
-        assert!(resources.try_admit_process().is_some());
+        assert!(resources.try_admit_foreground().is_none());
+        drop(permits);
+        assert!(resources.try_admit_foreground().is_some());
     }
 
     #[test]
-    fn read_only_admission_uses_the_runtime_configuration() {
+    fn foreground_admission_uses_the_runtime_configuration() {
         let mut config = RuntimeConfig::for_tests(1);
-        config.read_only_calls = 2;
-        config.blocking_threads = blocking_threads(
-            config.process_calls,
-            config.read_only_calls,
-            config.detached_calls,
-        );
+        config.foreground_calls = 2;
+        config.blocking_threads = blocking_threads(config.foreground_calls, config.detached_calls);
         let resources = RuntimeResources::new(config);
         let permits = (0..2)
-            .map(|_| resources.try_admit_read_only().expect("read admission"))
+            .map(|_| {
+                resources
+                    .try_admit_foreground()
+                    .expect("foreground admission")
+            })
             .collect::<Vec<_>>();
 
-        assert!(resources.try_admit_read_only().is_none());
+        assert!(resources.try_admit_foreground().is_none());
         drop(permits);
-        assert!(resources.try_admit_read_only().is_some());
+        assert!(resources.try_admit_foreground().is_some());
     }
 
     #[tokio::test]
-    async fn process_admission_recovers_after_worker_panic() {
+    async fn foreground_admission_recovers_after_worker_panic() {
         let resources = RuntimeResources::new(RuntimeConfig::for_tests(1));
-        let permit = resources.try_admit_process().expect("process admission");
+        let permit = resources
+            .try_admit_foreground()
+            .expect("foreground admission");
         let panic = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             panic!("injected worker panic");
         })
         .await;
         assert!(panic.expect_err("worker must panic").is_panic());
-        assert!(resources.try_admit_process().is_some());
+        assert!(resources.try_admit_foreground().is_some());
     }
 
     #[tokio::test]
-    async fn process_admission_recovers_after_task_cancellation() {
+    async fn foreground_admission_recovers_after_task_cancellation() {
         let mut config = RuntimeConfig::for_tests(1);
-        config.process_calls = 1;
-        config.blocking_threads = blocking_threads(
-            config.process_calls,
-            config.read_only_calls,
-            config.detached_calls,
-        );
+        config.foreground_calls = 1;
+        config.blocking_threads = blocking_threads(config.foreground_calls, config.detached_calls);
         let resources = RuntimeResources::new(config);
-        let permit = resources.try_admit_process().expect("process admission");
+        let permit = resources
+            .try_admit_foreground()
+            .expect("foreground admission");
         let task = tokio::spawn(async move {
             let _permit = permit;
             std::future::pending::<()>().await;
         });
 
-        assert!(resources.try_admit_process().is_none());
+        assert!(resources.try_admit_foreground().is_none());
         task.abort();
         assert!(
             task.await
                 .expect_err("task must be cancelled")
                 .is_cancelled()
         );
-        assert!(resources.try_admit_process().is_some());
-    }
-
-    #[test]
-    fn process_admission_uses_the_runtime_configuration() {
-        let mut config = RuntimeConfig::for_tests(1);
-        config.process_calls = 2;
-        config.blocking_threads = blocking_threads(
-            config.process_calls,
-            config.read_only_calls,
-            config.detached_calls,
-        );
-        let resources = RuntimeResources::new(config);
-        let permits = (0..2)
-            .map(|_| resources.try_admit_process().expect("process admission"))
-            .collect::<Vec<_>>();
-
-        assert!(resources.try_admit_process().is_none());
-        drop(permits);
-        assert!(resources.try_admit_process().is_some());
+        assert!(resources.try_admit_foreground().is_some());
     }
 }

@@ -14,3 +14,9 @@ mis = "mis"
 fo = "fo"
 # PDF stream dictionary key.
 Parms = "Parms"
+# Excel column label in a CellRef test.
+BA = "BA"
+# Piece-table fixture text.
+FIEL = "FIEL"
+# Piece-table fixture text.
+Hel = "Hel"

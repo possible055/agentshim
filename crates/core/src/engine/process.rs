@@ -390,11 +390,11 @@ impl ToolEngine {
         if Instant::now() >= deadline {
             return Err(ProcessError::TimeoutBeforeSpawn { timeout_ms });
         }
-        let process = self.resources.try_admit_process().ok_or_else(|| {
+        let foreground = self.resources.try_admit_foreground().ok_or_else(|| {
             if cancellation.is_cancelled() || self.resources.shutdown_token().is_cancelled() {
                 ProcessError::Cancelled
             } else {
-                ProcessError::ResourceBusy("foreground process capacity is full".to_owned())
+                ProcessError::ResourceBusy("foreground call capacity is full".to_owned())
             }
         })?;
         let memory = tokio::time::timeout_at(
@@ -405,7 +405,7 @@ impl ToolEngine {
         .map_err(|_| ProcessError::TimeoutBeforeSpawn { timeout_ms })?
         .map_err(|_| ProcessError::Cancelled)?;
         trace_capacity_acquired(queued);
-        Ok((process, memory))
+        Ok((foreground, memory))
     }
 
     pub(super) fn ensure_process_active(

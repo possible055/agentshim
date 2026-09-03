@@ -1,12 +1,10 @@
 use std::{env, ffi::OsStr, io, time::Duration};
 
-pub const DEFAULT_READ_ONLY_CALLS: usize = 16;
-pub const MAX_CONFIGURED_READ_ONLY_CALLS: usize = 32;
+pub const DEFAULT_FOREGROUND_CALLS: usize = 16;
+pub const MAX_CONFIGURED_FOREGROUND_CALLS: usize = 32;
 pub const MAX_SEARCH_LANES: usize = 16;
 pub const DEFAULT_WORKER_LANES: usize = 4;
 pub const MAX_OPEN_FILES: usize = 64;
-pub const DEFAULT_PROCESS_CALLS: usize = 16;
-pub const MAX_CONFIGURED_PROCESS_CALLS: usize = 32;
 pub const DEFAULT_MEMORY_BYTES: usize = 256 * 1024 * 1024;
 pub const DEFAULT_GREP_MEMORY_BYTES: usize = 256 * 1024 * 1024;
 pub const DEFAULT_GLOB_MEMORY_BYTES: usize = 64 * 1024 * 1024;
@@ -16,6 +14,7 @@ pub const DEFAULT_PDF_TEXT_MEMORY_BYTES: usize = 64 * 1024 * 1024;
 pub const MIN_PDF_TEXT_MEMORY_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_PDF_TEXT_MEMORY_BYTES: usize = 128 * 1024 * 1024;
 pub const DEFAULT_PDF_IMAGE_MEMORY_BYTES: usize = 96 * 1024 * 1024;
+pub const DEFAULT_OFFICE_MEMORY_BYTES: usize = 64 * 1024 * 1024;
 pub const MIN_PDF_IMAGE_MEMORY_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_PDF_IMAGE_MEMORY_BYTES: usize = 192 * 1024 * 1024;
 pub const MEMORY_PERMIT_BYTES: usize = 1024;
@@ -32,10 +31,10 @@ pub const PDF_GATE_WAIT: Duration = Duration::from_millis(300);
 /// so a time bound is required for the gate to mean anything.
 pub const PDF_TEXT_RUNTIME_LIMIT: Duration = Duration::from_secs(5);
 pub const PDF_IMAGE_RUNTIME_LIMIT: Duration = Duration::from_secs(10);
+pub const OFFICE_RUNTIME_LIMIT: Duration = Duration::from_secs(5);
 const HOST_BLOCKING_THREADS: usize = 2;
 const WORKER_ENV: &str = "AGENTSHIM_IO_WORKERS";
-const PROCESS_CALLS_ENV: &str = "AGENTSHIM_PROCESS_CALLS";
-const READ_ONLY_CALLS_ENV: &str = "AGENTSHIM_READ_ONLY_CALLS";
+const FOREGROUND_CALLS_ENV: &str = "AGENTSHIM_FOREGROUND_CALLS";
 const TOOL_TIMEOUT_SHELF_ENV: &str = "AGENTSHIM_TOOL_TIMEOUT_SHELF";
 pub const BACKGROUND_JOB_TIMEOUT_MAX_ENV: &str = "AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX";
 const IDLE_TIMEOUT_ENV: &str = "AGENTSHIM_IDLE_TIMEOUT";
@@ -67,8 +66,7 @@ pub struct RuntimeConfig {
     pub worker_lanes: usize,
     pub scheduler_threads: usize,
     pub blocking_threads: usize,
-    pub process_calls: usize,
-    pub read_only_calls: usize,
+    pub foreground_calls: usize,
     pub detached_calls: usize,
     pub detached_log_bytes: u64,
     pub windows_job_limits: crate::platform::process::WindowsJobLimits,
@@ -93,18 +91,13 @@ impl RuntimeConfig {
     pub fn for_host_defaults() -> Self {
         let available = std::thread::available_parallelism().map_or(1, usize::from);
         let worker_lanes = default_worker_lanes(available);
-        let process_calls = DEFAULT_PROCESS_CALLS;
+        let foreground_calls = DEFAULT_FOREGROUND_CALLS;
         let detached_calls = crate::tools::bash::detached::DEFAULT_DETACHED_CALLS;
         Self {
             worker_lanes,
             scheduler_threads: default_scheduler_threads(available),
-            blocking_threads: blocking_threads(
-                process_calls,
-                DEFAULT_READ_ONLY_CALLS,
-                detached_calls,
-            ),
-            process_calls,
-            read_only_calls: DEFAULT_READ_ONLY_CALLS,
+            blocking_threads: blocking_threads(foreground_calls, detached_calls),
+            foreground_calls,
             detached_calls,
             detached_log_bytes: crate::tools::bash::detached::DEFAULT_DETACHED_LOG_BYTES,
             windows_job_limits: crate::platform::process::WindowsJobLimits::default(),
@@ -143,8 +136,8 @@ impl RuntimeConfig {
                     )
                 })?,
         };
-        let process_calls = parse_process_calls(env::var_os(PROCESS_CALLS_ENV).as_deref())?;
-        let read_only_calls = parse_read_only_calls(env::var_os(READ_ONLY_CALLS_ENV).as_deref())?;
+        let foreground_calls =
+            parse_foreground_calls(env::var_os(FOREGROUND_CALLS_ENV).as_deref())?;
         let detached_calls = crate::tools::bash::detached::parse_detached_calls(
             env::var_os(crate::tools::bash::detached::DETACHED_CALLS_ENV).as_deref(),
         )?;
@@ -207,9 +200,8 @@ impl RuntimeConfig {
         Ok(Self {
             worker_lanes,
             scheduler_threads: default_scheduler_threads(available),
-            blocking_threads: blocking_threads(process_calls, read_only_calls, detached_calls),
-            process_calls,
-            read_only_calls,
+            blocking_threads: blocking_threads(foreground_calls, detached_calls),
+            foreground_calls,
             detached_calls,
             detached_log_bytes,
             windows_job_limits,
@@ -294,38 +286,19 @@ pub fn parse_memory_bytes_in_range(
     }
 }
 
-pub fn parse_process_calls(value: Option<&OsStr>) -> io::Result<usize> {
+pub fn parse_foreground_calls(value: Option<&OsStr>) -> io::Result<usize> {
     match value {
-        None => Ok(DEFAULT_PROCESS_CALLS),
+        None => Ok(DEFAULT_FOREGROUND_CALLS),
         Some(value) => value
             .to_str()
             .and_then(|value| value.parse::<usize>().ok())
-            .filter(|value| (1..=MAX_CONFIGURED_PROCESS_CALLS).contains(value))
+            .filter(|value| (1..=MAX_CONFIGURED_FOREGROUND_CALLS).contains(value))
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
-                        "{PROCESS_CALLS_ENV} must be an integer from 1 to \
-                         {MAX_CONFIGURED_PROCESS_CALLS}"
-                    ),
-                )
-            }),
-    }
-}
-
-pub fn parse_read_only_calls(value: Option<&OsStr>) -> io::Result<usize> {
-    match value {
-        None => Ok(DEFAULT_READ_ONLY_CALLS),
-        Some(value) => value
-            .to_str()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|value| (1..=MAX_CONFIGURED_READ_ONLY_CALLS).contains(value))
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "{READ_ONLY_CALLS_ENV} must be an integer from 1 to \
-                         {MAX_CONFIGURED_READ_ONLY_CALLS}"
+                        "{FOREGROUND_CALLS_ENV} must be an integer from 1 to \
+                         {MAX_CONFIGURED_FOREGROUND_CALLS}"
                     ),
                 )
             }),
@@ -420,12 +393,8 @@ pub fn parse_idle_timeout(value: Option<&OsStr>) -> io::Result<Option<Duration>>
     }
 }
 
-pub fn blocking_threads(
-    process_calls: usize,
-    read_only_calls: usize,
-    detached_calls: usize,
-) -> usize {
-    process_calls + read_only_calls + detached_calls + HOST_BLOCKING_THREADS
+pub fn blocking_threads(foreground_calls: usize, detached_calls: usize) -> usize {
+    foreground_calls + detached_calls + HOST_BLOCKING_THREADS
 }
 
 pub fn default_worker_lanes(available: usize) -> usize {

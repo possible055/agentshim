@@ -9,13 +9,13 @@ AgentShim 为 coding agent 提供一组精简而专注的源代码工具。Codex
 - **受限的文件访问。** `read`、`grep` 和 `glob` 默认仅在仓库内操作，可选访问 Codex skill 和 plugin 目录。
 - **可管理的长时间 Bash。** `run_program` 接收单一可执行文件和字面量参数。`bash` 处理 POSIX 命令组合，也可用 instance-bound `job_id` detach；`bash_status` 回报生命周期、primary exit status 与 bounded log tail，`bash` 还能终止完整的 server-owned tree。
 - **跨平台。** 完全支持 Windows x86-64，并为 Linux x86-64、Linux ARM64 与 macOS Apple Silicon 提供兼容性发行资产。
-- **可读 PDF。** `read` 依内容识别 PDF（不靠扩展名），返回页面文字或渲染图片，长文档带续读游标。
+- **可读结构化文档。** `read` 可返回 PDF 页面文字或渲染图片，也可将 DOCX、XLSX、PPTX、DOC、XLS 与 PPT 转为 Markdown；长文档带续读游标。
 
 ## 工具
 
 | 工具 | 说明 |
 | --- | --- |
-| `read` | 读取源文件并附带行号。支持 UTF-8、带 BOM 的 UTF-16，以及 WHATWG 编码标签。也可读取 PDF。 |
+| `read` | 读取源文件并附带行号。支持 UTF-8、带 BOM 的 UTF-16、WHATWG 编码标签、PDF 与六种 Office 格式。 |
 | `grep` | 使用 Rust 正则或字面字符串搜索文件内容。 |
 | `glob` | 查找文件。默认包含被 gitignore 的文件；`.git` 与常见超大目录仍排除。 |
 | `run_program` | 以字面量参数列表运行单个程序，不经 shell。 |
@@ -189,15 +189,18 @@ Git Bash 在启动 Windows 原生程序前，会转换看起来像 POSIX 路径�
 | `auto`、`text` | 前 10 页 | 20 页 |
 | `image` | 第 1 页 | 4 页 |
 
-响应会说明交付到哪里以及如何继续。同时包含可读页与纯图片页的文档视为成功：可读页以 Markdown 返回，其余变成 placeholder。单一实例同时最多只跑一个 PDF 呼叫；第二个并行呼叫会返回可重试的 `resource_busy`。
+响应会说明交付到哪里以及如何继续。同时包含可读页与纯图片页的文档视为成功：可读页以 Markdown 返回，其余变成 placeholder。单一实例同时最多只跑一个结构化文档呼叫；第二个并行 PDF 或 Office 呼叫会返回可重试的 `resource_busy`。
+
+### 读取 Office 文档
+
+`read` 接受 DOCX、XLSX、PPTX、DOC、XLS 与 PPT 路径并返回 Markdown。扩展名只选择 Office 候选格式族，实际格式由 ZIP content type 或 CFB stream signature 确认。Office 输入会拒绝文字与 PDF 参数。部分响应会携带不透明的 `office_cursor`，后续请求应以同一路径原样回传。PDF 与 Office 共用一个结构化文档 slot，因此不会同时持有大额内存预算。
 
 ### 环境变量
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `CODEX_MCP_PROTOCOL_VERSION` | — | 向 Codex 声明的 MCP 协议版本。 |
-| `AGENTSHIM_PROCESS_CALLS` | `16` | 每个实例的进程调用并行上限；1–32。 |
-| `AGENTSHIM_READ_ONLY_CALLS` | `16` | 每个实例的 `read`／`glob`／`grep` 调用并行上限；1–32。 |
+| `AGENTSHIM_FOREGROUND_CALLS` | `16` | 每个实例共享的 `read`、`glob`、`grep`、`run_program` 及前台 `bash` 并行上限；1–32。 |
 | `AGENTSHIM_DETACHED_CALLS` | `16` | 每个实例存活中的 detached `bash` 进程树数量；1–16。 |
 | `AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX` | `1800` | detached／background Bash 的最长运行时间（秒）；600–14400。省略的 job timeout 使用此值，显式值只能缩短它。 |
 | `AGENTSHIM_OUTPUT_BYTES` | `32000` | 每次呼叫的输出上限（字节）；4096–262144。 |
@@ -239,6 +242,7 @@ agentshim logs purge
 ## 致谢
 
 - [PDFOxide](https://github.com/yfedoseev/pdf_oxide) — PDF 读取后端
+- [OfficeOxide](https://github.com/yfedoseev/office_oxide) — Office 选择性衍生读取器的来源
 - [Gigatoken](https://github.com/marcelroed/gigatoken) — token 计数后端
 - [FastCtx](https://github.com/yc-duan/fastctx) — `read`、`grep` 与 `glob` 的设计与基准参考
 - [Linux Do](https://linux.do/) — 啟發本項目最初構想的論壇社群

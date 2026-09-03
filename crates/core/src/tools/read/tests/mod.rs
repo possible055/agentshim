@@ -8,13 +8,13 @@ use crate::path::{FileAccess, ReadScope, RepositoryRoot};
 use crate::runtime::DEFAULT_PDF_TEXT_MEMORY_BYTES;
 use crate::tools::read::test_support::*;
 use crate::tools::read::{
-    AFTER_READ_HOOK, Attempt, BEFORE_READ_HOOK, DecodeError, MAX_IMAGE_BASE64_BYTES,
-    MAX_LINE_COUNT, PdfMemoryBudgets, PdfMode, ReadError, ReadRequest, TEXT_READ_MEMORY_BYTES,
-    execute, execute_output, execute_prepared_with_budget, prepare,
+    AFTER_READ_HOOK, Attempt, BEFORE_READ_HOOK, DecodeError, DocumentMemoryBudgets,
+    MAX_IMAGE_BASE64_BYTES, MAX_LINE_COUNT, PdfMode, ReadError, ReadRequest,
+    TEXT_READ_MEMORY_BYTES, execute, execute_output, execute_prepared_with_budget, prepare,
 };
 
-fn budgets() -> PdfMemoryBudgets {
-    PdfMemoryBudgets::defaults()
+fn budgets() -> DocumentMemoryBudgets {
+    DocumentMemoryBudgets::defaults()
 }
 
 fn access(path: &std::path::Path) -> Arc<FileAccess> {
@@ -37,6 +37,7 @@ fn request(path: &str) -> ReadRequest {
         pdf_mode: None,
         pages: None,
         pdf_cursor: None,
+        office_cursor: None,
     }
 }
 
@@ -109,5 +110,6 @@ fn known_files_inside_denied_directories_remain_readable() {
 
 mod assessment;
 mod continuation;
+mod office;
 mod pdf;
 mod text;

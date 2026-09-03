@@ -149,6 +149,7 @@ pub(super) fn benchmark_read(
                 pdf_mode: None,
                 pages: None,
                 pdf_cursor: None,
+                office_cursor: None,
             },
             cancellation,
         )

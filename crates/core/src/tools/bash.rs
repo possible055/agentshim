@@ -105,7 +105,7 @@ impl BashTerminateRequest {
 }
 
 impl BashRequest {
-    /// Validate scalar and combination constraints before process admission.
+    /// Validate scalar and combination constraints before foreground admission.
     ///
     /// # Errors
     ///

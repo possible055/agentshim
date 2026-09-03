@@ -4,10 +4,10 @@ use serde::Deserialize;
 #[cfg(any(test, feature = "bench-internals"))]
 use tokio_util::sync::CancellationToken;
 
-use super::cursor::{self, PdfCursor};
+use super::cursor::{self, OfficeCursor, PdfCursor};
 use super::pdf::parse_page_selector;
 #[cfg(any(test, feature = "bench-internals"))]
-use super::prepared::{Attempt, PdfMemoryBudgets, execute_prepared, prepare};
+use super::prepared::{Attempt, DocumentMemoryBudgets, execute_prepared, prepare};
 use crate::{encoding::DecodeError, path::PathError};
 #[cfg(any(test, feature = "bench-internals"))]
 use crate::{path::FileAccess, tools::ToolOutput};
@@ -41,6 +41,7 @@ pub struct ReadRequest {
     pub pdf_mode: Option<PdfMode>,
     pub pages: Option<String>,
     pub pdf_cursor: Option<String>,
+    pub office_cursor: Option<String>,
 }
 
 impl ReadRequest {
@@ -72,6 +73,42 @@ impl ReadRequest {
             ));
         }
         self.validate_continuation()?;
+        self.validate_office_parameters()?;
+        self.validate_path_specific_parameters()?;
+        Ok(())
+    }
+
+    fn validate_path_specific_parameters(&self) -> Result<(), ReadError> {
+        if super::office::format_hint(&self.path).is_some()
+            && (self.start_line.is_some()
+                || self.line_count.is_some()
+                || self.encoding.is_some()
+                || self.pdf_mode.is_some()
+                || self.pages.is_some()
+                || self.pdf_cursor.is_some())
+        {
+            return Err(ReadError::Validation(
+                "text and PDF parameters do not apply to Office input".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_office_parameters(&self) -> Result<(), ReadError> {
+        let Some(_) = self.decoded_office_cursor()? else {
+            return Ok(());
+        };
+        if self.start_line.is_some()
+            || self.line_count.is_some()
+            || self.encoding.is_some()
+            || self.pdf_mode.is_some()
+            || self.pages.is_some()
+            || self.pdf_cursor.is_some()
+        {
+            return Err(ReadError::Validation(
+                "office_cursor cannot be combined with text or PDF parameters".to_owned(),
+            ));
+        }
         Ok(())
     }
 
@@ -112,6 +149,13 @@ impl ReadRequest {
     /// Returns a validation error when the token was not produced by this server.
     pub fn decoded_pdf_cursor(&self) -> Result<Option<PdfCursor<'_>>, ReadError> {
         self.pdf_cursor.as_deref().map(cursor::decode).transpose()
+    }
+
+    pub fn decoded_office_cursor(&self) -> Result<Option<OfficeCursor<'_>>, ReadError> {
+        self.office_cursor
+            .as_deref()
+            .map(cursor::decode_office)
+            .transpose()
     }
 }
 
@@ -167,6 +211,8 @@ pub enum ReadError {
     #[error(transparent)]
     Pdf(#[from] agentshim_pdf_read::PdfReadError),
     #[error(transparent)]
+    Office(#[from] agentshim_office_read::OfficeReadError),
+    #[error(transparent)]
     Io(#[from] io::Error),
 }
 
@@ -200,14 +246,24 @@ fn execute_inner(
     request: &ReadRequest,
     cancellation: &CancellationToken,
 ) -> Result<ToolOutput, ReadError> {
-    let prepared = prepare(access, request, cancellation, PdfMemoryBudgets::defaults())?;
+    let prepared = prepare(
+        access,
+        request,
+        cancellation,
+        DocumentMemoryBudgets::defaults(),
+    )?;
     match execute_prepared(access, request, prepared, cancellation)? {
         Attempt::Stable(output) => return Ok(output),
         Attempt::Changed => {
             tracing::warn!(target: "agentshim", event = "read_retry", phase = "execution", outcome = "degraded_success", reason = "file_changed");
         }
     }
-    let prepared = match prepare(access, request, cancellation, PdfMemoryBudgets::defaults()) {
+    let prepared = match prepare(
+        access,
+        request,
+        cancellation,
+        DocumentMemoryBudgets::defaults(),
+    ) {
         Ok(prepared) => prepared,
         Err(ReadError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
             return Err(ReadError::Changed);

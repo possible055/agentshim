@@ -24,7 +24,7 @@ use crate::tools::{
 use super::{
     response::{
         blocking_response, cancellation_class, classified_tool_error, diagnostic_tool_error,
-        duration_ms, parse_request, requests_detach, resource_busy, resource_busy_with_message,
+        duration_ms, parse_request, requests_detach, resource_busy_with_message,
     },
     service::AgentShim,
 };
@@ -521,9 +521,6 @@ impl AgentShim {
             .await;
         let result = match result {
             Ok(result) => result,
-            Err(agentshim_core::AuxiliaryError::Busy) => {
-                return resource_busy(output_budget, "bash_status", "read_only");
-            }
             Err(agentshim_core::AuxiliaryError::Cancelled) => {
                 return classified_tool_error(
                     output_budget,

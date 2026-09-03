@@ -27,11 +27,11 @@ pub(super) fn tool_catalog(
 fn read_tool(read_scope: ReadScope) -> Tool {
     let (description, path_description) = match read_scope {
         ReadScope::Normal => (
-            "Read one file as numbered lines. Relative paths resolve against the repository root. If output is truncated, a trailing Partial: next_start_line=N indicates the start line for the next call. For PDFs, returns page Markdown or rendered images based on pdf_mode.",
+            "Read one file as numbered lines. Relative paths resolve against the repository root. If output is truncated, a trailing Partial: next_start_line=N indicates the start line for the next call. PDFs return page Markdown or rendered images; supported Office documents return Markdown and an office_cursor when more remains.",
             "Platform-native path to the file. Relative paths resolve against the repository root.",
         ),
         ReadScope::Unrestricted => (
-            "Read one file as numbered lines. Relative paths resolve against the repository root; absolute paths may reach supported locations outside it. If output is truncated, a trailing Partial: next_start_line=N indicates the start line for the next call. For PDFs, returns page Markdown or rendered images based on pdf_mode.",
+            "Read one file as numbered lines. Relative paths resolve against the repository root; absolute paths may reach supported locations outside it. If output is truncated, a trailing Partial: next_start_line=N indicates the start line for the next call. PDFs return page Markdown or rendered images; supported Office documents return Markdown and an office_cursor when more remains.",
             "Platform-native path to the file. Relative paths resolve against the repository root; absolute paths may reach supported local filesystems.",
         ),
     };
@@ -72,6 +72,11 @@ fn read_tool(read_scope: ReadScope) -> Tool {
                     "type": "string",
                     "minLength": 1,
                     "description": "PDF only: opaque continuation token returned from a previous truncated read."
+                },
+                "office_cursor": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Office only: opaque continuation token returned from a previous truncated read."
                 },
                 "start_line": {
                     "type": "integer",

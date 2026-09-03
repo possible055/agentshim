@@ -1,19 +1,19 @@
 use super::*;
 
-fn doctor(process_calls: Option<&str>) -> std::process::Output {
+fn doctor(foreground_calls: Option<&str>) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_agentshim"));
     command
         .arg("doctor")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env_remove("AGENTSHIM_PROCESS_CALLS")
+        .env_remove("AGENTSHIM_FOREGROUND_CALLS")
         .env_remove("AGENTSHIM_DETACHED_CALLS")
         .env_remove("AGENTSHIM_GREP_MEMORY_BYTES")
         .env_remove("AGENTSHIM_GLOB_MEMORY_BYTES")
         .env_remove("AGENTSHIM_BURST_TOKENS")
         .env_remove("AGENTSHIM_IDLE_TIMEOUT")
         .env("AGENTSHIM_LOG_MODE", "off");
-    if let Some(process_calls) = process_calls {
-        command.env("AGENTSHIM_PROCESS_CALLS", process_calls);
+    if let Some(foreground_calls) = foreground_calls {
+        command.env("AGENTSHIM_FOREGROUND_CALLS", foreground_calls);
     }
     command.output().expect("run doctor")
 }
@@ -109,12 +109,12 @@ fn invalid_pdf_memory_configuration_fails_before_runtime_startup() {
 }
 
 #[test]
-fn invalid_process_capacity_fails_before_runtime_startup() {
+fn invalid_foreground_capacity_fails_before_runtime_startup() {
     let output = doctor(Some("0"));
     assert!(!output.status.success());
     assert!(
         String::from_utf8(output.stderr)
             .expect("doctor stderr")
-            .contains("AGENTSHIM_PROCESS_CALLS")
+            .contains("AGENTSHIM_FOREGROUND_CALLS")
     );
 }

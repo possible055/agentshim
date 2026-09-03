@@ -14,10 +14,9 @@ use super::{
 #[derive(Debug)]
 pub struct RuntimeCapacity {
     config: RuntimeConfig,
-    read_only_calls: Arc<Semaphore>,
+    foreground_calls: Arc<Semaphore>,
     worker_lanes: Arc<Semaphore>,
     open_files: Arc<Semaphore>,
-    process_calls: Arc<Semaphore>,
     background_calls: Arc<Semaphore>,
     memory: Arc<Semaphore>,
     pdf_calls: Arc<Semaphore>,
@@ -82,10 +81,9 @@ impl RuntimeCapacity {
     pub fn new(config: RuntimeConfig) -> Self {
         Self {
             config,
-            read_only_calls: Arc::new(Semaphore::new(config.read_only_calls)),
+            foreground_calls: Arc::new(Semaphore::new(config.foreground_calls)),
             worker_lanes: Arc::new(Semaphore::new(config.worker_lanes)),
             open_files: Arc::new(Semaphore::new(MAX_OPEN_FILES)),
-            process_calls: Arc::new(Semaphore::new(config.process_calls)),
             background_calls: Arc::new(Semaphore::new(config.detached_calls)),
             memory: Arc::new(Semaphore::new(config.memory_bytes / MEMORY_PERMIT_BYTES)),
             pdf_calls: Arc::new(Semaphore::new(MAX_PDF_CALLS)),
@@ -146,35 +144,29 @@ impl RuntimeResources {
         self.shutdown.cancel();
     }
 
-    /// Non-blocking probe for the idle watchdog: true while any foreground read-only or
-    /// process permit is held. Work queued but not yet admitted is invisible by design —
+    /// Non-blocking probe for the idle watchdog: true while any foreground permit is held.
+    /// Work queued but not yet admitted is invisible by design —
     /// admission re-checks the shutdown token, so such callers fail fast instead of being
     /// killed mid-call.
     #[must_use]
     pub fn has_in_flight_calls(&self) -> bool {
-        self.capacity.read_only_calls.available_permits() < self.config().read_only_calls
-            || self.capacity.process_calls.available_permits() < self.config().process_calls
+        self.capacity.foreground_calls.available_permits() < self.config().foreground_calls
     }
 
-    /// Blocking quiescence barrier for foreground process owners: returns once every
+    /// Blocking quiescence barrier for foreground call owners: returns once every
     /// configured permit is free, or `false` at `deadline`. The wait deliberately ignores
     /// the shutdown token — cancelling it is what started the shutdown — and acquires
     /// rather than closes the semaphore, so admission keeps working while it drains.
-    pub fn wait_for_process_quiescence(&self, deadline: std::time::Instant) -> bool {
+    pub fn wait_for_foreground_quiescence(&self, deadline: std::time::Instant) -> bool {
         wait_for_permits(
-            &self.capacity.process_calls,
-            self.config().process_calls,
+            &self.capacity.foreground_calls,
+            self.config().foreground_calls,
             deadline,
         )
     }
 
     pub fn wait_for_quiescence(&self, deadline: std::time::Instant) -> bool {
-        self.wait_for_process_quiescence(deadline)
-            && wait_for_permits(
-                &self.capacity.read_only_calls,
-                self.config().read_only_calls,
-                deadline,
-            )
+        self.wait_for_foreground_quiescence(deadline)
             && wait_for_permits(
                 &self.capacity.background_calls,
                 self.config().detached_calls,
@@ -187,31 +179,15 @@ impl RuntimeResources {
         Arc::clone(&self.capacity.file_work)
     }
 
-    pub(crate) fn try_admit_read_only(&self) -> Option<OwnedSemaphorePermit> {
-        if self.shutdown.is_cancelled() {
-            return None;
-        }
-        let permit = self
-            .capacity
-            .read_only_calls
-            .clone()
-            .try_acquire_owned()
-            .ok()?;
-        if self.shutdown.is_cancelled() {
-            return None;
-        }
-        Some(permit)
-    }
-
     /// Admission is fail-fast and double-checked around the permit: after the engine
     /// shutdown token fires, no caller may hold — or newly acquire — a foreground slot.
-    pub(crate) fn try_admit_process(&self) -> Option<OwnedSemaphorePermit> {
+    pub(crate) fn try_admit_foreground(&self) -> Option<OwnedSemaphorePermit> {
         if self.shutdown.is_cancelled() {
             return None;
         }
         let permit = self
             .capacity
-            .process_calls
+            .foreground_calls
             .clone()
             .try_acquire_owned()
             .ok()?;
@@ -240,8 +216,8 @@ impl RuntimeResources {
     }
 
     #[cfg(any(test, feature = "test-hooks"))]
-    pub fn try_admit_process_for_test(&self) -> Option<OwnedSemaphorePermit> {
-        self.try_admit_process()
+    pub fn try_admit_foreground_for_test(&self) -> Option<OwnedSemaphorePermit> {
+        self.try_admit_foreground()
     }
 
     /// Acquire one shared blocking/search lane.
@@ -297,7 +273,7 @@ impl RuntimeResources {
         acquire(&self.capacity.memory, request, &self.shutdown, permits).await
     }
 
-    /// Acquire the single PDF work slot, waiting at most [`PDF_GATE_WAIT`].
+    /// Acquire the single structured-document work slot, waiting at most [`PDF_GATE_WAIT`].
     ///
     /// A bounded wait rather than an immediate failure: plain text reads never touch this
     /// gate, so a PDF pausing here cannot delay them, while two ordinary back-to-back PDF
@@ -320,6 +296,13 @@ impl RuntimeResources {
         .await
         .ok()?
         .ok()
+    }
+
+    pub(crate) async fn acquire_structured_document_gate(
+        &self,
+        request: &CancellationToken,
+    ) -> Option<OwnedSemaphorePermit> {
+        self.acquire_pdf_gate(request).await
     }
 
     #[must_use]

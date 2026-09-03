@@ -20,6 +20,7 @@ pub const PARTIAL_MARKER: &str = "Partial:";
 pub const NEXT_START_LINE_FIELD: &str = "next_start_line";
 pub const NEXT_OFFSET_FIELD: &str = "next_offset";
 pub const PDF_CURSOR_FIELD: &str = "pdf_cursor";
+pub const OFFICE_CURSOR_FIELD: &str = "office_cursor";
 
 pub const CALL_OUTPUT_TOKEN_LIMIT: usize = 8_192;
 pub const MODEL_BYTE_LIMIT: usize = 32_000;
