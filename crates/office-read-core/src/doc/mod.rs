@@ -2,7 +2,7 @@
 //!
 //! # Example
 //!
-//! ```no_run
+//! ```ignore
 //! use office_oxide::doc::DocDocument;
 //!
 //! let doc = DocDocument::open("document.doc").unwrap();

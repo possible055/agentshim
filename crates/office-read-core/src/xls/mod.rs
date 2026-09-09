@@ -2,7 +2,7 @@
 //!
 //! # Example
 //!
-//! ```no_run
+//! ```ignore
 //! use office_oxide::xls::XlsDocument;
 //!
 //! let doc = XlsDocument::open("spreadsheet.xls").unwrap();

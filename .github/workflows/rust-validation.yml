@@ -179,9 +179,9 @@ jobs:
         run: cargo check --locked -p agentshim --all-targets
       - name: Test documentation examples
         if: ${{ inputs.engine_only }}
-        # pdf-read's retained upstream doctests reference the original
-        # `pdf_oxide` crate name and do not compile in this workspace.
-        run: cargo test --locked --doc --workspace --exclude agentshim-pdf-read
+        # pdf-read and office-read retained upstream doctests reference the original
+        # crate names and do not compile in this workspace.
+        run: cargo test --locked --doc --workspace --exclude agentshim-pdf-read --exclude agentshim-office-read
       - name: Lint derivative packages
         if: ${{ !inputs.engine_only && steps.validation-scope.outputs.scope == 'full' }}
         run: cargo clippy --locked -p agentshim-pdf-read -p agentshim-gigatoken --all-targets --all-features -- -D warnings

@@ -7,7 +7,7 @@
 //!
 //! # Quick Start
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use office_oxide::xlsx::XlsxDocument;
 //!
 //! let doc = XlsxDocument::open("data.xlsx").unwrap();

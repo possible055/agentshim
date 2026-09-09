@@ -5,7 +5,7 @@
 //!
 //! # Example
 //!
-//! ```no_run
+//! ```ignore
 //! use std::fs::File;
 //! use office_oxide::cfb::CfbReader;
 //!

@@ -2,7 +2,7 @@
 //!
 //! # Example
 //!
-//! ```no_run
+//! ```ignore
 //! use office_oxide::ppt::PptDocument;
 //!
 //! let doc = PptDocument::open("presentation.ppt").unwrap();

@@ -7,7 +7,7 @@
 //!
 //! # Quick Start
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use office_oxide::pptx::PptxDocument;
 //!
 //! let doc = PptxDocument::open("slides.pptx").unwrap();

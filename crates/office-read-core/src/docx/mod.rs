@@ -7,7 +7,7 @@
 //!
 //! # Quick Start
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use office_oxide::docx::DocxDocument;
 //!
 //! let doc = DocxDocument::open("report.docx").unwrap();

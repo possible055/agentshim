@@ -86,7 +86,7 @@ pub struct RuntimeConfig {
 impl RuntimeConfig {
     /// Build production defaults for an embedded host without consulting the
     /// process environment. Embedders may adjust the returned value from their
-    /// own typed configuration before constructing [`RuntimeResources`].
+    /// own typed configuration before constructing [`crate::runtime::RuntimeResources`].
     #[must_use]
     pub fn for_host_defaults() -> Self {
         let available = std::thread::available_parallelism().map_or(1, usize::from);
