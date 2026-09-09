@@ -458,9 +458,14 @@ describe('native addon loading', () => {
     })
     const handle = engine.startBackgroundPrepared(prepared.handle)
 
-    await new Promise(resolve => setTimeout(resolve, 200))
-    const partial = handle.readOutput()
-    expect(partial).toContain('x')
+    // readOutput drains the live buffer, so the poll accumulates what earlier reads took.
+    let partial = handle.readOutput()
+    const outputDeadline = Date.now() + 5_000
+    while (!partial.includes('x')) {
+      if (Date.now() >= outputDeadline) throw new Error('background job produced no live output')
+      await new Promise(resolve => setTimeout(resolve, 20))
+      partial += handle.readOutput()
+    }
 
     handle.cancel('test cancellation')
     const outcome = await handle.done()
@@ -480,17 +485,30 @@ describe('native addon loading', () => {
       backgroundJobTimeoutMaxMs: 600_000,
     })
     const engine = host.openEngine(root)
+    const marker = join(root, 'marker.txt')
     const prepared = engine.prepareBash({
       command: 'while :; do printf x >> marker.txt; sleep 0.02; done',
-      timeoutMs: 100,
+      // The deadline runs from spawn, so it has to outlast shell startup: Git Bash reaches
+      // its first loop iteration far later than the loop cadence suggests.
+      timeoutMs: 2_000,
       background: true,
     })
     const handle = engine.startBackgroundPrepared(prepared.handle)
+    const markerDeadline = Date.now() + 5_000
+    while (true) {
+      try {
+        await access(marker)
+        break
+      } catch {
+        if (Date.now() >= markerDeadline) throw new Error('background tree never wrote its marker')
+        await new Promise(resolve => setTimeout(resolve, 20))
+      }
+    }
     const outcome = await handle.done()
     expect(outcome.status).toBe('timed_out')
-    const first = (await stat(join(root, 'marker.txt'))).size
+    const first = (await stat(marker)).size
     await new Promise(resolve => setTimeout(resolve, 150))
-    const second = (await stat(join(root, 'marker.txt'))).size
+    const second = (await stat(marker)).size
     expect(second).toBe(first)
     await handle.dispose()
     await engine.close()
