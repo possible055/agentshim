@@ -207,7 +207,11 @@ fn configure_walk(
     literal_prefix: Option<&Path>,
 ) -> WalkBuilder {
     let mut builder = WalkBuilder::new(base.absolute());
-    builder.follow_links(false).hidden(false).require_git(false);
+    builder
+        .follow_links(false)
+        .hidden(false)
+        .require_git(false)
+        .sort_by_file_name(std::cmp::Ord::cmp);
     if include_ignored {
         builder.standard_filters(false).hidden(false);
     } else {
