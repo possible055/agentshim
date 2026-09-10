@@ -5,7 +5,7 @@
 ## Requirements
 
 - Node.js `^22.19.0 || >=24.0.0`.
-- The DSH `0.1.0-rc.6`, `0.1.0-rc.7`, `0.1.0-rc.8`, `0.1.1-rc.1`, `0.1.1-rc.2`, or `0.1.2-alpha.1` package family.
+- The DSH `0.1.0-rc.6` through `0.1.5-rc.1` package families. Development and CI use DSH `0.1.5-rc.1` with Cordis `4.0.2`; the peer declaration retains historical Cordis-compatible DSH releases.
 - A local filesystem provider for the configured root.
 - One supported platform: Windows x64 MSVC, macOS ARM64, Linux x64 glibc, or Linux ARM64 glibc.
 - Background Bash requires `ctx.jobs` and a job controller.
@@ -84,10 +84,11 @@ pnpm test
 pnpm build
 pnpm test:release-packages
 pnpm test:packed
+pnpm test:packed:matrix # Linux: all currently published DSH families
 pnpm verify:cutover
 ```
 
-Source/native tests may stage the locally built library through `AGENTSHIM_DSH_NATIVE_DLL`. The packed smoke does not: it fresh-packs and installs the entry plus the current platform package in a temporary consumer, then executes a native read through the package export. Existing `.tgz` files in this directory are never used as development or release evidence.
+Source/native tests may stage the locally built library through `AGENTSHIM_DSH_NATIVE_DLL`. The packed smoke does not: it fresh-packs and installs the entry plus the current platform package in isolated temporary consumers, then executes a native read through the package export. The Linux matrix covers every currently published DSH family and reports `0.1.2-alpha.1` and `0.1.3-alpha.1` as unavailable; those historical releases remain in the peer declaration but are not installable smoke targets. Existing `.tgz` files in this directory are never used as development or release evidence.
 
 ## Remove
 

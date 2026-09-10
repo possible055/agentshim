@@ -231,8 +231,8 @@ describe.runIf(enabled)('real DSH native composition', () => {
     }
   }, 120_000)
 
-  it('dispatches typed canonical values through the real Code and Both run_code surfaces', async () => {
-    for (const mode of ['code', 'both'] as const) {
+  it('dispatches typed canonical values through the real PTC and Both run_code surfaces', async () => {
+    for (const mode of ['ptc', 'both'] as const) {
       const composition = await startRealComposition(mode)
       try {
         const output = await callText(composition.ctx, composition.agent, 'run_code', {

@@ -88,7 +88,7 @@ function installAgentTools(
   jobs: BackgroundJobManager,
 ): void {
   const installed = new Map<Agent, AgentInstallation>()
-  const promptByName = new Map(promptSections().map(section => [section.name, section]))
+  const promptByName = new Map(promptSections(ctx).map(section => [section.name, section]))
 
   function uninstall(agent: Agent): void {
     const installation = installed.get(agent)
@@ -145,7 +145,7 @@ function installAgentTools(
         }
       }
       if (present.includes('pwsh')) {
-        disposers.push(agent.ctx.systemPrompt.section({ name: 'tool:pwsh', order: pwshSectionOrder(), text: '' }))
+        disposers.push(agent.ctx.systemPrompt.section({ name: 'tool:pwsh', order: pwshSectionOrder(agent.ctx), text: '' }))
       }
     } catch (error) {
       for (let index = disposers.length - 1; index >= 0; index--) {

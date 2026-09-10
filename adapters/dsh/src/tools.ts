@@ -455,15 +455,60 @@ export function isModernDsh(): boolean {
   return true
 }
 
-export function promptSections(isModern = isModernDsh()): ReadonlyArray<{ readonly name: string; readonly order: number; readonly text: string }> {
+interface SystemPromptOrderService {
+  readonly getSectionOrder?: (name: string) => unknown
+}
+
+function getSystemPromptService(ctx: Context | undefined): SystemPromptOrderService | undefined {
+  if (ctx === undefined) return undefined
+  try {
+    if (typeof ctx.get === 'function') {
+      const fromGet = ctx.get('systemPrompt')
+      if (fromGet !== undefined && fromGet !== null) return fromGet as SystemPromptOrderService
+    }
+  } catch {
+    // Cordis proxies can throw for absent services; try the property shape too.
+  }
+  try {
+    return (ctx as unknown as { systemPrompt?: SystemPromptOrderService }).systemPrompt ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
+function hasSectionOrder(service: SystemPromptOrderService | undefined): boolean {
+  try {
+    return typeof service?.getSectionOrder === 'function'
+  } catch {
+    return false
+  }
+}
+
+function resolveOrder(ctx: Context | undefined, name: string, fallback: number): number {
+  const service = getSystemPromptService(ctx)
+  try {
+    if (typeof service?.getSectionOrder !== 'function') return fallback
+    const resolved = service.getSectionOrder(name)
+    return typeof resolved === 'number' && Number.isFinite(resolved) ? resolved : fallback
+  } catch {
+    return fallback
+  }
+}
+
+export function promptSections(ctxOrModern: Context | boolean = isModernDsh()): ReadonlyArray<{ readonly name: string; readonly order: number; readonly text: string }> {
+  const ctx = typeof ctxOrModern === 'boolean' ? undefined : ctxOrModern
+  const sp = getSystemPromptService(ctx)
+  const isModern = typeof ctxOrModern === 'boolean'
+    ? ctxOrModern
+    : (hasSectionOrder(sp) || isModernDsh())
   if (isModern) {
     return [
-      { name: 'tool:bash', order: 1000, text: 'Use run_in_background=true for long-running work.' },
-      { name: 'tool:run_program', order: 1005, text: 'Prefer run_program for single executables with literal arguments; use bash only when shell composition is required.' },
-      { name: 'tool:read', order: 1100, text: 'Continue truncated reads by passing next_start_line as start_line.' },
-      { name: 'tool:glob', order: 1400, text: 'Continue truncated glob results by passing next_offset as offset.' },
-      { name: 'tool:grep', order: 1500, text: 'Continue truncated grep results by passing next_offset as offset.' },
-      { name: 'tool:bash_status', order: 1605, text: 'Use bash_status to check the lifecycle status of a background Bash job.' },
+      { name: 'tool:bash', order: resolveOrder(ctx, 'TOOL_BASH', 1000), text: 'Use run_in_background=true for long-running work.' },
+      { name: 'tool:run_program', order: resolveOrder(ctx, 'TOOL_BASH', 1000) + 5, text: 'Prefer run_program for single executables with literal arguments; use bash only when shell composition is required.' },
+      { name: 'tool:read', order: resolveOrder(ctx, 'TOOL_READ', 1100), text: 'Continue truncated reads by passing next_start_line as start_line.' },
+      { name: 'tool:glob', order: resolveOrder(ctx, 'TOOL_GLOB', 1400), text: 'Continue truncated glob results by passing next_offset as offset.' },
+      { name: 'tool:grep', order: resolveOrder(ctx, 'TOOL_GREP', 1500), text: 'Continue truncated grep results by passing next_offset as offset.' },
+      { name: 'tool:bash_status', order: resolveOrder(ctx, 'TOOL_JOBS', 1600) + 5, text: 'Use bash_status to check the lifecycle status of a background Bash job.' },
     ]
   }
   return [
@@ -476,8 +521,13 @@ export function promptSections(isModern = isModernDsh()): ReadonlyArray<{ readon
   ]
 }
 
-export function pwshSectionOrder(isModern = isModernDsh()): number {
-  return isModern ? 1010 : 105
+export function pwshSectionOrder(ctxOrModern: Context | boolean = isModernDsh()): number {
+  const ctx = typeof ctxOrModern === 'boolean' ? undefined : ctxOrModern
+  const sp = getSystemPromptService(ctx)
+  const isModern = typeof ctxOrModern === 'boolean'
+    ? ctxOrModern
+    : (hasSectionOrder(sp) || isModernDsh())
+  return isModern ? resolveOrder(ctx, 'TOOL_PWSH', 1010) : 105
 }
 
 export const RESTRICT_CANDIDATES = [...PUBLIC_TOOL_NAMES, 'pwsh'] as const

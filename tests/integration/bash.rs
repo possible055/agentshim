@@ -321,11 +321,15 @@ fn detached_log_quota_terminates_the_owned_tree() {
         .spawn();
     session.send(&modern_request(1, "server/discover", empty_params()));
     assert_eq!(session.receive()["id"], 1);
+    let command = format!(
+        "head -c {} /dev/zero; sleep 5",
+        DETACHED_LOG_QUOTA_TEST_BYTES + DETACHED_LOG_WRITE_BLOCK_BYTES
+    );
     let detached = session.call_tool(
         2,
         "bash",
         json!({
-            "command": "while :; do head -c 65536 /dev/zero; sleep 0.01; done",
+            "command": command,
             "detach": true,
             "log_path": "quota.log"
         }),

@@ -243,6 +243,19 @@ async function runTool(ctx: Context, agent: Agent, name: string, args: Record<st
 }
 
 describe('agent scope replacement', () => {
+  it('loads without a systemPrompt service when no agents service is present', async () => {
+    const root = await makeRoot()
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LocalFileSystem, { cwd: root })
+    pluginFibers.push(await ctx.plugin(agentshim, {
+      root,
+      captureRoot: join(root, '.dsh-test-captures'),
+      env: {},
+      toolCallTimeoutMs: 600_000,
+    }))
+  })
+
   it('replaces the six tools for a root-matched agent, hides pwsh, keeps the rest', async () => {
     const root = await makeRoot()
     const ctx = await mountComposition(root)
@@ -1329,7 +1342,7 @@ describe('DSH native contracts', () => {
     expect(result.error?.message).toContain('pdf_mode: "text"')
   })
 
-  it('generates correct section orders for both DSH 0.1.2-alpha.1 modern mode and legacy mode', () => {
+  it('generates correct section orders for modern DSH (0.1.2-alpha.1 ~ 0.1.5-rc.1) and legacy mode', async () => {
     expect(typeof isModernDsh()).toBe('boolean')
     const modern = promptSections(true)
     const modernMap = new Map(modern.map(s => [s.name, s.order]))
@@ -1350,5 +1363,73 @@ describe('DSH native contracts', () => {
     expect(legacyMap.get('tool:bash')).toBe(105)
     expect(legacyMap.get('tool:bash_status')).toBe(105.5)
     expect(pwshSectionOrder(false)).toBe(105)
+
+    // Verify DSH 0.1.5-rc.1 dynamic getSectionOrder resolution
+    const mockCtx = {
+      systemPrompt: {
+        getSectionOrder: (key: string) => {
+          if (key === 'TOOL_BASH') return 2000
+          if (key === 'TOOL_READ') return 2100
+          if (key === 'TOOL_PWSH') return 2010
+          return undefined
+        },
+      },
+    } as unknown as Parameters<typeof promptSections>[0]
+    const fromCtx = promptSections(mockCtx)
+    const fromCtxMap = new Map(fromCtx.map(s => [s.name, s.order]))
+    expect(fromCtxMap.get('tool:bash')).toBe(2000)
+    expect(fromCtxMap.get('tool:read')).toBe(2100)
+    expect(fromCtxMap.get('tool:glob')).toBe(1400)
+    expect(pwshSectionOrder(mockCtx)).toBe(2010)
+
+    const actualCtx = await mountComposition(await makeRoot())
+    const actualSystemPrompt = actualCtx.get('systemPrompt') as unknown as {
+      getSectionOrder(name: string): number
+    }
+    expect(typeof actualSystemPrompt.getSectionOrder).toBe('function')
+    const actualMap = new Map(promptSections(actualCtx).map(section => [section.name, section.order]))
+    expect(actualMap.get('tool:bash')).toBe(actualSystemPrompt.getSectionOrder('TOOL_BASH'))
+    expect(actualMap.get('tool:run_program')).toBe(actualSystemPrompt.getSectionOrder('TOOL_BASH') + 5)
+    expect(actualMap.get('tool:read')).toBe(actualSystemPrompt.getSectionOrder('TOOL_READ'))
+    expect(actualMap.get('tool:glob')).toBe(actualSystemPrompt.getSectionOrder('TOOL_GLOB'))
+    expect(actualMap.get('tool:grep')).toBe(actualSystemPrompt.getSectionOrder('TOOL_GREP'))
+    expect(actualMap.get('tool:bash_status')).toBe(actualSystemPrompt.getSectionOrder('TOOL_JOBS') + 5)
+    expect(pwshSectionOrder(actualCtx)).toBe(actualSystemPrompt.getSectionOrder('TOOL_PWSH'))
+
+    const getThrowsCtx = Object.defineProperty({
+      get: () => {
+        throw new Error('service lookup failed')
+      },
+    }, 'systemPrompt', { value: { getSectionOrder: () => 2200 } }) as unknown as Parameters<typeof promptSections>[0]
+    expect(promptSections(getThrowsCtx).find(section => section.name === 'tool:bash')?.order).toBe(2200)
+
+    const methodThrowsCtx = {
+      get: () => ({ getSectionOrder: () => { throw new Error('order lookup failed') } }),
+    } as unknown as Parameters<typeof promptSections>[0]
+    expect(promptSections(methodThrowsCtx).find(section => section.name === 'tool:bash')?.order).toBe(1000)
+
+    for (const invalidOrder of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, '100']) {
+      const invalidOrderCtx = {
+        get: () => ({ getSectionOrder: () => invalidOrder }),
+      } as unknown as Parameters<typeof promptSections>[0]
+      expect(promptSections(invalidOrderCtx).find(section => section.name === 'tool:bash')?.order).toBe(1000)
+    }
+
+    const throwingService = {}
+    Object.defineProperty(throwingService, 'getSectionOrder', {
+      get: () => {
+        throw new Error('section order getter failed')
+      },
+    })
+    const getterThrowsCtx = { get: () => throwingService } as unknown as Parameters<typeof promptSections>[0]
+    expect(promptSections(getterThrowsCtx).find(section => section.name === 'tool:bash')?.order).toBe(1000)
+
+    const missingServiceCtx = { get: () => undefined } as unknown as Parameters<typeof promptSections>[0]
+    Object.defineProperty(missingServiceCtx, 'systemPrompt', {
+      get: () => {
+        throw new Error('missing service getter failed')
+      },
+    })
+    expect(promptSections(missingServiceCtx).find(section => section.name === 'tool:bash')?.order).toBe(1000)
   })
 })
