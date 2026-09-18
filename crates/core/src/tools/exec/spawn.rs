@@ -123,6 +123,7 @@ pub struct ExecPlan<'a> {
     pub capture_page_bytes: usize,
 }
 
+#[derive(Debug)]
 pub struct ExecOutcome {
     pub exit: String,
     pub duration: Duration,
@@ -137,6 +138,7 @@ pub trait CaptureSink: Send + Sync {
     }
 }
 
+#[derive(Debug)]
 pub enum ExecFailure {
     Process(ProcessError),
     TimedOut {

@@ -275,6 +275,9 @@ struct ProcessSample {
     write_operations: u64,
     write_bytes: u64,
     page_faults: u64,
+    cpu_time_ticks: u64,
+    voluntary_ctxt_switches: u64,
+    involuntary_ctxt_switches: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -287,6 +290,9 @@ pub(super) struct ResourceHighWater {
     pub(super) write_operation_delta: u64,
     pub(super) write_bytes_delta: u64,
     pub(super) page_fault_delta: u64,
+    pub(super) cpu_time_ticks_delta: u64,
+    pub(super) voluntary_ctxt_switches_delta: u64,
+    pub(super) involuntary_ctxt_switches_delta: u64,
 }
 
 pub(super) struct ResourceMonitor {
@@ -325,6 +331,13 @@ impl ResourceMonitor {
                 last.write_operations.saturating_sub(first.write_operations);
             high.write_bytes_delta = last.write_bytes.saturating_sub(first.write_bytes);
             high.page_fault_delta = last.page_faults.saturating_sub(first.page_faults);
+            high.cpu_time_ticks_delta = last.cpu_time_ticks.saturating_sub(first.cpu_time_ticks);
+            high.voluntary_ctxt_switches_delta = last
+                .voluntary_ctxt_switches
+                .saturating_sub(first.voluntary_ctxt_switches);
+            high.involuntary_ctxt_switches_delta = last
+                .involuntary_ctxt_switches
+                .saturating_sub(first.involuntary_ctxt_switches);
             high
         });
         Self { stop, worker }
@@ -449,6 +462,11 @@ mod platform {
                 write_operations: io_counters.write_operations,
                 write_bytes: io_counters.write_bytes,
                 page_faults: u64::from(memory.page_fault_count),
+                // CPU tick and context-switch deltas are only collected on the Linux
+                // lane; the Windows gate reads the latency counters instead.
+                cpu_time_ticks: 0,
+                voluntary_ctxt_switches: 0,
+                involuntary_ctxt_switches: 0,
             })
         })();
         // SAFETY: process is the owned handle returned by OpenProcess.
@@ -491,6 +509,8 @@ mod platform {
     pub fn sample(pid: u32) -> io::Result<ProcessSample> {
         let status = fs::read_to_string(format!("/proc/{pid}/status"))?;
         let io = fs::read_to_string(format!("/proc/{pid}/io"))?;
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+        let (min_faults, major_faults, user_ticks, system_ticks) = stat_process_fields(&stat)?;
         Ok(ProcessSample {
             working_set_bytes: status_value(&status, "VmRSS:")? * 1024,
             peak_working_set_bytes: status_value(&status, "VmHWM:")? * 1024,
@@ -500,7 +520,10 @@ mod platform {
             read_bytes: io_value(&io, "read_bytes:")?,
             write_operations: io_value(&io, "syscw:")?,
             write_bytes: io_value(&io, "write_bytes:")?,
-            page_faults: 0,
+            page_faults: min_faults + major_faults,
+            cpu_time_ticks: user_ticks + system_ticks,
+            voluntary_ctxt_switches: status_value(&status, "voluntary_ctxt_switches:")?,
+            involuntary_ctxt_switches: status_value(&status, "nonvoluntary_ctxt_switches:")?,
         })
     }
 
@@ -519,6 +542,26 @@ mod platform {
             .find_map(|line| line.strip_prefix(key))
             .and_then(|value| value.trim().parse().ok())
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, key))
+    }
+
+    /// Extract `minflt`, `majflt`, `utime`, and `stime` from a `/proc/{pid}/stat` payload.
+    ///
+    /// Field numbers count from 1 and `comm` (field 2) may contain spaces, so the payload
+    /// is parsed after the last `)`: token `k` there is field `k + 3`. The four fields are
+    /// 10 (minflt), 12 (majflt), 14 (utime), and 15 (stime).
+    fn stat_process_fields(stat: &str) -> io::Result<(u64, u64, u64, u64)> {
+        let tail = stat
+            .rsplit_once(')')
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "stat comm field"))?
+            .1;
+        let tokens = tail.split_whitespace().collect::<Vec<_>>();
+        let field = |index: usize| -> io::Result<u64> {
+            tokens
+                .get(index)
+                .and_then(|token| token.parse().ok())
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "stat field layout"))
+        };
+        Ok((field(7)?, field(9)?, field(11)?, field(12)?))
     }
 }
 

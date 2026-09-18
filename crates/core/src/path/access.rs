@@ -467,6 +467,12 @@ impl FileAccess {
             use std::os::unix::fs::OpenOptionsExt;
             options.custom_flags(libc::O_NONBLOCK);
         }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options
+                .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_SEQUENTIAL_SCAN);
+        }
         options.open(path.absolute()).map(File::from_std)
     }
 
@@ -577,6 +583,11 @@ fn capability_read_options() -> OpenOptions {
     {
         use cap_std::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt as _;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_SEQUENTIAL_SCAN);
     }
     options
 }

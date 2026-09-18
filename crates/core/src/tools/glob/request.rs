@@ -38,10 +38,6 @@ pub enum GlobTraversal {
     Adaptive,
     Serial,
     ParallelBatched,
-    #[cfg(any(test, feature = "bench-internals"))]
-    SerialLiteralPrefix,
-    #[cfg(any(test, feature = "bench-internals"))]
-    ParallelBatchedLiteralPrefix,
 }
 
 /// Filesystem entry kind returned by glob.
@@ -321,7 +317,6 @@ fn execute_inner_with_traversal(
         .build()
         .map_err(|error| GlobError::Pattern(error.to_string()))?
         .compile_matcher();
-    #[cfg(any(test, feature = "bench-internals"))]
     let literal_prefix = crate::traversal::literal_path_prefix(&request.pattern);
     let base_input = request.path.as_deref().unwrap_or(".");
     let base = access.resolve(Path::new(base_input))?;
@@ -337,11 +332,9 @@ fn execute_inner_with_traversal(
         probe: offset.saturating_add(limit).saturating_add(1),
         terminal_error: None,
     };
-    let regular_plan = regular_collect_plan(request, resources, selection.threads);
-    #[cfg(any(test, feature = "bench-internals"))]
-    let prefix_plan = GlobCollectPlan {
-        include_ignored: regular_plan.include_ignored,
-        entry_type: regular_plan.entry_type,
+    let plan = GlobCollectPlan {
+        include_ignored: resources.config().include_ignored(request.include_ignored),
+        entry_type: request.entry_type.unwrap_or_default(),
         literal_prefix: literal_prefix.as_deref(),
         traversal_threads: selection.threads,
     };
@@ -349,14 +342,9 @@ fn execute_inner_with_traversal(
     let traversal_span = profiler.span(GlobStage::TraversalWall);
     let (collection, summary) = match traversal {
         GlobTraversal::Adaptive => unreachable!("adaptive traversal was resolved"),
-        GlobTraversal::Serial => collect_serial(
-            access,
-            &base,
-            cancellation,
-            &matcher,
-            collection,
-            regular_plan,
-        )?,
+        GlobTraversal::Serial => {
+            collect_serial(access, &base, cancellation, &matcher, collection, plan)?
+        }
         GlobTraversal::ParallelBatched => collect_parallel(
             access,
             &base,
@@ -364,26 +352,7 @@ fn execute_inner_with_traversal(
             &matcher,
             collection,
             profiler,
-            regular_plan,
-        )?,
-        #[cfg(any(test, feature = "bench-internals"))]
-        GlobTraversal::SerialLiteralPrefix => collect_serial(
-            access,
-            &base,
-            cancellation,
-            &matcher,
-            collection,
-            prefix_plan,
-        )?,
-        #[cfg(any(test, feature = "bench-internals"))]
-        GlobTraversal::ParallelBatchedLiteralPrefix => collect_parallel(
-            access,
-            &base,
-            cancellation,
-            &matcher,
-            collection,
-            profiler,
-            prefix_plan,
+            plan,
         )?,
     };
     drop(selection.credits);
@@ -420,12 +389,7 @@ struct GlobTraversalSelection {
 }
 
 fn traversal_is_serial(traversal: GlobTraversal) -> bool {
-    match traversal {
-        GlobTraversal::Serial => true,
-        #[cfg(any(test, feature = "bench-internals"))]
-        GlobTraversal::SerialLiteralPrefix => true,
-        _ => false,
-    }
+    matches!(traversal, GlobTraversal::Serial)
 }
 
 fn select_glob_traversal(
@@ -437,11 +401,7 @@ fn select_glob_traversal(
     let wants_parallel = match requested {
         GlobTraversal::Adaptive => prefer_parallel_root(access, base),
         GlobTraversal::ParallelBatched => true,
-        #[cfg(any(test, feature = "bench-internals"))]
-        GlobTraversal::ParallelBatchedLiteralPrefix => true,
         GlobTraversal::Serial => false,
-        #[cfg(any(test, feature = "bench-internals"))]
-        GlobTraversal::SerialLiteralPrefix => false,
     };
     let credits = if wants_parallel {
         pool.try_credits(pool.extra_capacity())
@@ -449,13 +409,10 @@ fn select_glob_traversal(
         Vec::new()
     };
     let traversal = match requested {
-        GlobTraversal::Adaptive if credits.is_empty() => GlobTraversal::Serial,
-        GlobTraversal::Adaptive => GlobTraversal::ParallelBatched,
-        GlobTraversal::ParallelBatched if credits.is_empty() => GlobTraversal::Serial,
-        #[cfg(any(test, feature = "bench-internals"))]
-        GlobTraversal::ParallelBatchedLiteralPrefix if credits.is_empty() => {
-            GlobTraversal::SerialLiteralPrefix
+        GlobTraversal::Adaptive | GlobTraversal::ParallelBatched if credits.is_empty() => {
+            GlobTraversal::Serial
         }
+        GlobTraversal::Adaptive => GlobTraversal::ParallelBatched,
         selected => selected,
     };
     GlobTraversalSelection {
@@ -491,19 +448,6 @@ struct GlobCollectPlan<'a> {
     entry_type: GlobEntryType,
     literal_prefix: Option<&'a Path>,
     traversal_threads: usize,
-}
-
-fn regular_collect_plan(
-    request: &GlobRequest,
-    resources: &RuntimeResources,
-    traversal_threads: usize,
-) -> GlobCollectPlan<'static> {
-    GlobCollectPlan {
-        include_ignored: resources.config().include_ignored(request.include_ignored),
-        entry_type: request.entry_type.unwrap_or_default(),
-        literal_prefix: None,
-        traversal_threads,
-    }
 }
 
 fn matches_entry_type(entry_type: GlobEntryType, file_type: Option<std::fs::FileType>) -> bool {

@@ -144,10 +144,6 @@ pub enum GrepTraversal {
     Serial,
     #[cfg(any(test, feature = "bench-internals"))]
     ParallelBatched,
-    #[cfg(any(test, feature = "bench-internals"))]
-    SerialLiteralPrefix,
-    #[cfg(any(test, feature = "bench-internals"))]
-    ParallelBatchedLiteralPrefix,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -701,7 +697,6 @@ fn execute_inner(
                 .map_err(|error| GrepError::Glob(error.to_string()))
         })
         .transpose()?;
-    #[cfg(any(test, feature = "bench-internals"))]
     let literal_prefix = request
         .glob
         .as_deref()
@@ -740,10 +735,7 @@ fn execute_inner(
         include_ignored,
         cancellation,
         traversal,
-        #[cfg(any(test, feature = "bench-internals"))]
         literal_prefix.as_deref(),
-        #[cfg(not(any(test, feature = "bench-internals")))]
-        None,
         request,
         plan,
         variant,

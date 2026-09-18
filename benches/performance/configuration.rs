@@ -150,16 +150,8 @@ pub(super) fn grep_traversals() -> &'static [(&'static str, grep::GrepTraversal)
                         "serial" => ("serial", grep::GrepTraversal::Serial),
                         "parallel_256" => ("parallel_256", grep::GrepTraversal::ParallelBatched),
                         "adaptive" => ("adaptive", grep::GrepTraversal::Adaptive),
-                        "serial_prefix" => {
-                            ("serial_prefix", grep::GrepTraversal::SerialLiteralPrefix)
-                        }
-                        "parallel_256_prefix" => (
-                            "parallel_256_prefix",
-                            grep::GrepTraversal::ParallelBatchedLiteralPrefix,
-                        ),
                         _ => panic!(
-                            "{GREP_TRAVERSALS_ENV} accepts only serial,parallel_256,adaptive,\
-                             serial_prefix,parallel_256_prefix"
+                            "{GREP_TRAVERSALS_ENV} accepts only serial,parallel_256,adaptive"
                         ),
                     })
                     .collect::<Vec<_>>();

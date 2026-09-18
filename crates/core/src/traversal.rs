@@ -1,15 +1,12 @@
 use std::{
     borrow::Cow,
     io,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{
         Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
-
-#[cfg(any(test, feature = "bench-internals"))]
-use std::path::Component;
 
 use ignore::{DirEntry, WalkBuilder, WalkState};
 use serde::Serialize;
@@ -403,7 +400,6 @@ where
 }
 
 #[must_use]
-#[cfg(any(test, feature = "bench-internals"))]
 pub fn literal_path_prefix(pattern: &str) -> Option<PathBuf> {
     let mut prefix = PathBuf::new();
     for component in Path::new(pattern).components() {

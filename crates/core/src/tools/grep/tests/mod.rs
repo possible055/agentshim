@@ -354,28 +354,31 @@ fn serial_and_parallel_candidate_traversal_are_equivalent() {
     assert_eq!(sorted_result_lines(&parallel), sorted_result_lines(&serial));
 }
 
+/// Production traversal prunes grep candidates to the glob's literal prefix, so a
+/// glob with a literal prefix and an equivalent glob without one must search the same
+/// candidates and produce the same output; neither may leak files the glob excludes.
 #[test]
-fn literal_prefix_grep_preserves_serial_and_parallel_output() {
+fn literal_prefix_glob_matches_full_traversal_candidates() {
     let (fixture, root) = fixture();
     fs::create_dir(fixture.path().join("other")).expect("other");
     fs::write(fixture.path().join("other/c.rs"), "needle\n").expect("c");
     let mut query = request("needle");
     query.fixed_strings = Some(true);
     query.mode = Some(GrepMode::Count);
-    query.glob = Some("src/*.rs".to_owned());
     let cancellation = CancellationToken::new();
-    let expected = sorted_result_lines(
-        &execute_with_traversal(&root, &query, 4, &cancellation, GrepTraversal::Serial)
-            .expect("serial grep"),
-    );
-
-    for traversal in [
-        GrepTraversal::SerialLiteralPrefix,
-        GrepTraversal::ParallelBatchedLiteralPrefix,
-    ] {
-        let output = execute_with_traversal(&root, &query, 4, &cancellation, traversal)
-            .expect("literal prefix grep");
-        assert_eq!(sorted_result_lines(&output), expected);
+    for glob in ["src/*.rs", "**/src/*.rs"] {
+        query.glob = Some(glob.to_owned());
+        let output = execute(&root, &query, 4, &cancellation).expect("literal prefix grep");
+        assert!(output.contains("src/a.rs"), "glob={glob} missed src/a.rs");
+        assert!(output.contains("src/b.rs"), "glob={glob} missed src/b.rs");
+        assert!(
+            !output.contains("other"),
+            "glob={glob} leaked a candidate outside the glob: {output}"
+        );
+        assert!(
+            !output.contains("ignored.rs"),
+            "glob={glob} output: {output}"
+        );
     }
 }
 

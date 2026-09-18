@@ -345,6 +345,47 @@ fn second_change_fails_explicitly() {
     ));
 }
 
+/// The first attempt must notice the path was replaced mid-read; the retry then reads
+/// the replacement, so the caller sees the new file's content rather than a splice.
+#[test]
+fn replaced_path_is_detected_and_retry_reads_the_replacement() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let path = fixture.path().join("swap.txt");
+    fs::write(&path, "old\n").expect("old");
+    let replacement = fixture.path().join("replacement.txt");
+    fs::write(&replacement, "new\n").expect("new");
+    let target = path.clone();
+    AFTER_READ_HOOK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            fs::rename(&replacement, &target).expect("replace path");
+        }));
+    });
+    let root = access(fixture.path());
+    let output = execute(&root, &request("swap.txt"), &CancellationToken::new())
+        .expect("retry after replacement succeeds");
+    assert!(output.contains("1\tnew"));
+}
+
+/// Unlinking an open Unix file leaves the handle's contents stable, so the read is
+/// still a coherent version and must succeed instead of forcing a doomed retry.
+#[cfg(unix)]
+#[test]
+fn unlinked_open_file_counts_as_unchanged() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let path = fixture.path().join("unlinked.txt");
+    fs::write(&path, "stable\n").expect("stable");
+    let removed = path.clone();
+    AFTER_READ_HOOK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            fs::remove_file(&removed).expect("remove open file");
+        }));
+    });
+    let root = access(fixture.path());
+    let output = execute(&root, &request("unlinked.txt"), &CancellationToken::new())
+        .expect("unlinked open file still delivers its content");
+    assert!(output.contains("1\tstable"));
+}
+
 #[test]
 fn validation_and_directory_fail_before_content_read() {
     let fixture = tempfile::tempdir().expect("fixture");

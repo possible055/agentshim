@@ -125,8 +125,7 @@ pub fn prepare(
     }
     let resolved = access.resolve(Path::new(&request.path))?;
     let absolute = crate::path::display_path(resolved.absolute());
-    let mut file = open_regular(access, &resolved)?;
-    let before = FileFingerprint::from_file(&file)?;
+    let (mut file, before) = open_regular(access, &resolved)?;
     run_before_read_hook();
 
     let mut prefix = Vec::with_capacity(PREFIX_BYTES);
@@ -288,17 +287,38 @@ fn source_is_unchanged(
     file: &File,
     before: &FileFingerprint,
 ) -> Result<bool, ReadError> {
-    if before != &FileFingerprint::from_file(file)? {
-        return Ok(false);
-    }
+    // The path is the authority: whatever it names now must still be the exact file
+    // version captured at prepare time, so one fresh fingerprint catches both an
+    // in-place modification and a replaced path. A vanished path only passes when the
+    // open handle shows the unlinked-but-content-stable state Unix allows.
     match open_regular(access, path) {
-        Ok(identity) => Ok(before == &FileFingerprint::from_file(&identity)?),
-        Err(ReadError::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Ok((_current_file, current)) => Ok(&current == before),
+        Err(ReadError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+            unlinked_open_file(file)
+        }
         Err(error) => Err(error),
     }
 }
 
-fn open_regular(access: &FileAccess, path: &ResolvedPath) -> Result<File, ReadError> {
+#[cfg(unix)]
+fn unlinked_open_file(file: &File) -> Result<bool, ReadError> {
+    Ok(FileFingerprint::from_file(file)?.unlinked())
+}
+
+#[cfg(not(unix))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the Windows share-mode deletion cases this guards cannot be distinguished, \
+              and the shared signature keeps the check call site platform-neutral"
+)]
+fn unlinked_open_file(_file: &File) -> Result<bool, ReadError> {
+    Ok(false)
+}
+
+fn open_regular(
+    access: &FileAccess,
+    path: &ResolvedPath,
+) -> Result<(File, FileFingerprint), ReadError> {
     let metadata = access.symlink_metadata_kind(path)?;
     if metadata.is_dir {
         return Err(ReadError::Directory);
@@ -310,10 +330,11 @@ fn open_regular(access: &FileAccess, path: &ResolvedPath) -> Result<File, ReadEr
         return Err(ReadError::NotRegular);
     }
     let file = access.open_read(path)?;
-    if !FileFingerprint::from_file(&file)?.regular {
+    let fingerprint = FileFingerprint::from_file(&file)?;
+    if !fingerprint.regular {
         return Err(ReadError::NotRegular);
     }
-    Ok(file)
+    Ok((file, fingerprint))
 }
 
 pub fn has_binary_magic(prefix: &[u8]) -> bool {

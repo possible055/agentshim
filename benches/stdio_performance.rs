@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use std::{
     collections::BTreeSet,
     fs,
@@ -29,6 +31,7 @@ const COLD_LIMIT_ENV: &str = "AGENTSHIM_BENCH_MAX_STDIO_COLD_MS";
 const P95_LIMIT_ENV: &str = "AGENTSHIM_BENCH_MAX_STDIO_P95_MS";
 const PROCESS_LIMIT_ENV: &str = "AGENTSHIM_BENCH_MAX_PROCESS_MS";
 const PROCESS_CONCURRENT_P95_LIMIT_ENV: &str = "AGENTSHIM_BENCH_MAX_PROCESS_CONCURRENT_P95_MS";
+const PROCESS_FAIRNESS_ENV: &str = "AGENTSHIM_BENCH_MAX_PROCESS_FAIRNESS";
 const PROCESS_CONCURRENT_FAIRNESS_LIMIT: f64 = 4.0;
 
 #[path = "stdio_performance/harness.rs"]
@@ -189,6 +192,9 @@ fn benchmark_mcp_grep() {
                 "write_operation_delta": resources.write_operation_delta,
                 "write_bytes_delta": resources.write_bytes_delta,
                 "page_fault_delta": resources.page_fault_delta,
+                "cpu_time_ticks_delta": resources.cpu_time_ticks_delta,
+                "voluntary_ctxt_switches_delta": resources.voluntary_ctxt_switches_delta,
+                "involuntary_ctxt_switches_delta": resources.involuntary_ctxt_switches_delta,
                 "temp_bytes_high_water": 0,
                 "temp_files_high_water": 0,
             },
@@ -323,6 +329,7 @@ fn benchmark_mode(mode: &str) {
     let logs = tempfile::tempdir().expect("diagnostic directory");
     let cold_started = Instant::now();
     let mut session = Session::start(mode, logs.path());
+    let resources = ResourceMonitor::start(session.pid());
     let expected = session.read(1);
     let cold_ms = cold_started.elapsed().as_secs_f64() * 1_000.0;
     let mut warm_ms = Vec::with_capacity(WARM_SAMPLES);
@@ -335,41 +342,12 @@ fn benchmark_mode(mode: &str) {
     let process_output = session.run_process(WARM_SAMPLES as u64 + 2);
     let process_ms = process_started.elapsed().as_secs_f64() * 1_000.0;
     let process_concurrent_p95_limit_ms = configured_limit(PROCESS_CONCURRENT_P95_LIMIT_ENV, 350.0);
-    let process_concurrent = [1_usize, 8, 16]
-        .into_iter()
-        .enumerate()
-        .map(|(index, calls)| {
-            let mut completion_ms = session.run_process_batch(100 + index as u64 * 32, calls);
-            completion_ms.sort_by(f64::total_cmp);
-            let completion_p95_ms = percentile(&completion_ms, 95, 100);
-            let fastest_ms = completion_ms.first().copied().unwrap_or_default();
-            let slowest_ms = completion_ms.last().copied().unwrap_or_default();
-            let slowest_fastest_ratio = if fastest_ms == 0.0 {
-                1.0
-            } else {
-                slowest_ms / fastest_ms
-            };
-            assert!(
-                completion_p95_ms <= process_concurrent_p95_limit_ms,
-                "stdio {mode} {calls}-call process P95 {completion_p95_ms:.3} ms exceeds \
-                 {process_concurrent_p95_limit_ms:.3} ms"
-            );
-            assert!(
-                slowest_fastest_ratio <= PROCESS_CONCURRENT_FAIRNESS_LIMIT,
-                "stdio {mode} {calls}-call process fairness ratio \
-                 {slowest_fastest_ratio:.3} exceeds {PROCESS_CONCURRENT_FAIRNESS_LIMIT:.3}"
-            );
-            json!({
-                "calls": calls,
-                "completion_p50_ms": percentile(&completion_ms, 50, 100),
-                "completion_p95_ms": completion_p95_ms,
-                "completion_p95_limit_ms": process_concurrent_p95_limit_ms,
-                "slowest_fastest_ratio": slowest_fastest_ratio,
-                "slowest_fastest_ratio_limit": PROCESS_CONCURRENT_FAIRNESS_LIMIT,
-                "completion_ms": completion_ms,
-            })
-        })
-        .collect::<Vec<_>>();
+    let process_concurrent = process_concurrent_batches(
+        &mut session,
+        WARM_SAMPLES as u64 + 2,
+        process_concurrent_p95_limit_ms,
+    );
+    let resources = resources.finish();
     session.close();
     warm_ms.sort_by(f64::total_cmp);
     let p95_ms = percentile(&warm_ms, 95, 100);
@@ -406,8 +384,63 @@ fn benchmark_mode(mode: &str) {
             "process_ms": process_ms,
             "process_concurrent": process_concurrent,
             "process_output_bytes": process_output.to_string().len(),
+            "resources": {
+                "peak_working_set_bytes": resources.peak_working_set_bytes,
+                "peak_threads": resources.peak_threads,
+                "peak_handles": resources.peak_handles,
+                "read_operation_delta": resources.read_operation_delta,
+                "read_bytes_delta": resources.read_bytes_delta,
+                "write_operation_delta": resources.write_operation_delta,
+                "write_bytes_delta": resources.write_bytes_delta,
+                "page_fault_delta": resources.page_fault_delta,
+                "cpu_time_ticks_delta": resources.cpu_time_ticks_delta,
+                "voluntary_ctxt_switches_delta": resources.voluntary_ctxt_switches_delta,
+                "involuntary_ctxt_switches_delta": resources.involuntary_ctxt_switches_delta,
+            },
         })
     );
+}
+
+fn process_concurrent_batches(
+    session: &mut Session,
+    first_id: u64,
+    p95_limit_ms: f64,
+) -> Vec<Value> {
+    let fairness_limit = configured_limit(PROCESS_FAIRNESS_ENV, PROCESS_CONCURRENT_FAIRNESS_LIMIT);
+    [1_usize, 8, 16]
+        .into_iter()
+        .enumerate()
+        .map(|(index, calls)| {
+            let mut completion_ms = session.run_process_batch(first_id + index as u64 * 32, calls);
+            completion_ms.sort_by(f64::total_cmp);
+            let completion_p95_ms = percentile(&completion_ms, 95, 100);
+            let fastest_ms = completion_ms.first().copied().unwrap_or_default();
+            let slowest_ms = completion_ms.last().copied().unwrap_or_default();
+            let slowest_fastest_ratio = if fastest_ms == 0.0 {
+                1.0
+            } else {
+                slowest_ms / fastest_ms
+            };
+            assert!(
+                completion_p95_ms <= p95_limit_ms,
+                "{calls}-call process P95 {completion_p95_ms:.3} ms exceeds {p95_limit_ms:.3} ms"
+            );
+            assert!(
+                slowest_fastest_ratio <= fairness_limit,
+                "{calls}-call process fairness ratio {slowest_fastest_ratio:.3} exceeds \
+                 {fairness_limit:.3}"
+            );
+            json!({
+                "calls": calls,
+                "completion_p50_ms": percentile(&completion_ms, 50, 100),
+                "completion_p95_ms": completion_p95_ms,
+                "completion_p95_limit_ms": p95_limit_ms,
+                "slowest_fastest_ratio": slowest_fastest_ratio,
+                "slowest_fastest_ratio_limit": fairness_limit,
+                "completion_ms": completion_ms,
+            })
+        })
+        .collect()
 }
 
 fn configured_limit(name: &str, default: f64) -> f64 {

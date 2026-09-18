@@ -366,11 +366,7 @@ fn resolve_traversal(
         #[cfg(any(test, feature = "bench-internals"))]
         GrepTraversal::ParallelBatched => true,
         #[cfg(any(test, feature = "bench-internals"))]
-        GrepTraversal::ParallelBatchedLiteralPrefix => true,
-        #[cfg(any(test, feature = "bench-internals"))]
         GrepTraversal::Serial => false,
-        #[cfg(any(test, feature = "bench-internals"))]
-        GrepTraversal::SerialLiteralPrefix => false,
     };
     let threads = pool.extra_capacity().saturating_add(1).max(1);
     if wants_parallel && threads > 1 {

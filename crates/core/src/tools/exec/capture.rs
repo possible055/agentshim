@@ -208,6 +208,7 @@ impl Capture {
     }
 }
 
+#[derive(Debug)]
 pub struct RenderedCapture {
     pub text: String,
     pub shown_bytes: usize,

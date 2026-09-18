@@ -11,48 +11,22 @@ pub struct FileFingerprint {
 #[cfg(feature = "bench-internals")]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FingerprintMetrics {
-    pub file_id_calls: usize,
-    pub file_id_ns: u64,
-    pub standard_calls: usize,
-    pub standard_ns: u64,
-    pub basic_calls: usize,
-    pub basic_ns: u64,
+    pub query_calls: usize,
+    pub query_ns: u64,
 }
 
 #[cfg(all(feature = "bench-internals", windows))]
-static FINGERPRINT_FILE_ID_CALLS: std::sync::atomic::AtomicUsize =
+static FINGERPRINT_QUERY_CALLS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 #[cfg(all(feature = "bench-internals", windows))]
-static FINGERPRINT_FILE_ID_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-#[cfg(all(feature = "bench-internals", windows))]
-static FINGERPRINT_STANDARD_CALLS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-#[cfg(all(feature = "bench-internals", windows))]
-static FINGERPRINT_STANDARD_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-#[cfg(all(feature = "bench-internals", windows))]
-static FINGERPRINT_BASIC_CALLS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-#[cfg(all(feature = "bench-internals", windows))]
-static FINGERPRINT_BASIC_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FINGERPRINT_QUERY_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(feature = "bench-internals")]
 pub fn reset_fingerprint_metrics() {
     #[cfg(windows)]
     {
-        for counter in [
-            &FINGERPRINT_FILE_ID_CALLS,
-            &FINGERPRINT_STANDARD_CALLS,
-            &FINGERPRINT_BASIC_CALLS,
-        ] {
-            counter.store(0, std::sync::atomic::Ordering::Relaxed);
-        }
-        for counter in [
-            &FINGERPRINT_FILE_ID_NS,
-            &FINGERPRINT_STANDARD_NS,
-            &FINGERPRINT_BASIC_NS,
-        ] {
-            counter.store(0, std::sync::atomic::Ordering::Relaxed);
-        }
+        FINGERPRINT_QUERY_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+        FINGERPRINT_QUERY_NS.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -60,12 +34,8 @@ pub fn reset_fingerprint_metrics() {
 #[must_use]
 pub fn fingerprint_metrics() -> FingerprintMetrics {
     FingerprintMetrics {
-        file_id_calls: FINGERPRINT_FILE_ID_CALLS.load(std::sync::atomic::Ordering::Relaxed),
-        file_id_ns: FINGERPRINT_FILE_ID_NS.load(std::sync::atomic::Ordering::Relaxed),
-        standard_calls: FINGERPRINT_STANDARD_CALLS.load(std::sync::atomic::Ordering::Relaxed),
-        standard_ns: FINGERPRINT_STANDARD_NS.load(std::sync::atomic::Ordering::Relaxed),
-        basic_calls: FINGERPRINT_BASIC_CALLS.load(std::sync::atomic::Ordering::Relaxed),
-        basic_ns: FINGERPRINT_BASIC_NS.load(std::sync::atomic::Ordering::Relaxed),
+        query_calls: FINGERPRINT_QUERY_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+        query_ns: FINGERPRINT_QUERY_NS.load(std::sync::atomic::Ordering::Relaxed),
     }
 }
 
@@ -76,21 +46,10 @@ pub fn fingerprint_metrics() -> FingerprintMetrics {
 }
 
 #[cfg(all(feature = "bench-internals", windows))]
-fn record_fingerprint_query(class: i32, elapsed: std::time::Duration) {
-    use windows_sys::Win32::Storage::FileSystem::{FileBasicInfo, FileIdInfo, FileStandardInfo};
-
+fn record_fingerprint_query(elapsed: std::time::Duration) {
+    FINGERPRINT_QUERY_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let elapsed = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
-    let (calls, nanoseconds) = if class == FileIdInfo {
-        (&FINGERPRINT_FILE_ID_CALLS, &FINGERPRINT_FILE_ID_NS)
-    } else if class == FileStandardInfo {
-        (&FINGERPRINT_STANDARD_CALLS, &FINGERPRINT_STANDARD_NS)
-    } else if class == FileBasicInfo {
-        (&FINGERPRINT_BASIC_CALLS, &FINGERPRINT_BASIC_NS)
-    } else {
-        return;
-    };
-    calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let _ = nanoseconds.fetch_update(
+    let _ = FINGERPRINT_QUERY_NS.fetch_update(
         std::sync::atomic::Ordering::Relaxed,
         std::sync::atomic::Ordering::Relaxed,
         |current| Some(current.saturating_add(elapsed)),
@@ -113,11 +72,10 @@ struct PlatformFingerprint {
 #[cfg(windows)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PlatformFingerprint {
-    volume: u64,
-    file_id: [u8; 16],
-    length: i64,
+    volume: u32,
+    file_index: u64,
+    length: u64,
     last_write_time: i64,
-    change_time: i64,
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -160,10 +118,9 @@ impl FileFingerprint {
         #[cfg(windows)]
         {
             material.extend_from_slice(&self.platform.volume.to_le_bytes());
-            material.extend_from_slice(&self.platform.file_id);
+            material.extend_from_slice(&self.platform.file_index.to_le_bytes());
             material.extend_from_slice(&self.platform.length.to_le_bytes());
             material.extend_from_slice(&self.platform.last_write_time.to_le_bytes());
-            material.extend_from_slice(&self.platform.change_time.to_le_bytes());
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -179,30 +136,15 @@ impl FileFingerprint {
 
     #[must_use]
     pub fn length(&self) -> u64 {
-        #[cfg(windows)]
-        {
-            u64::try_from(self.platform.length).unwrap_or(0)
-        }
-        #[cfg(not(windows))]
-        {
-            self.platform.length
-        }
+        self.platform.length
     }
 
     #[cfg(windows)]
     pub fn matches_current_state(&self, file: &File) -> io::Result<bool> {
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{
-            FILE_BASIC_INFO, FILE_STANDARD_INFO, FileBasicInfo, FileStandardInfo,
-        };
-
-        let handle = file.as_raw_handle();
-        let standard: FILE_STANDARD_INFO = query_file_information(handle, FileStandardInfo)?;
-        let basic: FILE_BASIC_INFO = query_file_information(handle, FileBasicInfo)?;
-        Ok(self.regular != standard.Directory
-            && self.platform.length == standard.EndOfFile
-            && self.platform.last_write_time == basic.LastWriteTime
-            && self.platform.change_time == basic.ChangeTime)
+        let current = Self::from_file(file)?;
+        Ok(self.regular == current.regular
+            && self.platform.length == current.platform.length
+            && self.platform.last_write_time == current.platform.last_write_time)
     }
 
     #[cfg(unix)]
@@ -222,6 +164,14 @@ impl FileFingerprint {
                 && self.platform.changed_nanoseconds == current.platform.changed_nanoseconds)
                 || current.platform.nlink == 0,
         )
+    }
+
+    /// True when the open file has been unlinked. Unix keeps such a handle's contents
+    /// stable, so a read that captured its state before the unlink is still a coherent
+    /// version even though the path is gone.
+    #[cfg(unix)]
+    pub(crate) fn unlinked(&self) -> bool {
+        self.platform.nlink == 0
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -253,22 +203,18 @@ impl FileFingerprint {
     pub fn from_file(file: &File) -> io::Result<Self> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Storage::FileSystem::{
-            FILE_BASIC_INFO, FILE_ID_INFO, FILE_STANDARD_INFO, FileBasicInfo, FileIdInfo,
-            FileStandardInfo,
+            BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, GetFileInformationByHandle,
         };
 
         let handle = file.as_raw_handle();
-        let id: FILE_ID_INFO = query_file_information(handle, FileIdInfo)?;
-        let standard: FILE_STANDARD_INFO = query_file_information(handle, FileStandardInfo)?;
-        let basic: FILE_BASIC_INFO = query_file_information(handle, FileBasicInfo)?;
+        let info: BY_HANDLE_FILE_INFORMATION = query_by_handle(handle)?;
         Ok(Self {
-            regular: !standard.Directory,
+            regular: info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0,
             platform: PlatformFingerprint {
-                volume: id.VolumeSerialNumber,
-                file_id: id.FileId.Identifier,
-                length: standard.EndOfFile,
-                last_write_time: basic.LastWriteTime,
-                change_time: basic.ChangeTime,
+                volume: info.dwVolumeSerialNumber,
+                file_index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+                length: (u64::from(info.nFileSizeHigh) << 32) | u64::from(info.nFileSizeLow),
+                last_write_time: filetime_as_i64(&info.ftLastWriteTime),
             },
         })
     }
@@ -277,20 +223,21 @@ impl FileFingerprint {
     pub fn from_file_state(file: &File) -> io::Result<Self> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Storage::FileSystem::{
-            FILE_BASIC_INFO, FILE_STANDARD_INFO, FileBasicInfo, FileStandardInfo,
+            BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, GetFileInformationByHandle,
         };
 
         let handle = file.as_raw_handle();
-        let standard: FILE_STANDARD_INFO = query_file_information(handle, FileStandardInfo)?;
-        let basic: FILE_BASIC_INFO = query_file_information(handle, FileBasicInfo)?;
+        let info: BY_HANDLE_FILE_INFORMATION = query_by_handle(handle)?;
         Ok(Self {
-            regular: !standard.Directory,
+            regular: info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0,
+            // State fingerprints carry no identity: grep compares them against the open
+            // handle only, and the bench-only pathname-reopen policy reopens with
+            // `from_file` when it needs identity.
             platform: PlatformFingerprint {
                 volume: 0,
-                file_id: [0; 16],
-                length: standard.EndOfFile,
-                last_write_time: basic.LastWriteTime,
-                change_time: basic.ChangeTime,
+                file_index: 0,
+                length: (u64::from(info.nFileSizeHigh) << 32) | u64::from(info.nFileSizeLow),
+                last_write_time: filetime_as_i64(&info.ftLastWriteTime),
             },
         })
     }
@@ -314,26 +261,27 @@ impl FileFingerprint {
 }
 
 #[cfg(windows)]
-fn query_file_information<T: Default>(
+fn query_by_handle(
     handle: windows_sys::Win32::Foundation::HANDLE,
-    class: i32,
-) -> io::Result<T> {
-    use std::mem::size_of;
-    use windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandleEx;
+) -> io::Result<windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION> {
+    use windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandle;
 
-    let mut value = T::default();
-    let size = u32::try_from(size_of::<T>()).expect("file information size fits DWORD");
+    let mut info = <windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION>::default();
     #[cfg(feature = "bench-internals")]
     let started = std::time::Instant::now();
-    // SAFETY: `handle` is borrowed from a live file, and `value` is writable for the structure
-    // size corresponding to `class` at each call site.
-    let succeeded =
-        unsafe { GetFileInformationByHandleEx(handle, class, (&raw mut value).cast(), size) };
+    // SAFETY: `handle` is borrowed from a live file, and `info` is writable for the
+    // structure `GetFileInformationByHandle` fills.
+    let succeeded = unsafe { GetFileInformationByHandle(handle, &raw mut info) };
     #[cfg(feature = "bench-internals")]
-    record_fingerprint_query(class, started.elapsed());
+    record_fingerprint_query(started.elapsed());
     if succeeded == 0 {
         Err(io::Error::last_os_error())
     } else {
-        Ok(value)
+        Ok(info)
     }
+}
+
+#[cfg(windows)]
+fn filetime_as_i64(time: &windows_sys::Win32::Foundation::FILETIME) -> i64 {
+    (i64::from(time.dwHighDateTime) << 32) | i64::from(time.dwLowDateTime)
 }

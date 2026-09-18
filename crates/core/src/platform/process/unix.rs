@@ -38,6 +38,10 @@ thread_local! {
     static LAST_SPAWNED_PROCESS_GROUP: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
 }
 
+#[cfg(all(test, target_os = "linux"))]
+static FORCE_POLL_FALLBACK: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub fn run(
     plan: &ExecPlan<'_>,
     cancellation: &CancellationToken,
@@ -77,7 +81,7 @@ pub fn run(
                 captures,
             });
         }
-        lifecycle.wait_io(Duration::from_millis(10))?;
+        lifecycle.wait_io(Duration::from_millis(10), primary_exit.is_some())?;
     };
 
     let captures = if terminated_descendants {
@@ -282,6 +286,9 @@ struct Lifecycle {
     child: Child,
     process_group: i32,
     io: Option<UnixIo>,
+    /// pidfd for the unreaped direct child; its `POLLIN` turns exit detection into an
+    /// event instead of a bounded wait. `None` means the polling fallback is active.
+    exit_fd: Option<OwnedFd>,
     completed: bool,
 }
 
@@ -298,6 +305,7 @@ impl Lifecycle {
             child,
             process_group,
             io: None,
+            exit_fd: open_child_pidfd(process_group),
             completed: false,
         })
     }
@@ -317,11 +325,12 @@ impl Lifecycle {
             .poll()
     }
 
-    fn wait_io(&mut self, timeout: Duration) -> Result<(), ProcessError> {
-        self.io
-            .as_mut()
-            .expect("I/O is installed before waiting")
-            .wait(timeout)
+    fn wait_io(&mut self, timeout: Duration, reaped: bool) -> Result<(), ProcessError> {
+        let io = self.io.as_mut().expect("I/O is installed before waiting");
+        // Once the primary is reaped its pidfd stays readable forever, so it must leave
+        // the poll set: the loop then waits only on remaining group I/O.
+        let exit_fd = if reaped { None } else { self.exit_fd.as_ref() };
+        io.wait_with_exit(timeout, exit_fd)
             .map_err(ProcessError::Io)
     }
 
@@ -330,7 +339,12 @@ impl Lifecycle {
         if let Some(io) = self.io.as_mut() {
             io.close_stdin();
         }
-        let termination = terminate(self.process_group, &mut self.child, deadline);
+        let termination = terminate(
+            self.process_group,
+            &mut self.child,
+            deadline,
+            self.exit_fd.as_ref(),
+        );
         let settlement = self.settle_io(deadline);
         if termination.is_err() {
             self.best_effort_cleanup();
@@ -460,8 +474,15 @@ impl UnixIo {
     }
 
     fn wait(&self, timeout: Duration) -> io::Result<()> {
+        self.wait_with_exit(timeout, None)
+    }
+
+    /// Wait for pipe readiness, and additionally for `exit_fd` to signal termination
+    /// when one is supplied. The timeout still bounds every call so the caller's loop
+    /// keeps checking cancellation and deadlines.
+    fn wait_with_exit(&self, timeout: Duration, exit_fd: Option<&OwnedFd>) -> io::Result<()> {
         let mut descriptors =
-            Vec::with_capacity(usize::from(self.stdin.is_some()) + self.readers.len());
+            Vec::with_capacity(usize::from(self.stdin.is_some()) + self.readers.len() + 1);
         if let Some(stdin) = &self.stdin
             && self.input_offset < self.input.len()
         {
@@ -478,6 +499,13 @@ impl UnixIo {
                 revents: 0,
             })
         }));
+        if let Some(exit_fd) = exit_fd {
+            descriptors.push(libc::pollfd {
+                fd: exit_fd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
         let timeout_ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
         // SAFETY: `descriptors` owns a contiguous array for the duration of this call. `poll`
         // ignores the pointer when the descriptor count is zero and provides the bounded wait.
@@ -600,10 +628,17 @@ fn set_nonblocking(file_descriptor: i32) -> io::Result<()> {
 }
 
 /// Poll until the process group is gone or the deadline passes; `Ok(false)`
-/// means the deadline expired with the group still alive.
-fn wait_group_exit(process_group: i32, child: &mut Child, deadline: Instant) -> io::Result<bool> {
+/// means the deadline expired with the group still alive. While the primary is
+/// unreaped, its pidfd is the wake source for each bounded step; once it is reaped
+/// only group members remain and the sleep keeps the bounded polling cadence.
+fn wait_group_exit(
+    process_group: i32,
+    child: &mut Child,
+    deadline: Instant,
+    exit_fd: Option<&OwnedFd>,
+) -> io::Result<bool> {
     loop {
-        let _ = child.try_wait()?;
+        let pending = child.try_wait()?.is_none();
         if !group_exists(process_group)? {
             let _ = child.wait()?;
             return Ok(true);
@@ -611,7 +646,31 @@ fn wait_group_exit(process_group: i32, child: &mut Child, deadline: Instant) -> 
         if Instant::now() >= deadline {
             return Ok(false);
         }
-        thread::sleep(Duration::from_millis(10));
+        match exit_fd.filter(|_| pending) {
+            Some(exit_fd) => poll_exit_ready(exit_fd, Duration::from_millis(10))?,
+            None => thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
+/// Block until the pidfd becomes readable (the child terminated) or `timeout` elapses.
+fn poll_exit_ready(exit_fd: &OwnedFd, timeout: Duration) -> io::Result<()> {
+    let mut descriptor = libc::pollfd {
+        fd: exit_fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let timeout_ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+    // SAFETY: `descriptor` is a valid one-entry array for the duration of this call.
+    let result = unsafe { libc::poll(&raw mut descriptor, 1, timeout_ms) };
+    if result >= 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::Interrupted {
+        Ok(())
+    } else {
+        Err(error)
     }
 }
 
@@ -619,15 +678,16 @@ fn terminate(
     process_group: i32,
     child: &mut Child,
     cleanup_deadline: Instant,
+    exit_fd: Option<&OwnedFd>,
 ) -> Result<(), ProcessError> {
     signal_group(process_group, libc::SIGTERM)?;
     let grace_deadline = (Instant::now() + TERM_GRACE).min(cleanup_deadline);
-    if wait_group_exit(process_group, child, grace_deadline)? {
+    if wait_group_exit(process_group, child, grace_deadline, exit_fd)? {
         return Ok(());
     }
 
     signal_group(process_group, libc::SIGKILL)?;
-    if wait_group_exit(process_group, child, cleanup_deadline)? {
+    if wait_group_exit(process_group, child, cleanup_deadline, exit_fd)? {
         Ok(())
     } else {
         Err(ProcessError::OutcomeUncertain)
@@ -660,6 +720,62 @@ pub fn group_exists(process_group: i32) -> io::Result<bool> {
         Some(libc::EPERM) => Ok(true),
         _ => Err(error),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn open_child_pidfd(pid: i32) -> Option<OwnedFd> {
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    /// Process-wide capability probe result: unknown, available, or permanently
+    /// unavailable. `pidfd_open` failing with `ENOSYS` (kernel < 5.3), `EINVAL`, or a
+    /// seccomp `EPERM` is a property of the host, not of the child, so the first such
+    /// failure degrades every future spawn to the polling path as well.
+    const UNKNOWN: u8 = 0;
+    const AVAILABLE: u8 = 1;
+    const UNAVAILABLE: u8 = 2;
+    static AVAILABILITY: AtomicU8 = AtomicU8::new(UNKNOWN);
+
+    #[cfg(test)]
+    if FORCE_POLL_FALLBACK.load(Ordering::Relaxed) {
+        return None;
+    }
+    if AVAILABILITY.load(Ordering::Relaxed) == UNAVAILABLE {
+        return None;
+    }
+    match pidfd_open(pid) {
+        Ok(exit_fd) => {
+            AVAILABILITY.store(AVAILABLE, Ordering::Relaxed);
+            Some(exit_fd)
+        }
+        Err(error) => {
+            if matches!(
+                error.raw_os_error(),
+                Some(libc::ENOSYS | libc::EINVAL | libc::EPERM)
+            ) {
+                AVAILABILITY.store(UNAVAILABLE, Ordering::Relaxed);
+            }
+            None
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_child_pidfd(_pid: i32) -> Option<OwnedFd> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn pidfd_open(pid: i32) -> io::Result<OwnedFd> {
+    // SAFETY: `pidfd_open` takes the target pid and flags and returns a new descriptor
+    // or -1; no buffers are shared with the kernel.
+    let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    if descriptor < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let descriptor =
+        i32::try_from(descriptor).map_err(|_| io::Error::other("pidfd descriptor out of range"))?;
+    // SAFETY: the kernel returned a descriptor this process owns from here on.
+    Ok(unsafe { OwnedFd::from_raw_fd(descriptor) })
 }
 
 /// Request the kernel to deliver `SIGKILL` when the parent process exits, so an abrupt
@@ -764,7 +880,7 @@ impl DetachedTree {
     /// Terminate the process group and confirm it died before `deadline`, sharing one
     /// deadline across every tree a shutdown owns instead of budgeting five seconds each.
     pub fn terminate_and_wait(&mut self, deadline: Instant) -> Result<(), ProcessError> {
-        let outcome = terminate(self.process_group, &mut self.child, deadline);
+        let outcome = terminate(self.process_group, &mut self.child, deadline, None);
         if outcome.is_err() {
             let _ = signal_group(self.process_group, libc::SIGKILL);
             let _ = self.child.kill();
@@ -849,5 +965,162 @@ mod readiness_tests {
         writer.join().expect("writer");
         io.poll().expect("EOF");
         assert_eq!(io.captures[0].bytes_read, 5);
+    }
+}
+
+/// Behavior coverage for the pidfd-driven exit path and its permanent polling
+/// fallback. Latency claims are deliberately absent: they belong to the stdio
+/// benchmark's paired samples, not to clock-sensitive CI assertions.
+#[cfg(all(test, target_os = "linux"))]
+mod pidfd_exit_tests {
+    use super::*;
+    use crate::tools::exec::resolve::{Launcher, ResolvedProgram};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::Ordering;
+
+    fn run_shell(cwd: &Path, script: &str, timeout: Duration) -> Result<ExecOutcome, ExecFailure> {
+        let resolved = ResolvedProgram {
+            absolute: PathBuf::from("/bin/sh"),
+            executable: PathBuf::from("/bin/sh"),
+            launcher: Launcher::Native,
+        };
+        let args = vec!["-c".to_owned(), script.to_owned()];
+        let plan = ExecPlan {
+            resolved: &resolved,
+            cwd,
+            args: &args,
+            environment: &EnvironmentPlan::default(),
+            stdin: None,
+            streams: Streams::Merged,
+            timeout,
+            capture_page_bytes: crate::output::MODEL_BYTE_LIMIT,
+        };
+        run(&plan, &CancellationToken::new(), None)
+    }
+
+    struct ForceFallbackGuard;
+
+    impl Drop for ForceFallbackGuard {
+        fn drop(&mut self) {
+            FORCE_POLL_FALLBACK.store(false, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn pidfd_exit_reports_the_command_status() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let outcome =
+            run_shell(fixture.path(), "echo out; exit 7", Duration::from_secs(10)).expect("run");
+        assert_eq!(outcome.exit, "7");
+        let capture = &outcome.captures[0];
+        let rendered = capture.render(capture.retained());
+        assert!(rendered.text.contains("out"), "captured {rendered:?}");
+    }
+
+    #[test]
+    fn lingering_group_members_are_reaped_after_the_primary_exits() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let started = Instant::now();
+        let outcome = run_shell(
+            fixture.path(),
+            "sleep 30 & echo spawned",
+            Duration::from_secs(10),
+        )
+        .expect("run");
+        let elapsed = started.elapsed();
+
+        assert_eq!(outcome.exit, "0");
+        let capture = &outcome.captures[0];
+        let rendered = capture.render(capture.retained());
+        assert!(rendered.text.contains("spawned"), "captured {rendered:?}");
+        // The 30-second `sleep` must die with its process group, not outlive the call
+        // or hold the call open; the descendant grace is the only expected delay.
+        assert!(elapsed >= DESCENDANT_EXIT_GRACE.saturating_sub(Duration::from_millis(50)));
+        assert!(elapsed < Duration::from_secs(5), "cleanup took {elapsed:?}");
+        let group = take_spawned_process_group_for_tests().expect("spawned group");
+        assert!(
+            !process_group_exists_for_tests(group),
+            "the process group outlived the call"
+        );
+    }
+
+    #[test]
+    fn trapped_term_escapes_to_kill_inside_the_cleanup_deadline() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let started = Instant::now();
+        let result = run_shell(
+            fixture.path(),
+            "trap '' TERM; echo ready; sleep 30",
+            Duration::from_millis(600),
+        );
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(result, Err(ExecFailure::TimedOut { .. })),
+            "the hanging command must end in a bounded timeout, got {result:?}"
+        );
+        assert!(elapsed >= Duration::from_millis(600));
+        assert!(elapsed < Duration::from_secs(4), "cleanup took {elapsed:?}");
+        let group = take_spawned_process_group_for_tests().expect("spawned group");
+        assert!(
+            !process_group_exists_for_tests(group),
+            "the process group outlived the call"
+        );
+    }
+
+    #[test]
+    fn repeated_spawns_leave_no_pidfd_descriptors_behind() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let baseline = minimum_pidfd_count();
+        for _ in 0..6 {
+            run_shell(fixture.path(), "true", Duration::from_secs(10)).expect("run");
+        }
+        // Every pidfd is owned by its `Lifecycle` and must close with it. Other tests
+        // run concurrently and hold transient pidfds, so settle briefly instead of
+        // asserting an instant count.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if pidfd_descriptor_count() <= baseline {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "pidfd descriptors leaked: {} > {baseline}",
+                pidfd_descriptor_count()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn forced_fallback_preserves_the_polling_semantics() {
+        let _guard = ForceFallbackGuard;
+        FORCE_POLL_FALLBACK.store(true, Ordering::Relaxed);
+        let fixture = tempfile::tempdir().expect("fixture");
+        let outcome = run_shell(fixture.path(), "exit 3", Duration::from_secs(10)).expect("run");
+        assert_eq!(outcome.exit, "3");
+    }
+
+    fn minimum_pidfd_count() -> usize {
+        let mut minimum = pidfd_descriptor_count();
+        for _ in 0..2 {
+            thread::sleep(Duration::from_millis(5));
+            minimum = minimum.min(pidfd_descriptor_count());
+        }
+        minimum
+    }
+
+    fn pidfd_descriptor_count() -> usize {
+        std::fs::read_dir("/proc/self/fd")
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        std::fs::read_link(entry.path())
+                            .is_ok_and(|target| target.to_string_lossy().contains("pidfd"))
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
     }
 }

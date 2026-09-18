@@ -351,16 +351,8 @@ pub(super) fn glob_traversals() -> &'static [(&'static str, glob::GlobTraversal)
                         "serial" => ("serial", glob::GlobTraversal::Serial),
                         "parallel_256" => ("parallel_256", glob::GlobTraversal::ParallelBatched),
                         "adaptive" => ("adaptive", glob::GlobTraversal::Adaptive),
-                        "serial_prefix" => {
-                            ("serial_prefix", glob::GlobTraversal::SerialLiteralPrefix)
-                        }
-                        "parallel_256_prefix" => (
-                            "parallel_256_prefix",
-                            glob::GlobTraversal::ParallelBatchedLiteralPrefix,
-                        ),
                         _ => panic!(
-                            "{GLOB_TRAVERSALS_ENV} accepts only serial,parallel_256,adaptive,\
-                             serial_prefix,parallel_256_prefix"
+                            "{GLOB_TRAVERSALS_ENV} accepts only serial,parallel_256,adaptive"
                         ),
                     })
                     .collect::<Vec<_>>();

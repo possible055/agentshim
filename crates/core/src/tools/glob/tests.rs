@@ -354,36 +354,60 @@ mod tests {
         }
     }
 
+    /// Production traversal prunes to the pattern's literal prefix, so a fully literal
+    /// pattern, a partially literal one, and a pattern without any literal prefix must
+    /// all produce the same result set on a fixture where they match the same files.
     #[test]
-    fn literal_prefix_glob_preserves_serial_and_parallel_result_set() {
+    fn literal_prefix_patterns_match_full_traversal_results() {
         let fixture = tempfile::tempdir().expect("fixture");
         fs::write(fixture.path().join(".gitignore"), "src/deep/ignored.rs\n").expect("ignore");
         fs::create_dir_all(fixture.path().join("src/deep")).expect("deep");
         fs::create_dir_all(fixture.path().join("src/sibling")).expect("sibling");
+        fs::create_dir_all(fixture.path().join("other")).expect("other");
         fs::write(fixture.path().join("src/deep/a.rs"), "source").expect("a");
         fs::write(fixture.path().join("src/deep/ignored.rs"), "ignored").expect("ignored");
         fs::write(fixture.path().join("src/sibling/b.rs"), "source").expect("b");
+        fs::write(fixture.path().join("other/c.rs"), "source").expect("c");
         let root = access(fixture.path());
-        let query = request("src/deep/*.rs");
         let cancellation = CancellationToken::new();
-        let expected = execute_with_traversal(
-            &root,
-            &query,
-            TEST_LANES,
-            &cancellation,
-            GlobTraversal::Serial,
-        )
-        .expect("serial glob");
-        let expected = sorted_result_lines(&expected);
-
-        for traversal in [
-            GlobTraversal::SerialLiteralPrefix,
-            GlobTraversal::ParallelBatchedLiteralPrefix,
-        ] {
-            let output =
-                execute_with_traversal(&root, &query, TEST_LANES, &cancellation, traversal)
-                    .expect("literal prefix glob");
-            assert_eq!(sorted_result_lines(&output), expected);
+        // The three patterns differ in how far they let the traversal prune, but in
+        // this fixture they all select only src/deep/a.rs. Pruning must not change the
+        // ancestor gitignore policy or leak pruned subtrees into the result set.
+        let mut expected = None;
+        for traversal in [GlobTraversal::Serial, GlobTraversal::ParallelBatched] {
+            for pattern in ["src/deep/*.rs", "src/*ep/*.rs", "**/deep/*.rs"] {
+                let mut query = request(pattern);
+                query.include_ignored = Some(false);
+                let output =
+                    execute_with_traversal(&root, &query, TEST_LANES, &cancellation, traversal)
+                        .expect("literal prefix glob");
+                let lines = sorted_result_lines(&output);
+                let matched = expected.get_or_insert_with(|| lines.clone());
+                assert_eq!(lines, *matched, "pattern={pattern}");
+                assert!(
+                    matched.len() == 1 && matched[0].contains("src/deep/a.rs"),
+                    "pattern={pattern} produced {matched:?}"
+                );
+                assert!(!output.contains("sibling"), "pattern={pattern}");
+                assert!(!output.contains("other/"), "pattern={pattern}");
+                assert!(!output.contains("ignored.rs"), "pattern={pattern}");
+            }
+        }
+        // A prefix naming a nonexistent directory yields the same empty result the
+        // full traversal would, with no new error surface.
+        let mut expected_missing = None;
+        for pattern in ["src/missing/*.rs", "**/missing/*.rs"] {
+            let output = execute_with_traversal(
+                &root,
+                &request(pattern),
+                TEST_LANES,
+                &cancellation,
+                GlobTraversal::Serial,
+            )
+            .expect("missing prefix glob");
+            let matched = expected_missing.get_or_insert_with(|| output.clone());
+            assert_eq!(output, *matched, "pattern={pattern}");
+            assert!(output.contains("No paths matched"), "pattern={pattern}");
         }
     }
 
