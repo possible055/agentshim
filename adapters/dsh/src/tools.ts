@@ -5,7 +5,7 @@ import { JobId } from '@deepseek-ai/dsh-jobs'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolCallView, ToolDefinition, ToolResultView, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { ResolvedPluginConfig } from './config.ts'
-import { getDshPackageVersion, materializeReadAttachments } from './content.ts'
+import { materializeReadAttachments } from './content.ts'
 import {
   beginReadObservation,
   completeReadObservation,
@@ -447,14 +447,6 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
   return new Map(PUBLIC_TOOL_NAMES.map(name => [name, definitions[name]]))
 }
 
-export function isModernDsh(): boolean {
-  const version = getDshPackageVersion()
-  if (version !== undefined && (version.startsWith('0.1.0-rc') || version.startsWith('0.1.1-rc'))) {
-    return false
-  }
-  return true
-}
-
 interface SystemPromptOrderService {
   readonly getSectionOrder?: (name: string) => unknown
 }
@@ -476,14 +468,6 @@ function getSystemPromptService(ctx: Context | undefined): SystemPromptOrderServ
   }
 }
 
-function hasSectionOrder(service: SystemPromptOrderService | undefined): boolean {
-  try {
-    return typeof service?.getSectionOrder === 'function'
-  } catch {
-    return false
-  }
-}
-
 function resolveOrder(ctx: Context | undefined, name: string, fallback: number): number {
   const service = getSystemPromptService(ctx)
   try {
@@ -495,39 +479,19 @@ function resolveOrder(ctx: Context | undefined, name: string, fallback: number):
   }
 }
 
-export function promptSections(ctxOrModern: Context | boolean = isModernDsh()): ReadonlyArray<{ readonly name: string; readonly order: number; readonly text: string }> {
-  const ctx = typeof ctxOrModern === 'boolean' ? undefined : ctxOrModern
-  const sp = getSystemPromptService(ctx)
-  const isModern = typeof ctxOrModern === 'boolean'
-    ? ctxOrModern
-    : (hasSectionOrder(sp) || isModernDsh())
-  if (isModern) {
-    return [
-      { name: 'tool:bash', order: resolveOrder(ctx, 'TOOL_BASH', 1000), text: 'Use run_in_background=true for long-running work.' },
-      { name: 'tool:run_program', order: resolveOrder(ctx, 'TOOL_BASH', 1000) + 5, text: 'Prefer run_program for single executables with literal arguments; use bash only when shell composition is required.' },
-      { name: 'tool:read', order: resolveOrder(ctx, 'TOOL_READ', 1100), text: 'Continue truncated reads by passing next_start_line as start_line.' },
-      { name: 'tool:glob', order: resolveOrder(ctx, 'TOOL_GLOB', 1400), text: 'Continue truncated glob results by passing next_offset as offset.' },
-      { name: 'tool:grep', order: resolveOrder(ctx, 'TOOL_GREP', 1500), text: 'Continue truncated grep results by passing next_offset as offset.' },
-      { name: 'tool:bash_status', order: resolveOrder(ctx, 'TOOL_JOBS', 1600) + 5, text: 'Use bash_status to check the lifecycle status of a background Bash job.' },
-    ]
-  }
+export function promptSections(ctx: Context): ReadonlyArray<{ readonly name: string; readonly order: number; readonly text: string }> {
   return [
-    { name: 'tool:read', order: 100, text: 'Continue truncated reads by passing next_start_line as start_line.' },
-    { name: 'tool:glob', order: 103, text: 'Continue truncated glob results by passing next_offset as offset.' },
-    { name: 'tool:grep', order: 104, text: 'Continue truncated grep results by passing next_offset as offset.' },
-    { name: 'tool:run_program', order: 104.5, text: 'Prefer run_program for single executables with literal arguments; use bash only when shell composition is required.' },
-    { name: 'tool:bash', order: 105, text: 'Use run_in_background=true for long-running work.' },
-    { name: 'tool:bash_status', order: 105.5, text: 'Use bash_status to check the lifecycle status of a background Bash job.' },
+    { name: 'tool:bash', order: resolveOrder(ctx, 'TOOL_BASH', 1000), text: 'Use run_in_background=true for long-running work.' },
+    { name: 'tool:run_program', order: resolveOrder(ctx, 'TOOL_BASH', 1000) + 5, text: 'Prefer run_program for single executables with literal arguments; use bash only when shell composition is required.' },
+    { name: 'tool:read', order: resolveOrder(ctx, 'TOOL_READ', 1100), text: 'Continue truncated reads by passing next_start_line as start_line.' },
+    { name: 'tool:glob', order: resolveOrder(ctx, 'TOOL_GLOB', 1400), text: 'Continue truncated glob results by passing next_offset as offset.' },
+    { name: 'tool:grep', order: resolveOrder(ctx, 'TOOL_GREP', 1500), text: 'Continue truncated grep results by passing next_offset as offset.' },
+    { name: 'tool:bash_status', order: resolveOrder(ctx, 'TOOL_JOBS', 1600) + 5, text: 'Use bash_status to check the lifecycle status of a background Bash job.' },
   ]
 }
 
-export function pwshSectionOrder(ctxOrModern: Context | boolean = isModernDsh()): number {
-  const ctx = typeof ctxOrModern === 'boolean' ? undefined : ctxOrModern
-  const sp = getSystemPromptService(ctx)
-  const isModern = typeof ctxOrModern === 'boolean'
-    ? ctxOrModern
-    : (hasSectionOrder(sp) || isModernDsh())
-  return isModern ? resolveOrder(ctx, 'TOOL_PWSH', 1010) : 105
+export function pwshSectionOrder(ctx: Context): number {
+  return resolveOrder(ctx, 'TOOL_PWSH', 1010)
 }
 
 export const RESTRICT_CANDIDATES = [...PUBLIC_TOOL_NAMES, 'pwsh'] as const

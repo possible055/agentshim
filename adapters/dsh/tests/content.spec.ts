@@ -83,7 +83,7 @@ describe('materializeContent', () => {
     expect(error).toMatchObject({ code: 'AGENTSHIM_IMAGE_ROUTE_UNSUPPORTED' })
   })
 
-  it('persists images via batch saveImages and skips manual deferral when rc.7+ host capability is present', async () => {
+  it('persists images via batch saveImages', async () => {
     const saveImages = vi.fn(async () => [
       { attachmentId: 'att-1', mediaType: 'image/png', bytes: 70, width: 1, height: 1 },
       { attachmentId: 'att-2', mediaType: 'image/png', bytes: 70, width: 1, height: 1 },
@@ -103,7 +103,7 @@ describe('materializeContent', () => {
     expect(deferContext).not.toHaveBeenCalled()
   })
 
-  it('preserves originalDimensions on normalized images from DSH 0.1.2-alpha.1 attachment store', async () => {
+  it('preserves originalDimensions on normalized images from the attachment store', async () => {
     const saveImages = vi.fn(async () => [
       {
         attachmentId: 'att-norm',
@@ -127,42 +127,6 @@ describe('materializeContent', () => {
         originalDimensions: { width: 4000, height: 4000 },
       },
     })
-  })
-
-  it('persists validated images and manually defers under rc.6 legacy host without saveImages', async () => {
-    const attachments = stubAttachments()
-    const deferContext = vi.fn()
-    const exec = stubExec({ agent: routedAgent(), parent: Symbol('code-mode') as never, deferContext })
-    const blocks = await materializeContent(stubContext({ attachments, llm: stubLlm(['text', 'image']) }), exec, [
-      { type: 'text', text: 'page 1' },
-      { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
-      { type: 'text', text: 'end' },
-    ])
-    expect(blocks).toHaveLength(3)
-    expect(blocks[0]).toEqual({ type: 'text', text: 'page 1' })
-    expect(blocks[1]).toMatchObject({ type: 'image', attachment: { attachmentId: 'att-1', mediaType: 'image/png' } })
-    expect(blocks[2]).toEqual({ type: 'text', text: 'end' })
-    expect(JSON.stringify(blocks)).not.toContain(PNG_1X1)
-    expect(attachments.validateImage).toHaveBeenCalledTimes(1)
-    expect(attachments.saveImage).toHaveBeenCalledTimes(1)
-    const saved = (attachments.saveImage as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { data: Uint8Array; mediaType: string }
-    expect(saved.mediaType).toBe('image/png')
-    expect(saved.data).toBeInstanceOf(Uint8Array)
-    expect(deferContext).toHaveBeenCalledTimes(1)
-  })
-
-  it('validates every image before persisting any', async () => {
-    const attachments = stubAttachments({
-      validateImage: vi.fn(async input => {
-        if (input.mediaType === 'image/jpeg') throw new Error('decode failed')
-      }),
-    })
-    const exec = stubExec({ agent: routedAgent() })
-    await expect(materializeContent(stubContext({ attachments, llm: stubLlm(['image']) }), exec, [
-      { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
-      { type: 'image', data: PNG_1X1, mimeType: 'image/jpeg' },
-    ])).rejects.toThrow(/decode failed/)
-    expect(attachments.saveImage).not.toHaveBeenCalled()
   })
 
   it('rejects invalid base64 and unsupported media types', async () => {

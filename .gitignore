@@ -39,6 +39,7 @@ CLAUDE.md
 *.log
 .env
 !.env.example
+.envrc
 
 # Project-specific
 adapters/dsh/lib/

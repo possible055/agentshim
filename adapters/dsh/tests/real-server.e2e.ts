@@ -6,7 +6,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
-import WorkerThreadCodeRuntime from '@deepseek-ai/dsh-code-runtime-worker-thread'
+import NodePtcRuntime from '@deepseek-ai/dsh-ptc-runtime-node'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as llm from '@deepseek-ai/dsh-llm'
 const createCallId = (llm as { ToolCallId?: (id: string) => any; CallId?: (id: string) => any }).ToolCallId
@@ -15,6 +15,7 @@ const createCallId = (llm as { ToolCallId?: (id: string) => any; CallId?: (id: s
 const CallId = createCallId
 import { createScope } from '@deepseek-ai/dsh-scope'
 import ShellExecutor from '@deepseek-ai/dsh-shell'
+import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import * as TimeoutPolicy from '@deepseek-ai/dsh-tool-call-timeout-policy'
 import * as ToolJobs from '@deepseek-ai/dsh-tool-jobs'
@@ -60,8 +61,38 @@ class UnconfinedShell extends ShellExecutor {
     return Promise.reject(new Error('native E2E marker shell must not execute'))
   }
 
-  override start(): never {
-    throw new Error('native E2E marker shell must not execute')
+  override start(): Promise<never> {
+    return Promise.reject(new Error('native E2E marker shell must not execute'))
+  }
+}
+
+class PassthroughSandbox extends Service {
+  constructor(inner: Context) {
+    super(inner, 'sandbox')
+  }
+
+  async confine(argv: readonly string[]): Promise<{
+    argv: string[]
+    enforcement: 'full'
+    denialSignatures: string[]
+    runnerFailureRules: []
+  }> {
+    return {
+      argv: [...argv],
+      enforcement: 'full',
+      denialSignatures: ['permission denied'],
+      runnerFailureRules: [],
+    }
+  }
+}
+
+class WorkspaceWritePolicy extends Service {
+  constructor(inner: Context) {
+    super(inner, 'sandboxPolicy')
+  }
+
+  resolve(request: { mode?: string } = {}): { mode: string; workspaceRoot: string } {
+    return { mode: request.mode ?? 'workspace-write', workspaceRoot: repoRoot }
   }
 }
 
@@ -88,7 +119,12 @@ async function startRealComposition(
   const captureRoot = await mkdtemp(join(tmpdir(), 'agentshim-real-captures-'))
   const ctx = new Context()
   await ctx.plugin(SystemPrompt, {})
-  if (mode !== 'native') await ctx.plugin(WorkerThreadCodeRuntime, {})
+  if (mode !== 'native') {
+    await ctx.plugin(LocalSubprocessRuntime)
+    await ctx.plugin(PassthroughSandbox)
+    await ctx.plugin(WorkspaceWritePolicy)
+    await ctx.plugin(NodePtcRuntime, {})
+  }
   await ctx.plugin(ToolRuntime, { mode })
   registerInheritedCatalog(ctx)
   await ctx.plugin(TimeoutPolicy)
@@ -125,7 +161,7 @@ async function startRealComposition(
     ;(draft as { ctx?: Context }).ctx = scope.ctx
     agent = draft
   }, { inject: ['tools', 'systemPrompt'] }))
-  const unregisterAgent = ctx.agents.register(agent)
+  const unregisterAgent = await ctx.agents.register(agent)
 
   return {
     ctx,

@@ -48,7 +48,7 @@ describe('native public contracts', () => {
     })
   })
 
-  it('declares attachment originalDimensions in readOutputSchema for DSH 0.1.2-alpha.1 compatibility', () => {
+  it('declares attachment originalDimensions in readOutputSchema', () => {
     const properties = (readOutputSchema as { properties: { attachments: { items: { properties: Record<string, unknown> } } } }).properties
     const attachmentProperties = properties.attachments.items.properties
     expect(attachmentProperties).toHaveProperty('originalDimensions')

@@ -24,7 +24,7 @@ import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as agentshim from '../src/index.ts'
 import type { Config } from '../src/index.ts'
 import { PUBLIC_TOOL_NAMES } from '../src/contracts.ts'
-import { isModernDsh, promptSections, pwshSectionOrder } from '../src/tools.ts'
+import { promptSections, pwshSectionOrder } from '../src/tools.ts'
 
 const builtNativeDll = fileURLToPath(new URL(
   process.platform === 'win32'
@@ -155,7 +155,7 @@ async function mintAgent(ctx: Context, name: string, cwd: string): Promise<Minte
 async function mintStandardAgent(ctx: Context, name: string, cwd: string): Promise<MintedAgent> {
   registerInheritedTools(ctx, ['read', 'grep', 'glob', 'bash'])
   const minted = await mintAgent(ctx, name, cwd)
-  ctx.emit('agent/created', { agent: minted.agent })
+  ctx.emit('agent/created', { agent: minted.agent, source: 'startup' })
   return minted
 }
 
@@ -261,7 +261,7 @@ describe('agent scope replacement', () => {
     const ctx = await mountComposition(root)
     registerInheritedTools(ctx, ['read', 'grep', 'glob', 'bash', 'pwsh', 'write', 'edit', 'read_image', 'todo'])
     const { agent } = await mintAgent(ctx, 'a1', root)
-    ctx.emit('agent/created', { agent })
+    ctx.emit('agent/created', { agent, source: 'startup' })
 
     const names = visibleNames(ctx, agent)
     expect(names).toContain('read')
@@ -341,7 +341,7 @@ describe('agent scope replacement', () => {
     ctx.systemPrompt.section({ name: 'tool:pwsh', order: 105, text: 'INHERITED-PWSH-GUIDANCE' })
     registerInheritedTools(ctx, ['read', 'grep', 'glob', 'bash', 'pwsh', 'write', 'edit'])
     const { agent } = await mintAgent(ctx, 'a2', root)
-    ctx.emit('agent/created', { agent })
+    ctx.emit('agent/created', { agent, source: 'startup' })
 
     const assembly = await ctx.systemPrompt.assemble({ scope: agent })
     const prompt = JSON.stringify(assembly)
@@ -368,7 +368,7 @@ describe('agent scope replacement', () => {
       toolCallTimeoutMs: 600_000,
     }))
     const { agent } = await mintAgent(ctx, 'minimal', root)
-    ctx.emit('agent/created', { agent })
+    ctx.emit('agent/created', { agent, source: 'startup' })
 
     expect(visibleNames(ctx, agent)).toEqual(['bash', 'bash_status', 'str_replace_editor'])
     const bash = ctx.tools.get('bash', agent)
@@ -395,7 +395,7 @@ describe('agent scope replacement', () => {
     const ctx = await mountComposition(root)
     registerInheritedTools(ctx, ['bash_status', 'str_replace_editor'])
     const { agent } = await mintAgent(ctx, 'status-without-bash', root)
-    ctx.emit('agent/created', { agent })
+    ctx.emit('agent/created', { agent, source: 'startup' })
 
     expect(visibleNames(ctx, agent)).toEqual(['str_replace_editor'])
     const assembly = await ctx.systemPrompt.assemble({ scope: agent })
@@ -409,8 +409,8 @@ describe('agent scope replacement', () => {
     registerInheritedTools(ctx, ['read', 'grep', 'glob', 'bash', 'write', 'edit'])
     const matching = await mintAgent(ctx, 'match', root)
     const other = await mintAgent(ctx, 'other', elsewhere)
-    ctx.emit('agent/created', { agent: matching.agent })
-    ctx.emit('agent/created', { agent: other.agent })
+    ctx.emit('agent/created', { agent: matching.agent, source: 'startup' })
+    ctx.emit('agent/created', { agent: other.agent, source: 'startup' })
 
     expect(visibleNames(ctx, other.agent)).toContain('run_program')
     expect(visibleNames(ctx, matching.agent)).toContain('run_program')
@@ -425,7 +425,7 @@ describe('agent scope replacement', () => {
     registerInheritedTools(ctx, ['read', 'grep', 'glob', 'bash', 'pwsh', 'write'])
     const { agent } = await mintAgent(ctx, 'a3', root)
     agent.ctx.tools.register(inheritedTool('bash'))
-    expect(() => ctx.emit('agent/created', { agent })).toThrow(/duplicate|already/i)
+    expect(() => ctx.emit('agent/created', { agent, source: 'startup' })).toThrow(/duplicate|already/i)
 
     const names = visibleNames(ctx, agent)
     expect(names).not.toContain('run_program')
@@ -438,7 +438,7 @@ describe('agent scope replacement', () => {
     const ctx = await mountComposition(root)
     registerInheritedTools(ctx, ['read', 'grep', 'glob', 'bash', 'pwsh', 'write'])
     const { agent } = await mintAgent(ctx, 'a4', root)
-    ctx.emit('agent/created', { agent })
+    ctx.emit('agent/created', { agent, source: 'startup' })
     expect(visibleNames(ctx, agent)).toContain('run_program')
 
     ctx.emit('agent/disposed', { agent })
@@ -615,7 +615,7 @@ describe('preset-scoped catalog (web surface topology)', () => {
     const { agent } = await mintPresetAgent(ctx, 'standard', root, [
       'read', 'grep', 'glob', 'pwsh', 'write', 'edit', 'read_image', 'todo',
     ])
-    ctx.emit('agent/created', { agent })
+    ctx.emit('agent/created', { agent, source: 'startup' })
 
     expect(visibleNames(ctx, agent)).toEqual([
       'bash', 'bash_status', 'edit', 'glob', 'grep', 'read', 'read_image', 'run_program', 'todo', 'write',
@@ -631,7 +631,7 @@ describe('preset-scoped catalog (web surface topology)', () => {
     const root = await makeRoot()
     const ctx = await mountComposition(root)
     const { agent } = await mintPresetAgent(ctx, 'minimal', root, ['bash', 'str_replace_editor'])
-    ctx.emit('agent/created', { agent })
+    ctx.emit('agent/created', { agent, source: 'startup' })
 
     expect(visibleNames(ctx, agent)).toEqual(['bash', 'bash_status', 'str_replace_editor'])
     expect(ctx.tools.get('bash', agent)?.description).toContain('POSIX')
@@ -647,7 +647,7 @@ describe('preset-scoped catalog (web surface topology)', () => {
     ])
     standing.ctx.systemPrompt.section({ name: 'tool:read', order: 100, text: 'PRESET-READ-GUIDANCE' })
     standing.ctx.systemPrompt.section({ name: 'tool:pwsh', order: 105, text: 'PRESET-PWSH-GUIDANCE' })
-    ctx.emit('agent/created', { agent })
+    ctx.emit('agent/created', { agent, source: 'startup' })
 
     const prompt = JSON.stringify(await ctx.systemPrompt.assemble({ scope: agent }))
     expect(prompt).not.toContain('PRESET-READ-GUIDANCE')
@@ -660,7 +660,7 @@ describe('preset-scoped catalog (web surface topology)', () => {
     const root = await makeRoot()
     const ctx = await mountComposition(root)
     const { agent } = await mintPresetAgent(ctx, 'status-only', root, ['bash_status', 'str_replace_editor'])
-    ctx.emit('agent/created', { agent })
+    ctx.emit('agent/created', { agent, source: 'startup' })
 
     expect(visibleNames(ctx, agent)).toEqual(['str_replace_editor'])
     expect(JSON.stringify(await ctx.systemPrompt.assemble({ scope: agent })))
@@ -673,7 +673,7 @@ describe('preset-scoped catalog (web surface topology)', () => {
     const warn = vi.spyOn(ctx.logger, 'warn')
     const missing = join(tmpdir(), `agentshim-no-overlap-${Math.random()}`)
     const { agent } = await mintPresetAgent(ctx, 'no-overlap', missing, ['todo', 'write'])
-    ctx.emit('agent/created', { agent })
+    ctx.emit('agent/created', { agent, source: 'startup' })
 
     expect(visibleNames(ctx, agent)).toEqual(['todo', 'write'])
     expect(warn).not.toHaveBeenCalled()
@@ -687,8 +687,8 @@ describe('multi-workspace engine pool', () => {
     registerInheritedTools(ctx, ['read', 'grep', 'glob', 'bash'])
     const a = await mintAgent(ctx, 'shared-a', root)
     const b = await mintAgent(ctx, 'shared-b', root)
-    ctx.emit('agent/created', { agent: a.agent })
-    ctx.emit('agent/created', { agent: b.agent })
+    ctx.emit('agent/created', { agent: a.agent, source: 'startup' })
+    ctx.emit('agent/created', { agent: b.agent, source: 'startup' })
 
     expect(visibleNames(ctx, a.agent)).toContain('run_program')
     expect(visibleNames(ctx, b.agent)).toContain('run_program')
@@ -704,7 +704,7 @@ describe('multi-workspace engine pool', () => {
     const ctx = await mountComposition(root)
     registerInheritedTools(ctx, ['read', 'grep', 'glob', 'bash'])
     const { agent } = await mintAgent(ctx, 'bad-cwd', join(tmpdir(), 'agentshim-nonexistent-' + Math.random()))
-    ctx.emit('agent/created', { agent })
+    ctx.emit('agent/created', { agent, source: 'startup' })
 
     expect(visibleNames(ctx, agent)).not.toContain('run_program')
     expect(await runTool(ctx, agent, 'read', {})).toBe('inherited:read')
@@ -719,8 +719,8 @@ describe('multi-workspace engine pool', () => {
     await writeFile(join(rootB, 'marker.txt'), 'workspace B')
     const agentA = await mintAgent(ctx, 'ws-a', rootA)
     const agentB = await mintAgent(ctx, 'ws-b', rootB)
-    ctx.emit('agent/created', { agent: agentA.agent })
-    ctx.emit('agent/created', { agent: agentB.agent })
+    ctx.emit('agent/created', { agent: agentA.agent, source: 'startup' })
+    ctx.emit('agent/created', { agent: agentB.agent, source: 'startup' })
 
     expect(visibleNames(ctx, agentA.agent)).toContain('run_program')
     expect(visibleNames(ctx, agentB.agent)).toContain('run_program')
@@ -831,7 +831,7 @@ describe('DSH native contracts', () => {
       registerInheritedTools(inner, ['bash'])
     })
     const { agent } = await mintAgent(ctx, 'background-timeout', root)
-    ctx.emit('agent/created', { agent })
+    ctx.emit('agent/created', { agent, source: 'startup' })
     await ctx.plugin(class extends Service {
       constructor(inner: Context) {
         super(inner, 'agents')
@@ -1085,7 +1085,7 @@ describe('DSH native contracts', () => {
       constructor(inner: Context) {
         super(inner, 'sandbox')
       }
-      confine(argv: readonly string[], policy: { mode: string }) {
+      async confine(argv: readonly string[], policy: { mode: string }) {
         confineCalls.push({ argv, policy })
         return {
           argv: [...argv],
@@ -1213,7 +1213,7 @@ describe('DSH native contracts', () => {
       })
       registerInheritedTools(ctx, ['read', 'grep', 'glob', 'bash'])
       const { agent } = await mintAgent(ctx, 'no-bash', root)
-      ctx.emit('agent/created', { agent })
+      ctx.emit('agent/created', { agent, source: 'startup' })
       expect(visibleNames(ctx, agent)).not.toContain('run_program')
       expect(await runTool(ctx, agent, 'read', {})).toBe('inherited:read')
     } finally {
@@ -1342,29 +1342,18 @@ describe('DSH native contracts', () => {
     expect(result.error?.message).toContain('pdf_mode: "text"')
   })
 
-  it('generates correct section orders for modern DSH (0.1.2-alpha.1 ~ 0.1.5-rc.1) and legacy mode', async () => {
-    expect(typeof isModernDsh()).toBe('boolean')
-    const modern = promptSections(true)
-    const modernMap = new Map(modern.map(s => [s.name, s.order]))
-    expect(modernMap.get('tool:bash')).toBe(1000)
-    expect(modernMap.get('tool:run_program')).toBe(1005)
-    expect(modernMap.get('tool:read')).toBe(1100)
-    expect(modernMap.get('tool:glob')).toBe(1400)
-    expect(modernMap.get('tool:grep')).toBe(1500)
-    expect(modernMap.get('tool:bash_status')).toBe(1605)
-    expect(pwshSectionOrder(true)).toBe(1010)
+  it('resolves section orders from the system-prompt service with static fallbacks', async () => {
+    const fallbackCtx = {} as unknown as Parameters<typeof promptSections>[0]
+    const fallbackMap = new Map(promptSections(fallbackCtx).map(s => [s.name, s.order]))
+    expect(fallbackMap.get('tool:bash')).toBe(1000)
+    expect(fallbackMap.get('tool:run_program')).toBe(1005)
+    expect(fallbackMap.get('tool:read')).toBe(1100)
+    expect(fallbackMap.get('tool:glob')).toBe(1400)
+    expect(fallbackMap.get('tool:grep')).toBe(1500)
+    expect(fallbackMap.get('tool:bash_status')).toBe(1605)
+    expect(pwshSectionOrder(fallbackCtx)).toBe(1010)
 
-    const legacy = promptSections(false)
-    const legacyMap = new Map(legacy.map(s => [s.name, s.order]))
-    expect(legacyMap.get('tool:read')).toBe(100)
-    expect(legacyMap.get('tool:glob')).toBe(103)
-    expect(legacyMap.get('tool:grep')).toBe(104)
-    expect(legacyMap.get('tool:run_program')).toBe(104.5)
-    expect(legacyMap.get('tool:bash')).toBe(105)
-    expect(legacyMap.get('tool:bash_status')).toBe(105.5)
-    expect(pwshSectionOrder(false)).toBe(105)
-
-    // Verify DSH 0.1.5-rc.1 dynamic getSectionOrder resolution
+    // Dynamic getSectionOrder resolution
     const mockCtx = {
       systemPrompt: {
         getSectionOrder: (key: string) => {

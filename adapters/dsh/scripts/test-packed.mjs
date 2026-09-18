@@ -5,35 +5,26 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const TARGET_DSH_VERSION = '0.1.5-rc.1'
+const TARGET_DSH_VERSION = '0.1.6-alpha.2'
 const PUBLISHED_DSH_VERSIONS = [
-  '0.1.0-rc.6',
-  '0.1.0-rc.7',
-  '0.1.0-rc.8',
-  '0.1.1-rc.1',
-  '0.1.1-rc.2',
-  '0.1.2-alpha.2',
-  '0.1.2-alpha.3',
-  '0.1.2-alpha.4',
-  '0.1.2-alpha.5',
-  '0.1.2-rc.1',
-  '0.1.3-alpha.2',
   '0.1.5-alpha.1',
   '0.1.5-alpha.2',
+  '0.1.5-rc.1',
+  '0.1.5-rc.2',
+  '0.1.6-alpha.1',
   TARGET_DSH_VERSION,
 ]
-const UNAVAILABLE_DSH_VERSIONS = ['0.1.2-alpha.1', '0.1.3-alpha.1']
+const CORDIS_VERSION = '4.0.2'
 const DSH_FAMILY_PACKAGES = [
   '@deepseek-ai/dsh-agent',
   '@deepseek-ai/dsh-attachment-local',
   '@deepseek-ai/dsh-attachment',
   '@deepseek-ai/dsh-brand',
-  '@deepseek-ai/dsh-code-runtime-worker-thread',
-  '@deepseek-ai/dsh-code-runtime',
   '@deepseek-ai/dsh-fs-local',
   '@deepseek-ai/dsh-fs-observation-policy',
   '@deepseek-ai/dsh-fs',
   '@deepseek-ai/dsh-home-paths',
+  '@deepseek-ai/dsh-http-proxy',
   '@deepseek-ai/dsh-invariants',
   '@deepseek-ai/dsh-jobs-local',
   '@deepseek-ai/dsh-jobs',
@@ -53,12 +44,9 @@ const DSH_FAMILY_PACKAGES = [
   '@deepseek-ai/dsh-tools',
   '@deepseek-ai/dsh-typert-protocol',
   '@deepseek-ai/dsh-user-approval',
-]
-const MODERN_DSH_PACKAGES = [
   '@deepseek-ai/dsh-util-crypto',
   '@deepseek-ai/dsh-util-values',
 ]
-const HTTP_PROXY_PACKAGE = '@deepseek-ai/dsh-http-proxy'
 
 const adapterRoot = fileURLToPath(new URL('../', import.meta.url))
 const repositoryRoot = resolve(adapterRoot, '..', '..')
@@ -100,15 +88,20 @@ function runPnpm(args, options = {}) {
   run(corepack, ['pnpm@11.21.0', ...args], options)
 }
 
-function cordisVersionFor(version) {
-  return version.startsWith('0.1.0-') || version.startsWith('0.1.1-') ? '4.0.1' : '4.0.2'
-}
-
 function packagesFor(version) {
-  const packages = [...DSH_FAMILY_PACKAGES]
-  if (!version.startsWith('0.1.0-') && !version.startsWith('0.1.1-')) packages.push(...MODERN_DSH_PACKAGES)
-  if (version === '0.1.3-alpha.2' || version.startsWith('0.1.5-')) packages.push(HTTP_PROXY_PACKAGE)
-  return packages
+  if (version.startsWith('0.1.6-')) {
+    return [
+      ...DSH_FAMILY_PACKAGES,
+      '@deepseek-ai/dsh-ptc-runtime',
+      '@deepseek-ai/dsh-ptc-runtime-node',
+      '@deepseek-ai/dsh-sandbox-policy',
+    ]
+  }
+  return [
+    ...DSH_FAMILY_PACKAGES,
+    '@deepseek-ai/dsh-code-runtime',
+    '@deepseek-ai/dsh-code-runtime-worker-thread',
+  ]
 }
 
 function localArchive(path) {
@@ -123,7 +116,7 @@ async function runPackedSmoke({ entryArchive, platformArchive, platformName, ver
   await writeFile(join(fixtureRoot, 'notes.txt'), `packed native read ${version}\n`)
 
   const dependencies = {
-    '@deepseek-ai/cordis': cordisVersionFor(version),
+    '@deepseek-ai/cordis': CORDIS_VERSION,
     ...Object.fromEntries(packagesFor(version).map(name => [name, version])),
     'dsh-agentshim': localArchive(entryArchive),
     [platformName]: localArchive(platformArchive),
@@ -142,9 +135,7 @@ async function runPackedSmoke({ entryArchive, platformArchive, platformName, ver
     '--strict-peer-dependencies',
   ], { cwd: consumer })
 
-  const expectedModern = !version.startsWith('0.1.0-') && !version.startsWith('0.1.1-')
   const expectedVersion = JSON.stringify(version)
-  const expectedModernLiteral = JSON.stringify(expectedModern)
   await writeFile(join(consumer, 'smoke.mjs'), `
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
@@ -157,7 +148,6 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as agentshim from 'dsh-agentshim'
 
 const version = ${expectedVersion}
-const expectedModern = ${expectedModernLiteral}
 const root = process.env.AGENTSHIM_PACKED_FIXTURE
 const resolvedEntry = import.meta.resolve('dsh-agentshim')
 assert.match(resolvedEntry, /node_modules\\/dsh-agentshim\\/lib\\/index\\.js$/)
@@ -178,13 +168,11 @@ const ctx = new Context()
 await ctx.plugin(SystemPrompt, {})
 const systemPrompt = ctx.get('systemPrompt')
 assert(systemPrompt !== undefined)
-if (expectedModern) {
-  assert.equal(typeof systemPrompt.getSectionOrder, 'function')
-  assert.equal(typeof systemPrompt.getSectionOrder('TOOL_BASH'), 'number')
-  assert.equal(typeof systemPrompt.getSectionOrder('TOOL_READ'), 'number')
-  assert.equal(systemPrompt.getSectionOrder('TOOL_BASH'), 1000)
-  assert.equal(systemPrompt.getSectionOrder('TOOL_READ'), 1100)
-}
+assert.equal(typeof systemPrompt.getSectionOrder, 'function')
+assert.equal(typeof systemPrompt.getSectionOrder('TOOL_BASH'), 'number')
+assert.equal(typeof systemPrompt.getSectionOrder('TOOL_READ'), 'number')
+assert.equal(systemPrompt.getSectionOrder('TOOL_BASH'), 1000)
+assert.equal(systemPrompt.getSectionOrder('TOOL_READ'), 1100)
 await ctx.plugin(ToolRuntime)
 await ctx.plugin(LocalFileSystem, { cwd: root })
 
@@ -233,7 +221,7 @@ const bashSection = sectionNames.indexOf('tool:bash')
 const readSection = sectionNames.indexOf('tool:read')
 assert.notEqual(bashSection, -1)
 assert.notEqual(readSection, -1)
-assert(expectedModern ? bashSection < readSection : readSection < bashSection)
+assert(bashSection < readSection)
 const result = await ctx.tools.execute({
   signal: new AbortController().signal,
   callId: createCallId('packed-read'),
@@ -294,11 +282,6 @@ try {
       version,
       temporaryRoot,
     })
-  }
-  if (matrix) {
-    for (const version of UNAVAILABLE_DSH_VERSIONS) {
-      console.log(`packed smoke: DSH ${version} unavailable (not published by the registry)`)
-    }
   }
 } finally {
   await rm(temporaryRoot, { recursive: true, force: true })

@@ -134,7 +134,7 @@ export function createProcessPolicy(ctx: Context): ProcessPolicy {
       }
       let confined: ConfinedArgv
       try {
-        confined = currentSandbox.confine(argv as [string, ...string[]], policy as SandboxPolicy)
+        confined = await currentSandbox.confine(argv as [string, ...string[]], policy as SandboxPolicy, exec.signal)
       } catch (error) {
         throw error instanceof HarnessError
           ? error

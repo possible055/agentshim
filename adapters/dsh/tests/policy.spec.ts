@@ -23,7 +23,7 @@ function stubExec(): ToolExecution {
 function confined(mode: 'read-only' | 'workspace-write' | 'danger-full-access', outcome = 'allowed-once') {
   const approval = { request: vi.fn(async () => outcome) }
   const sandbox = {
-    confine: vi.fn((argv: readonly string[]) => ({
+    confine: vi.fn(async (argv: readonly string[]) => ({
       argv: ['sandbox-runner', '--', ...argv],
       enforcement: 'partial',
       denialSignatures: ['permission denied'],
@@ -57,7 +57,7 @@ describe('native per-call process policy', () => {
     const { policy, sandbox } = confined('read-only')
     const argv = ['C:/bin/node.exe', 'script.js']
     const decision = await policy.wrapArgv('run_program', argv, { program: 'node' }, stubExec())
-    expect(sandbox.confine).toHaveBeenCalledWith(argv, expect.objectContaining({ mode: 'read-only' }))
+    expect(sandbox.confine).toHaveBeenCalledWith(argv, expect.objectContaining({ mode: 'read-only' }), signal)
     expect(decision).toMatchObject({
       mode: 'read-only',
       wrappedArgv: ['sandbox-runner', '--', ...argv],
@@ -65,7 +65,7 @@ describe('native per-call process policy', () => {
     })
   })
 
-  it('approves only a strictly wider mode before confinement', async () => {
+  it('approves a strictly wider mode before confinement and repeats the standing mode without approval', async () => {
     const { policy, approval, sandbox } = confined('read-only')
     await policy.wrapArgv('bash', ['bash', '-c', 'touch file'], {
       command: 'touch file',
@@ -73,13 +73,27 @@ describe('native per-call process policy', () => {
       justification: 'create the requested file',
     }, stubExec())
     expect(approval.request).toHaveBeenCalledTimes(1)
-    expect(sandbox.confine).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({ mode: 'workspace-write' }))
+    expect(sandbox.confine).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({ mode: 'workspace-write' }), signal)
 
+    const repeated = confined('read-only')
+    await repeated.policy.wrapArgv('bash', ['bash', '-c', 'true'], {
+      command: 'true',
+      sandbox_permissions: 'read-only',
+      justification: 'keep the standing mode',
+    }, stubExec())
+    expect(repeated.approval.request).not.toHaveBeenCalled()
+    expect(repeated.sandbox.confine).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({ mode: 'read-only' }), signal)
+  })
+
+  it('rejects a narrower escalation target before confinement', async () => {
+    const { policy, approval, sandbox } = confined('workspace-write')
     await expect(policy.wrapArgv('bash', ['bash', '-c', 'true'], {
       command: 'true',
       sandbox_permissions: 'read-only',
-      justification: 'not wider',
+      justification: 'narrower than standing',
     }, stubExec())).rejects.toThrow(/not strictly wider/)
+    expect(approval.request).not.toHaveBeenCalled()
+    expect(sandbox.confine).not.toHaveBeenCalled()
   })
 
   it('fails closed when a live sandbox capability changes', async () => {
