@@ -1043,9 +1043,14 @@ mod tests {
         let access = access_with_scope(fixture.path(), ReadScope::Unrestricted);
         let base = access.resolve(&ambient_link).expect("ambient base");
         assert!(matches!(
-            walk(&access, &base, true, &CancellationToken::new(), |_| {
-                TraversalControl::Continue
-            }),
+            walk(
+                &access,
+                &base,
+                true,
+                &CancellationToken::new(),
+                None,
+                |_| { TraversalControl::Continue }
+            ),
             Err(super::TraversalError::NotDirectory)
         ));
     }

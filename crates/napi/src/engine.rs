@@ -307,6 +307,8 @@ impl Engine {
             config.read_scope,
             resources.clone(),
         )
+        .with_file_access(Arc::clone(&access))
+        .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))?
         .with_process_environment(config.process_environment.clone());
         let state = Arc::new(EngineState {
             root,
