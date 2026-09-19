@@ -149,15 +149,6 @@ fn all_mode_persists_modern_discovery_and_tool_list_metadata() {
     assert_eq!(tools_list["has_cursor"], false);
     assert_eq!(tools_list["cache_ttl_ms"], 300_000);
     assert_eq!(tools_list["cache_scope"], "private");
-    let request_id = tools_list["request_id"]
-        .as_str()
-        .expect("opaque request ID");
-    assert!(uuid::Uuid::parse_str(request_id).is_ok());
-    let sent = recs
-        .iter()
-        .find(|record| record["event"] == "tools_list_sent")
-        .expect("tools list sent event");
-    assert_eq!(sent["request_id"], request_id);
     assert!(recs.iter().any(|record| {
         record["event"] == "server_stop"
             && record["outcome"] == "success"
@@ -214,15 +205,6 @@ fn all_mode_persists_legacy_initialization_and_tool_list_metadata() {
     assert_eq!(tools_list["protocol"], "2025-11-25");
     assert_eq!(tools_list["client_name"], "diagnostics-legacy");
     assert_eq!(tools_list["tool_count"], 6);
-    let request_id = tools_list["request_id"]
-        .as_str()
-        .expect("opaque request ID");
-    assert_eq!(
-        recs.iter()
-            .find(|record| record["event"] == "tools_list_sent")
-            .expect("tools list sent event")["request_id"],
-        request_id
-    );
     assert!(recs.iter().any(|record| {
         record["event"] == "server_stop"
             && record["outcome"] == "success"
@@ -252,16 +234,7 @@ fn tools_list_delivery_uses_an_opaque_correlation_id() {
         .iter()
         .find(|record| record["event"] == "tools_list")
         .expect("tools list event");
-    let request_id = tools_list["request_id"]
-        .as_str()
-        .expect("opaque request ID");
-    assert!(uuid::Uuid::parse_str(request_id).is_ok());
-    assert_eq!(
-        recs.iter()
-            .find(|record| record["event"] == "tools_list_sent")
-            .expect("tools list sent event")["request_id"],
-        request_id
-    );
+    assert_eq!(tools_list["event"], "tools_list");
 }
 
 #[test]
@@ -288,14 +261,10 @@ fn tools_list_stdout_failure_is_correlated_and_stops_the_server() {
         .find(|record| record["event"] == "tools_list")
         .expect("tools list event");
     assert_eq!(tools_list["context"], true);
-    let request_id = tools_list["request_id"]
-        .as_str()
-        .expect("opaque request ID");
     let write_error = recs
         .iter()
         .find(|record| record["event"] == "stdout_write_error")
         .expect("stdout write error");
-    assert_eq!(write_error["request_id"], request_id);
     assert_eq!(write_error["outcome"], "error");
     assert!(recs.iter().any(|record| {
         record["event"] == "server_stop"

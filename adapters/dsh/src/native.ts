@@ -84,9 +84,8 @@ export interface NativeHostOptions {
   readonly readScope?: 'normal' | 'unrestricted'
   readonly toolTimeoutShelfMs?: number
   readonly backgroundJobTimeoutMaxMs?: number
-  readonly foregroundCalls?: number
   readonly env?: ReadonlyArray<{ key: string; value: string }>
-  readonly captureRoot?: string
+  readonly captureRoot: string
   readonly captureMaxBytes?: number
   readonly captureCleanup?: 'never' | 'session-end'
 }
@@ -440,15 +439,8 @@ export function nativePlatformTriple(): string {
   if (process.platform === 'win32' && process.arch === 'x64') return 'win32-x64-msvc'
   if (process.platform === 'darwin' && process.arch === 'arm64') return 'darwin-arm64'
   if (process.platform === 'linux') {
-    let glibc = false
-    try {
-      const report = process.report?.getReport() as { header?: { glibcVersionRuntime?: string } } | undefined
-      glibc = report?.header?.glibcVersionRuntime !== undefined
-    } catch {
-      glibc = false
-    }
-    if (process.arch === 'x64') return glibc ? 'linux-x64-gnu' : 'linux-x64-musl'
-    if (process.arch === 'arm64') return glibc ? 'linux-arm64-gnu' : 'linux-arm64-musl'
+    if (process.arch === 'x64') return 'linux-x64-gnu'
+    if (process.arch === 'arm64') return 'linux-arm64-gnu'
   }
   return `${process.platform}-${process.arch}`
 }

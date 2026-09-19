@@ -8,7 +8,7 @@ use crate::capture::{
     DEFAULT_CAPTURE_MAX_BYTES, MAX_CAPTURE_MAX_BYTES, MIN_CAPTURE_MAX_BYTES, should_publish,
 };
 use crate::classify::{Classification, SandboxAttribution, classify};
-use crate::engine::EngineState;
+use crate::state::EngineState;
 
 #[napi(object)]
 pub struct ProcessArgs {
@@ -357,17 +357,14 @@ pub(crate) fn register_artifacts(state: &EngineState, records: &[ArtifactRecord]
     }
 }
 
-/// Exit label and bounded stderr preview a completed core process output
-/// carries in its bridge structured content — the same evidence the MCP bridge
-/// classified on, so native classification sees identical inputs.
+/// Bounded stream preview of a completed core process output, read through the
+/// core typed process facts so classification sees the same inputs the
+/// renderer produced.
 fn stream_fact(
-    output: Option<&agentshim_core::tools::ToolOutput>,
+    facts: Option<&agentshim_core::tools::ProcessStreamFacts<'_>>,
     stream: &str,
     artifacts: &[ArtifactInfo],
 ) -> ProcessStreamOutcome {
-    let value = output
-        .and_then(|output| output.structured.as_ref())
-        .and_then(|structured| structured.pointer(&format!("/process/{stream}")));
     let artifact = artifacts
         .iter()
         .find(|artifact| {
@@ -375,27 +372,20 @@ fn stream_fact(
                 || artifact.stream == "output" && matches!(stream, "stdout" | "stderr")
         })
         .cloned();
+    let Some(facts) = facts else {
+        return ProcessStreamOutcome {
+            text: String::new(),
+            total_bytes: artifact.as_ref().map_or(0.0, |artifact| artifact.bytes),
+            shown_bytes: 0.0,
+            omitted_bytes: 0.0,
+            artifact,
+        };
+    };
     ProcessStreamOutcome {
-        text: value
-            .and_then(|value| value.get("text"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-        total_bytes: value
-            .and_then(|value| value.get("totalBytes"))
-            .and_then(serde_json::Value::as_u64)
-            .map_or_else(
-                || artifact.as_ref().map_or(0.0, |artifact| artifact.bytes),
-                |bytes| bytes as f64,
-            ),
-        shown_bytes: value
-            .and_then(|value| value.get("shownBytes"))
-            .and_then(serde_json::Value::as_u64)
-            .map_or(0.0, |bytes| bytes as f64),
-        omitted_bytes: value
-            .and_then(|value| value.get("omittedBytes"))
-            .and_then(serde_json::Value::as_u64)
-            .map_or(0.0, |bytes| bytes as f64),
+        text: facts.text.to_owned(),
+        total_bytes: facts.total_bytes as f64,
+        shown_bytes: facts.shown_bytes as f64,
+        omitted_bytes: facts.omitted_bytes as f64,
         artifact,
     }
 }
@@ -409,7 +399,7 @@ fn outcome_facts(
     ProcessStreamOutcome,
     ProcessStreamOutcome,
 ) {
-    let Some(structured) = &output.structured else {
+    let Some(facts) = output.process_facts() else {
         return (
             None,
             String::new(),
@@ -417,19 +407,13 @@ fn outcome_facts(
             stream_fact(None, "stderr", artifacts),
         );
     };
-    let exit = structured
-        .pointer("/process/exitCode")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
-    let stderr = structured
-        .pointer("/process/stderr/text")
-        .and_then(serde_json::Value::as_str)
-        .map_or_else(String::new, str::to_owned);
     (
-        exit,
-        stderr,
-        stream_fact(Some(output), "stdout", artifacts),
-        stream_fact(Some(output), "stderr", artifacts),
+        facts.exit_code.map(str::to_owned),
+        facts
+            .stderr
+            .map_or_else(String::new, |stream| stream.text.to_owned()),
+        stream_fact(facts.stdout.as_ref(), "stdout", artifacts),
+        stream_fact(facts.stderr.as_ref(), "stderr", artifacts),
     )
 }
 

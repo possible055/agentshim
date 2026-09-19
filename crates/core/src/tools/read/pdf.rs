@@ -131,7 +131,7 @@ pub fn read_pdf(
     call_bytes: usize,
     output_budget: &dyn crate::output::CallBudget,
 ) -> Result<ToolOutput, ReadError> {
-    if request.start_line.is_some() || request.line_count.is_some() || request.encoding.is_some() {
+    if request.has_line_parameters() {
         return Err(ReadError::Validation(
             "encoding, start_line, and line_count do not apply to PDF input".to_owned(),
         ));

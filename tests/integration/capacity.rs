@@ -4,9 +4,7 @@ use super::*;
 
 fn projected_success_tokens(responses: &[Value]) -> usize {
     let prototype = agentshim_gigatoken::O200kPrototype::load_embedded().expect("token ranks");
-    let mut counter = prototype
-        .fork_counter(agentshim_gigatoken::CounterLimits::default())
-        .expect("counter");
+    let mut counter = prototype.fork_counter().expect("counter");
     responses
         .iter()
         .filter(|response| response["result"]["isError"] == false)

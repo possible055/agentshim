@@ -73,9 +73,7 @@ fn release_load_and_partial_overlap_targets() {
 
     let prototype = O200kPrototype::load_embedded().expect("load ranks");
     let replacement = corpus();
-    let mut first_counter = prototype
-        .fork_counter(CounterLimits::default())
-        .expect("counter");
+    let mut first_counter = prototype.fork_counter().expect("counter");
     let first_started = Instant::now();
     assert_eq!(
         first_counter.count_ordinary_up_to(&replacement, usize::MAX, || false),
@@ -89,9 +87,7 @@ fn release_load_and_partial_overlap_targets() {
         let mut timings = Vec::new();
         let mut resident_bytes = 0_usize;
         for _ in 0..7 {
-            let mut counter = prototype
-                .fork_counter(CounterLimits::default())
-                .expect("counter");
+            let mut counter = prototype.fork_counter().expect("counter");
             assert!(matches!(
                 counter.count_ordinary_up_to(&base, usize::MAX, || false),
                 CountUpTo::Exact(_)
@@ -140,9 +136,7 @@ fn unique_content_soak_keeps_counter_resident_bytes_bounded() {
             std::time::Duration::from_secs,
         );
     let prototype = O200kPrototype::load_embedded().expect("load ranks");
-    let mut counter = prototype
-        .fork_counter(CounterLimits::default())
-        .expect("counter");
+    let mut counter = prototype.fork_counter().expect("counter");
     let started = Instant::now();
     let mut iterations = 0_u64;
     let mut peak_resident = counter.metrics().resident_bytes;
@@ -188,9 +182,7 @@ fn exact_interval_matrix_is_bounded() {
             let text = sized_fixture(pattern, bytes);
             let mut timings = Vec::new();
             for _ in 0..7 {
-                let mut counter = prototype
-                    .fork_counter(CounterLimits::default())
-                    .expect("counter");
+                let mut counter = prototype.fork_counter().expect("counter");
                 let started = Instant::now();
                 assert_ne!(
                     counter.count_ordinary_up_to(&text, 9_872, || false),

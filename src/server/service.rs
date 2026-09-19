@@ -30,9 +30,7 @@ use super::dispatch::ToolAdmission;
 #[cfg(test)]
 use super::response::tool_error;
 use super::{
-    ToolsListCorrelation,
     catalog::tool_catalog,
-    dispatch::shell_delegate,
     response::{diagnostic_tool_error, resource_busy_with_message},
 };
 
@@ -178,8 +176,11 @@ impl AgentShimBuilder {
     #[must_use]
     pub fn client_profile(mut self, client_profile: crate::ClientProfile) -> Self {
         self.client_profile = client_profile;
-        self.runtime.tool_timeout_shelf =
-            crate::profile::resolve_tool_timeout_shelf(client_profile);
+        self.runtime.tool_timeout_shelf = crate::profile::resolve_tool_timeout_shelf(
+            client_profile,
+            self.runtime.tool_timeout_shelf,
+            std::env::var_os("AGENTSHIM_TOOL_TIMEOUT_SHELF").is_some(),
+        );
         self
     }
 
@@ -488,10 +489,6 @@ impl ServerHandler for AgentShim {
         let (protocol, client_name, client_version) = Self::request_identity(&context);
         let has_cursor = request.is_some_and(|request| request.cursor.is_some());
         let result = self.configured_tools_result();
-        let request_id = context
-            .extensions
-            .get::<ToolsListCorrelation>()
-            .map(|correlation| correlation.0.clone());
         tracing::info!(
             target: "agentshim",
             event = "tools_list",
@@ -500,7 +497,6 @@ impl ServerHandler for AgentShim {
             protocol,
             client_name,
             client_version,
-            request_id,
             tool_count = TOOL_COUNT,
             toolset = TOOLSET,
             has_cursor,
@@ -542,7 +538,7 @@ impl AgentShim {
             Err(error) => {
                 return Ok(match error {
                     ProcessError::ResourceBusy(message) => {
-                        resource_busy_with_message(budget, "bash", "detached", message)
+                        resource_busy_with_message(budget, "bash", message)
                     }
                     other => diagnostic_tool_error(budget, &other),
                 });
@@ -556,7 +552,14 @@ impl AgentShim {
         let call_id = Uuid::new_v4().to_string();
         let tool = request.name.to_string();
         let span = if request.name.as_ref() == "bash" {
-            let shell_delegate = shell_delegate(&request);
+            let shell_delegate = crate::diagnostics::shell_delegate_class(
+                request.name.as_ref(),
+                request
+                    .arguments
+                    .as_ref()
+                    .and_then(|arguments| arguments.get("command"))
+                    .and_then(serde_json::Value::as_str),
+            );
             tracing::info_span!(
                 target: "agentshim",
                 "tool_call",

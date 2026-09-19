@@ -1,6 +1,6 @@
 use std::io::{self, Read};
 
-use encoding_rs::{Decoder, DecoderResult, Encoding, UTF_8, UTF_16BE, UTF_16LE};
+use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE};
 use tokio_util::sync::CancellationToken;
 
 use super::decoder::{StrictDecoder, detect_encoding};
@@ -15,16 +15,19 @@ pub enum TranscodeFailure {
     Binary,
 }
 
+/// Thin `Read` adapter over [`StrictDecoder`]: one strict decode stack, one BOM
+/// table, one NUL binary detection for both the chunked and the streaming paths.
 pub struct StrictTranscodingReader<'a, R> {
     reader: R,
-    decoder: Decoder,
+    decoder: StrictDecoder,
+    encoding: &'static Encoding,
     cancellation: &'a CancellationToken,
     input: Box<[u8]>,
     input_start: usize,
     input_end: usize,
-    output: Box<[u8]>,
-    output_start: usize,
-    output_end: usize,
+    decoded: String,
+    decoded_start: usize,
+    bom_checked: bool,
     eof: bool,
     finished: bool,
     failure: Option<TranscodeFailure>,
@@ -36,18 +39,18 @@ impl<'a, R> StrictTranscodingReader<'a, R> {
         encoding: &'static Encoding,
         cancellation: &'a CancellationToken,
         input_bytes: usize,
-        output_bytes: usize,
     ) -> Self {
         Self {
             reader,
-            decoder: encoding.new_decoder(),
+            decoder: StrictDecoder::new(SourceEncoding::for_encoding(encoding)),
+            encoding,
             cancellation,
             input: vec![0; input_bytes.max(4)].into_boxed_slice(),
             input_start: 0,
             input_end: 0,
-            output: vec![0; output_bytes.max(4)].into_boxed_slice(),
-            output_start: 0,
-            output_end: 0,
+            decoded: String::new(),
+            decoded_start: 0,
+            bom_checked: false,
             eof: false,
             finished: false,
             failure: None,
@@ -64,20 +67,36 @@ impl<'a, R> StrictTranscodingReader<'a, R> {
     }
 }
 
+/// Mirror the WHATWG decode algorithm's BOM sniffing that `encoding_rs`' BOM-sniffing
+/// `new_decoder` performs: a leading UTF BOM overrides the requested encoding
+/// entirely, and legacy encodings keep their requested decoder.
+fn sniff_bom(requested: &'static Encoding, chunk: &[u8]) -> (&'static Encoding, usize) {
+    if chunk.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        (UTF_8, 3)
+    } else if chunk.starts_with(&[0xFE, 0xFF]) {
+        (UTF_16BE, 2)
+    } else if chunk.starts_with(&[0xFF, 0xFE]) {
+        (UTF_16LE, 2)
+    } else {
+        (requested, 0)
+    }
+}
+
 impl<R: Read> Read for StrictTranscodingReader<'_, R> {
     fn read(&mut self, destination: &mut [u8]) -> io::Result<usize> {
         if destination.is_empty() {
             return Ok(0);
         }
         loop {
-            if self.output_start < self.output_end {
+            if self.decoded_start < self.decoded.len() {
                 let count = destination
                     .len()
-                    .min(self.output_end.saturating_sub(self.output_start));
+                    .min(self.decoded.len() - self.decoded_start);
                 destination[..count].copy_from_slice(
-                    &self.output[self.output_start..self.output_start.saturating_add(count)],
+                    &self.decoded.as_bytes()
+                        [self.decoded_start..self.decoded_start.saturating_add(count)],
                 );
-                self.output_start += count;
+                self.decoded_start += count;
                 return Ok(count);
             }
             if self.finished {
@@ -99,23 +118,40 @@ impl<R: Read> Read for StrictTranscodingReader<'_, R> {
                     }
                 }
             }
-            let (result, read, written) = self.decoder.decode_to_utf8_without_replacement(
-                &self.input[self.input_start..self.input_end],
-                &mut self.output,
-                self.eof,
-            );
-            self.input_start = self.input_start.saturating_add(read);
-            self.output_start = 0;
-            self.output_end = written;
-            if self.output[..written].contains(&0) {
-                return Err(self.fail(TranscodeFailure::Binary));
+            if !self.bom_checked {
+                self.bom_checked = true;
+                let chunk = &self.input[..self.input_end];
+                let (encoding, bom_len) = sniff_bom(self.encoding, chunk);
+                if encoding != self.encoding {
+                    self.encoding = encoding;
+                    self.decoder = StrictDecoder::new(SourceEncoding::for_encoding(encoding));
+                }
+                self.input_start = bom_len;
             }
-            match result {
-                DecoderResult::InputEmpty if self.eof => self.finished = true,
-                DecoderResult::InputEmpty | DecoderResult::OutputFull => {}
-                DecoderResult::Malformed(_, _) => {
+            let chunk = &self.input[self.input_start..self.input_end];
+            let decoded = match self.decoder.decode(chunk, self.eof) {
+                Ok(decoded) => decoded,
+                Err(super::DecodeError::Io(io_error)) => {
+                    self.failure = Some(TranscodeFailure::Io);
+                    return Err(io_error);
+                }
+                Err(super::DecodeError::Cancelled) => {
+                    return Err(self.fail(TranscodeFailure::Cancelled));
+                }
+                Err(_) => {
                     return Err(self.fail(TranscodeFailure::Malformed));
                 }
+            };
+            self.input_start = self.input_end;
+            if let Some(decoded) = decoded {
+                if decoded.contains('\0') {
+                    return Err(self.fail(TranscodeFailure::Binary));
+                }
+                self.decoded = decoded.into_owned();
+                self.decoded_start = 0;
+            }
+            if self.eof {
+                self.finished = true;
             }
         }
     }
@@ -130,6 +166,21 @@ pub enum SourceEncoding {
 }
 
 impl SourceEncoding {
+    /// The canonical source encoding for an `encoding_rs` encoding, as the
+    /// BOM-aware detection path would classify it.
+    #[must_use]
+    pub fn for_encoding(encoding: &'static Encoding) -> Self {
+        if encoding == UTF_8 {
+            Self::Utf8
+        } else if encoding == UTF_16LE {
+            Self::Utf16Le
+        } else if encoding == UTF_16BE {
+            Self::Utf16Be
+        } else {
+            Self::Other(encoding)
+        }
+    }
+
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {

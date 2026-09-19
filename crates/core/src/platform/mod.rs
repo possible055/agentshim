@@ -1,3 +1,4 @@
+pub mod fingerprint;
 pub mod path;
 pub mod process;
 

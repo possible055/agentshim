@@ -217,16 +217,7 @@ pub fn execute_prepared_with_budget(
             call_bytes,
             output_budget,
         )?;
-        run_after_read_hook();
-        if take_forced_change() {
-            return Ok(Attempt::Changed);
-        }
-        return if source_is_unchanged(access, &prepared.resolved, &prepared.file, &prepared.before)?
-        {
-            Ok(Attempt::Stable(output))
-        } else {
-            Ok(Attempt::Changed)
-        };
+        return settle_structured_document(access, &prepared, output);
     }
     if let PreparedKind::Office { hint, call_bytes } = prepared.kind {
         let output = super::office::read_office(
@@ -239,16 +230,7 @@ pub fn execute_prepared_with_budget(
             call_bytes,
             output_budget,
         )?;
-        run_after_read_hook();
-        if take_forced_change() {
-            return Ok(Attempt::Changed);
-        }
-        return if source_is_unchanged(access, &prepared.resolved, &prepared.file, &prepared.before)?
-        {
-            Ok(Attempt::Stable(output))
-        } else {
-            Ok(Attempt::Changed)
-        };
+        return settle_structured_document(access, &prepared, output);
     }
     let PreparedKind::Text { detected_encoding } = prepared.kind else {
         unreachable!("structured-document reads return before text decoding");
@@ -290,6 +272,24 @@ pub fn execute_prepared_with_budget(
         output_budget,
     )
     .map(Attempt::Stable)
+}
+
+/// Shared tail for PDF and Office reads: run the after-read hook, honor a forced
+/// change, and only report stability when the source fingerprint still matches.
+fn settle_structured_document(
+    access: &FileAccess,
+    prepared: &PreparedRead,
+    output: ToolOutput,
+) -> Result<Attempt<ToolOutput>, ReadError> {
+    run_after_read_hook();
+    if take_forced_change() {
+        return Ok(Attempt::Changed);
+    }
+    if source_is_unchanged(access, &prepared.resolved, &prepared.file, &prepared.before)? {
+        Ok(Attempt::Stable(output))
+    } else {
+        Ok(Attempt::Changed)
+    }
 }
 
 fn source_is_unchanged(
@@ -376,8 +376,9 @@ use crate::{
     tools::ToolOutput,
 };
 
+use crate::platform::fingerprint::FileFingerprint;
+
 use super::{
-    fingerprint::FileFingerprint,
     hooks::{forced_runtime_limit, run_after_read_hook, run_before_read_hook, take_forced_change},
     pdf::{has_pdf_header, has_pdf_parameters, read_pdf},
     request::{PREFIX_BYTES, PdfMode, ReadError, ReadRequest, TEXT_READ_MEMORY_BYTES},

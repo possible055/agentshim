@@ -169,6 +169,48 @@ impl FieldVisitor {
     }
 }
 
+fn first_shell_token(command: &str) -> Option<&str> {
+    let command = command.trim_start();
+    let first = command.as_bytes().first().copied()?;
+    if first == b'\'' || first == b'"' {
+        let end = command[1..].find(char::from(first))? + 1;
+        return Some(&command[1..end]);
+    }
+    command.split_whitespace().next()
+}
+
+/// Classify the delegated shell from a bash command's first token, as a
+/// `tool_call` span decoration. Used only for log fields; never for decisions.
+pub(crate) fn shell_delegate_class(tool: &str, command: Option<&str>) -> &'static str {
+    if tool != "bash" {
+        return "none";
+    }
+    let Some(command) = command else {
+        return "none";
+    };
+    let Some(token) = first_shell_token(command) else {
+        return "none";
+    };
+    let file_name = token
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(token)
+        .to_ascii_lowercase();
+    if file_name == "bash.exe" {
+        return "wsl";
+    }
+    let stem = file_name
+        .rsplit_once('.')
+        .map_or(file_name.as_str(), |(stem, _)| stem);
+    match stem {
+        "pwsh" | "powershell" => "pwsh",
+        "cmd" => "cmd",
+        "wsl" => "wsl",
+        "python" | "node" | "perl" | "ruby" => "other-interpreter",
+        _ => "none",
+    }
+}
+
 fn allowed_field(name: &str) -> bool {
     matches!(
         name,

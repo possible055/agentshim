@@ -1,5 +1,4 @@
 mod cursor;
-mod fingerprint;
 mod hooks;
 mod office;
 mod pdf;
@@ -9,9 +8,11 @@ mod text;
 
 #[cfg(test)]
 use crate::encoding::DecodeError;
-pub use fingerprint::FileFingerprint;
+pub use crate::platform::fingerprint::FileFingerprint;
 #[cfg(feature = "bench-internals")]
-pub use fingerprint::{FingerprintMetrics, fingerprint_metrics, reset_fingerprint_metrics};
+pub use crate::platform::fingerprint::{
+    FingerprintMetrics, fingerprint_metrics, reset_fingerprint_metrics,
+};
 pub(crate) use prepared::{
     Attempt, DocumentMemoryBudgets, PreparedRead, execute_prepared_with_budget, prepare,
 };

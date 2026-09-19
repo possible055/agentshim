@@ -19,8 +19,8 @@ use agentshim_core::platform::process::DetachedTree;
 use agentshim_core::tools::exec::CaptureSink;
 
 use crate::capture::{ArtifactRecord, CAPTURE_IO_FAILED_CODE, CallCapture, should_publish};
-use crate::engine::{EngineState, detached_native_work, native_promise};
 use crate::process::{NativeFailure, NativeVoidResult, process_failure};
+use crate::state::{EngineState, detached_native_work, native_promise};
 
 /// Live preview buffer ceiling: the adapter's `readOutput()` drains a rolling
 /// 1 MiB window of recent text; the raw capture artifact is always lossless.

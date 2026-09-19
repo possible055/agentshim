@@ -3,9 +3,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use agentshim_gigatoken::{CountUpTo, CounterLimits, LoadError, O200kCounter, O200kPrototype};
-use rmcp::model::{CallToolResult, ContentBlock};
-use serde::Serialize;
+use agentshim_gigatoken::{CountUpTo, LoadError, O200kCounter, O200kPrototype};
+use rmcp::model::CallToolResult;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -24,14 +23,6 @@ const POOL_CANCELLATION_POLL: Duration = Duration::from_millis(5);
 static SHARED_GATE: OnceLock<Arc<OutputTokenGate>> = OnceLock::new();
 static SHARED_GATE_INIT: Mutex<()> = Mutex::new(());
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum GateDecision {
-    FitsByBytes,
-    FitsExactly(usize),
-    Exceeded,
-    Cancelled,
-}
-
 pub(crate) use agentshim_core::output::{ProjectedTokenCost, ProjectionDecision};
 
 pub(crate) struct OutputTokenGate {
@@ -44,7 +35,7 @@ impl OutputTokenGate {
     pub(crate) fn load() -> Result<Self, LoadError> {
         let prototype = O200kPrototype::load_embedded()?;
         let counters = (0..COUNTER_WORKERS)
-            .map(|_| prototype.fork_counter(CounterLimits::default()))
+            .map(|_| prototype.fork_counter())
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             prototype,
@@ -69,73 +60,6 @@ impl OutputTokenGate {
             "shared gate initialization is serialized"
         );
         Ok(gate)
-    }
-
-    pub(crate) fn evaluate(&self, payload: &str, cancellation: &CancellationToken) -> GateDecision {
-        self.evaluate_up_to(payload, TOOL_CONTENT_TOKEN_LIMIT, cancellation)
-    }
-
-    pub(crate) fn evaluate_tool_text(
-        &self,
-        text: &str,
-        has_images: bool,
-        cancellation: &CancellationToken,
-    ) -> GateDecision {
-        if has_images {
-            self.evaluate(text, cancellation)
-        } else {
-            if cancellation.is_cancelled() {
-                return GateDecision::Cancelled;
-            }
-            let projected_len = projected_text_encoded_len(text);
-            if projected_len <= TOOL_CONTENT_TOKEN_LIMIT {
-                tracing::trace!(target: "agentshim", token_gate_path = "byte_fast", tokens_upper_bound = projected_len);
-                return GateDecision::FitsByBytes;
-            }
-            self.evaluate(&project_text_payload(text), cancellation)
-        }
-    }
-
-    pub(crate) fn evaluate_result(
-        &self,
-        result: &CallToolResult,
-        cancellation: &CancellationToken,
-    ) -> GateDecision {
-        if let Some(structured) = &result.structured_content {
-            let payload =
-                serde_json::to_string(structured).expect("MCP structured content is serializable");
-            return self.evaluate(&payload, cancellation);
-        }
-        if result
-            .content
-            .iter()
-            .all(|content| matches!(content, ContentBlock::Text(_)))
-        {
-            if let [ContentBlock::Text(text)] = result.content.as_slice() {
-                return self.evaluate_tool_text(&text.text, false, cancellation);
-            }
-            let payload =
-                serde_json::to_string(&result.content).expect("MCP content is serializable");
-            return self.evaluate(&payload, cancellation);
-        }
-
-        let mut texts = result.content.iter().filter_map(|content| {
-            let ContentBlock::Text(text) = content else {
-                return None;
-            };
-            Some(text.text.as_str())
-        });
-        let Some(text) = texts.next() else {
-            return if cancellation.is_cancelled() {
-                GateDecision::Cancelled
-            } else {
-                GateDecision::FitsByBytes
-            };
-        };
-        if texts.next().is_some() {
-            return GateDecision::Exceeded;
-        }
-        self.evaluate(text, cancellation)
     }
 
     pub(crate) fn project_tool_output(
@@ -195,7 +119,7 @@ impl OutputTokenGate {
         )
     }
 
-    fn project_payload(
+    pub(crate) fn project_payload(
         &self,
         payload: &str,
         fixed_tokens: usize,
@@ -210,16 +134,12 @@ impl OutputTokenGate {
             };
         };
         match self.evaluate_up_to(payload, payload_ceiling, cancellation) {
-            GateDecision::FitsByBytes => ProjectionDecision::Fits(ProjectedTokenCost {
-                tokens: fixed_tokens.saturating_add(payload.len()),
-                exact: false,
+            ProjectionDecision::Fits(cost) => ProjectionDecision::Fits(ProjectedTokenCost {
+                tokens: fixed_tokens.saturating_add(cost.tokens),
+                exact: cost.exact,
             }),
-            GateDecision::FitsExactly(tokens) => ProjectionDecision::Fits(ProjectedTokenCost {
-                tokens: fixed_tokens.saturating_add(tokens),
-                exact: true,
-            }),
-            GateDecision::Exceeded => ProjectionDecision::Exceeded,
-            GateDecision::Cancelled => ProjectionDecision::Cancelled,
+            ProjectionDecision::Exceeded => ProjectionDecision::Exceeded,
+            ProjectionDecision::Cancelled => ProjectionDecision::Cancelled,
         }
     }
 
@@ -228,18 +148,21 @@ impl OutputTokenGate {
         payload: &str,
         limit: usize,
         cancellation: &CancellationToken,
-    ) -> GateDecision {
+    ) -> ProjectionDecision {
         if cancellation.is_cancelled() {
-            return GateDecision::Cancelled;
+            return ProjectionDecision::Cancelled;
         }
         if payload.len() <= limit && payload.len() <= BYTE_FAST_PATH_LIMIT {
             tracing::trace!(target: "agentshim", token_gate_path = "byte_fast", tokens_upper_bound = payload.len());
-            return GateDecision::FitsByBytes;
+            return ProjectionDecision::Fits(ProjectedTokenCost {
+                tokens: payload.len(),
+                exact: false,
+            });
         }
         let trace_enabled = tracing::enabled!(target: "agentshim", tracing::Level::TRACE);
         let wait_started = trace_enabled.then(Instant::now);
         let Some(mut counter) = self.acquire(cancellation) else {
-            return GateDecision::Cancelled;
+            return ProjectionDecision::Cancelled;
         };
         let wait_ns = wait_started.map(|started| duration_ns(started.elapsed()));
         let before = trace_enabled.then(|| counter.counter_mut().metrics());
@@ -269,9 +192,12 @@ impl OutputTokenGate {
             );
         }
         match result {
-            CountUpTo::Exact(count) => GateDecision::FitsExactly(count),
-            CountUpTo::Exceeded => GateDecision::Exceeded,
-            CountUpTo::Cancelled => GateDecision::Cancelled,
+            CountUpTo::Exact(count) => ProjectionDecision::Fits(ProjectedTokenCost {
+                tokens: count,
+                exact: true,
+            }),
+            CountUpTo::Exceeded => ProjectionDecision::Exceeded,
+            CountUpTo::Cancelled => ProjectionDecision::Cancelled,
         }
     }
 
@@ -349,10 +275,7 @@ impl Drop for CounterLease<'_> {
         let counter = if self.healthy {
             self.counter.take()
         } else {
-            self.gate
-                .prototype
-                .fork_counter(CounterLimits::default())
-                .ok()
+            self.gate.prototype.fork_counter().ok()
         };
         if let Some(counter) = counter {
             self.gate.release(counter);
@@ -364,25 +287,6 @@ fn duration_ns(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
-pub(crate) fn project_text_payload(text: &str) -> String {
-    #[derive(Serialize)]
-    struct ProjectedText<'a> {
-        r#type: &'static str,
-        text: &'a str,
-    }
-
-    serde_json::to_string(&[ProjectedText {
-        r#type: "text",
-        text,
-    }])
-    .expect("MCP text content is serializable")
-}
-
-fn projected_text_encoded_len(text: &str) -> usize {
-    const OVERHEAD: usize = b"[{\"type\":\"text\",\"text\":\"\"}]".len();
-    OVERHEAD.saturating_add(crate::output::json_string_content_encoded_len(text))
-}
-
 pub(crate) fn structured_result_fits_model_budget(
     structured: &Value,
     cancellation: &CancellationToken,
@@ -391,59 +295,80 @@ pub(crate) fn structured_result_fits_model_budget(
         return false;
     };
     matches!(
-        gate.evaluate(
+        gate.project_payload(
             &serde_json::to_string(structured).expect("structured content is serializable"),
+            0,
+            TOOL_CONTENT_TOKEN_LIMIT,
             cancellation,
         ),
-        GateDecision::FitsByBytes | GateDecision::FitsExactly(_)
+        ProjectionDecision::Fits(_)
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use rmcp::model::{CallToolResult, ContentBlock};
+    use rmcp::model::CallToolResult;
     use tokio_util::sync::CancellationToken;
 
+    use rmcp::model::ContentBlock;
+
     use super::{
-        CLIENT_WRAPPER_TOKEN_RESERVE, COUNTER_WORKERS, GateDecision, IMAGE_ITEM_TOKEN_RESERVE,
+        CLIENT_WRAPPER_TOKEN_RESERVE, COUNTER_WORKERS, IMAGE_ITEM_TOKEN_RESERVE,
         IMAGE_MODEL_TOKENS, OutputTokenGate, POOL_CANCELLATION_POLL, ProjectionDecision,
-        TOOL_CONTENT_TOKEN_LIMIT, project_text_payload, projected_text_encoded_len,
+        TOOL_CONTENT_TOKEN_LIMIT,
     };
 
-    #[test]
-    fn text_projection_matches_the_client_mcp_json_body() {
-        assert_eq!(
-            project_text_payload("line\n\"quoted\""),
-            r#"[{"type":"text","text":"line\n\"quoted\""}]"#
-        );
-        for text in ["plain", "line\n\"quoted\"", "\u{0}\u{1f}", "繁體👨‍👩‍👧‍👦"]
-        {
-            assert_eq!(
-                projected_text_encoded_len(text),
-                project_text_payload(text).len()
-            );
-        }
+    fn projected_text_payload(text: &str) -> String {
+        serde_json::to_string(&[serde_json::json!({ "type": "text", "text": text })])
+            .expect("MCP text content is serializable")
     }
 
     #[test]
     fn fast_path_and_exact_boundary_are_distinct() {
         let gate = OutputTokenGate::load().expect("embedded ranks");
         let cancellation = CancellationToken::new();
+        let gate_limit = TOOL_CONTENT_TOKEN_LIMIT + CLIENT_WRAPPER_TOKEN_RESERVE;
         assert_eq!(
-            gate.evaluate(&"a".repeat(512), &cancellation),
-            GateDecision::FitsByBytes
+            gate.project_payload(
+                &"a".repeat(512),
+                CLIENT_WRAPPER_TOKEN_RESERVE,
+                gate_limit,
+                &cancellation
+            ),
+            ProjectionDecision::Fits(agentshim_core::output::ProjectedTokenCost {
+                tokens: CLIENT_WRAPPER_TOKEN_RESERVE + 512,
+                exact: false
+            })
         );
-        assert!(matches!(
-            gate.evaluate(&"a".repeat(TOOL_CONTENT_TOKEN_LIMIT), &cancellation),
-            GateDecision::FitsExactly(_)
-        ));
+        let ProjectionDecision::Fits(exact) = gate.project_payload(
+            &"a".repeat(TOOL_CONTENT_TOKEN_LIMIT),
+            CLIENT_WRAPPER_TOKEN_RESERVE,
+            gate_limit,
+            &cancellation,
+        ) else {
+            panic!("exact boundary must fit");
+        };
+        assert!(exact.exact);
         assert_eq!(
-            gate.evaluate(&" x".repeat(TOOL_CONTENT_TOKEN_LIMIT), &cancellation),
-            GateDecision::FitsExactly(TOOL_CONTENT_TOKEN_LIMIT)
+            gate.project_payload(
+                &" x".repeat(TOOL_CONTENT_TOKEN_LIMIT),
+                CLIENT_WRAPPER_TOKEN_RESERVE,
+                gate_limit,
+                &cancellation,
+            ),
+            ProjectionDecision::Fits(agentshim_core::output::ProjectedTokenCost {
+                tokens: gate_limit,
+                exact: true
+            })
         );
         assert_eq!(
-            gate.evaluate(&" x".repeat(TOOL_CONTENT_TOKEN_LIMIT + 1), &cancellation),
-            GateDecision::Exceeded
+            gate.project_payload(
+                &" x".repeat(TOOL_CONTENT_TOKEN_LIMIT + 1),
+                CLIENT_WRAPPER_TOKEN_RESERVE,
+                gate_limit,
+                &cancellation,
+            ),
+            ProjectionDecision::Exceeded
         );
     }
 
@@ -454,10 +379,14 @@ mod tests {
             ContentBlock::text("page 1 caption"),
             ContentBlock::image("A".repeat(200_000), "image/png"),
         ]);
-        assert_eq!(
-            gate.evaluate_result(&result, &CancellationToken::new()),
-            GateDecision::FitsByBytes
-        );
+        assert!(matches!(
+            gate.project_result(
+                &result,
+                TOOL_CONTENT_TOKEN_LIMIT + CLIENT_WRAPPER_TOKEN_RESERVE,
+                &CancellationToken::new()
+            ),
+            ProjectionDecision::Fits(_)
+        ));
     }
 
     #[test]
@@ -469,8 +398,12 @@ mod tests {
         cancellation.cancel();
 
         assert_eq!(
-            gate.evaluate_result(&result, &cancellation),
-            GateDecision::Cancelled
+            gate.project_result(
+                &result,
+                TOOL_CONTENT_TOKEN_LIMIT + CLIENT_WRAPPER_TOKEN_RESERVE,
+                &cancellation
+            ),
+            ProjectionDecision::Cancelled
         );
     }
 
@@ -527,13 +460,20 @@ mod tests {
     fn client_json_wrapper_crosses_the_exact_content_boundary() {
         let gate = OutputTokenGate::load().expect("embedded ranks");
         let cancellation = CancellationToken::new();
+        // One projected text block counted against the content limit pins the
+        // wrapper-reserve boundary the retired evaluate_tool_text API tested.
+        let fits = projected_text_payload(&" x".repeat(TOOL_CONTENT_TOKEN_LIMIT - 10));
         assert_eq!(
-            gate.evaluate_tool_text(&" x".repeat(9_862), false, &cancellation),
-            GateDecision::FitsExactly(TOOL_CONTENT_TOKEN_LIMIT)
+            gate.project_payload(&fits, 0, TOOL_CONTENT_TOKEN_LIMIT, &cancellation),
+            ProjectionDecision::Fits(agentshim_core::output::ProjectedTokenCost {
+                tokens: TOOL_CONTENT_TOKEN_LIMIT,
+                exact: true
+            })
         );
+        let over = projected_text_payload(&" x".repeat(TOOL_CONTENT_TOKEN_LIMIT - 9));
         assert_eq!(
-            gate.evaluate_tool_text(&" x".repeat(9_863), false, &cancellation),
-            GateDecision::Exceeded
+            gate.project_payload(&over, 0, TOOL_CONTENT_TOKEN_LIMIT, &cancellation),
+            ProjectionDecision::Exceeded
         );
     }
 
@@ -543,21 +483,36 @@ mod tests {
         let counters = (0..COUNTER_WORKERS)
             .map(|_| gate.acquire(&CancellationToken::new()).expect("counter"))
             .collect::<Vec<_>>();
-        assert_eq!(
-            gate.evaluate_tool_text("small output", false, &CancellationToken::new()),
-            GateDecision::FitsByBytes,
+        assert!(
+            matches!(
+                gate.project_payload(
+                    "small output",
+                    0,
+                    TOOL_CONTENT_TOKEN_LIMIT,
+                    &CancellationToken::new()
+                ),
+                ProjectionDecision::Fits(_)
+            ),
             "small output must not wait for a counter slot"
         );
         let cancellation = CancellationToken::new();
         let worker_gate = std::sync::Arc::clone(&gate);
         let worker_cancellation = cancellation.clone();
         let waiter = std::thread::spawn(move || {
-            worker_gate.evaluate(&" x".repeat(10_000), &worker_cancellation)
+            worker_gate.project_payload(
+                &" x".repeat(10_000),
+                0,
+                TOOL_CONTENT_TOKEN_LIMIT,
+                &worker_cancellation,
+            )
         });
 
         std::thread::sleep(POOL_CANCELLATION_POLL * 2);
         cancellation.cancel();
-        assert_eq!(waiter.join().expect("waiter"), GateDecision::Cancelled);
+        assert_eq!(
+            waiter.join().expect("waiter"),
+            ProjectionDecision::Cancelled
+        );
         drop(counters);
     }
 
@@ -586,8 +541,10 @@ mod tests {
                 .map(|_| {
                     let gate = std::sync::Arc::clone(&gate);
                     std::thread::spawn(move || {
-                        gate.evaluate(
+                        gate.project_payload(
                             &" x".repeat(9_800),
+                            0,
+                            TOOL_CONTENT_TOKEN_LIMIT,
                             &tokio_util::sync::CancellationToken::new(),
                         )
                     })
@@ -596,7 +553,7 @@ mod tests {
             for worker in workers {
                 assert!(matches!(
                     worker.join().expect("worker"),
-                    GateDecision::FitsExactly(_)
+                    ProjectionDecision::Fits(_)
                 ));
             }
             eprintln!(

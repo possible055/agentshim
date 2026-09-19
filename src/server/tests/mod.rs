@@ -4,11 +4,10 @@ use rmcp::model::{CallToolRequestParams, CallToolResponse, CallToolResult, Conte
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{AgentShim, ToolAdmission, diagnostic_tool_error, shell_delegate, tool_error};
-use crate::{
-    output::MODEL_BYTE_LIMIT,
-    server::response::{blocking_response_for_test, finalize_tool_response, parse_request},
-};
+use agentshim_core::output::MODEL_BYTE_LIMIT;
+
+use super::{AgentShim, ToolAdmission, diagnostic_tool_error, tool_error};
+use crate::server::response::{blocking_response_for_test, finalize_tool_response, parse_request};
 
 mod admission;
 mod catalog;
@@ -174,8 +173,12 @@ fn tool_error_budget_counts_escaped_text_and_bounds_detail_captures() {
     assert!(budget.tool_result_fits(&content.text, Some(structured), true));
     let gate = crate::output::OutputTokenGate::load_shared().expect("token gate");
     assert!(matches!(
-        gate.evaluate_result(&result, &tokio_util::sync::CancellationToken::new()),
-        crate::output::GateDecision::FitsByBytes | crate::output::GateDecision::FitsExactly(_)
+        gate.project_result(
+            &result,
+            crate::output::TOOL_CONTENT_TOKEN_LIMIT + crate::output::CLIENT_WRAPPER_TOKEN_RESERVE,
+            &tokio_util::sync::CancellationToken::new()
+        ),
+        agentshim_core::output::ProjectionDecision::Fits(_)
     ));
 }
 
@@ -354,9 +357,9 @@ fn unavailable_and_unsearchable_errors_map_to_io_with_explicit_retryability() {
     let unavailable: crate::tools::exec::ProcessError =
         crate::tools::exec::ProcessError::Unavailable("no GNU bash".to_owned());
     let binary: crate::tools::grep::GrepError =
-        crate::tools::grep::GrepError::Unsearchable(crate::output::SkipReason::Binary);
+        crate::tools::grep::GrepError::Unsearchable(agentshim_core::output::SkipReason::Binary);
     let changed: crate::tools::grep::GrepError = crate::tools::grep::GrepError::Unsearchable(
-        crate::output::SkipReason::ChangedWhileSearched,
+        agentshim_core::output::SkipReason::ChangedWhileSearched,
     );
     for (error, retryable, message_needle) in [
         (&unavailable as &dyn DiagnosticError, false, None),

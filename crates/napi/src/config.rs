@@ -28,13 +28,12 @@ pub struct NativeHostOptions {
     pub tool_timeout_shelf_ms: Option<u32>,
     /// Maximum background job runtime, resolved by the embedding host.
     pub background_job_timeout_max_ms: Option<u32>,
-    /// Foreground admission capacity for request-bound tools in the shared runtime.
-    pub foreground_calls: Option<u32>,
     /// Explicit child environment; the Engine never reads the host ambient
     /// environment on its own.
     pub env: Option<Vec<EnvEntry>>,
-    /// Private persistent root for durable process capture artifacts.
-    pub capture_root: Option<String>,
+    /// Private persistent root for durable process capture artifacts, resolved by
+    /// the embedding host.
+    pub capture_root: String,
     /// Aggregate raw capture ceiling for one process call, in bytes.
     pub capture_max_bytes: Option<f64>,
     /// Artifact cleanup policy: `never` or `session-end`.
@@ -50,29 +49,6 @@ pub(crate) struct NativeEngineConfig {
     pub(crate) capture_root: std::path::PathBuf,
     pub(crate) capture_max_bytes: u64,
     pub(crate) capture_cleanup_session_end: bool,
-}
-
-fn configured_foreground_calls(value: Option<u32>) -> Result<usize> {
-    value.map_or_else(
-        || Ok(agentshim_core::runtime::DEFAULT_FOREGROUND_CALLS),
-        |value| {
-            usize::try_from(value)
-                .ok()
-                .filter(|configured| {
-                    (1..=agentshim_core::runtime::MAX_CONFIGURED_FOREGROUND_CALLS)
-                        .contains(configured)
-                })
-                .ok_or_else(|| {
-                    Error::new(
-                        napi::Status::InvalidArg,
-                        format!(
-                            "foregroundCalls must be an integer from 1 to {}",
-                            agentshim_core::runtime::MAX_CONFIGURED_FOREGROUND_CALLS
-                        ),
-                    )
-                })
-        },
-    )
 }
 
 #[cfg(windows)]
@@ -92,6 +68,40 @@ fn configured_windows_job_limits(
     .map_err(|error| Error::new(napi::Status::InvalidArg, error.to_string()))
 }
 
+fn validate_shelf(shelf: Duration) -> Result<()> {
+    if !(agentshim_core::runtime::MIN_TOOL_TIMEOUT_SHELF
+        ..=agentshim_core::runtime::MAX_TOOL_TIMEOUT_SHELF)
+        .contains(&shelf)
+    {
+        return Err(Error::new(
+            napi::Status::InvalidArg,
+            format!(
+                "toolTimeoutShelfMs must be from {} through {}",
+                agentshim_core::runtime::MIN_TOOL_TIMEOUT_SHELF.as_millis(),
+                agentshim_core::runtime::MAX_TOOL_TIMEOUT_SHELF.as_millis()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_background_timeout_max(background_timeout_max: Duration) -> Result<()> {
+    if !(agentshim_core::runtime::MIN_BACKGROUND_JOB_TIMEOUT_MAX
+        ..=agentshim_core::runtime::MAX_BACKGROUND_JOB_TIMEOUT_MAX)
+        .contains(&background_timeout_max)
+    {
+        return Err(Error::new(
+            napi::Status::InvalidArg,
+            format!(
+                "backgroundJobTimeoutMaxMs must be from {} through {}",
+                agentshim_core::runtime::MIN_BACKGROUND_JOB_TIMEOUT_MAX.as_millis(),
+                agentshim_core::runtime::MAX_BACKGROUND_JOB_TIMEOUT_MAX.as_millis()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 impl NativeEngineConfig {
     pub(crate) fn new(
         options: NativeHostOptions,
@@ -106,30 +116,17 @@ impl NativeEngineConfig {
                 ));
             }
         };
-        let shelf_ms = options.tool_timeout_shelf_ms.map_or(600_000_u64, u64::from);
+        let shelf_ms = options.tool_timeout_shelf_ms.map_or(
+            agentshim_core::tools::exec::spawn::DEFAULT_TOOL_TIMEOUT_SHELF_MS,
+            u64::from,
+        );
         let shelf = Duration::from_millis(shelf_ms);
-        if !(agentshim_core::runtime::MIN_TOOL_TIMEOUT_SHELF
-            ..=agentshim_core::runtime::MAX_TOOL_TIMEOUT_SHELF)
-            .contains(&shelf)
-        {
-            return Err(Error::new(
-                napi::Status::InvalidArg,
-                "toolTimeoutShelfMs must be from 15000 through 3600000",
-            ));
-        }
+        validate_shelf(shelf)?;
         let background_timeout_max = options.background_job_timeout_max_ms.map_or(
             agentshim_core::runtime::DEFAULT_BACKGROUND_JOB_TIMEOUT_MAX,
             |milliseconds| Duration::from_millis(u64::from(milliseconds)),
         );
-        if !(agentshim_core::runtime::MIN_BACKGROUND_JOB_TIMEOUT_MAX
-            ..=agentshim_core::runtime::MAX_BACKGROUND_JOB_TIMEOUT_MAX)
-            .contains(&background_timeout_max)
-        {
-            return Err(Error::new(
-                napi::Status::InvalidArg,
-                "backgroundJobTimeoutMaxMs must be from 600000 through 14400000",
-            ));
-        }
+        validate_background_timeout_max(background_timeout_max)?;
         let env = options
             .env
             .unwrap_or_default()
@@ -144,15 +141,7 @@ impl NativeEngineConfig {
         let windows_job_limits = configured_windows_job_limits(&env)?;
         let process_environment = agentshim_core::ProcessEnvironment::new(env, bash_override)
             .map_err(|error| Error::new(napi::Status::InvalidArg, error.to_string()))?;
-        let capture_root = options.capture_root.map_or_else(
-            || {
-                std::env::temp_dir().join(format!(
-                    "agentshim-captures-{}",
-                    uuid::Uuid::new_v4().simple()
-                ))
-            },
-            std::path::PathBuf::from,
-        );
+        let capture_root = std::path::PathBuf::from(&options.capture_root);
         std::fs::create_dir_all(&capture_root)
             .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))?;
         let capture_root = std::fs::canonicalize(capture_root)
@@ -170,7 +159,6 @@ impl NativeEngineConfig {
         let mut runtime = agentshim_core::runtime::RuntimeConfig::for_host_defaults();
         runtime.tool_timeout_shelf = shelf;
         runtime.background_job_timeout_max = background_timeout_max;
-        runtime.foreground_calls = configured_foreground_calls(options.foreground_calls)?;
         #[cfg(windows)]
         {
             runtime.windows_job_limits = windows_job_limits;

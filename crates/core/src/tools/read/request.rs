@@ -79,19 +79,29 @@ impl ReadRequest {
     }
 
     fn validate_path_specific_parameters(&self) -> Result<(), ReadError> {
-        if super::office::format_hint(&self.path).is_some()
-            && (self.start_line.is_some()
-                || self.line_count.is_some()
-                || self.encoding.is_some()
-                || self.pdf_mode.is_some()
-                || self.pages.is_some()
-                || self.pdf_cursor.is_some())
-        {
+        if super::office::format_hint(&self.path).is_some() && self.has_text_or_pdf_parameters() {
             return Err(ReadError::Validation(
                 "text and PDF parameters do not apply to Office input".to_owned(),
             ));
         }
         Ok(())
+    }
+
+    /// The single source for "any text or PDF shaping parameter is set", shared by
+    /// the Office admission path and its per-format rejection messages.
+    pub(crate) fn has_text_or_pdf_parameters(&self) -> bool {
+        self.start_line.is_some()
+            || self.line_count.is_some()
+            || self.encoding.is_some()
+            || self.pdf_mode.is_some()
+            || self.pages.is_some()
+            || self.pdf_cursor.is_some()
+    }
+
+    /// The single source for "any line-oriented text parameter is set", shared by
+    /// the PDF rejection path.
+    pub(crate) fn has_line_parameters(&self) -> bool {
+        self.start_line.is_some() || self.line_count.is_some() || self.encoding.is_some()
     }
 
     fn validate_office_parameters(&self) -> Result<(), ReadError> {

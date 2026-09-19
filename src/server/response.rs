@@ -6,7 +6,10 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use crate::output::{CallOutputBudget, MAX_CONTROL_RESPONSE_TOKENS, ProjectionDecision};
+use crate::output::{
+    CLIENT_WRAPPER_TOKEN_RESERVE, CallOutputBudget, MAX_CONTROL_RESPONSE_TOKENS,
+    ProjectionDecision, TOOL_CONTENT_TOKEN_LIMIT,
+};
 
 pub(super) fn finalize_tool_response(
     tool: &str,
@@ -84,11 +87,12 @@ fn burst_limit_response(
         "output_budget",
         true,
         "tool output exceeded the current burst budget; retry after the burst resets",
-        Some(&json!({
-            "reason": "burst_limit",
-            "retry_after_ms": 2000
-        })),
+        Some(&burst_limit_details()),
     )
+}
+
+fn burst_limit_details() -> Value {
+    json!({ "reason": "burst_limit", "retry_after_ms": 2000 })
 }
 
 pub(super) fn parse_request<T: DeserializeOwned>(
@@ -312,10 +316,9 @@ impl DiagnosticError for crate::tools::read::ReadError {
                 "limit_bytes": limit,
                 "observed": observed
             })),
-            ReadError::Output(crate::output::OutputError::BurstLimit) => Some(json!({
-                "reason": "burst_limit",
-                "retry_after_ms": 2000
-            })),
+            ReadError::Output(crate::output::OutputError::BurstLimit) => {
+                Some(burst_limit_details())
+            }
             ReadError::ResourceBusy {
                 resource,
                 retry_after,
@@ -365,7 +368,7 @@ impl DiagnosticError for crate::tools::glob::GlobError {
     fn details(&self) -> Option<Value> {
         match self {
             crate::tools::glob::GlobError::Output(crate::output::OutputError::BurstLimit) => {
-                Some(json!({ "reason": "burst_limit", "retry_after_ms": 2000 }))
+                Some(burst_limit_details())
             }
             crate::tools::glob::GlobError::ResourceBusy(resource) => {
                 Some(json!({ "resource": resource }))
@@ -387,7 +390,6 @@ impl DiagnosticError for crate::tools::grep::GrepError {
             GrepError::Output(crate::output::OutputError::BurstLimit) => "output_budget",
             GrepError::Output(_) => "output_invariant",
             GrepError::CandidateMemory => "resource_limit",
-            GrepError::PoolPoison => "resource_timeout",
             GrepError::Unsearchable(_) | GrepError::Traversal(_) | GrepError::Io(_) => "io",
         }
     }
@@ -410,7 +412,7 @@ impl DiagnosticError for crate::tools::grep::GrepError {
     fn details(&self) -> Option<Value> {
         match self {
             crate::tools::grep::GrepError::Output(crate::output::OutputError::BurstLimit) => {
-                Some(json!({ "reason": "burst_limit", "retry_after_ms": 2000 }))
+                Some(burst_limit_details())
             }
             crate::tools::grep::GrepError::ResourceBusy(resource) => {
                 Some(json!({ "resource": resource }))
@@ -545,17 +547,23 @@ pub(super) fn blocking_response<E: DiagnosticError>(
                 tracing::trace!(target: "agentshim", token_gate_path = "verified_renderer");
                 return result.into();
             }
-            match output_token_gate.evaluate_result(&result, cancellation) {
-                crate::output::GateDecision::FitsByBytes
-                | crate::output::GateDecision::FitsExactly(_) => result.into(),
-                crate::output::GateDecision::Exceeded => tool_error(
+            // The wrapper reserve is added to the ceiling so the payload budget stays
+            // at TOOL_CONTENT_TOKEN_LIMIT, exactly as the retired evaluate_result API
+            // bounded it.
+            match output_token_gate.project_result(
+                &result,
+                TOOL_CONTENT_TOKEN_LIMIT + CLIENT_WRAPPER_TOKEN_RESERVE,
+                cancellation,
+            ) {
+                crate::output::ProjectionDecision::Fits(_) => result.into(),
+                crate::output::ProjectionDecision::Exceeded => tool_error(
                     output_budget,
                     "output_budget",
                     false,
                     "tool output exceeded the model token budget",
                     None,
                 ),
-                crate::output::GateDecision::Cancelled => tool_error(
+                crate::output::ProjectionDecision::Cancelled => tool_error(
                     output_budget,
                     "client_cancellation",
                     false,
@@ -576,12 +584,10 @@ pub(super) fn blocking_response<E: DiagnosticError>(
 pub(super) fn resource_busy_with_message(
     budget: &CallOutputBudget,
     tool: &str,
-    admission: &'static str,
     message: impl Into<String>,
 ) -> CallToolResponse {
-    tracing::error!(target: "agentshim", event = "tool_error", phase = "request", outcome = "error", error_class = "resource_busy", tool, admission);
-    let retryable = true;
-    tool_error(budget, "resource_busy", retryable, message, None)
+    tracing::error!(target: "agentshim", event = "tool_error", phase = "request", outcome = "error", error_class = "resource_busy", tool, admission = "detached");
+    tool_error(budget, "resource_busy", true, message, None)
 }
 
 pub(super) fn cancellation_class(

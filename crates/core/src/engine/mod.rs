@@ -247,13 +247,6 @@ impl ToolEngine {
             };
             drop(text_memory);
 
-            let elapsed = started.elapsed();
-            if deadline.is_some_and(|limit| elapsed > limit) {
-                return Err(read::ReadError::ResourceTimeout {
-                    limit: deadline.unwrap_or_default(),
-                    elapsed,
-                });
-            }
             match executed {
                 Ok(read::Attempt::Stable(output)) => {
                     result = Some(Ok(output));
@@ -386,11 +379,7 @@ impl ToolEngine {
         prepared: &read::PreparedRead,
         cancellation: &CancellationToken,
     ) -> Result<(OwnedSemaphorePermit, OwnedSemaphorePermit), read::ReadError> {
-        let Some(gate) = self
-            .resources
-            .acquire_structured_document_gate(cancellation)
-            .await
-        else {
+        let Some(gate) = self.resources.acquire_pdf_gate(cancellation).await else {
             if cancellation.is_cancelled() || self.resources.shutdown_token().is_cancelled() {
                 return Err(read::ReadError::Cancelled);
             }

@@ -15,8 +15,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     output::SkipReason,
     path::{FileAccess, ResolvedPath},
+    platform::fingerprint::FileFingerprint,
     runtime::RuntimeResources,
-    tools::read::FileFingerprint,
 };
 
 use super::{

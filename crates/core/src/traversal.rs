@@ -86,6 +86,7 @@ pub struct TraversalEntry<'a> {
 pub struct OwnedTraversalEntry {
     pub key: PathBuf,
     pub absolute: PathBuf,
+    pub file_type: Option<std::fs::FileType>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -118,34 +119,6 @@ pub enum TraversalError {
 /// Returns an error when the root is unavailable, the base is not a directory,
 /// or cancellation is requested.
 pub fn walk(
-    access: &FileAccess,
-    base: &ResolvedPath,
-    include_ignored: bool,
-    cancellation: &CancellationToken,
-    visitor: impl for<'entry> FnMut(TraversalEntry<'entry>) -> TraversalControl,
-) -> Result<TraversalSummary, TraversalError> {
-    walk_filtered(access, base, include_ignored, cancellation, None, visitor)
-}
-
-pub fn walk_with_literal_prefix(
-    access: &FileAccess,
-    base: &ResolvedPath,
-    include_ignored: bool,
-    cancellation: &CancellationToken,
-    literal_prefix: &Path,
-    visitor: impl for<'entry> FnMut(TraversalEntry<'entry>) -> TraversalControl,
-) -> Result<TraversalSummary, TraversalError> {
-    walk_filtered(
-        access,
-        base,
-        include_ignored,
-        cancellation,
-        Some(literal_prefix),
-        visitor,
-    )
-}
-
-fn walk_filtered(
     access: &FileAccess,
     base: &ResolvedPath,
     include_ignored: bool,
@@ -258,53 +231,6 @@ pub fn walk_parallel_batched<P, V>(
     include_ignored: bool,
     cancellation: &CancellationToken,
     parallel: ParallelTraversal,
-    callbacks: &ParallelTraversalCallbacks<P, V>,
-) -> Result<TraversalSummary, TraversalError>
-where
-    P: for<'entry> Fn(TraversalEntry<'entry>) -> bool + Send + Sync,
-    V: Fn(&[OwnedTraversalEntry]) -> TraversalControl + Send + Sync,
-{
-    walk_parallel_batched_filtered(
-        access,
-        base,
-        include_ignored,
-        cancellation,
-        parallel,
-        None,
-        callbacks,
-    )
-}
-
-pub fn walk_parallel_batched_with_literal_prefix<P, V>(
-    access: &FileAccess,
-    base: &ResolvedPath,
-    include_ignored: bool,
-    cancellation: &CancellationToken,
-    parallel: ParallelTraversal,
-    literal_prefix: &Path,
-    callbacks: &ParallelTraversalCallbacks<P, V>,
-) -> Result<TraversalSummary, TraversalError>
-where
-    P: for<'entry> Fn(TraversalEntry<'entry>) -> bool + Send + Sync,
-    V: Fn(&[OwnedTraversalEntry]) -> TraversalControl + Send + Sync,
-{
-    walk_parallel_batched_filtered(
-        access,
-        base,
-        include_ignored,
-        cancellation,
-        parallel,
-        Some(literal_prefix),
-        callbacks,
-    )
-}
-
-fn walk_parallel_batched_filtered<P, V>(
-    access: &FileAccess,
-    base: &ResolvedPath,
-    include_ignored: bool,
-    cancellation: &CancellationToken,
-    parallel: ParallelTraversal,
     literal_prefix: Option<&Path>,
     callbacks: &ParallelTraversalCallbacks<P, V>,
 ) -> Result<TraversalSummary, TraversalError>
@@ -370,6 +296,7 @@ where
             pending.entries.push(OwnedTraversalEntry {
                 key: key.into_owned(),
                 absolute: entry.path().to_path_buf(),
+                file_type: entry.file_type(),
             });
             if pending.entries.len() < pending.capacity {
                 return WalkState::Continue;
@@ -653,7 +580,6 @@ mod tests {
     use super::{
         OwnedTraversalEntry, ParallelTraversal, ParallelTraversalCallbacks, TraversalControl,
         TraversalEntry, literal_path_prefix, walk, walk_parallel_batched,
-        walk_parallel_batched_with_literal_prefix, walk_with_literal_prefix,
     };
     use crate::path::{FileAccess, ReadScope, RepositoryRoot};
 
@@ -677,10 +603,17 @@ mod tests {
         let root = access(fixture.path());
         let base = root.resolve(Path::new(".")).expect("base");
         let mut included = Vec::new();
-        walk(&root, &base, true, &CancellationToken::new(), |entry| {
-            included.push(crate::path::slash_path(entry.key).expect("model path"));
-            TraversalControl::Continue
-        })
+        walk(
+            &root,
+            &base,
+            true,
+            &CancellationToken::new(),
+            None,
+            |entry| {
+                included.push(crate::path::slash_path(entry.key).expect("model path"));
+                TraversalControl::Continue
+            },
+        )
         .expect("include ignored walk");
         assert!(included.contains(&"visible.txt".to_owned()));
         assert!(included.contains(&".hidden".to_owned()));
@@ -688,10 +621,17 @@ mod tests {
         assert!(!included.iter().any(|path| path.starts_with(".git/")));
 
         let mut respected = Vec::new();
-        walk(&root, &base, false, &CancellationToken::new(), |entry| {
-            respected.push(crate::path::slash_path(entry.key).expect("model path"));
-            TraversalControl::Continue
-        })
+        walk(
+            &root,
+            &base,
+            false,
+            &CancellationToken::new(),
+            None,
+            |entry| {
+                respected.push(crate::path::slash_path(entry.key).expect("model path"));
+                TraversalControl::Continue
+            },
+        )
         .expect("respect ignore walk");
         assert!(respected.contains(&"visible.txt".to_owned()));
         assert!(respected.contains(&".hidden".to_owned()));
@@ -718,10 +658,17 @@ mod tests {
         let root = access(fixture.path());
         let base = root.resolve(Path::new(".")).expect("base");
         let mut serial = Vec::new();
-        let serial_summary = walk(&root, &base, false, &CancellationToken::new(), |entry| {
-            serial.push(entry.key.to_path_buf());
-            TraversalControl::Continue
-        })
+        let serial_summary = walk(
+            &root,
+            &base,
+            false,
+            &CancellationToken::new(),
+            None,
+            |entry| {
+                serial.push(entry.key.to_path_buf());
+                TraversalControl::Continue
+            },
+        )
         .expect("serial walk");
         let parallel = Mutex::new(Vec::new());
         let parallel_summary = walk_parallel_batched(
@@ -733,6 +680,7 @@ mod tests {
                 batch_size: 2,
                 threads: 4,
             },
+            None,
             &ParallelTraversalCallbacks {
                 prefilter: |_: TraversalEntry<'_>| true,
                 visitor: |batch: &[OwnedTraversalEntry]| {
@@ -773,6 +721,7 @@ mod tests {
                 batch_size: 8,
                 threads: 4,
             },
+            None,
             &ParallelTraversalCallbacks {
                 prefilter: |entry: TraversalEntry<'_>| {
                     prefiltered
@@ -840,12 +789,12 @@ mod tests {
         let prefix = Path::new("src/deep");
 
         let mut serial = Vec::new();
-        let serial_summary = walk_with_literal_prefix(
+        let serial_summary = walk(
             &root,
             &base,
             false,
             &CancellationToken::new(),
-            prefix,
+            Some(prefix),
             |entry| {
                 serial.push(entry.key.to_path_buf());
                 TraversalControl::Continue
@@ -853,7 +802,7 @@ mod tests {
         )
         .expect("serial prefix walk");
         let parallel = Mutex::new(Vec::new());
-        let parallel_summary = walk_parallel_batched_with_literal_prefix(
+        let parallel_summary = walk_parallel_batched(
             &root,
             &base,
             false,
@@ -862,7 +811,7 @@ mod tests {
                 batch_size: 2,
                 threads: 4,
             },
-            prefix,
+            Some(prefix),
             &ParallelTraversalCallbacks {
                 prefilter: |_: TraversalEntry<'_>| true,
                 visitor: |batch: &[OwnedTraversalEntry]| {
@@ -898,10 +847,17 @@ mod tests {
         let root = access(fixture.path());
         let base = root.resolve(Path::new(".")).expect("base");
         let mut paths = Vec::new();
-        walk(&root, &base, true, &CancellationToken::new(), |entry| {
-            paths.push(crate::path::slash_path(entry.key).expect("model path"));
-            TraversalControl::Continue
-        })
+        walk(
+            &root,
+            &base,
+            true,
+            &CancellationToken::new(),
+            None,
+            |entry| {
+                paths.push(crate::path::slash_path(entry.key).expect("model path"));
+                TraversalControl::Continue
+            },
+        )
         .expect("walk");
         assert!(paths.contains(&"src.rs".to_owned()));
         assert!(!paths.iter().any(|path| path.starts_with("node_modules")));
@@ -909,9 +865,14 @@ mod tests {
 
         let denied = root.resolve(Path::new("node_modules")).expect("denied");
         assert!(matches!(
-            walk(&root, &denied, true, &CancellationToken::new(), |_| {
-                TraversalControl::Continue
-            }),
+            walk(
+                &root,
+                &denied,
+                true,
+                &CancellationToken::new(),
+                None,
+                |_| { TraversalControl::Continue }
+            ),
             Err(super::TraversalError::DeniedDirectory)
         ));
     }
@@ -924,7 +885,7 @@ mod tests {
         let cancellation = CancellationToken::new();
         cancellation.cancel();
         assert!(
-            walk(&root, &base, false, &cancellation, |_| {
+            walk(&root, &base, false, &cancellation, None, |_| {
                 TraversalControl::Continue
             })
             .is_err()
@@ -939,6 +900,7 @@ mod tests {
                     batch_size: 2,
                     threads: 4,
                 },
+                None,
                 &ParallelTraversalCallbacks {
                     prefilter: |_: TraversalEntry<'_>| true,
                     visitor: |_: &[OwnedTraversalEntry]| TraversalControl::Continue,
@@ -956,10 +918,17 @@ mod tests {
         let root = access(fixture.path());
         let base = root.resolve(Path::new("src")).expect("base");
         let mut paths = Vec::new();
-        walk(&root, &base, false, &CancellationToken::new(), |entry| {
-            paths.push(entry.key.to_path_buf());
-            TraversalControl::Continue
-        })
+        walk(
+            &root,
+            &base,
+            false,
+            &CancellationToken::new(),
+            None,
+            |entry| {
+                paths.push(entry.key.to_path_buf());
+                TraversalControl::Continue
+            },
+        )
         .expect("walk");
         assert_eq!(paths, [Path::new("src/Unicode 界.rs").to_path_buf()]);
     }
@@ -973,10 +942,17 @@ mod tests {
         let access = access_with_scope(fixture.path(), ReadScope::Unrestricted);
         let base = access.resolve(outside.path()).expect("ambient base");
         let mut paths = Vec::new();
-        walk(&access, &base, false, &CancellationToken::new(), |entry| {
-            paths.push(entry.key.to_path_buf());
-            TraversalControl::Continue
-        })
+        walk(
+            &access,
+            &base,
+            false,
+            &CancellationToken::new(),
+            None,
+            |entry| {
+                paths.push(entry.key.to_path_buf());
+                TraversalControl::Continue
+            },
+        )
         .expect("ambient walk");
         assert!(paths.contains(&Path::new("nested/source.rs").to_path_buf()));
     }
@@ -994,9 +970,14 @@ mod tests {
         let access = access_with_scope(fixture.path(), ReadScope::Unrestricted);
         let base = access.resolve(&link).expect("ambient base");
         assert!(matches!(
-            walk(&access, &base, true, &CancellationToken::new(), |_| {
-                TraversalControl::Continue
-            }),
+            walk(
+                &access,
+                &base,
+                true,
+                &CancellationToken::new(),
+                None,
+                |_| { TraversalControl::Continue }
+            ),
             Err(super::TraversalError::NotDirectory)
         ));
     }
@@ -1017,7 +998,7 @@ mod tests {
         let root = access(fixture.path());
         let base = root.resolve(Path::new(".")).expect("base");
         let mut visited = 0_usize;
-        let summary = walk(&root, &base, false, &CancellationToken::new(), |_| {
+        let summary = walk(&root, &base, false, &CancellationToken::new(), None, |_| {
             visited = visited.saturating_add(1);
             TraversalControl::Continue
         })
@@ -1039,10 +1020,17 @@ mod tests {
         let root = access(fixture.path());
         let base = root.resolve(Path::new(".")).expect("base");
         let mut paths = Vec::new();
-        walk(&root, &base, true, &CancellationToken::new(), |entry| {
-            paths.push(entry.key.to_path_buf());
-            TraversalControl::Continue
-        })
+        walk(
+            &root,
+            &base,
+            true,
+            &CancellationToken::new(),
+            None,
+            |entry| {
+                paths.push(entry.key.to_path_buf());
+                TraversalControl::Continue
+            },
+        )
         .expect("walk");
         assert!(
             !paths

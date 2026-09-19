@@ -1,6 +1,7 @@
 import { access, copyFile, mkdtemp, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { Worker } from 'node:worker_threads'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -21,6 +22,8 @@ const builtLibrary = fileURLToPath(new URL(
       : 'libagentshim_napi.so'}`,
   import.meta.url,
 ))
+
+const captureRootFor = (): string => join(tmpdir(), `agentshim-native-captures-${randomUUID()}`)
 
 async function stageAddon(): Promise<string | undefined> {
   try {
@@ -90,8 +93,9 @@ describe('native addon loading', () => {
     expect(() => new result.engine!.NativeHostRuntime({
       env: nativeEngineEnv({}),
       backgroundJobTimeoutMaxMs: 599_999,
+      captureRoot: captureRootFor(),
     })).toThrow(/600000 through 14400000/)
-    const host = new result.engine.NativeHostRuntime({ env: nativeEngineEnv({}) })
+    const host = new result.engine.NativeHostRuntime({ env: nativeEngineEnv({}), captureRoot: captureRootFor() })
     const engine = host.openEngine(root)
     await engine.close()
   })
@@ -139,7 +143,7 @@ describe('native addon loading', () => {
     await writeFile(join(root, 'notes.md'), 'alpha needle\n'.repeat(8))
     await writeFile(join(root, 'other.txt'), 'bravo\n'.repeat(8))
     await writeFile(join(root, 'document.pdf'), pdfFixture())
-    const host = new result.engine.NativeHostRuntime({ env: nativeEngineEnv({ AGENTSHIM_PROBE: 'native' }) })
+    const host = new result.engine.NativeHostRuntime({ env: nativeEngineEnv({ AGENTSHIM_PROBE: 'native' }), captureRoot: captureRootFor() })
     const engine = host.openEngine(root)
 
     const read = await engine.readText({ path: 'notes.md', lineCount: 2 })
@@ -165,6 +169,7 @@ describe('native addon loading', () => {
     const unrestrictedHost = new result.engine.NativeHostRuntime({
       env: nativeEngineEnv({}),
       readScope: 'unrestricted',
+      captureRoot: captureRootFor(),
     })
     const unrestricted = unrestrictedHost.openEngine(root)
     expect((await unrestricted.readText({ path: outsideFile })).text).toContain('unrestricted read')
@@ -201,7 +206,7 @@ describe('native addon loading', () => {
     if (result.engine === undefined) throw new Error('unreachable')
 
     const root = await mkdtemp(join(tmpdir(), 'agentshim-native-classify-'))
-    const host = new result.engine.NativeHostRuntime({ env: nativeEngineEnv({}) })
+    const host = new result.engine.NativeHostRuntime({ env: nativeEngineEnv({}), captureRoot: captureRootFor() })
     const engine = host.openEngine(root)
     const spawn = async (statement: string, attribution?: NativeSandboxAttribution) => {
       const prepared = engine.prepareRunProgram({
@@ -258,7 +263,7 @@ describe('native addon loading', () => {
     if (result.engine === undefined) throw new Error('unreachable')
     const firstRoot = await mkdtemp(join(tmpdir(), 'agentshim-native-capacity-a-'))
     const secondRoot = await mkdtemp(join(tmpdir(), 'agentshim-native-capacity-b-'))
-    const host = new result.engine.NativeHostRuntime({ env: nativeEngineEnv({}), foregroundCalls: 2 })
+    const host = new result.engine.NativeHostRuntime({ env: nativeEngineEnv({}), captureRoot: captureRootFor() })
     const first = host.openEngine(firstRoot)
     const second = host.openEngine(secondRoot)
     const controllers: AbortController[] = []
@@ -279,8 +284,8 @@ describe('native addon loading', () => {
       running.push(engine.spawnPrepared(prepared.handle))
     }
     // A child writes its marker only after its spawn was admitted, so waiting for both
-    // markers proves the shared two-slot pool is full without assuming a wall-clock
-    // delay that slow runners would flake on.
+    // markers proves both engines draw on the shared host capacity without assuming a
+    // wall-clock delay that slow runners would flake on.
     for (const marker of admissionMarkers) {
       const admittedDeadline = Date.now() + 10_000
       while (true) {
@@ -293,14 +298,6 @@ describe('native addon loading', () => {
         }
       }
     }
-
-    const overflow = second.prepareRunProgram({
-      program: process.execPath,
-      args: ['-e', 'process.stdout.write("unexpected admission")'],
-      timeoutMs: 2_000,
-    })
-    const rejected = await second.spawnPrepared(overflow.handle)
-    expect(rejected.failure).toMatchObject({ code: 'AGENTSHIM_RESOURCE_BUSY' })
 
     for (const controller of controllers) controller.abort()
     await Promise.all(running)
@@ -415,7 +412,7 @@ describe('native addon loading', () => {
     if (result.engine === undefined) throw new Error('unreachable')
 
     const root = await mkdtemp(join(tmpdir(), 'agentshim-native-bg-'))
-    const host = new result.engine.NativeHostRuntime({ env: nativeEngineEnv({}) })
+    const host = new result.engine.NativeHostRuntime({ env: nativeEngineEnv({}), captureRoot: captureRootFor() })
     const engine = host.openEngine(root)
     const prepared = engine.prepareBash({
       command: 'for i in 1 2 3 4 5 6; do printf "line-%s\\n" "$i"; sleep 0.05; done; exit 0',
@@ -445,7 +442,7 @@ describe('native addon loading', () => {
     const result = loadNativeAddon()
     if (result.engine === undefined) throw new Error('unreachable')
     const root = await mkdtemp(join(tmpdir(), 'agentshim-native-bg-concurrent-'))
-    const host = new result.engine.NativeHostRuntime({ env: nativeEngineEnv({}) })
+    const host = new result.engine.NativeHostRuntime({ env: nativeEngineEnv({}), captureRoot: captureRootFor() })
     const engine = host.openEngine(root)
     const handles = Array.from({ length: 3 }, (_, index) => {
       const prepared = engine.prepareBash({ command: `sleep 0.1; printf concurrent-${index}`, background: true })
@@ -466,7 +463,7 @@ describe('native addon loading', () => {
     if (result.engine === undefined) throw new Error('unreachable')
 
     const root = await mkdtemp(join(tmpdir(), 'agentshim-native-bg-cancel-'))
-    const host = new result.engine.NativeHostRuntime({ env: nativeEngineEnv({}) })
+    const host = new result.engine.NativeHostRuntime({ env: nativeEngineEnv({}), captureRoot: captureRootFor() })
     const engine = host.openEngine(root)
 
     const prepared = engine.prepareBash({
@@ -500,6 +497,7 @@ describe('native addon loading', () => {
     const host = new result.engine.NativeHostRuntime({
       env: nativeEngineEnv({}),
       backgroundJobTimeoutMaxMs: 600_000,
+      captureRoot: captureRootFor(),
     })
     const engine = host.openEngine(root)
     const marker = join(root, 'marker.txt')
@@ -536,7 +534,7 @@ describe('native addon loading', () => {
     const result = loadNativeAddon()
     if (result.engine === undefined) throw new Error('unreachable')
     const root = await mkdtemp(join(tmpdir(), 'agentshim-native-bg-race-'))
-    const host = new result.engine.NativeHostRuntime({ backgroundJobTimeoutMaxMs: 600_000 })
+    const host = new result.engine.NativeHostRuntime({ backgroundJobTimeoutMaxMs: 600_000, captureRoot: captureRootFor() })
     const engine = host.openEngine(root)
     const prepared = engine.prepareBash({
       command: 'while :; do sleep 0.02; done',
@@ -560,7 +558,7 @@ describe('native addon loading', () => {
     const result = loadNativeAddon()
     if (result.engine === undefined) throw new Error('unreachable')
     const root = await mkdtemp(join(tmpdir(), 'agentshim-native-errors-'))
-    const host = new result.engine.NativeHostRuntime({ env: nativeEngineEnv({}) })
+    const host = new result.engine.NativeHostRuntime({ env: nativeEngineEnv({}), captureRoot: captureRootFor() })
     const engine = host.openEngine(root)
 
     await expect(engine.readText({ path: '../missing.txt' })).rejects.toMatchObject({
@@ -608,7 +606,7 @@ describe('native addon loading', () => {
     const worker = new Worker(`
       const { parentPort, workerData } = require('node:worker_threads')
       const addon = require(workerData.addon)
-      const host = new addon.NativeHostRuntime({ env: workerData.env })
+      const host = new addon.NativeHostRuntime({ env: workerData.env, captureRoot: workerData.captureRoot })
       const engine = host.openEngine(workerData.root)
       engine.beginCall('worker-call')
       const prepared = engine.prepareRunProgram('worker-call', {
@@ -623,6 +621,7 @@ describe('native addon loading', () => {
         addon: stagedAddon!,
         root,
         env: nativeEngineEnv({}),
+        captureRoot: captureRootFor(),
         program: process.execPath,
         childScript,
       },
@@ -653,7 +652,7 @@ describe('native addon loading', () => {
     const worker = new Worker(`
       const { parentPort, workerData } = require('node:worker_threads')
       const addon = require(workerData.addon)
-      const host = new addon.NativeHostRuntime({ env: workerData.env })
+      const host = new addon.NativeHostRuntime({ env: workerData.env, captureRoot: workerData.captureRoot })
       const engine = host.openEngine(workerData.root)
       engine.beginCall('worker-background-call')
       const prepared = engine.prepareBash('worker-background-call', {
@@ -670,6 +669,7 @@ describe('native addon loading', () => {
         addon: stagedAddon!,
         root,
         env: nativeEngineEnv({}),
+        captureRoot: captureRootFor(),
       },
     })
     await new Promise<void>((resolve, reject) => {

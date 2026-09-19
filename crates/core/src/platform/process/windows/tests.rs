@@ -7,7 +7,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use crate::tools::exec::{
+    use crate::platform::process::{
         resolve::launcher_for,
         spawn::{EnvironmentPlan, ExecPlan, Streams},
     };
@@ -20,7 +20,7 @@ mod tests {
             },
             runner::{FAILURE_POINT, FailurePoint, LAST_SPAWNED_PID, run, spawn_io_threads},
         },
-        tools::exec::{
+        platform::process::{
             capture::drain,
             resolve::{Launcher, ResolvedProgram},
             spawn::{ThreadCompletion, spawn_monitored},

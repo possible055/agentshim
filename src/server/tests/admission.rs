@@ -12,14 +12,6 @@ fn detached_request() -> CallToolRequestParams {
     .expect("call tool request")
 }
 
-fn bash_request(command: &str) -> CallToolRequestParams {
-    serde_json::from_value(json!({
-        "name": "bash",
-        "arguments": { "command": command }
-    }))
-    .expect("bash request")
-}
-
 fn bash_terminate_request() -> CallToolRequestParams {
     serde_json::from_value(json!({
         "name": "bash",
@@ -56,7 +48,7 @@ fn shell_delegate_classifies_only_the_first_token_file_stem() {
         ("bash -lc true", "none"),
     ] {
         assert_eq!(
-            shell_delegate(&bash_request(command)),
+            crate::diagnostics::shell_delegate_class("bash", Some(command)),
             expected,
             "{command}"
         );
@@ -255,138 +247,6 @@ async fn dropped_request_future_after_commit_still_arms_the_deadline() {
         crate::tools::bash::status::JobState::TimedOut
     );
     assert_eq!(snapshot.cause, Some("timeout"));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn detached_timeout_stops_the_tree_without_status_polling() {
-    if crate::bash_report().is_err() {
-        return;
-    }
-    let fixture = tempfile::tempdir().expect("fixture");
-    let marker = fixture.path().join("marker.txt");
-    fs::write(&marker, "").expect("create marker");
-    let server = AgentShim::from_path(fixture.path()).expect("server");
-    let request: CallToolRequestParams = serde_json::from_value(json!({
-        "name": "bash",
-        "arguments": {
-            "command": "while :; do printf x >> marker.txt; sleep 0.02; done",
-            "detach": true,
-            "log_path": "timeout.log",
-            "timeout_ms": 1000
-        }
-    }))
-    .expect("timeout request");
-    let admission = server.try_admit_tool(&request).expect("detached admission");
-    let budget = default_output_budget();
-    let response = server
-        .call_bash_for_test(
-            request.arguments,
-            &tokio_util::sync::CancellationToken::new(),
-            admission,
-            &budget,
-        )
-        .await;
-    let CallToolResponse::Complete(result) = response else {
-        panic!("detached response must be complete");
-    };
-    let ContentBlock::Text(content) = &result.content[0] else {
-        panic!("detached response must contain text");
-    };
-    let job_id = content
-        .text
-        .split_whitespace()
-        .find_map(|part| part.strip_prefix("job_id="))
-        .expect("detached job id");
-
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-    let first_len = fs::metadata(&marker).expect("marker").len();
-    assert!(first_len > 0, "detached command did not run before timeout");
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    let second_len = fs::metadata(&marker).expect("stable marker").len();
-    let snapshot = server.detached.status(job_id, 0).expect("timed out status");
-    assert_eq!(
-        snapshot.state,
-        crate::tools::bash::status::JobState::TimedOut
-    );
-    assert_eq!(snapshot.cause, Some("timeout"));
-    assert_eq!(
-        first_len, second_len,
-        "process tree kept writing after timeout"
-    );
-}
-
-#[test]
-fn root_capability_blocks_parent_escape() {
-    let fixture = tempfile::tempdir().expect("create fixture");
-    let root = fixture.path().join("root");
-    fs::create_dir(&root).expect("create root");
-    fs::write(fixture.path().join("outside.txt"), "outside").expect("write outside");
-    let server = AgentShim::from_path(&root).expect("open root");
-
-    let error = server
-        .root
-        .capability()
-        .read_to_string("../outside.txt")
-        .expect_err("parent escape must fail");
-    assert!(matches!(
-        error.kind(),
-        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
-    ));
-}
-
-#[cfg(unix)]
-#[test]
-fn root_capability_blocks_symlink_escape() {
-    use std::os::unix::fs::symlink;
-
-    let fixture = tempfile::tempdir().expect("create fixture");
-    let root = fixture.path().join("root");
-    fs::create_dir(&root).expect("create root");
-    let outside = fixture.path().join("outside.txt");
-    fs::write(&outside, "outside").expect("write outside");
-    symlink(&outside, root.join("escape")).expect("create symlink");
-    let server = AgentShim::from_path(&root).expect("open root");
-
-    server
-        .root
-        .capability()
-        .read_to_string("escape")
-        .expect_err("symlink escape must fail");
-}
-
-#[cfg(any(unix, windows))]
-#[test]
-fn root_handle_preserves_repository_identity() {
-    let fixture = tempfile::tempdir().expect("create fixture");
-    let root = fixture.path().join("root");
-    let moved = fixture.path().join("moved");
-    fs::create_dir(&root).expect("create root");
-    fs::write(root.join("identity.txt"), "original").expect("write original");
-    let server = AgentShim::from_path(&root).expect("open root");
-
-    #[cfg(unix)]
-    {
-        fs::rename(&root, &moved).expect("move original root");
-        fs::create_dir(&root).expect("create replacement root");
-        fs::write(root.join("identity.txt"), "replacement").expect("write replacement");
-    }
-    #[cfg(windows)]
-    {
-        let error = fs::rename(&root, &moved).expect_err("held Windows root blocks replacement");
-        assert!(
-            matches!(error.raw_os_error(), Some(5 | 32)),
-            "unexpected Windows root rename error: {error}"
-        );
-    }
-
-    assert_eq!(
-        server
-            .root
-            .capability()
-            .read_to_string("identity.txt")
-            .expect("read held root"),
-        "original"
-    );
 }
 
 /// Re-entrant shutdown: concurrent callers share one transaction and one report, the

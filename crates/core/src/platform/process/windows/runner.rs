@@ -24,7 +24,7 @@ use super::platform::{
     LaunchEncoding, Lifecycle, PreparedStdio, create_process_cwd, environment_block, prepare_stdio,
     settle_threads,
 };
-use crate::tools::exec::{
+use crate::platform::process::{
     ProcessError,
     capture::{Capture, capture_bytes_per_stream, drain_with_capture, write_stdin},
     resolve::Launcher,

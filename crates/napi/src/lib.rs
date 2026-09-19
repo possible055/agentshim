@@ -12,6 +12,7 @@ mod config;
 mod engine;
 mod failures;
 mod process;
+mod state;
 mod tools;
 
 /// Module API version; hosts must exact-match before using any Engine capability.

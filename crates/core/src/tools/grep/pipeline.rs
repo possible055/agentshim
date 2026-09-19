@@ -17,7 +17,6 @@ use crate::{
     traversal::{
         OwnedTraversalEntry, ParallelTraversal, ParallelTraversalCallbacks, TraversalControl,
         TraversalEntry, TraversalSummary, prefer_parallel_root, walk, walk_parallel_batched,
-        walk_parallel_batched_with_literal_prefix, walk_with_literal_prefix,
     },
 };
 
@@ -181,7 +180,7 @@ pub fn pipelined_search(
 
     drain_pending(&state, &receiver, &context, request, single_file)?;
     let mut state = Arc::try_unwrap(state)
-        .map_err(|_| GrepError::PoolPoison)?
+        .map_err(|_| GrepError::Worker("grep pipeline state was still shared".to_owned()))?
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(error) = state.terminal_error.take() {
@@ -294,58 +293,31 @@ fn traverse(
     };
 
     match selected {
-        TraversalSelection::Serial => {
-            if let Some(literal_prefix) = literal_prefix {
-                walk_with_literal_prefix(
-                    access,
-                    base,
-                    include_ignored,
-                    cancellation,
-                    literal_prefix,
-                    serial_visit,
-                )
-                .map_err(GrepError::Traversal)
-            } else {
-                walk(access, base, include_ignored, cancellation, serial_visit)
-                    .map_err(GrepError::Traversal)
-            }
-        }
-        TraversalSelection::Parallel { threads } => {
-            if let Some(literal_prefix) = literal_prefix {
-                walk_parallel_batched_with_literal_prefix(
-                    access,
-                    base,
-                    include_ignored,
-                    cancellation,
-                    ParallelTraversal {
-                        batch_size: PARALLEL_BATCH_SIZE,
-                        threads,
-                    },
-                    literal_prefix,
-                    &ParallelTraversalCallbacks {
-                        prefilter,
-                        visitor: parallel_visit,
-                    },
-                )
-                .map_err(GrepError::Traversal)
-            } else {
-                walk_parallel_batched(
-                    access,
-                    base,
-                    include_ignored,
-                    cancellation,
-                    ParallelTraversal {
-                        batch_size: PARALLEL_BATCH_SIZE,
-                        threads,
-                    },
-                    &ParallelTraversalCallbacks {
-                        prefilter,
-                        visitor: parallel_visit,
-                    },
-                )
-                .map_err(GrepError::Traversal)
-            }
-        }
+        TraversalSelection::Serial => walk(
+            access,
+            base,
+            include_ignored,
+            cancellation,
+            literal_prefix,
+            serial_visit,
+        )
+        .map_err(GrepError::Traversal),
+        TraversalSelection::Parallel { threads } => walk_parallel_batched(
+            access,
+            base,
+            include_ignored,
+            cancellation,
+            ParallelTraversal {
+                batch_size: PARALLEL_BATCH_SIZE,
+                threads,
+            },
+            literal_prefix,
+            &ParallelTraversalCallbacks {
+                prefilter,
+                visitor: parallel_visit,
+            },
+        )
+        .map_err(GrepError::Traversal),
     }
 }
 
@@ -535,7 +507,9 @@ fn receive_one(
                     return Err(GrepError::Cancelled);
                 }
             }
-            Err(RecvTimeoutError::Disconnected) => return Err(GrepError::PoolPoison),
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(GrepError::Worker("grep worker pool stopped".to_owned()));
+            }
         }
     }
 }
@@ -562,7 +536,9 @@ fn drain_pending(
                     return Err(GrepError::Cancelled);
                 }
                 Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => return Err(GrepError::PoolPoison),
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(GrepError::Worker("grep worker pool stopped".to_owned()));
+                }
             }
         };
         let mut state = state

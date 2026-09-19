@@ -253,28 +253,3 @@ pub(crate) fn parse_grep_case(
         )),
     }
 }
-
-pub(crate) fn filter_capture_glob_lines(
-    text: &str,
-    repository_root: &std::path::Path,
-    capture_root: &std::path::Path,
-) -> String {
-    text.lines()
-        .filter(|line| {
-            let candidate = std::path::Path::new(line);
-            if line.starts_with("Partial:") || line.starts_with("Retry:") {
-                return true;
-            }
-            let absolute = if candidate.is_absolute() {
-                candidate.to_path_buf()
-            } else {
-                repository_root.join(candidate)
-            };
-            match std::fs::canonicalize(absolute) {
-                Ok(path) => !path.starts_with(capture_root),
-                Err(_) => true,
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}

@@ -267,6 +267,68 @@ mod tests {
         assert_eq!(root.resolve(&outside).unwrap_err(), PathError::OutsideRoot);
     }
 
+    #[test]
+    fn capability_blocks_parent_and_symlink_escape() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root_dir = fixture.path().join("root");
+        fs::create_dir(&root_dir).expect("root");
+        fs::write(fixture.path().join("outside.txt"), "outside").expect("outside");
+        let root = RepositoryRoot::open(&root_dir).expect("open root");
+
+        let error = root
+            .capability()
+            .read_to_string("../outside.txt")
+            .expect_err("parent escape must fail");
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+        ));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let outside = fixture.path().join("outside.txt");
+            symlink(&outside, root_dir.join("escape")).expect("symlink");
+            root.capability()
+                .read_to_string("escape")
+                .expect_err("symlink escape must fail");
+        }
+    }
+
+    #[test]
+    fn capability_read_preserves_repository_identity() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root_dir = fixture.path().join("root");
+        fs::create_dir(&root_dir).expect("root");
+        fs::write(root_dir.join("identity.txt"), "original").expect("original");
+        let root = RepositoryRoot::open(&root_dir).expect("open root");
+
+        #[cfg(unix)]
+        {
+            let moved = fixture.path().join("moved");
+            fs::rename(&root_dir, &moved).expect("move original root");
+            fs::create_dir(&root_dir).expect("replacement root");
+            fs::write(root_dir.join("identity.txt"), "replacement").expect("replacement");
+        }
+        #[cfg(windows)]
+        {
+            let error = fs::rename(&root_dir, &fixture.path().join("moved"))
+                .expect_err("held Windows root blocks replacement");
+            assert!(
+                matches!(error.raw_os_error(), Some(5 | 32)),
+                "unexpected Windows root rename error: {error}"
+            );
+        }
+
+        assert_eq!(
+            root.capability()
+                .read_to_string("identity.txt")
+                .expect("read held root"),
+            "original"
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_drive_relative_and_case_rules_are_explicit() {

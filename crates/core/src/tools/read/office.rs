@@ -78,13 +78,7 @@ pub fn read_office(
 }
 
 fn validate_parameters(request: &ReadRequest) -> Result<(), ReadError> {
-    if request.start_line.is_some()
-        || request.line_count.is_some()
-        || request.encoding.is_some()
-        || request.pdf_mode.is_some()
-        || request.pages.is_some()
-        || request.pdf_cursor.is_some()
-    {
+    if request.has_text_or_pdf_parameters() {
         return Err(ReadError::Validation(
             "text and PDF parameters do not apply to Office input".to_owned(),
         ));
@@ -94,7 +88,12 @@ fn validate_parameters(request: &ReadRequest) -> Result<(), ReadError> {
 
 pub fn format_hint(path: &str) -> Option<agentshim_office_read::OfficeFormat> {
     let extension = std::path::Path::new(path).extension()?.to_str()?;
-    match extension.to_ascii_lowercase().as_str() {
+    format_from_code(&extension.to_ascii_lowercase())
+}
+
+/// The one extension/cursor-code table for the six Office formats.
+pub(crate) fn format_from_code(code: &str) -> Option<agentshim_office_read::OfficeFormat> {
+    match code {
         "docx" => Some(agentshim_office_read::OfficeFormat::Docx),
         "xlsx" => Some(agentshim_office_read::OfficeFormat::Xlsx),
         "pptx" => Some(agentshim_office_read::OfficeFormat::Pptx),

@@ -38,6 +38,8 @@ pub fn default_timeout_within(max_timeout_ms: u64) -> u64 {
 /// The default shelf when no per-instance ceiling is supplied. Matches the
 /// `tool_timeout_sec = 600` documented in every example.
 const DEFAULT_SHELF: Duration = Duration::from_secs(600);
+/// The default shelf in milliseconds, for hosts that configure one in `u64` ms.
+pub const DEFAULT_TOOL_TIMEOUT_SHELF_MS: u64 = 600_000;
 #[cfg(unix)]
 pub const TERM_GRACE: Duration = Duration::from_millis(250);
 pub const CLEANUP_DEADLINE: Duration = Duration::from_secs(5);
@@ -93,7 +95,7 @@ pub struct EnvironmentPlan {
     pub overrides: Vec<(String, String)>,
     /// Full base environment for hosts that supply one explicitly (native hosts
     /// pass a scrubbed parent environment); `None` inherits the server's own.
-    pub base: Option<Vec<(String, String)>>,
+    pub base: Option<Arc<Vec<(String, String)>>>,
 }
 
 impl EnvironmentPlan {
@@ -223,7 +225,7 @@ pub fn resolve_cwd(root: &RepositoryRoot, requested: Option<&str>) -> Result<Pat
 pub fn apply_environment(command: &mut std::process::Command, plan: &EnvironmentPlan) {
     if let Some(base) = &plan.base {
         command.env_clear();
-        for (key, value) in base {
+        for (key, value) in base.iter() {
             command.env(key, value);
         }
     }

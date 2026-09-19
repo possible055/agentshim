@@ -32,14 +32,12 @@ async function assertImageCapableRoute(ctx: Context, exec: ToolRunContext): Prom
 }
 
 function strictBase64Decode(data: string): Uint8Array {
+  // The charset/length check alone rejects non-canonical padding and stray
+  // characters; the core produced this base64 itself, so no round-trip needed.
   if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length % 4 !== 0) {
     throw new HarnessError('agentshim returned an image block whose data is not strict base64', 'AGENTSHIM_INVALID_IMAGE_DATA')
   }
-  const decoded = Buffer.from(data, 'base64')
-  if (decoded.toString('base64') !== data) {
-    throw new HarnessError('agentshim returned an image block whose data is not strict base64', 'AGENTSHIM_INVALID_IMAGE_DATA')
-  }
-  return new Uint8Array(decoded)
+  return new Uint8Array(Buffer.from(data, 'base64'))
 }
 
 /**

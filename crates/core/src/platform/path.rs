@@ -1,6 +1,23 @@
 use std::path::{Component, Path, PathBuf};
 
-use crate::path::PathError;
+/// Error vocabulary for path validation and normalization. Owned here because the
+/// validation primitives live on the platform side; `crate::path` re-exports it.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum PathError {
+    #[error("path contains NUL")]
+    Nul,
+    #[error("path is outside the repository root")]
+    OutsideRoot,
+    #[error(
+        "path has an absolute, rooted, or drive-relative prefix where a relative path is required"
+    )]
+    AmbiguousPrefix,
+    #[error("path escapes the repository root through '..'")]
+    ParentEscape,
+    #[cfg(windows)]
+    #[error("path is not on a supported local filesystem")]
+    UnsupportedLocation,
+}
 
 #[cfg(unix)]
 pub type SortKey = Vec<u8>;

@@ -2,6 +2,16 @@
 #[path = "process/unix.rs"]
 mod implementation;
 
+pub mod capture;
+pub mod error;
+pub mod resolve;
+pub mod spawn;
+
+pub use error::{
+    CaptureFailureKind, CaptureSinkError, ProcessError, ProcessStreamSummary,
+    ProcessTimeoutDetails, containment_scope,
+};
+
 use std::{ffi::OsStr, io};
 
 pub const WINDOWS_JOB_MEMORY_BYTES_ENV: &str = "AGENTSHIM_WINDOWS_JOB_MEMORY_BYTES";

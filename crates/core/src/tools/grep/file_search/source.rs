@@ -121,7 +121,6 @@ pub(super) fn search_transcoded(
         encoding,
         context.cancellation,
         context.plan.memory.decode_input_bytes,
-        context.plan.memory.decode_output_bytes,
     );
     let result = searcher.search_reader(context.matcher, &mut reader, sink);
     let validation = if result.is_ok() {

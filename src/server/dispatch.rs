@@ -48,51 +48,6 @@ fn requests_bash_terminate(arguments: Option<&JsonObject>) -> bool {
         == Some("terminate")
 }
 
-fn first_shell_token(command: &str) -> Option<&str> {
-    let command = command.trim_start();
-    let first = command.as_bytes().first().copied()?;
-    if first == b'\'' || first == b'"' {
-        let end = command[1..].find(char::from(first))? + 1;
-        return Some(&command[1..end]);
-    }
-    command.split_whitespace().next()
-}
-
-pub(super) fn shell_delegate(request: &CallToolRequestParams) -> &'static str {
-    if request.name.as_ref() != "bash" {
-        return "none";
-    }
-    let Some(command) = request
-        .arguments
-        .as_ref()
-        .and_then(|arguments| arguments.get("command"))
-        .and_then(Value::as_str)
-    else {
-        return "none";
-    };
-    let Some(token) = first_shell_token(command) else {
-        return "none";
-    };
-    let file_name = token
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(token)
-        .to_ascii_lowercase();
-    if file_name == "bash.exe" {
-        return "wsl";
-    }
-    let stem = file_name
-        .rsplit_once('.')
-        .map_or(file_name.as_str(), |(stem, _)| stem);
-    match stem {
-        "pwsh" | "powershell" => "pwsh",
-        "cmd" => "cmd",
-        "wsl" => "wsl",
-        "python" | "node" | "perl" | "ruby" => "other-interpreter",
-        _ => "none",
-    }
-}
-
 impl AgentShim {
     pub(super) async fn call_read(
         &self,
@@ -361,7 +316,7 @@ impl AgentShim {
             (ToolAdmission::ForegroundProcess, true) => match self.detached.admit() {
                 Ok(admission) => Some(admission),
                 Err(ProcessError::ResourceBusy(message)) => {
-                    return resource_busy_with_message(output_budget, "bash", "detached", message);
+                    return resource_busy_with_message(output_budget, "bash", message);
                 }
                 Err(error) => return diagnostic_tool_error(output_budget, &error),
             },
@@ -388,7 +343,7 @@ impl AgentShim {
                     admission,
                     self.background_timeout_max_ms(),
                     max_timeout_ms,
-                    move || Self::arm_detached_deadline(detached, shutdown, &job_id),
+                    move || detached.arm_deadline_enforcement(&job_id, shutdown),
                     operation,
                 )
                 .await
@@ -418,48 +373,6 @@ impl AgentShim {
             },
             output_budget,
         )
-    }
-
-    fn arm_detached_deadline(
-        detached: crate::tools::bash::detached::DetachedTrees,
-        shutdown: CancellationToken,
-        job_id: &str,
-    ) {
-        let Some(registration) = detached.deadline_registration(job_id) else {
-            return;
-        };
-        tokio::spawn(async move {
-            std::mem::drop(tokio::task::spawn_blocking(move || {
-                const POLL: std::time::Duration = std::time::Duration::from_millis(50);
-                let cause = loop {
-                    if registration.finished().is_cancelled() || shutdown.is_cancelled() {
-                        return;
-                    }
-                    match registration.log_quota_exceeded() {
-                        Ok(true) => break StopCause::LogQuota,
-                        Ok(false) => {}
-                        Err(error) => {
-                            tracing::error!(target: "agentshim", event = "detached_log_quota_monitor", phase = "lifecycle", outcome = "uncertain", error_class = "io", io_kind = ?error.kind());
-                            break StopCause::LogQuotaMonitor;
-                        }
-                    }
-                    if std::time::Instant::now() >= registration.deadline() {
-                        break StopCause::Timeout;
-                    }
-                    std::thread::sleep(
-                        registration
-                            .deadline()
-                            .saturating_duration_since(std::time::Instant::now())
-                            .min(POLL),
-                    );
-                };
-                if let Ok(StopStart::Accepted(work)) =
-                    detached.begin_stop(registration.job_id(), cause)
-                {
-                    work.run();
-                }
-            }));
-        });
     }
 
     async fn call_bash_status(

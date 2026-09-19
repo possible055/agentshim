@@ -23,7 +23,63 @@ pub struct ToolOutput {
     retained_resources: Option<crate::runtime::resources::OutputLease>,
 }
 
+/// Typed view over the stream summaries one foreground process result carries in
+/// its structured content, so hosts read fields instead of JSON pointers.
+#[derive(Clone, Copy, Debug)]
+pub struct ProcessStreamFacts<'a> {
+    pub text: &'a str,
+    pub total_bytes: u64,
+    pub shown_bytes: u64,
+    pub omitted_bytes: u64,
+}
+
+/// Typed view over the process facts of one foreground result: the exit label and
+/// both bounded stream summaries.
+#[derive(Clone, Copy, Debug)]
+pub struct ProcessFacts<'a> {
+    pub exit_code: Option<&'a str>,
+    pub stdout: Option<ProcessStreamFacts<'a>>,
+    pub stderr: Option<ProcessStreamFacts<'a>>,
+}
+
 impl ToolOutput {
+    /// The process facts carried in this result's structured content, or `None`
+    /// when the result is not a completed foreground process output.
+    #[must_use]
+    pub fn process_facts(&self) -> Option<ProcessFacts<'_>> {
+        fn stream<'a>(
+            process: &'a serde_json::Value,
+            name: &str,
+        ) -> Option<ProcessStreamFacts<'a>> {
+            let stream = process.get(name)?;
+            Some(ProcessStreamFacts {
+                text: stream
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default(),
+                total_bytes: stream
+                    .get("totalBytes")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default(),
+                shown_bytes: stream
+                    .get("shownBytes")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default(),
+                omitted_bytes: stream
+                    .get("omittedBytes")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default(),
+            })
+        }
+
+        let process = self.structured.as_ref()?.get("process")?;
+        Some(ProcessFacts {
+            exit_code: process.get("exitCode").and_then(serde_json::Value::as_str),
+            stdout: stream(process, "stdout"),
+            stderr: stream(process, "stderr"),
+        })
+    }
+
     pub fn new(text: String) -> Self {
         Self {
             text,

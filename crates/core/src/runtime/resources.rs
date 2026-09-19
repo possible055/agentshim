@@ -298,13 +298,6 @@ impl RuntimeResources {
         .ok()
     }
 
-    pub(crate) async fn acquire_structured_document_gate(
-        &self,
-        request: &CancellationToken,
-    ) -> Option<OwnedSemaphorePermit> {
-        self.acquire_pdf_gate(request).await
-    }
-
     #[must_use]
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn try_acquire_pdf_gate(&self) -> Option<OwnedSemaphorePermit> {

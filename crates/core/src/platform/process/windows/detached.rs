@@ -32,7 +32,7 @@ use windows_sys::Win32::{
     },
 };
 
-use crate::tools::exec::{
+use crate::platform::process::{
     ProcessError,
     spawn::{EnvironmentPlan, ExecPlan},
 };

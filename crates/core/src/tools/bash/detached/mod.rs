@@ -558,6 +558,49 @@ impl DetachedTrees {
         pids
     }
 
+    /// Enforce one job's log quota and deadline: poll the registration until one
+    /// fires or the job finishes, then begin stopping the tree with the matching
+    /// cause. Hosts arm this once per detached launch; the 50 ms poll bounds the
+    /// stop latency while letting the deadline sleep dominate most of the wait.
+    pub fn arm_deadline_enforcement(&self, job_id: &str, shutdown: CancellationToken) {
+        let Some(registration) = self.deadline_registration(job_id) else {
+            return;
+        };
+        let trees = self.clone();
+        tokio::spawn(async move {
+            std::mem::drop(tokio::task::spawn_blocking(move || {
+                const POLL: std::time::Duration = std::time::Duration::from_millis(50);
+                let cause = loop {
+                    if registration.finished().is_cancelled() || shutdown.is_cancelled() {
+                        return;
+                    }
+                    match registration.log_quota_exceeded() {
+                        Ok(true) => break StopCause::LogQuota,
+                        Ok(false) => {}
+                        Err(error) => {
+                            tracing::error!(target: "agentshim", event = "detached_log_quota_monitor", phase = "lifecycle", outcome = "uncertain", error_class = "io", io_kind = ?error.kind());
+                            break StopCause::LogQuotaMonitor;
+                        }
+                    }
+                    if std::time::Instant::now() >= registration.deadline() {
+                        break StopCause::Timeout;
+                    }
+                    std::thread::sleep(
+                        registration
+                            .deadline()
+                            .saturating_duration_since(std::time::Instant::now())
+                            .min(POLL),
+                    );
+                };
+                if let Ok(StopStart::Accepted(work)) =
+                    trees.begin_stop(registration.job_id(), cause)
+                {
+                    work.run();
+                }
+            }));
+        });
+    }
+
     pub fn deadline_registration(&self, job_id: &str) -> Option<DeadlineRegistration> {
         self.lock()
             .active

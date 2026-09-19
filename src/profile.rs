@@ -1,4 +1,4 @@
-use std::{env, ffi::OsString, fmt::Display, io, str::FromStr, time::Duration};
+use std::{fmt::Display, io, str::FromStr, time::Duration};
 
 pub(crate) const CODEX_BURST_TOKENS: usize = 16_384;
 pub(crate) const CURSOR_BURST_TOKENS: usize = 32_768;
@@ -62,22 +62,18 @@ pub(crate) fn resolve_idle_timeout_from(
     }
 }
 
-/// Resolve the effective tool-timeout shelf: use the environment override when set,
-/// otherwise fall back to the client-profile default. Called when the builder selects the
-/// profile, because `RuntimeConfig::from_env()` predates that selection and always uses
-/// `DEFAULT_TOOL_TIMEOUT_SHELF`.
-pub(crate) fn resolve_tool_timeout_shelf(profile: ClientProfile) -> Duration {
-    resolve_tool_timeout_shelf_from(env::var_os("AGENTSHIM_TOOL_TIMEOUT_SHELF"), profile)
-}
-
-fn resolve_tool_timeout_shelf_from(
-    env_value: Option<OsString>,
+/// Resolve the effective tool-timeout shelf: when the environment override is set,
+/// `RuntimeConfig::from_env` has already fail-fast parsed it into `configured`, so
+/// that value is authoritative; otherwise the client-profile default applies.
+pub(crate) fn resolve_tool_timeout_shelf(
     profile: ClientProfile,
+    configured: Duration,
+    env_override_set: bool,
 ) -> Duration {
-    match env_value {
-        None => profile.default_tool_timeout_shelf(),
-        Some(value) => agentshim_core::runtime::parse_tool_timeout_shelf(Some(&value))
-            .unwrap_or(agentshim_core::runtime::DEFAULT_TOOL_TIMEOUT_SHELF),
+    if env_override_set {
+        configured
+    } else {
+        profile.default_tool_timeout_shelf()
     }
 }
 
@@ -102,7 +98,7 @@ mod tests {
         CODEX_BURST_TOKENS, CURSOR_BURST_TOKENS, CURSOR_TOOL_TIMEOUT_SHELF, ClientProfile,
     };
     use crate::runtime::DEFAULT_TOOL_TIMEOUT_SHELF;
-    use std::{ffi::OsString, time::Duration};
+    use std::time::Duration;
 
     #[test]
     fn profile_burst_defaults_match_the_client_contract() {
@@ -131,26 +127,29 @@ mod tests {
     }
 
     #[test]
-    fn resolve_tool_timeout_shelf_uses_profile_default_when_env_unset_and_env_when_set() {
+    fn resolve_tool_timeout_shelf_uses_env_presence_to_choose_configured_or_profile_default() {
+        let configured = Duration::from_secs(300);
         assert_eq!(
-            super::resolve_tool_timeout_shelf_from(None, ClientProfile::Codex),
-            DEFAULT_TOOL_TIMEOUT_SHELF,
+            super::resolve_tool_timeout_shelf(ClientProfile::Codex, configured, true),
+            configured,
         );
         assert_eq!(
-            super::resolve_tool_timeout_shelf_from(None, ClientProfile::Cursor),
+            super::resolve_tool_timeout_shelf(ClientProfile::Cursor, configured, true),
+            configured,
+        );
+        assert_eq!(
+            super::resolve_tool_timeout_shelf(
+                ClientProfile::Cursor,
+                DEFAULT_TOOL_TIMEOUT_SHELF,
+                false
+            ),
             Duration::from_secs(120),
         );
         assert_eq!(
-            super::resolve_tool_timeout_shelf_from(
-                Some(OsString::from("300")),
-                ClientProfile::Cursor
-            ),
-            Duration::from_secs(300),
-        );
-        assert_eq!(
-            super::resolve_tool_timeout_shelf_from(
-                Some(OsString::from("600")),
-                ClientProfile::Codex
+            super::resolve_tool_timeout_shelf(
+                ClientProfile::Codex,
+                DEFAULT_TOOL_TIMEOUT_SHELF,
+                false
             ),
             DEFAULT_TOOL_TIMEOUT_SHELF,
         );

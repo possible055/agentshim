@@ -9,12 +9,13 @@ use crate::{
     tools::{
         ToolOutput,
         exec::{
-            ProcessError, ProcessStreamSummary, ProcessTimeoutDetails,
+            ProcessError, ProcessTimeoutDetails,
             capture::{
                 Capture, RenderedCapture, diagnostic_path, project_captures,
                 push_capture_diagnostics, push_capture_section, push_output_line,
             },
-            resolve::{Launcher, ProcessResolver, ResolvedProgram, launcher_for},
+            report,
+            resolve::{Launcher, ProcessResolver, ResolvedProgram},
             spawn::{
                 self, EnvironmentPlan, ExecFailure, ExecPlan, Streams, default_timeout_within,
             },
@@ -291,12 +292,12 @@ pub(crate) fn prepare_run_program(
     let started = std::time::Instant::now();
     let deadline = started + timeout;
     request.validate(timeout_ceiling_ms)?;
-    ensure_before_spawn(deadline, request.timeout_ms(timeout_ceiling_ms))?;
+    report::deadline_remaining(deadline, request.timeout_ms(timeout_ceiling_ms))?;
     tracing::info!(target: "agentshim", event = "process_resolve", phase = "execution");
     let cwd = spawn::resolve_cwd(root, request.cwd.as_deref()).map_err(invalid)?;
-    ensure_before_spawn(deadline, request.timeout_ms(timeout_ceiling_ms))?;
+    report::deadline_remaining(deadline, request.timeout_ms(timeout_ceiling_ms))?;
     let program = resolver.resolve(&request.program, &cwd)?;
-    ensure_before_spawn(deadline, request.timeout_ms(timeout_ceiling_ms))?;
+    report::deadline_remaining(deadline, request.timeout_ms(timeout_ceiling_ms))?;
     Ok(PreparedRunProgram {
         resolved: program,
         cwd,
@@ -330,24 +331,8 @@ pub(crate) fn execute_prepared_run_program(
     if cancellation.is_cancelled() {
         return Err(ProcessError::Cancelled);
     }
-    let timeout = deadline
-        .checked_duration_since(std::time::Instant::now())
-        .filter(|remaining| !remaining.is_zero())
-        .ok_or(ProcessError::TimeoutBeforeSpawn {
-            timeout_ms: request_timeout_ms,
-        })?;
-    let mut resolved = resolved;
-    if let Some(argv) = wrapped_argv {
-        let command = argv
-            .first()
-            .ok_or_else(|| invalid("wrapped argv must contain at least the executable"))?;
-        resolved = ResolvedProgram {
-            absolute: PathBuf::from(command),
-            executable: PathBuf::from(command),
-            launcher: launcher_for(std::path::Path::new(command))?,
-        };
-    }
-    let args = wrapped_argv.map_or(args, |argv| argv[1.min(argv.len())..].to_vec());
+    let timeout = report::deadline_remaining(deadline, request_timeout_ms)?;
+    let (resolved, args) = report::apply_wrapped_argv(resolved, args, wrapped_argv)?;
     let plan = ExecPlan {
         resolved: &resolved,
         cwd: &cwd,
@@ -360,7 +345,7 @@ pub(crate) fn execute_prepared_run_program(
     };
     match spawn::run_with_capture(&plan, cancellation, capture_sink) {
         Ok(outcome) => {
-            let [stdout, stderr] = expect_two(outcome.captures);
+            let [stdout, stderr] = report::expect_two(outcome.captures);
             render_completed_with_budget(
                 &CompletedProcess {
                     resolved,
@@ -375,7 +360,7 @@ pub(crate) fn execute_prepared_run_program(
             )
         }
         Err(ExecFailure::TimedOut { duration, captures }) => {
-            let [stdout, stderr] = expect_two(captures);
+            let [stdout, stderr] = report::expect_two(captures);
             let report = render_timeout_with_budget(
                 &TimedOutProcess {
                     resolved,
@@ -417,21 +402,6 @@ pub(crate) fn execute_output_with_capture(
     execute_prepared_run_program(prepared, None, cancellation, output_budget, capture_sink)
 }
 
-fn ensure_before_spawn(deadline: std::time::Instant, timeout_ms: u64) -> Result<(), ProcessError> {
-    if std::time::Instant::now() >= deadline {
-        Err(ProcessError::TimeoutBeforeSpawn { timeout_ms })
-    } else {
-        Ok(())
-    }
-}
-
-fn expect_two(captures: Vec<Capture>) -> [Capture; 2] {
-    let count = captures.len();
-    captures
-        .try_into()
-        .unwrap_or_else(|_| panic!("a separate topology always yields two captures, got {count}"))
-}
-
 pub struct CompletedProcess {
     pub resolved: ResolvedProgram,
     pub cwd: PathBuf,
@@ -447,19 +417,6 @@ pub struct TimedOutProcess {
     pub duration: Duration,
     pub stdout: Capture,
     pub stderr: Capture,
-}
-
-pub struct TimeoutRender {
-    pub text: String,
-    pub details: ProcessTimeoutDetails,
-}
-
-impl std::ops::Deref for TimeoutRender {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.text
-    }
 }
 
 #[cfg(test)]
@@ -551,11 +508,11 @@ fn completed_output(
 }
 
 #[cfg(test)]
-pub fn render_timeout(
+pub(crate) fn render_timeout(
     timed_out: &TimedOutProcess,
     timeout_ms: u64,
     cancellation: &CancellationToken,
-) -> Result<TimeoutRender, ProcessError> {
+) -> Result<report::TimeoutRender, ProcessError> {
     render_timeout_with_budget(
         timed_out,
         timeout_ms,
@@ -569,32 +526,14 @@ fn render_timeout_with_budget(
     timeout_ms: u64,
     cancellation: &CancellationToken,
     output_budget: &dyn crate::output::CallBudget,
-) -> Result<TimeoutRender, ProcessError> {
+) -> Result<report::TimeoutRender, ProcessError> {
     project_captures(
         &[&timed_out.stdout, &timed_out.stderr],
         cancellation,
         |rendered| timeout_output(timed_out, timeout_ms, &rendered[0], &rendered[1]),
-        |output| timeout_output_fits_budget(output, cancellation, output_budget),
+        |render| report::timeout_render_fits_budget(render, cancellation, output_budget),
     )
-    .map_err(|error| normalize_burst_render_error(error, output_budget))
-}
-
-fn normalize_burst_render_error(
-    error: ProcessError,
-    output_budget: &dyn crate::output::CallBudget,
-) -> ProcessError {
-    if output_budget
-        .token_gate()
-        .is_some_and(|token_gate| token_gate.ceiling() < crate::output::CALL_OUTPUT_TOKEN_LIMIT)
-        && matches!(
-            error,
-            ProcessError::Output(crate::output::OutputError::RequiredContentTooLarge)
-        )
-    {
-        ProcessError::Output(crate::output::OutputError::BurstLimit)
-    } else {
-        error
-    }
+    .map_err(|error| report::normalize_burst_render_error(error, output_budget))
 }
 
 fn timeout_output(
@@ -602,7 +541,7 @@ fn timeout_output(
     timeout_ms: u64,
     stdout: &RenderedCapture,
     stderr: &RenderedCapture,
-) -> TimeoutRender {
+) -> report::TimeoutRender {
     let header = format!(
         "process timed out after {timeout_ms} ms and its owned process containment was terminated\nResolved program: {}\nLauncher: {}\nCwd: {}\nStatus: timed out; owned process containment terminated",
         diagnostic_path(&timed_out.resolved.absolute),
@@ -646,7 +585,7 @@ fn timeout_output(
         text.push('\n');
         text.push_str(&line);
     }
-    TimeoutRender {
+    report::TimeoutRender {
         text,
         details: ProcessTimeoutDetails {
             timeout_ms,
@@ -654,56 +593,10 @@ fn timeout_output(
             cwd: diagnostic_path(&timed_out.cwd),
             launcher: spawn::launcher_label(&timed_out.resolved).to_owned(),
             duration_ms: u64::try_from(timed_out.duration.as_millis()).unwrap_or(u64::MAX),
-            stdout: ProcessStreamSummary {
-                total: timed_out.stdout.bytes_read,
-                shown: stdout.shown_bytes,
-                omitted: stdout.omitted_bytes,
-                invalid_utf8: stdout.invalid_bytes,
-                encoding: stdout.encoding.clone(),
-            },
-            stderr: ProcessStreamSummary {
-                total: timed_out.stderr.bytes_read,
-                shown: stderr.shown_bytes,
-                omitted: stderr.omitted_bytes,
-                invalid_utf8: stderr.invalid_bytes,
-                encoding: stderr.encoding.clone(),
-            },
+            stdout: report::stream_summary(timed_out.stdout.bytes_read, stdout),
+            stderr: report::stream_summary(timed_out.stderr.bytes_read, stderr),
             termination_outcome: "terminated",
             containment_scope: crate::tools::exec::containment_scope(),
         },
     }
-}
-
-fn timeout_output_fits_budget(
-    output: &TimeoutRender,
-    cancellation: &CancellationToken,
-    output_budget: &dyn crate::output::CallBudget,
-) -> bool {
-    serde_json::to_value(&output.details)
-        .ok()
-        .is_some_and(|details| {
-            let structured = crate::output::tool_error_structure(
-                "resource_timeout",
-                true,
-                &output.text,
-                Some(&details),
-            );
-            crate::output::tool_result_encoded_len(&output.text, Some(&structured), true)
-                <= crate::output::OutputLimits::for_content_within(
-                    &output.text,
-                    output_budget.page_bytes(),
-                )
-                .bytes
-                && output_budget.token_gate().is_none_or(|token_gate| {
-                    matches!(
-                        token_gate.project_result(
-                            &output.text,
-                            Some(&structured),
-                            true,
-                            cancellation
-                        ),
-                        crate::output::ProjectionDecision::Fits(_)
-                    )
-                })
-        })
 }

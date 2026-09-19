@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use chardetng::{EncodingDetector, Iso2022JpDetection, Utf8Detection};
-use encoding_rs::{BIG5, Decoder, DecoderResult, Encoding, GBK, UTF_8, UTF_16BE, UTF_16LE};
+use encoding_rs::{BIG5, Decoder, DecoderResult, Encoding, GBK};
 
 use super::io::{DecodeError, SourceEncoding};
 
@@ -51,12 +51,30 @@ pub fn detect_legacy_encoding(
     }
 }
 
+/// The one BOM table for both the streaming and the chunked decode paths. UTF-32
+/// entries must sort before the UTF-16 entries they extend.
+#[derive(Clone, Copy)]
+pub(crate) enum Bom {
+    Utf32,
+    Encoding(SourceEncoding, usize),
+}
+
+const BOMS: [(&[u8], Bom); 5] = [
+    (&[0x00, 0x00, 0xFE, 0xFF], Bom::Utf32),
+    (&[0xFF, 0xFE, 0x00, 0x00], Bom::Utf32),
+    (&[0xEF, 0xBB, 0xBF], Bom::Encoding(SourceEncoding::Utf8, 3)),
+    (&[0xFF, 0xFE], Bom::Encoding(SourceEncoding::Utf16Le, 2)),
+    (&[0xFE, 0xFF], Bom::Encoding(SourceEncoding::Utf16Be, 2)),
+];
+
+pub(crate) fn detect_bom(prefix: &[u8]) -> Option<Bom> {
+    BOMS.iter()
+        .find(|(bom, _)| prefix.starts_with(bom))
+        .map(|(_, kind)| *kind)
+}
+
 fn starts_with_unicode_bom(prefix: &[u8]) -> bool {
-    prefix.starts_with(&[0x00, 0x00, 0xFE, 0xFF])
-        || prefix.starts_with(&[0xFF, 0xFE, 0x00, 0x00])
-        || prefix.starts_with(&[0xEF, 0xBB, 0xBF])
-        || prefix.starts_with(&[0xFF, 0xFE])
-        || prefix.starts_with(&[0xFE, 0xFF])
+    detect_bom(prefix).is_some()
 }
 
 fn prefix_is_utf8(prefix: &[u8]) -> bool {
@@ -70,19 +88,10 @@ pub fn detect_encoding(
     prefix: &[u8],
     explicit: Option<&str>,
 ) -> Result<(SourceEncoding, usize), DecodeError> {
-    if prefix.starts_with(&[0x00, 0x00, 0xFE, 0xFF])
-        || prefix.starts_with(&[0xFF, 0xFE, 0x00, 0x00])
-    {
-        return Err(DecodeError::Utf32);
-    }
-    if prefix.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        return Ok((SourceEncoding::Utf8, 3));
-    }
-    if prefix.starts_with(&[0xFF, 0xFE]) {
-        return Ok((SourceEncoding::Utf16Le, 2));
-    }
-    if prefix.starts_with(&[0xFE, 0xFF]) {
-        return Ok((SourceEncoding::Utf16Be, 2));
+    match detect_bom(prefix) {
+        Some(Bom::Utf32) => return Err(DecodeError::Utf32),
+        Some(Bom::Encoding(source, bom_len)) => return Ok((source, bom_len)),
+        None => {}
     }
     let Some(label) = explicit else {
         return Ok((SourceEncoding::Utf8, 0));
@@ -90,16 +99,7 @@ pub fn detect_encoding(
     let label = label.trim_matches(char::is_whitespace);
     let encoding = Encoding::for_label_no_replacement(label.as_bytes())
         .ok_or_else(|| DecodeError::UnknownEncoding(label.to_owned()))?;
-    let source = if encoding == UTF_8 {
-        SourceEncoding::Utf8
-    } else if encoding == UTF_16LE {
-        SourceEncoding::Utf16Le
-    } else if encoding == UTF_16BE {
-        SourceEncoding::Utf16Be
-    } else {
-        SourceEncoding::Other(encoding)
-    };
-    Ok((source, 0))
+    Ok((SourceEncoding::for_encoding(encoding), 0))
 }
 
 pub enum StrictDecoder {
@@ -152,16 +152,15 @@ fn decode_utf8<'input>(
     let mut bytes = std::mem::take(carry);
     bytes.extend_from_slice(input);
     match std::str::from_utf8(&bytes) {
-        Ok(_) => String::from_utf8(bytes)
-            .map(Cow::Owned)
-            .map_err(|_| DecodeError::Malformed("UTF-8")),
+        // `bytes` is owned, so the borrowed text must be copied out; `to_owned`
+        // reuses the already-validated `&str` instead of re-scanning the buffer.
+        Ok(text) => Ok(Cow::Owned(text.to_owned())),
         Err(error) if error.error_len().is_none() && !is_last => {
             let valid_up_to = error.valid_up_to();
+            let text = std::str::from_utf8(&bytes[..valid_up_to])
+                .map_err(|_| DecodeError::Malformed("UTF-8"))?;
             carry.extend_from_slice(&bytes[valid_up_to..]);
-            bytes.truncate(valid_up_to);
-            String::from_utf8(bytes)
-                .map(Cow::Owned)
-                .map_err(|_| DecodeError::Malformed("UTF-8"))
+            Ok(Cow::Owned(text.to_owned()))
         }
         Err(_) => Err(DecodeError::Malformed("UTF-8")),
     }

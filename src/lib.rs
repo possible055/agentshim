@@ -6,7 +6,7 @@ mod server;
 
 // The MCP shell owns transport, catalog, client profiles, and output gating; every
 // compute path below lives in the host-neutral core crate.
-pub use agentshim_core::{encoding, path, runtime, sorting, tools, traversal};
+pub use agentshim_core::{encoding, path, runtime, tools, traversal};
 
 pub use diagnostics::{
     DiagnosticsConfig, DiagnosticsGuard, LogMode, capacity_bytes, purge, retention_days, status,
@@ -34,11 +34,8 @@ pub fn bash_report() -> Result<(std::path::PathBuf, String), String> {
     );
     engine.bash_runtime().map_err(|error| error.to_string())
 }
-pub use agentshim_core::platform::process::WindowsJobLimits;
-pub use runtime::{
-    DEFAULT_FOREGROUND_CALLS, MAX_CONFIGURED_FOREGROUND_CALLS, RuntimeConfig as RuntimeLimits,
-};
-pub use server::{AgentShim, AgentShimBuilder, ToolsListCorrelation};
+pub use runtime::RuntimeConfig as RuntimeLimits;
+pub use server::{AgentShim, AgentShimBuilder};
 
 #[cfg(feature = "bench-internals")]
 #[doc(hidden)]

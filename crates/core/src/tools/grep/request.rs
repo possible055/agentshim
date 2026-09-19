@@ -316,7 +316,6 @@ impl GrepRequest {
                 "encoding and fallback_encoding are mutually exclusive".to_owned(),
             ));
         }
-        self.encoding_labels()?;
         Ok(())
     }
 
@@ -350,8 +349,9 @@ impl GrepRequest {
 
     /// Resolve both encoding arguments to canonical labels.
     ///
-    /// Done once per request so a rejected label fails before any filesystem work, and so
-    /// the per-candidate path never has to resolve a label again.
+    /// The single parse per request: a rejected label fails during search planning,
+    /// before any candidate is searched, and the per-candidate path never has to
+    /// resolve a label again.
     ///
     /// # Errors
     ///
@@ -385,8 +385,6 @@ pub enum GrepError {
     CandidateMemory,
     #[error("grep memory capacity is busy; retry the request later")]
     MemoryBusy,
-    #[error("grep worker pool state was poisoned")]
-    PoolPoison,
     #[error("{}", .0.single_file_message())]
     Unsearchable(crate::output::SkipReason),
     #[error("grep cancelled")]

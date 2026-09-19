@@ -46,30 +46,39 @@ pub fn encode_office(
 }
 
 pub fn decode_office(cursor: &str) -> Result<OfficeCursor<'_>, ReadError> {
-    let mut parts = cursor.split(OFFICE_SEPARATOR);
-    let version = parts.next();
-    let format = parts.next().and_then(parse_office_format);
-    let source_id = parts.next();
-    let unit_index = parts.next().and_then(|value| value.parse::<usize>().ok());
-    let offset = parts.next().and_then(|value| value.parse::<usize>().ok());
-    let trailing = parts.next();
-    if version != Some("2")
-        || format.is_none()
-        || source_id.is_none_or(|value| !valid_source_id(value))
-        || unit_index.is_none()
-        || offset.is_none()
-        || trailing != Some("")
-        || parts.next().is_some()
-    {
-        return Err(ReadError::Validation(
+    let invalid = || {
+        ReadError::Validation(
             "office_cursor must be a value copied from a previous response".to_owned(),
-        ));
+        )
+    };
+    let mut parts = cursor.split(OFFICE_SEPARATOR);
+    if parts.next() != Some("2") {
+        return Err(invalid());
+    }
+    let format = parts
+        .next()
+        .and_then(super::office::format_from_code)
+        .ok_or_else(invalid)?;
+    let source_id = parts
+        .next()
+        .filter(|value| valid_source_id(value))
+        .ok_or_else(invalid)?;
+    let unit_index = parts
+        .next()
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(invalid)?;
+    let offset = parts
+        .next()
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(invalid)?;
+    if parts.next() != Some("") || parts.next().is_some() {
+        return Err(invalid());
     }
     Ok(OfficeCursor {
-        source_id: source_id.unwrap_or_default(),
-        format: format.unwrap_or(agentshim_office_read::OfficeFormat::Docx),
-        unit_index: unit_index.unwrap_or_default(),
-        offset: offset.unwrap_or_default(),
+        source_id,
+        format,
+        unit_index,
+        offset,
     })
 }
 
@@ -88,18 +97,6 @@ const fn office_format_code(format: agentshim_office_read::OfficeFormat) -> &'st
         agentshim_office_read::OfficeFormat::Doc => "doc",
         agentshim_office_read::OfficeFormat::Xls => "xls",
         agentshim_office_read::OfficeFormat::Ppt => "ppt",
-    }
-}
-
-fn parse_office_format(value: &str) -> Option<agentshim_office_read::OfficeFormat> {
-    match value {
-        "docx" => Some(agentshim_office_read::OfficeFormat::Docx),
-        "xlsx" => Some(agentshim_office_read::OfficeFormat::Xlsx),
-        "pptx" => Some(agentshim_office_read::OfficeFormat::Pptx),
-        "doc" => Some(agentshim_office_read::OfficeFormat::Doc),
-        "xls" => Some(agentshim_office_read::OfficeFormat::Xls),
-        "ppt" => Some(agentshim_office_read::OfficeFormat::Ppt),
-        _ => None,
     }
 }
 

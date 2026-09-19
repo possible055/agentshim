@@ -104,6 +104,7 @@ impl ToolEngine {
                 "foreground bash prepare does not accept detach".to_owned(),
             ));
         }
+        request.validate(timeout_ceiling_ms)?;
         let timeout = Duration::from_millis(request.timeout_ms(timeout_ceiling_ms));
         let mut inner = bash::prepare_bash_foreground(
             &self.root,
@@ -387,9 +388,8 @@ impl ToolEngine {
     ) -> Result<(OwnedSemaphorePermit, OwnedSemaphorePermit), ProcessError> {
         let queued = Instant::now();
         self.ensure_process_active(cancellation)?;
-        if Instant::now() >= deadline {
-            return Err(ProcessError::TimeoutBeforeSpawn { timeout_ms });
-        }
+        // The memory reservation's `timeout_at` is the single deadline gate; an
+        // already-passed deadline elapses it immediately with the same error.
         let foreground = self.resources.try_admit_foreground().ok_or_else(|| {
             if cancellation.is_cancelled() || self.resources.shutdown_token().is_cancelled() {
                 ProcessError::Cancelled
@@ -421,7 +421,7 @@ impl ToolEngine {
 
     pub(super) fn apply_process_environment(&self, environment: &mut EnvironmentPlan) {
         if let Some(base) = &self.process_environment {
-            environment.base = Some(base.entries.as_ref().clone());
+            environment.base = Some(Arc::clone(&base.entries));
         }
     }
 }

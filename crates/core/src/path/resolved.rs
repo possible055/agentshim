@@ -180,22 +180,7 @@ impl PartialOrd for PathSortKey {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum PathError {
-    #[error("path contains NUL")]
-    Nul,
-    #[error("path is outside the repository root")]
-    OutsideRoot,
-    #[error(
-        "path has an absolute, rooted, or drive-relative prefix where a relative path is required"
-    )]
-    AmbiguousPrefix,
-    #[error("path escapes the repository root through '..'")]
-    ParentEscape,
-    #[cfg(windows)]
-    #[error("path is not on a supported local filesystem")]
-    UnsupportedLocation,
-}
+pub use crate::platform::path::PathError;
 
 pub fn normalize_relative(path: &Path) -> Result<PathBuf, PathError> {
     let mut normalized = PathBuf::new();

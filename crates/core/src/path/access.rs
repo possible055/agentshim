@@ -159,6 +159,9 @@ pub struct FileAccess {
     scope: ReadScope,
     codex_roots: Vec<Arc<RepositoryRoot>>,
     exact_grant: Option<PathBuf>,
+    /// Deny containment for engine-owned trees (capture roots) that may sit inside
+    /// the repository; only an exact grant may reach past it.
+    excluded_root: Option<PathBuf>,
 }
 
 pub struct SameParentReader<'a> {
@@ -181,7 +184,35 @@ impl FileAccess {
             scope,
             codex_roots,
             exact_grant: None,
+            excluded_root: None,
         }
+    }
+
+    /// Deny tree for admission checks (glob listing); resolves and exact grants are
+    /// unaffected, so a granted capture artifact stays readable while wholesale
+    /// listing of the containment tree is suppressed.
+    #[must_use]
+    pub fn with_excluded_root(mut self, root: PathBuf) -> Self {
+        self.excluded_root = Some(root);
+        self
+    }
+
+    /// True when `path` is inside this view's excluded containment root. A symlinked
+    /// entry can only be classified through its canonical form.
+    #[must_use]
+    pub fn is_excluded(&self, path: &Path, file_type: Option<std::fs::FileType>) -> bool {
+        let Some(excluded) = &self.excluded_root else {
+            return false;
+        };
+        if path.starts_with(excluded) {
+            return true;
+        }
+        if file_type.is_some_and(|kind| kind.is_symlink())
+            && let Ok(canonical) = std::fs::canonicalize(path)
+        {
+            return canonical.starts_with(excluded);
+        }
+        false
     }
 
     #[cfg(test)]
@@ -196,6 +227,7 @@ impl FileAccess {
             scope: ReadScope::Normal,
             codex_roots,
             exact_grant: None,
+            excluded_root: None,
         })
     }
 
@@ -219,6 +251,7 @@ impl FileAccess {
             scope: self.scope,
             codex_roots: self.codex_roots.clone(),
             exact_grant: Some(normalize_absolute(path)?),
+            excluded_root: self.excluded_root.clone(),
         })
     }
 

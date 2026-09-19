@@ -45,7 +45,7 @@ use windows_sys::Win32::{
 
 #[cfg(test)]
 use super::runner::{FailurePoint, inject_failure};
-use crate::tools::exec::{
+use crate::platform::process::{
     ProcessError,
     capture::Capture,
     resolve::{Launcher, ResolvedProgram},

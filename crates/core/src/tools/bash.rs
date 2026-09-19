@@ -13,11 +13,12 @@ use crate::{
             locate::{BashLocator, LocateError, ShellFlavor},
         },
         exec::{
-            ProcessError, ProcessStreamSummary, ProcessTimeoutDetails,
+            ProcessError, ProcessTimeoutDetails,
             capture::{
                 Capture, RenderedCapture, diagnostic_path, project_captures,
                 push_capture_diagnostics, push_capture_section, push_output_line,
             },
+            report,
             resolve::{ResolvedProgram, launcher_for},
             spawn::{
                 self, EnvironmentPlan, ExecFailure, ExecPlan, Streams, default_timeout_within,
@@ -342,7 +343,6 @@ pub(crate) fn prepare_bash_foreground(
     cancellation: &CancellationToken,
 ) -> Result<PreparedBash, ProcessError> {
     let deadline = std::time::Instant::now() + timeout;
-    request.validate(timeout_ceiling_ms)?;
     let runtime = locator
         .resolve_before(cancellation, deadline)
         .map_err(|error| match error {
@@ -380,7 +380,7 @@ pub(crate) fn execute_prepared_bash(
     capture_sink: Option<&Arc<dyn spawn::CaptureSink>>,
 ) -> Result<ToolOutput, ProcessError> {
     let PreparedBash {
-        mut resolved,
+        resolved,
         cwd,
         args,
         environment,
@@ -391,23 +391,8 @@ pub(crate) fn execute_prepared_bash(
     if cancellation.is_cancelled() {
         return Err(ProcessError::Cancelled);
     }
-    let timeout = deadline
-        .checked_duration_since(std::time::Instant::now())
-        .filter(|remaining| !remaining.is_zero())
-        .ok_or(ProcessError::TimeoutBeforeSpawn {
-            timeout_ms: request_timeout_ms,
-        })?;
-    if let Some(argv) = wrapped_argv {
-        let command = argv
-            .first()
-            .ok_or_else(|| invalid("wrapped argv must contain at least the executable"))?;
-        resolved = ResolvedProgram {
-            absolute: std::path::PathBuf::from(command),
-            executable: std::path::PathBuf::from(command),
-            launcher: launcher_for(std::path::Path::new(command))?,
-        };
-    }
-    let args = wrapped_argv.map_or(args, |argv| argv[1.min(argv.len())..].to_vec());
+    let timeout = report::deadline_remaining(deadline, request_timeout_ms)?;
+    let (resolved, args) = report::apply_wrapped_argv(resolved, args, wrapped_argv)?;
     let plan = ExecPlan {
         resolved: &resolved,
         cwd: &cwd,
@@ -425,7 +410,7 @@ pub(crate) fn execute_prepared_bash(
                 cwd,
                 exit: outcome.exit,
                 duration: outcome.duration,
-                output: expect_one(outcome.captures),
+                output: report::expect_one(outcome.captures),
                 msys_retry_available,
             },
             cancellation,
@@ -437,7 +422,7 @@ pub(crate) fn execute_prepared_bash(
                     bash: resolved.absolute,
                     cwd,
                     duration,
-                    output: expect_one(captures),
+                    output: report::expect_one(captures),
                 },
                 request_timeout_ms,
                 cancellation,
@@ -451,14 +436,6 @@ pub(crate) fn execute_prepared_bash(
         }
         Err(failure) => Err(failure.into_process_error(request_timeout_ms)),
     }
-}
-
-fn expect_one(captures: Vec<Capture>) -> Capture {
-    let count = captures.len();
-    captures
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| panic!("a merged topology always yields one capture, got {count}"))
 }
 
 struct CompletedBash {
@@ -475,11 +452,6 @@ struct TimedOutBash {
     cwd: PathBuf,
     duration: Duration,
     output: Capture,
-}
-
-struct TimeoutRender {
-    text: String,
-    details: ProcessTimeoutDetails,
 }
 
 #[cfg(test)]
@@ -505,7 +477,7 @@ fn render_completed_with_budget(
         |rendered| completed_output(completed, &rendered[0]),
         |output| output.fits_content_and_call(output_budget, cancellation),
     )
-    .map_err(|error| normalize_burst_render_error(error, output_budget))
+    .map_err(|error| report::normalize_burst_render_error(error, output_budget))
 }
 
 /// Offered from the command text rather than from the child's diagnostics: every native
@@ -590,67 +562,21 @@ fn render_timeout(
     timeout_ms: u64,
     cancellation: &CancellationToken,
     output_budget: &dyn crate::output::CallBudget,
-) -> Result<TimeoutRender, ProcessError> {
+) -> Result<report::TimeoutRender, ProcessError> {
     project_captures(
         &[&timed_out.output],
         cancellation,
         |rendered| timeout_output(timed_out, timeout_ms, &rendered[0]),
-        |render: &TimeoutRender| {
-            serde_json::to_value(&render.details)
-                .ok()
-                .is_some_and(|details| {
-                    let structured = crate::output::tool_error_structure(
-                        "resource_timeout",
-                        true,
-                        &render.text,
-                        Some(&details),
-                    );
-                    crate::output::tool_result_encoded_len(&render.text, Some(&structured), true)
-                        <= crate::output::OutputLimits::for_content_within(
-                            &render.text,
-                            output_budget.page_bytes(),
-                        )
-                        .bytes
-                        && output_budget.token_gate().is_none_or(|token_gate| {
-                            matches!(
-                                token_gate.project_result(
-                                    &render.text,
-                                    Some(&structured),
-                                    true,
-                                    cancellation
-                                ),
-                                crate::output::ProjectionDecision::Fits(_)
-                            )
-                        })
-                })
-        },
+        |render| report::timeout_render_fits_budget(render, cancellation, output_budget),
     )
-    .map_err(|error| normalize_burst_render_error(error, output_budget))
-}
-
-fn normalize_burst_render_error(
-    error: ProcessError,
-    output_budget: &dyn crate::output::CallBudget,
-) -> ProcessError {
-    if output_budget
-        .token_gate()
-        .is_some_and(|token_gate| token_gate.ceiling() < crate::output::CALL_OUTPUT_TOKEN_LIMIT)
-        && matches!(
-            error,
-            ProcessError::Output(crate::output::OutputError::RequiredContentTooLarge)
-        )
-    {
-        ProcessError::Output(crate::output::OutputError::BurstLimit)
-    } else {
-        error
-    }
+    .map_err(|error| report::normalize_burst_render_error(error, output_budget))
 }
 
 fn timeout_output(
     timed_out: &TimedOutBash,
     timeout_ms: u64,
     output: &RenderedCapture,
-) -> TimeoutRender {
+) -> report::TimeoutRender {
     let header = format!(
         "bash timed out after {timeout_ms} ms and its owned process containment was terminated\nBash: {}\nCwd: {}\nStatus: timed out; owned process containment terminated",
         diagnostic_path(&timed_out.bash),
@@ -682,14 +608,8 @@ fn timeout_output(
         text.push('\n');
         text.push_str(&line);
     }
-    let summary = ProcessStreamSummary {
-        total: timed_out.output.bytes_read,
-        shown: output.shown_bytes,
-        omitted: output.omitted_bytes,
-        invalid_utf8: output.invalid_bytes,
-        encoding: output.encoding.clone(),
-    };
-    TimeoutRender {
+    let summary = report::stream_summary(timed_out.output.bytes_read, output);
+    report::TimeoutRender {
         text,
         details: ProcessTimeoutDetails {
             timeout_ms,

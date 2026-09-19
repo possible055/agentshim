@@ -10,7 +10,7 @@ use base64::Engine as _;
 
 use agentshim_core::output::CallBudget as _;
 
-use crate::{capture::ArtifactRecord, engine::EngineState, process::NativeFailure};
+use crate::{capture::ArtifactRecord, process::NativeFailure, state::EngineState};
 
 impl EngineState {
     /// Resolve the file-access view a text tool runs under, granting an exact

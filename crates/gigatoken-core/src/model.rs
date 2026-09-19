@@ -53,7 +53,18 @@ impl O200kPrototype {
     ///
     /// Returns an error when a counter bound is zero or the short-cache slot
     /// count is not a power of two.
-    pub fn fork_counter(&self, limits: CounterLimits) -> Result<O200kCounter, LoadError> {
+    /// Fork one counter with the canonical read-only limits.
+    pub fn fork_counter(&self) -> Result<O200kCounter, LoadError> {
+        self.fork_counter_with_limits(CounterLimits::default())
+    }
+
+    /// White-box hook for cache-bound tests; production callers must use
+    /// [`O200kPrototype::fork_counter`].
+    #[doc(hidden)]
+    pub fn fork_counter_with_limits(
+        &self,
+        limits: CounterLimits,
+    ) -> Result<O200kCounter, LoadError> {
         limits.validate()?;
         Ok(O200kCounter::new(Arc::clone(&self.model), limits))
     }

@@ -9,17 +9,15 @@ mod token_gate;
 pub(crate) use burst_gate::{
     BurstOutputGate, BurstTicket, MAX_CONTROL_RESPONSE_TOKENS, configured_burst_tokens,
 };
-pub(crate) use token_gate::{GateDecision, OutputTokenGate, structured_result_fits_model_budget};
+pub(crate) use token_gate::{
+    CLIENT_WRAPPER_TOKEN_RESERVE, OutputTokenGate, TOOL_CONTENT_TOKEN_LIMIT,
+    structured_result_fits_model_budget,
+};
 
-#[allow(
-    unused_imports,
-    reason = "re-exports keep crate-internal output paths stable across build profiles"
-)]
 pub use agentshim_core::output::{
     CALL_OUTPUT_TOKEN_LIMIT, MAX_OUTPUT_BYTES, MIN_OUTPUT_BYTES, MODEL_BYTE_LIMIT,
-    NEXT_OFFSET_FIELD, NEXT_START_LINE_FIELD, OUTPUT_BYTES_ENV, OutputError, OutputFormatter,
-    OutputLimits, PARTIAL_MARKER, PDF_CURSOR_FIELD, ProjectedTokenCost, ProjectionDecision,
-    SkipNotes, SkipReason, json_string_content_encoded_len, tool_error_structure,
+    NEXT_OFFSET_FIELD, NEXT_START_LINE_FIELD, OUTPUT_BYTES_ENV, OutputError, PARTIAL_MARKER,
+    PDF_CURSOR_FIELD, ProjectedTokenCost, ProjectionDecision, tool_error_structure,
     tool_result_encoded_len,
 };
 

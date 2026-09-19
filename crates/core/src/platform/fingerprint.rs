@@ -76,6 +76,9 @@ struct PlatformFingerprint {
     file_index: u64,
     length: u64,
     last_write_time: i64,
+    // Renaming a file leaves its index, size, and write time alone while updating the
+    // change time, so this is what lets a same-handle fingerprint notice a rename.
+    change_time: i64,
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -121,6 +124,7 @@ impl FileFingerprint {
             material.extend_from_slice(&self.platform.file_index.to_le_bytes());
             material.extend_from_slice(&self.platform.length.to_le_bytes());
             material.extend_from_slice(&self.platform.last_write_time.to_le_bytes());
+            material.extend_from_slice(&self.platform.change_time.to_le_bytes());
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -144,7 +148,8 @@ impl FileFingerprint {
         let current = Self::from_file(file)?;
         Ok(self.regular == current.regular
             && self.platform.length == current.platform.length
-            && self.platform.last_write_time == current.platform.last_write_time)
+            && self.platform.last_write_time == current.platform.last_write_time
+            && self.platform.change_time == current.platform.change_time)
     }
 
     #[cfg(unix)]
@@ -203,11 +208,12 @@ impl FileFingerprint {
     pub fn from_file(file: &File) -> io::Result<Self> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Storage::FileSystem::{
-            BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
+            FILE_ATTRIBUTE_DIRECTORY, FILE_BASIC_INFO, FileBasicInfo,
         };
 
         let handle = file.as_raw_handle();
-        let info: BY_HANDLE_FILE_INFORMATION = query_by_handle(handle)?;
+        let info = query_by_handle(handle)?;
+        let basic: FILE_BASIC_INFO = query_file_information(handle, FileBasicInfo)?;
         Ok(Self {
             regular: info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0,
             platform: PlatformFingerprint {
@@ -215,6 +221,7 @@ impl FileFingerprint {
                 file_index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
                 length: (u64::from(info.nFileSizeHigh) << 32) | u64::from(info.nFileSizeLow),
                 last_write_time: filetime_as_i64(info.ftLastWriteTime),
+                change_time: basic.ChangeTime,
             },
         })
     }
@@ -223,11 +230,12 @@ impl FileFingerprint {
     pub fn from_file_state(file: &File) -> io::Result<Self> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Storage::FileSystem::{
-            BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
+            FILE_ATTRIBUTE_DIRECTORY, FILE_BASIC_INFO, FileBasicInfo,
         };
 
         let handle = file.as_raw_handle();
-        let info: BY_HANDLE_FILE_INFORMATION = query_by_handle(handle)?;
+        let info = query_by_handle(handle)?;
+        let basic: FILE_BASIC_INFO = query_file_information(handle, FileBasicInfo)?;
         Ok(Self {
             regular: info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0,
             // State fingerprints carry no identity: grep compares them against the open
@@ -238,6 +246,7 @@ impl FileFingerprint {
                 file_index: 0,
                 length: (u64::from(info.nFileSizeHigh) << 32) | u64::from(info.nFileSizeLow),
                 last_write_time: filetime_as_i64(info.ftLastWriteTime),
+                change_time: basic.ChangeTime,
             },
         })
     }
@@ -278,6 +287,30 @@ fn query_by_handle(
         Err(io::Error::last_os_error())
     } else {
         Ok(info)
+    }
+}
+
+#[cfg(windows)]
+fn query_file_information<T: Default>(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    class: i32,
+) -> io::Result<T> {
+    use windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandleEx;
+
+    let mut value = T::default();
+    let size = u32::try_from(std::mem::size_of::<T>()).expect("file information size fits DWORD");
+    #[cfg(feature = "bench-internals")]
+    let started = std::time::Instant::now();
+    // SAFETY: `handle` is borrowed from a live file, and `value` is writable for the
+    // structure size corresponding to `class` at each call site.
+    let succeeded =
+        unsafe { GetFileInformationByHandleEx(handle, class, (&raw mut value).cast(), size) };
+    #[cfg(feature = "bench-internals")]
+    record_fingerprint_query(started.elapsed());
+    if succeeded == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(value)
     }
 }
 

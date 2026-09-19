@@ -48,7 +48,6 @@ pub(in crate::tools::bash) fn execute_detached(
     output_budget: &dyn crate::output::CallBudget,
 ) -> Result<ToolOutput, ProcessError> {
     let started = std::time::Instant::now();
-    request.validate(timeout_ceiling_ms)?;
     let deadline = started + timeout;
     let pre_spawn_timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
     if cancellation.is_cancelled() {

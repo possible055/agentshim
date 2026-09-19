@@ -3,7 +3,7 @@ use std::io;
 use cap_std::fs::File;
 
 use crate::path::{FileAccess, ResolvedPath};
-use crate::tools::read::FileFingerprint;
+use crate::platform::fingerprint::FileFingerprint;
 
 use crate::tools::grep::profile::{GrepProfiler, GrepStage};
 use crate::tools::grep::request::PathnameReopenPolicy;

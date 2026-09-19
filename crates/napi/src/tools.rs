@@ -4,15 +4,10 @@ use std::sync::Arc;
 
 use napi::{Env, Error, Result, Unknown};
 
-use crate::engine::{
-    Engine, EngineState, NativeImage, NativeToolTextResult, ToolText, detached_native_work,
-    native_promise,
-};
-use crate::failures::{
-    filter_capture_glob_lines, glob_failure, grep_failure, parse_grep_case, parse_grep_mode,
-    read_failure,
-};
+use crate::engine::{Engine, NativeImage, NativeToolTextResult, ToolText};
+use crate::failures::{glob_failure, grep_failure, parse_grep_case, parse_grep_mode, read_failure};
 use crate::process::napi_failure;
+use crate::state::{EngineState, detached_native_work, native_promise};
 
 impl Engine {
     fn pdf_mode(value: Option<&str>) -> Result<Option<agentshim_core::tools::read::PdfMode>> {
@@ -227,8 +222,6 @@ impl Engine {
             offset: args.offset.map(|offset| offset as usize),
             limit: args.limit.map(|limit| limit as usize),
         };
-        let repository_root = state.root.path().to_path_buf();
-        let capture_root = state.capture_root.clone();
         let output = state
             .tool_engine
             .glob(
@@ -240,9 +233,8 @@ impl Engine {
             )
             .await
             .map_err(glob_failure)?;
-        let text = filter_capture_glob_lines(&output.text, &repository_root, &capture_root);
         Ok(ToolText {
-            text,
+            text: output.text,
             images: Vec::new(),
         })
     }

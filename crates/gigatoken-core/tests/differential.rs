@@ -6,7 +6,7 @@ fn counter() -> O200kCounter {
     static PROTOTYPE: OnceLock<O200kPrototype> = OnceLock::new();
     PROTOTYPE
         .get_or_init(|| O200kPrototype::load_embedded().expect("load pinned o200k ranks"))
-        .fork_counter(CounterLimits::default())
+        .fork_counter()
         .expect("fork counter")
 }
 
@@ -93,7 +93,9 @@ fn cancellation_and_cache_bounds_are_observable() {
         cancellation_stride: 1,
     };
     let prototype = O200kPrototype::load_embedded().expect("load pinned o200k ranks");
-    let mut counter = prototype.fork_counter(limits).expect("fork counter");
+    let mut counter = prototype
+        .fork_counter_with_limits(limits)
+        .expect("fork counter");
     let resident_before = counter.metrics().resident_bytes;
 
     for index in 0..20 {

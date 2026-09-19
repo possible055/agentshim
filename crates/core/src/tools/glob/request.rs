@@ -22,7 +22,6 @@ use crate::{
     traversal::{
         ParallelTraversal, ParallelTraversalCallbacks, TraversalControl, TraversalEntry,
         TraversalError, TraversalSummary, prefer_parallel_root, walk, walk_parallel_batched,
-        walk_parallel_batched_with_literal_prefix, walk_with_literal_prefix,
     },
 };
 
@@ -477,6 +476,9 @@ fn collect_serial(
     plan: GlobCollectPlan<'_>,
 ) -> Result<(GlobCollection, TraversalSummary), GlobError> {
     let mut visit = |entry: TraversalEntry<'_>| {
+        if access.is_excluded(entry.absolute, entry.file_type) {
+            return TraversalControl::Continue;
+        }
         if !matches_glob_entry(matcher, plan.entry_type, entry) {
             return TraversalControl::Continue;
         }
@@ -496,18 +498,14 @@ fn collect_serial(
         }
         TraversalControl::Continue
     };
-    let summary = if let Some(literal_prefix) = plan.literal_prefix {
-        walk_with_literal_prefix(
-            access,
-            base,
-            plan.include_ignored,
-            cancellation,
-            literal_prefix,
-            &mut visit,
-        )?
-    } else {
-        walk(access, base, plan.include_ignored, cancellation, &mut visit)?
-    };
+    let summary = walk(
+        access,
+        base,
+        plan.include_ignored,
+        cancellation,
+        plan.literal_prefix,
+        &mut visit,
+    )?;
     Ok((collection, summary))
 }
 
@@ -521,11 +519,17 @@ fn collect_parallel(
     plan: GlobCollectPlan<'_>,
 ) -> Result<(GlobCollection, TraversalSummary), GlobError> {
     let collection = Mutex::new(collection);
-    let prefilter = |entry: TraversalEntry<'_>| matches_glob_entry(matcher, plan.entry_type, entry);
+    let prefilter = |entry: TraversalEntry<'_>| {
+        !access.is_excluded(entry.absolute, entry.file_type)
+            && matches_glob_entry(matcher, plan.entry_type, entry)
+    };
     let visit = |batch: &[crate::traversal::OwnedTraversalEntry]| {
         let mut found = Vec::with_capacity(batch.len());
         let matched_entries = batch.len();
         for entry in batch {
+            if access.is_excluded(&entry.absolute, entry.file_type) {
+                continue;
+            }
             match access.resolve_walked_entry(base, &entry.key, &entry.absolute) {
                 Ok(path) => found.push(path),
                 Err(error) => {
@@ -559,38 +563,21 @@ fn collect_parallel(
         drop(hold_span);
         TraversalControl::Continue
     };
-    let summary = if let Some(literal_prefix) = plan.literal_prefix {
-        walk_parallel_batched_with_literal_prefix(
-            access,
-            base,
-            plan.include_ignored,
-            cancellation,
-            ParallelTraversal {
-                batch_size: PARALLEL_BATCH_SIZE,
-                threads: plan.traversal_threads,
-            },
-            literal_prefix,
-            &ParallelTraversalCallbacks {
-                prefilter,
-                visitor: visit,
-            },
-        )?
-    } else {
-        walk_parallel_batched(
-            access,
-            base,
-            plan.include_ignored,
-            cancellation,
-            ParallelTraversal {
-                batch_size: PARALLEL_BATCH_SIZE,
-                threads: plan.traversal_threads,
-            },
-            &ParallelTraversalCallbacks {
-                prefilter,
-                visitor: visit,
-            },
-        )?
-    };
+    let summary = walk_parallel_batched(
+        access,
+        base,
+        plan.include_ignored,
+        cancellation,
+        ParallelTraversal {
+            batch_size: PARALLEL_BATCH_SIZE,
+            threads: plan.traversal_threads,
+        },
+        plan.literal_prefix,
+        &ParallelTraversalCallbacks {
+            prefilter,
+            visitor: visit,
+        },
+    )?;
     let collection = collection
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner);

@@ -13,7 +13,7 @@ use std::{
 
 use tokio_util::sync::CancellationToken;
 
-use crate::tools::exec::{
+use crate::platform::process::{
     ProcessError,
     capture::{Capture, DRAIN_CHUNK_BYTES, capture_bytes_per_stream},
     spawn::{
@@ -974,7 +974,7 @@ mod readiness_tests {
 #[cfg(all(test, target_os = "linux"))]
 mod pidfd_exit_tests {
     use super::*;
-    use crate::tools::exec::resolve::{Launcher, ResolvedProgram};
+    use crate::platform::process::resolve::{Launcher, ResolvedProgram};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::Ordering;
 
