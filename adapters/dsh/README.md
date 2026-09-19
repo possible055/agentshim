@@ -45,7 +45,7 @@ The entry package exact-pins its platform package. There is no install script or
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `root` | `process.cwd()` | Canonical local root and exact agent-cwd match target. |
-| `env` | `{}` | Child variables layered over DSH's credential-scrubbed parent environment. `AGENTSHIM_BASH` directs discovery. `AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX` is parsed once at activation after this merge, so config overrides the parent environment. |
+| `env` | `{}` | Child variables layered over DSH's credential-scrubbed parent environment. `AGENTSHIM_BASH` set here also directs load-time bash discovery. Accepts a GNU Bash executable (Git Bash `bash.exe`), a BusyBox-w32 dispatcher binary (`busybox64u.exe`), or an applet-named BusyBox copy (`sh.exe`/`ash.exe`/`bash.exe`); the shell flavor and invocation form are auto-detected by the probe. `AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX` is parsed once at activation after this merge, so config overrides the parent environment. |
 | `toolCallTimeoutMs` | `600000` | DSH deadline shelf; values below 600000 are rejected and the process ceiling is 590000 ms. |
 | `captureRoot` | Platform data directory | Private persistent process-artifact root; an explicit value must be absolute. |
 | `captureMaxBytes` | `67108864` | Aggregate raw bytes per process call; 1 MiB through 1 GiB. |

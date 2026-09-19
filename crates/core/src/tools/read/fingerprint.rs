@@ -203,7 +203,7 @@ impl FileFingerprint {
     pub fn from_file(file: &File) -> io::Result<Self> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Storage::FileSystem::{
-            BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, GetFileInformationByHandle,
+            BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
         };
 
         let handle = file.as_raw_handle();
@@ -214,7 +214,7 @@ impl FileFingerprint {
                 volume: info.dwVolumeSerialNumber,
                 file_index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
                 length: (u64::from(info.nFileSizeHigh) << 32) | u64::from(info.nFileSizeLow),
-                last_write_time: filetime_as_i64(&info.ftLastWriteTime),
+                last_write_time: filetime_as_i64(info.ftLastWriteTime),
             },
         })
     }
@@ -223,7 +223,7 @@ impl FileFingerprint {
     pub fn from_file_state(file: &File) -> io::Result<Self> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Storage::FileSystem::{
-            BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, GetFileInformationByHandle,
+            BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
         };
 
         let handle = file.as_raw_handle();
@@ -237,7 +237,7 @@ impl FileFingerprint {
                 volume: 0,
                 file_index: 0,
                 length: (u64::from(info.nFileSizeHigh) << 32) | u64::from(info.nFileSizeLow),
-                last_write_time: filetime_as_i64(&info.ftLastWriteTime),
+                last_write_time: filetime_as_i64(info.ftLastWriteTime),
             },
         })
     }
@@ -282,6 +282,6 @@ fn query_by_handle(
 }
 
 #[cfg(windows)]
-fn filetime_as_i64(time: &windows_sys::Win32::Foundation::FILETIME) -> i64 {
+fn filetime_as_i64(time: windows_sys::Win32::Foundation::FILETIME) -> i64 {
     (i64::from(time.dwHighDateTime) << 32) | i64::from(time.dwLowDateTime)
 }

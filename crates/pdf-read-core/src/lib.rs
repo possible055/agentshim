@@ -45,9 +45,9 @@ pub use budget::{
 };
 pub use metrics::{current as current_metrics, measure, PdfReadMetrics};
 pub use read_api::{
-    LimitScope, MarkdownChunk, MarkdownOptions, PageInfo, PageTextAssessment, PageTextStatus,
-    PageVisualAssessment, ParserLimits, PdfReadDocument, PdfReadError, PdfReadErrorKind,
-    RenderLimits, RenderedPage, ResourceLimitDetails,
+    warm_render_fonts, LimitScope, MarkdownChunk, MarkdownOptions, PageInfo, PageTextAssessment,
+    PageTextStatus, PageVisualAssessment, ParserLimits, PdfReadDocument, PdfReadError,
+    PdfReadErrorKind, RenderLimits, RenderedPage, ResourceLimitDetails,
 };
 
 pub(crate) mod cache;

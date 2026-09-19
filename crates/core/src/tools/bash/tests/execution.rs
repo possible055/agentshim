@@ -101,11 +101,41 @@ fn validation_accepts_bounded_detached_timeout_and_rejects_invalid_combinations(
 }
 
 fn runtime_fixture(path: Option<&str>) -> locate::BashRuntime {
+    runtime_with_flavor(locate::ShellFlavor::Bash, path)
+}
+
+fn runtime_with_flavor(flavor: locate::ShellFlavor, path: Option<&str>) -> locate::BashRuntime {
     locate::BashRuntime {
         executable: std::path::PathBuf::from("/usr/bin/bash"),
         locale: "C.UTF-8".to_owned(),
         path: path.map(str::to_owned),
+        flavor,
+        busybox_dispatch: false,
     }
+}
+
+#[test]
+fn launch_args_follow_the_flavor_and_dispatch_form() {
+    let mut dispatcher = runtime_with_flavor(locate::ShellFlavor::Ash, None);
+    dispatcher.busybox_dispatch = true;
+
+    assert_eq!(
+        runtime_fixture(None).launch_args("echo hi"),
+        [
+            "--noprofile".to_owned(),
+            "--norc".to_owned(),
+            "-c".to_owned(),
+            "echo hi".to_owned()
+        ]
+    );
+    assert_eq!(
+        dispatcher.launch_args("echo hi"),
+        ["sh".to_owned(), "-c".to_owned(), "echo hi".to_owned()]
+    );
+    assert_eq!(
+        runtime_with_flavor(locate::ShellFlavor::Ash, None).launch_args("echo hi"),
+        ["-c".to_owned(), "echo hi".to_owned()]
+    );
 }
 
 #[test]
@@ -191,6 +221,23 @@ fn disabled_msys_conversion_is_a_noop_outside_windows() {
     let plan = bash_environment(&runtime_fixture(None), MsysArgumentConversion::Disabled);
 
     assert!(plan.overrides.is_empty());
+}
+
+/// busybox has no MSYS2 argument rewriting, so the override would be dead weight on the
+/// ash backend even when the caller asks for it.
+#[cfg(windows)]
+#[test]
+fn an_ash_runtime_never_receives_the_msys2_conversion_override() {
+    let plan = bash_environment(
+        &runtime_with_flavor(locate::ShellFlavor::Ash, None),
+        MsysArgumentConversion::Disabled,
+    );
+
+    assert!(
+        plan.overrides
+            .iter()
+            .all(|(name, _)| name != "MSYS2_ARG_CONV_EXCL")
+    );
 }
 
 /// The failure this reproduces is a shell that cannot see its own coreutils: on Windows a

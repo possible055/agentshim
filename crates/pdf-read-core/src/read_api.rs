@@ -467,6 +467,15 @@ fn validate_parser_limits(limits: ParserLimits) -> Result<()> {
     Ok(())
 }
 
+/// Loads the process-wide system font database ahead of the first page render.
+///
+/// The scan walks every font directory on the host and takes seconds on cold
+/// machines, so callers that enforce a rendering runtime budget should warm
+/// during request preparation and keep the scan outside the measured work.
+pub fn warm_render_fonts() {
+    crate::rendering::warm_render_fonts();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

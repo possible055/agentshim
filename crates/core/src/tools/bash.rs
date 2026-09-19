@@ -10,7 +10,7 @@ use crate::{
         ToolOutput,
         bash::{
             detached::DetachedAdmission,
-            locate::{BashLocator, LocateError},
+            locate::{BashLocator, LocateError, ShellFlavor},
         },
         exec::{
             ProcessError, ProcessStreamSummary, ProcessTimeoutDetails,
@@ -172,15 +172,24 @@ pub(in crate::tools::bash) fn invalid(message: impl Into<String>) -> ProcessErro
     ProcessError::Validation(message.into())
 }
 
-/// Every command goes through the same non-interactive, profile-free invocation, which is
-/// what the tool description promises the caller.
-pub fn bash_args(command: &str) -> Vec<String> {
-    vec![
-        "--noprofile".to_owned(),
-        "--norc".to_owned(),
-        "-c".to_owned(),
-        command.to_owned(),
-    ]
+impl locate::BashRuntime {
+    /// Every command goes through the same non-interactive, profile-free invocation, which is
+    /// what the tool description promises the caller. A busybox dispatcher needs the `sh`
+    /// applet name as an argv prefix; applet-named copies and GNU bash do not.
+    pub fn launch_args(&self, command: &str) -> Vec<String> {
+        match self.flavor {
+            ShellFlavor::Bash => vec![
+                "--noprofile".to_owned(),
+                "--norc".to_owned(),
+                "-c".to_owned(),
+                command.to_owned(),
+            ],
+            ShellFlavor::Ash if self.busybox_dispatch => {
+                vec!["sh".to_owned(), "-c".to_owned(), command.to_owned()]
+            }
+            ShellFlavor::Ash => vec!["-c".to_owned(), command.to_owned()],
+        }
+    }
 }
 
 /// Removed from the inherited environment on every bash launch, foreground and detached
@@ -204,8 +213,12 @@ pub fn bash_environment(
     if let Some(path) = &runtime.path {
         plan.overrides.push(("PATH".to_owned(), path.clone()));
     }
+    // busybox has no MSYS2 argument rewriting, so `/E` switches always pass through
+    // literally under ash and the parameter is a no-op there.
     #[cfg(windows)]
-    if msys_argument_conversion == MsysArgumentConversion::Disabled {
+    if runtime.flavor == ShellFlavor::Bash
+        && msys_argument_conversion == MsysArgumentConversion::Disabled
+    {
         plan.overrides
             .push((MSYS2_ARG_CONV_EXCL.to_owned(), "*".to_owned()));
     }
@@ -349,11 +362,11 @@ pub(crate) fn prepare_bash_foreground(
     Ok(PreparedBash {
         resolved,
         cwd,
-        args: bash_args(&request.command),
+        args: runtime.launch_args(&request.command),
         environment: bash_environment(&runtime, request.msys_argument_conversion),
         deadline,
         request_timeout_ms: request.timeout_ms(timeout_ceiling_ms),
-        msys_retry_available: msys_retry_available(request),
+        msys_retry_available: msys_retry_available(request, runtime.flavor),
     })
 }
 
@@ -499,9 +512,11 @@ fn render_completed_with_budget(
 /// program words an unknown-switch failure differently, but the syntax that provokes Git
 /// Bash into rewriting the argument is fixed. Deliberately conservative — a missed hint
 /// costs nothing because the parameter is still documented, while a hint on every failing
-/// `ls /tmp` would be noise on the most common commands.
-fn msys_retry_available(request: &BashRequest) -> bool {
+/// `ls /tmp` would be noise on the most common commands. The ash backend never rewrites
+/// arguments, so the hint is meaningless there.
+fn msys_retry_available(request: &BashRequest, flavor: ShellFlavor) -> bool {
     cfg!(windows)
+        && flavor == ShellFlavor::Bash
         && matches!(
             request.msys_argument_conversion,
             MsysArgumentConversion::Default

@@ -30,6 +30,11 @@ mod unicode;
 
 use encoding::{fallback_char_to_unicode, measure_text_bytes, TextCharIter};
 use fonts::{classify_embedded_font, cmap_byte_to_gid, get_cjk_fallback_cached, system_fontdb};
+
+/// Forces the process-wide system font database to load before the first render.
+pub(super) fn warm_render_fonts() {
+    system_fontdb();
+}
 use outline::SkiaOutlineBuilder;
 
 /// Rasterizer for PDF text operations.

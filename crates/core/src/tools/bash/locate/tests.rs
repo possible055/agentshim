@@ -6,6 +6,16 @@ fn available_bash() -> Option<Arc<BashRuntime>> {
         .ok()
 }
 
+/// Flavor-matching argv for driving the probe execution helpers against any discovered
+/// runtime, including a busybox dispatcher reached through `AGENTSHIM_BASH`.
+fn probe_invocation<'a>(runtime: &BashRuntime, script: &'a str) -> Vec<&'a str> {
+    if runtime.busybox_dispatch {
+        vec!["sh", "-c", script]
+    } else {
+        vec!["-c", script]
+    }
+}
+
 #[test]
 fn locator_instances_keep_captured_inputs_independent() {
     let Some(runtime) = available_bash() else {
@@ -161,14 +171,10 @@ fn probe_rejects_output_over_sixty_four_kibibytes() {
         return;
     };
     let budget = Budget::new(Duration::from_secs(5));
+    let args = probe_invocation(&runtime, "head -c 65537 /dev/zero | tr '\\0' x");
     let output = probe_output(
         &runtime.executable,
-        &[
-            "--noprofile",
-            "--norc",
-            "-c",
-            "head -c 65537 /dev/zero | tr '\\0' x",
-        ],
+        &args,
         runtime.path.as_deref(),
         &budget,
         &CancellationToken::new(),
@@ -203,6 +209,7 @@ fn probe_parser_requires_the_version_marker_on_the_first_line() {
         "GNU bash, version 5.2.37\nC.UTF-8\n",
         "C.UTF-8\nAGENTSHIM_BASH_PROBE_V1:5.2.37\n",
         "AGENTSHIM_BASH_PROBE_V1:\nC.UTF-8\n",
+        "AGENTSHIM_BASH_PROBE_V1:\n",
     ] {
         assert!(parse_probe_output(output).is_none(), "accepted {output:?}");
     }
@@ -212,17 +219,81 @@ fn probe_parser_requires_the_version_marker_on_the_first_line() {
 fn probe_parser_selects_preferred_locale_or_fallback() {
     assert_eq!(
         parse_probe_output("AGENTSHIM_BASH_PROBE_V1:5.2.37\nC.utf8\n"),
-        Some(PREFERRED_LOCALE.to_owned())
+        Some((ShellFlavor::Bash, PREFERRED_LOCALE.to_owned()))
     );
     assert_eq!(
         parse_probe_output("AGENTSHIM_BASH_PROBE_V1:5.2.37\nC\nPOSIX\n"),
-        Some(FALLBACK_LOCALE.to_owned())
+        Some((ShellFlavor::Bash, FALLBACK_LOCALE.to_owned()))
     );
     assert_eq!(
         parse_probe_output("AGENTSHIM_BASH_PROBE_V1:5.2.37\n"),
-        Some(FALLBACK_LOCALE.to_owned()),
+        Some((ShellFlavor::Bash, FALLBACK_LOCALE.to_owned())),
         "a missing locale command must not reject a valid Bash"
     );
+    assert_eq!(
+        parse_probe_output("AGENTSHIM_BASH_PROBE_V1:busybox-ash\n"),
+        Some((ShellFlavor::Ash, FALLBACK_LOCALE.to_owned()))
+    );
+}
+
+#[test]
+fn busybox_dispatch_matches_prefixed_executable_names() {
+    for name in [
+        "busybox",
+        "busybox.exe",
+        "busybox64.exe",
+        "busybox64u.exe",
+        "BusyBox64.EXE",
+        "busybox-helper.exe",
+    ] {
+        assert!(
+            busybox_dispatch(Path::new(name)),
+            "{name} is a dispatcher name"
+        );
+    }
+    for name in ["bash.exe", "sh.exe", "ash.exe", "sh", "my-busybox.exe"] {
+        assert!(
+            !busybox_dispatch(Path::new(name)),
+            "{name} is not a dispatcher name"
+        );
+    }
+}
+
+#[test]
+fn probe_args_carry_the_sh_prefix_only_for_a_dispatcher() {
+    assert_eq!(probe_args(true), &["sh", "-c", PROBE_SCRIPT][..]);
+    assert_eq!(probe_args(false), &["-c", PROBE_SCRIPT][..]);
+    for args in [probe_args(true), probe_args(false)] {
+        assert!(
+            args.iter().all(|arg| !arg.starts_with("--")),
+            "the probe must not pass long options: {args:?}"
+        );
+    }
+}
+
+#[test]
+fn the_probe_environment_strips_an_inherited_bash_version() {
+    let plan = probe_environment(Some("/toolchain/bin"));
+
+    for name in ["BASH_ENV", "ENV", "BASH_VERSION"] {
+        assert!(
+            plan.removed.iter().any(|removed| removed == name),
+            "{name} must be removed from the probe environment"
+        );
+    }
+    assert_eq!(
+        plan.overrides,
+        vec![
+            ("LC_ALL".to_owned(), "C".to_owned()),
+            ("PATH".to_owned(), "/toolchain/bin".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn the_probe_environment_neutralizes_host_locale() {
+    let plan = probe_environment(None);
+    assert_eq!(plan.overrides, vec![("LC_ALL".to_owned(), "C".to_owned())]);
 }
 
 #[test]
@@ -231,10 +302,11 @@ fn probe_timeout_terminates_the_process_tree() {
         return;
     };
     let budget = Budget::new(Duration::from_millis(100));
+    let args = probe_invocation(&runtime, "sleep 30");
     let started = Instant::now();
     let output = probe_output(
         &runtime.executable,
-        &["--noprofile", "--norc", "-c", "sleep 30"],
+        &args,
         runtime.path.as_deref(),
         &budget,
         &CancellationToken::new(),
@@ -252,15 +324,14 @@ fn successful_primary_with_a_pipe_holding_descendant_is_bounded() {
     };
     let fixture = tempfile::tempdir().expect("fixture");
     let budget = Budget::new(Duration::from_secs(5));
+    let args = probe_invocation(
+        &runtime,
+        "(sleep 1; printf late > delayed-marker) & printf 'probe complete\\n'",
+    );
     let started = Instant::now();
     let output = probe_output_in(
         &runtime.executable,
-        &[
-            "--noprofile",
-            "--norc",
-            "-c",
-            "(sleep 1; printf late > delayed-marker) & printf 'probe complete\\n'",
-        ],
+        &args,
         runtime.path.as_deref(),
         &budget,
         &CancellationToken::new(),
@@ -289,14 +360,10 @@ fn cancelling_a_running_probe_terminates_its_process_tree() {
     let worker_cancellation = cancellation.clone();
     let worker = std::thread::spawn(move || {
         let budget = Budget::new(Duration::from_secs(5));
+        let args = probe_invocation(&runtime, "(sleep 1; printf late > delayed-marker) & wait");
         probe_output_in(
             &runtime.executable,
-            &[
-                "--noprofile",
-                "--norc",
-                "-c",
-                "(sleep 1; printf late > delayed-marker) & wait",
-            ],
+            &args,
             runtime.path.as_deref(),
             &budget,
             &worker_cancellation,
@@ -483,7 +550,7 @@ fn an_arm64_git_layout_prefixes_clangarm64_bin() {
     std::fs::create_dir_all(&arm64).expect("clangarm64/bin");
     std::fs::write(own.join("bash.exe"), b"").expect("layout bash");
 
-    let path = toolchain_path(&own.join("bash.exe"), &OsString::new())
+    let path = toolchain_path(&own.join("bash.exe"), &OsString::new(), false)
         .expect("a bin layout must yield a toolchain PATH");
     let entries = std::env::split_paths(&path).collect::<Vec<_>>();
 
@@ -492,4 +559,81 @@ fn an_arm64_git_layout_prefixes_clangarm64_bin() {
         "clangarm64/bin is missing: {path}"
     );
     assert_eq!(entries.last(), Some(&own));
+}
+
+#[cfg(windows)]
+#[test]
+fn a_busybox_dispatcher_gets_only_its_own_directory_ahead_of_the_inherited_path() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let own = fixture.path().join("usr").join("bin");
+    let mingw = fixture.path().join("mingw64").join("bin");
+    std::fs::create_dir_all(&own).expect("usr/bin");
+    std::fs::create_dir_all(&mingw).expect("mingw64/bin");
+    std::fs::write(own.join("busybox64u.exe"), b"").expect("dispatcher binary");
+    let inherited = std::env::join_paths([fixture.path()]).expect("joined PATH");
+
+    let dispatcher = toolchain_path(&own.join("busybox64u.exe"), &inherited, true)
+        .expect("a dispatcher must yield a toolchain PATH");
+    let bash = toolchain_path(&own.join("bash.exe"), &inherited, false)
+        .expect("a bin layout must yield a toolchain PATH");
+    let dispatcher_entries = std::env::split_paths(&dispatcher).collect::<Vec<_>>();
+    let bash_entries = std::env::split_paths(&bash).collect::<Vec<_>>();
+
+    assert_eq!(
+        dispatcher_entries.first(),
+        Some(&own),
+        "the own directory must lead: {dispatcher}"
+    );
+    assert!(
+        !dispatcher_entries.contains(&mingw),
+        "a dispatcher must not probe MSYS2 toolchain directories: {dispatcher}"
+    );
+    assert!(
+        bash_entries.contains(&mingw),
+        "the MSYS2 layout keeps its lookup: {bash}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn candidates_place_busybox_after_every_full_bash_source() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let bin = fixture.path().join("bin");
+    std::fs::create_dir_all(&bin).expect("bin");
+    for name in ["git.exe", "bash.exe", "busybox64u.exe", "busybox64.exe"] {
+        std::fs::write(bin.join(name), b"").expect("candidate file");
+    }
+    let inherited = std::env::join_paths([&bin]).expect("joined PATH");
+    let program_files = Some(OsString::from(fixture.path()));
+    let local_app_data = Some(OsString::from(fixture.path()));
+
+    let candidates = candidates_with(
+        &[program_files.clone(), program_files],
+        local_app_data.as_deref(),
+        &inherited,
+    );
+
+    let position = |candidate: &Path| {
+        candidates
+            .iter()
+            .position(|entry| entry == candidate)
+            .unwrap_or_else(|| panic!("{candidate:?} is missing from {candidates:?}"))
+    };
+    let path_bash = position(&bin.join("bash.exe"));
+    let fixed_unicode = position(&fixture.path().join("busybox-w32").join("busybox64u.exe"));
+    let fixed_ansi = position(&fixture.path().join("busybox-w32").join("busybox64.exe"));
+    let path_unicode = position(&bin.join("busybox64u.exe"));
+
+    assert!(
+        path_bash < fixed_unicode,
+        "a PATH bash.exe must precede the fixed busybox locations: {candidates:?}"
+    );
+    assert!(
+        fixed_unicode < fixed_ansi,
+        "the Unicode build must precede the ANSI build: {candidates:?}"
+    );
+    assert!(
+        fixed_ansi < path_unicode,
+        "fixed busybox locations must precede PATH busybox hits: {candidates:?}"
+    );
 }

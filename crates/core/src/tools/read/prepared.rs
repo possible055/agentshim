@@ -160,6 +160,17 @@ pub fn prepare(
         )?;
         PreparedKind::Text { detected_encoding }
     };
+    if let PreparedKind::Pdf {
+        mode: PdfMode::Image,
+        ..
+    } = &kind
+    {
+        // The first image render loads the process-wide system font database, which scans
+        // host font directories for seconds on cold machines. Warming here keeps that
+        // one-time scan out of the image mode's runtime budget, which measures rendering
+        // work only.
+        agentshim_pdf_read::warm_render_fonts();
+    }
     Ok(PreparedRead {
         resolved,
         absolute,

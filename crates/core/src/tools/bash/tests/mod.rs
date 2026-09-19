@@ -97,6 +97,26 @@ fn slash_switch_detection_separates_windows_switches_from_posix_paths() {
     }
 }
 
+/// ash passes `/E` through literally, so the Git-Bash-specific retry hint would be noise.
+#[test]
+fn msys_retry_hint_is_suppressed_for_the_ash_flavor() {
+    let request = request("robocopy /E src dst");
+    assert!(!super::msys_retry_available(
+        &request,
+        locate::ShellFlavor::Ash
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn msys_retry_hint_survives_for_a_bash_runtime() {
+    let request = request("robocopy /E src dst");
+    assert!(super::msys_retry_available(
+        &request,
+        locate::ShellFlavor::Bash
+    ));
+}
+
 fn bash_is_available() -> bool {
     BashLocator::capture()
         .resolve(&CancellationToken::new())
@@ -114,6 +134,7 @@ fn windows_argument_echo_command(root: &std::path::Path) -> String {
     format!("powershell.exe -NoProfile -File '{script}' /E")
 }
 
+mod busybox;
 mod detached;
 mod detached_admission;
 mod execution;

@@ -1,6 +1,14 @@
 # dsh-agentshim
 
-`dsh-agentshim` 将 `read`、`grep`、`glob`、`run_program`、`bash` 和 `bash_status` 作为原生 DSH 工具暴露给智能体。该插件在进程内直接加载对应平台的 `agentshim-napi` 原生插件（addon）；它不会启动 `agentshim serve`，也不包含任何兼容性回退机制。
+适用于 DeepSeek Harness (DSH) 的原生、具备能力感知的仓库工具插件。
+
+`dsh-agentshim` 将 `read`、`grep`、`glob`、`run_program`、`bash` 和 `bash_status` 作为原生 DSH 工具暴露给智能体。该插件在进程内直接加载对应平台的 `agentshim-napi` 原生插件（addon）；它不会启动 `agentshim serve`，也不包含任何协议桥接或内置工具回退机制。
+
+- **直接进程内执行**：调用停留在 Node.js 进程内，只读工具无需启动辅助子进程即可执行。
+- **读取结构化文档**：PDF 页面返回文本或渲染图像；Word、Excel 和 PowerPoint 文件返回 Markdown 并附带可重放的接续游标。
+- **确定性与有界预算**：文件读取、搜索与命令执行均在明确的字节预算下运作，提供可预测的分页与接续标记。
+- **原生生命周期管理**：后台命令由 DSH 任务追踪，并与服务端和智能体生命周期绑定，附带受限的日志保留策略。
+- **强化进程执行**：进程调用在 Windows 下运行于私有 Job Object，在 Unix 下运行于独立进程组。DSH 沙箱策略直接包装原生命令行参数。
 
 ## 运行环境要求
 
@@ -43,7 +51,7 @@ dsh --profile headless --dump-config
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
 | `root` | `process.cwd()` | 规范的本地根目录，作为精确匹配智能体工作目录（agent-cwd）的目标。 |
-| `env` | `{}` | 叠加在 DSH 凭据清洗（credential-scrubbed）父环境变量之上的子环境变量。`AGENTSHIM_BASH` 用于指定 Bash 路径。`AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX` 在激活合并后解析一次，因此配置会覆盖父环境中的值。 |
+| `env` | `{}` | 叠加在 DSH 凭据清洗（credential-scrubbed）父环境变量之上的子环境变量。在此设定的 `AGENTSHIM_BASH` 也会在加载时驱动 Bash 探测。接受 GNU Bash 可执行文件（Git Bash `bash.exe`）、BusyBox-w32 派发器二进制文件（`busybox64u.exe`）或按 applet 命名的 BusyBox 副本（`sh.exe`/`ash.exe`/`bash.exe`）；shell 类型与调用形式由探针自动判定。`AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX` 在激活合并后解析一次，因此配置会覆盖父环境中的值。 |
 | `toolCallTimeoutMs` | `600000` | DSH 工具超时阈值；低于 600000 的值会被拒绝，进程超时上限为 590000 毫秒。 |
 | `captureRoot` | 平台数据目录 | 私有持久化进程产物根目录；若显式指定则必须为绝对路径。 |
 | `captureMaxBytes` | `67108864` | 每次进程调用的原始字节上限；范围为 1 MiB 至 1 GiB。 |

@@ -310,7 +310,7 @@ fn run_program_tool(max: u64, default: u64) -> Tool {
 fn bash_tool(max: u64, default: u64, background_max: u64) -> Tool {
     Tool::new(
         "bash",
-        "Run a POSIX bash command line non-interactively and return merged stdout/stderr with the exit code. Write POSIX bash (never PowerShell) on all platforms. For long-running commands, set detach=true with a log_path to run in the background and monitor via bash_status.",
+        "Run a POSIX bash command line non-interactively and return merged stdout/stderr with the exit code. Write POSIX bash (never PowerShell) on all platforms; prefer POSIX sh syntax so the command also runs on the BusyBox-w32 ash fallback backend used on Windows when GNU Bash is absent. For long-running commands, set detach=true with a log_path to run in the background and monitor via bash_status.",
         schema(json!({
             "type": "object",
             "oneOf": [

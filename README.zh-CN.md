@@ -214,7 +214,7 @@ Git Bash 在启动 Windows 原生程序前，会转换看起来像 POSIX 路径�
 | `AGENTSHIM_WINDOWS_ACTIVE_PROCESS_LIMIT` | 关闭 | 可选的 Windows Job Object 单棵前景或 detached 进程树 active-process 硬上限；1–256。 |
 | `AGENTSHIM_WINDOWS_JOB_MEMORY_BYTES` | 关闭 | 可选的 Windows Job Object aggregate committed-memory 硬上限；67108864–17179869184。 |
 | `AGENTSHIM_WINDOWS_PROCESS_MEMORY_BYTES` | 关闭 | 可选的 Windows Job Object 单进程 committed-memory 硬上限；67108864–17179869184。 |
-| `AGENTSHIM_BASH` | 自动探测 | GNU bash 的绝对路径。在 DSH adapter 中，plugin config `env` 段里设定的同名键也会在加载时驱动 bash 探测，因此无需在 host process 环境中预设。 |
+| `AGENTSHIM_BASH` | 自动探测 | GNU bash（Git Bash 的 `bash.exe`）、BusyBox-w32 dispatcher（`busybox64u.exe`）或 applet 命名的 BusyBox 副本的绝对路径；shell flavor 与调用形式由探针自动判定。在 DSH adapter 中，plugin config `env` 段里设定的同名键也会在加载时驱动 bash 探测，因此无需在 host process 环境中预设。 |
 | `AGENTSHIM_LOG_MODE` | `errors` | 取值 `off`、`errors`、`all` 之一。 |
 | `AGENTSHIM_LOG_DIR` | 平台默认 | 用绝对路径覆盖日志目录。 |
 | `AGENTSHIM_RESPECT_GITIGNORE` | `false` | 设为 `true` 时，`grep` 与 `glob` 才套用 `.gitignore`／`.ignore`。省略 `include_ignored` 时跟随此默认值。由于调用方读不到这项设定，过滤生效且结果为空时，响应末尾会附上一行建议改用 `include_ignored=true`。`.git` 以及 `node_modules`、`target`、`.venv`、`venv`、`dist`、`build`、`__pycache__` 无论开关都排除。binary、输出预算与内存上限仍会挡住内容。 |

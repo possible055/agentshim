@@ -50,6 +50,12 @@ mod text_rasterizer;
 pub use page_renderer::{ImageFormat, PageRenderer, RenderOptions, RenderedImage};
 pub use separation_renderer::{render_separation, render_separations, SeparationPlate};
 
+/// Loads the shared system font database once, up front, so a later page render
+/// pays only the rendering work and not the one-time font directory scan.
+pub fn warm_render_fonts() {
+    text_rasterizer::warm_render_fonts();
+}
+
 use crate::content::GraphicsState;
 use crate::error::Result;
 use tiny_skia::{Color, Paint};

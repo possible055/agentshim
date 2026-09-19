@@ -258,24 +258,41 @@ describe('native addon loading', () => {
     if (result.engine === undefined) throw new Error('unreachable')
     const firstRoot = await mkdtemp(join(tmpdir(), 'agentshim-native-capacity-a-'))
     const secondRoot = await mkdtemp(join(tmpdir(), 'agentshim-native-capacity-b-'))
-    const host = new result.engine.NativeHostRuntime({ env: nativeEngineEnv({}) })
+    const host = new result.engine.NativeHostRuntime({ env: nativeEngineEnv({}), foregroundCalls: 2 })
     const first = host.openEngine(firstRoot)
     const second = host.openEngine(secondRoot)
     const controllers: AbortController[] = []
     const running: Array<Promise<unknown>> = []
+    const admissionMarkers = [join(firstRoot, 'admitted.txt'), join(secondRoot, 'admitted.txt')]
 
-    for (let index = 0; index < 16; index++) {
-      const engine = index % 2 === 0 ? first : second
+    for (const [index, engine] of [first, second].entries()) {
       const controller = new AbortController()
       controllers.push(controller)
       const prepared = engine.prepareRunProgram({
         program: process.execPath,
-        args: ['-e', 'setInterval(() => {}, 1000)'],
+        args: [
+          '-e',
+          `require('node:fs').writeFileSync(${JSON.stringify(admissionMarkers[index])}, 'admitted'); setInterval(() => {}, 1000)`,
+        ],
         timeoutMs: 10_000,
       }, controller.signal)
       running.push(engine.spawnPrepared(prepared.handle))
     }
-    await new Promise(resolve => setTimeout(resolve, 300))
+    // A child writes its marker only after its spawn was admitted, so waiting for both
+    // markers proves the shared two-slot pool is full without assuming a wall-clock
+    // delay that slow runners would flake on.
+    for (const marker of admissionMarkers) {
+      const admittedDeadline = Date.now() + 10_000
+      while (true) {
+        try {
+          await access(marker)
+          break
+        } catch {
+          if (Date.now() >= admittedDeadline) throw new Error('capacity child was never admitted')
+          await new Promise(resolve => setTimeout(resolve, 20))
+        }
+      }
+    }
 
     const overflow = second.prepareRunProgram({
       program: process.execPath,

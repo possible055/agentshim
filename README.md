@@ -215,7 +215,7 @@ The response tells you how far it got and how to continue. A document that mixes
 | `AGENTSHIM_WINDOWS_ACTIVE_PROCESS_LIMIT` | off | Optional Windows Job Object active-process hard limit per foreground or detached tree; 1–256. |
 | `AGENTSHIM_WINDOWS_JOB_MEMORY_BYTES` | off | Optional Windows Job Object aggregate committed-memory hard limit; 67108864–17179869184. |
 | `AGENTSHIM_WINDOWS_PROCESS_MEMORY_BYTES` | off | Optional Windows Job Object per-process committed-memory hard limit; 67108864–17179869184. |
-| `AGENTSHIM_BASH` | probed | Absolute path to a GNU bash. In the DSH adapter, the same key set in plugin config `env` also drives load-time bash discovery, so it need not be preset on the host process. |
+| `AGENTSHIM_BASH` | probed | Absolute path to a GNU bash (Git Bash `bash.exe`), a BusyBox-w32 dispatcher (`busybox64u.exe`), or an applet-named BusyBox copy; the shell flavor and invocation form are auto-detected by the probe. In the DSH adapter, the same key set in plugin config `env` also drives load-time bash discovery, so it need not be preset on the host process. |
 | `AGENTSHIM_LOG_MODE` | `errors` | One of `off`, `errors`, `all`. |
 | `AGENTSHIM_LOG_DIR` | platform default | Override the log directory with an absolute path. |
 | `AGENTSHIM_RESPECT_GITIGNORE` | `false` | When `true`, `grep` and `glob` apply `.gitignore` / `.ignore` filters. Omitted `include_ignored` follows this default. Because the caller cannot read this setting, an empty result under active filtering ends with a line recommending `include_ignored=true`. `.git` and `node_modules`, `target`, `.venv`, `venv`, `dist`, `build`, `__pycache__` stay excluded either way. Binary, output-budget, and memory limits still apply. |
