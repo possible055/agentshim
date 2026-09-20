@@ -206,7 +206,7 @@ jobs:
         run: cargo nextest run --locked --retries 2 --final-status-level flaky -p agentshim
       - name: Test bench-internals profiled paths
         if: ${{ !inputs.engine_only }}
-        run: cargo nextest run --locked --retries 2 --final-status-level flaky -p agentshim --features bench-internals --lib profiled
+        run: cargo nextest run --locked --retries 2 --final-status-level flaky -p agentshim-core --features bench-internals --lib profiled
       - name: Lint engine packages
         run: cargo clippy --locked -p agentshim-core -p agentshim-napi -p agentshim-test-support --all-targets --all-features -- -D warnings
       - name: Test engine packages default features

@@ -323,8 +323,18 @@ fn profiled_execution_preserves_output_and_records_wall_stages() {
     let partial =
         execute_profiled(&root, &partial_query, 4, &cancellation).expect("profiled partial grep");
     assert!(partial.output.contains("Partial: next_offset=1."));
-    assert!(!partial.timings.scan_complete);
-    assert!(partial.timings.reduced_candidates < partial.timings.candidate_count);
+    assert!(partial.timings.scan_complete);
+    assert_eq!(
+        partial.timings.reduced_candidates,
+        partial.timings.candidate_count
+    );
+
+    let serial_partial = execute_profiled(&root, &partial_query, 1, &cancellation)
+        .expect("profiled serial partial grep");
+    assert!(serial_partial.output.contains("Partial: next_offset=1."));
+    assert!(!serial_partial.timings.scan_complete);
+    assert!(serial_partial.timings.reduced_candidates < partial.timings.candidate_count);
+    assert!(serial_partial.timings.candidate_count < partial.timings.candidate_count);
 }
 
 #[test]

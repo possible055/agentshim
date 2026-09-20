@@ -9,7 +9,7 @@ cargo fmt --all -- --check
 cargo clippy --locked -p agentshim --all-targets --all-features -- -D warnings
 cargo test --locked -p agentshim --tests
 cargo check --locked -p agentshim --all-features --tests
-cargo test --locked -p agentshim --features bench-internals --lib -- profiled
+cargo test --locked -p agentshim-core --features bench-internals --lib -- profiled
 cargo doc --locked -p agentshim --all-features --no-deps
 ```
 
