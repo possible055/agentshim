@@ -18,7 +18,7 @@ thiserror = "2"
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [dev-dependencies]
-agentshim-test-support = { version = "0.1.6-alpha.2", path = "../test-support" }
+agentshim-test-support = { version = "0.1.6", path = "../test-support" }
 tempfile = "3.20.0"
 
 [lints.rust]
