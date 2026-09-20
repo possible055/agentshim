@@ -154,6 +154,7 @@ assert.match(resolvedEntry, /node_modules\\/dsh-agentshim\\/lib\\/index\\.js$/)
 const resolvedPlatform = import.meta.resolve(process.env.AGENTSHIM_PACKED_PLATFORM)
 assert.match(resolvedPlatform, /node_modules\\/${platformManifest.name}\\/agentshim_napi\\.node$/)
 
+console.log('packed smoke: validating entry resolution and noPrompt context')
 const noPromptCtx = new Context()
 await noPromptCtx.plugin(LocalFileSystem, { cwd: root })
 const noPromptPlugin = await noPromptCtx.plugin(agentshim, {
@@ -164,6 +165,7 @@ const noPromptPlugin = await noPromptCtx.plugin(agentshim, {
 })
 await noPromptPlugin.dispose()
 
+console.log('packed smoke: validating tool replacements and native execution')
 const ctx = new Context()
 await ctx.plugin(SystemPrompt, {})
 const systemPrompt = ctx.get('systemPrompt')
@@ -232,6 +234,8 @@ const result = await ctx.tools.execute({
 assert.equal(result.isError, false)
 assert((result.content[0]?.text ?? '').includes('packed native read ' + version))
 await plugin.dispose()
+console.log('packed smoke: verified successfully')
+process.exit(0)
 `)
 
   const smokeEnv = {
@@ -245,6 +249,7 @@ await plugin.dispose()
     cwd: consumer,
     env: smokeEnv,
     shell: false,
+    timeout: 60_000,
   })
 }
 
