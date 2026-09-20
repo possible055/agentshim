@@ -1,9 +1,9 @@
 [workspace]
 # Do not list "." here. Cargo matches members/exclude with Path::starts_with,
 # so a "." member is the whole tree and disables exclude for nested checkouts.
-members = ["crates/core", "crates/gigatoken-core", "crates/napi", "crates/office-read-core", "crates/pdf-read-core"]
+members = ["crates/core", "crates/gigatoken-core", "crates/napi", "crates/office-read-core", "crates/pdf-read-core", "crates/test-support"]
 # Keep bare workspace-root Cargo commands aligned with the explicit CI package scope.
-default-members = [".", "crates/core", "crates/gigatoken-core", "crates/napi", "crates/office-read-core", "crates/pdf-read-core"]
+default-members = [".", "crates/core", "crates/gigatoken-core", "crates/napi", "crates/office-read-core", "crates/pdf-read-core", "crates/test-support"]
 # Nested checkouts and local-only trees are not members. Cargo matches exclude
 # with Path::starts_with (not globs), so list directory prefixes, not `dir/*`.
 exclude = ["repos", "local"]
@@ -42,6 +42,7 @@ libc = "0.2.172"
 
 [dev-dependencies]
 agentshim-core = { version = "0.1.6-alpha.2", path = "crates/core", features = ["test-hooks"] }
+agentshim-test-support = { version = "0.1.6-alpha.2", path = "crates/test-support" }
 log = "0.4.27"
 tempfile = "3.20.0"
 

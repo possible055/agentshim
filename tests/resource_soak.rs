@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use agentshim_test_support::poll::poll_until_within;
 use serde_json::{Map, Value, json};
 
 const DEFAULT_ITERATIONS: usize = 100;

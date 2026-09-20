@@ -1,5 +1,5 @@
 use super::common::{fixtures::*, session::*};
-use super::process::process_is_running;
+use super::process::{FixtureStopFile, process_is_running};
 use super::*;
 
 fn projected_success_tokens(responses: &[Value]) -> usize {
@@ -65,6 +65,8 @@ fn parallel_large_reads_share_one_projected_burst_budget() {
 fn foreground_overload_is_fail_fast_and_preserves_resource_busy_contract() {
     let fixture = tempfile::tempdir().expect("fixture");
     let executable = std::env::current_exe().expect("integration test executable");
+    let stop_file = fixture.path().join("overload-child.stop");
+    let _release_fixtures = FixtureStopFile(stop_file.clone());
     let mut session = TestSession::builder().foreground_calls(2).spawn();
     session.send(&modern_request(1, "server/discover", empty_params()));
     assert_eq!(session.receive()["id"], 1);
@@ -83,6 +85,7 @@ fn foreground_overload_is_fail_fast_and_preserves_resource_busy_contract() {
                 "env": {
                     "AGENTSHIM_EOF_FIXTURE": "child",
                     "AGENTSHIM_EOF_PID_FILE": pid_file,
+                    "AGENTSHIM_EOF_STOP_FILE": stop_file,
                 },
                 "timeout_ms": 30_000,
             }),
@@ -118,6 +121,10 @@ fn foreground_overload_is_fail_fast_and_preserves_resource_busy_contract() {
             "program": executable,
             "args": ["--exact", "process::eof_process_child_fixture", "--nocapture"],
             "cwd": env!("CARGO_MANIFEST_DIR"),
+            "env": {
+                "AGENTSHIM_EOF_FIXTURE": "child",
+                "AGENTSHIM_EOF_STOP_FILE": stop_file,
+            },
             "timeout_ms": 30_000,
         }),
     );

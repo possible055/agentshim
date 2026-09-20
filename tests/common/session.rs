@@ -270,14 +270,11 @@ impl TestSession {
     }
 
     pub fn assert_alive_for(&mut self, duration: Duration) {
-        let deadline = Instant::now() + duration;
-        while Instant::now() < deadline {
-            assert!(
-                self.child.try_wait().expect("poll server").is_none(),
-                "server exited prematurely"
-            );
-            thread::sleep(Duration::from_millis(25));
-        }
+        agentshim_test_support::poll::hold_until(
+            Instant::now() + duration,
+            "server exited prematurely",
+            || self.child.try_wait().expect("poll server").is_none(),
+        );
     }
 
     pub fn wait_for_exit(&mut self, timeout: Duration) -> ExitStatus {

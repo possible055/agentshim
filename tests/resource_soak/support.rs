@@ -242,7 +242,9 @@ pub(super) fn warm_up_count(iterations: usize) -> usize {
 
 pub(super) fn wait_for_next_burst_epoch(iteration: usize, iterations: usize) {
     if iteration < iterations {
-        thread::sleep(Duration::from_millis(BURST_QUIET_MS));
+        // Aligns each iteration with a distinct production burst epoch; the gate's
+        // epoch clock is internal, so there is no external event to poll.
+        thread::sleep(Duration::from_millis(BURST_QUIET_MS)); // sleep-allow: burst-epoch pacing has no observable event
     }
 }
 

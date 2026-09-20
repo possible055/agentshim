@@ -89,11 +89,32 @@ repos:
         files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|crates/.*\.(rs|toml)|tests/.*\.rs|benches/.*\.rs)$'
         pass_filenames: false
 
-      - id: cargo-clippy
-        name: cargo clippy
-        entry: cargo clippy --all-targets -- -D warnings
+      - id: cargo-clippy-core
+        name: cargo clippy (core & host)
+        entry: cargo clippy -p agentshim -p agentshim-core -p agentshim-napi -p agentshim-test-support --all-targets -- -D warnings
         language: system
-        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|crates/.*\.(rs|toml)|tests/.*\.rs|benches/.*\.rs)$'
+        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|clippy\.toml|src/.*\.rs|crates/(core|napi|test-support)/.*\.(rs|toml)|tests/.*\.rs|benches/.*\.rs)$'
+        pass_filenames: false
+
+      - id: cargo-clippy-pdf
+        name: cargo clippy (pdf-read)
+        entry: cargo clippy -p agentshim-pdf-read --all-targets --all-features -- -D warnings
+        language: system
+        files: '^(Cargo\.(toml|lock)|crates/pdf-read-core/.*\.(rs|toml))$'
+        pass_filenames: false
+
+      - id: cargo-clippy-office
+        name: cargo clippy (office-read)
+        entry: cargo clippy -p agentshim-office-read --all-targets --all-features -- -D warnings
+        language: system
+        files: '^(Cargo\.(toml|lock)|crates/office-read-core/.*\.(rs|toml))$'
+        pass_filenames: false
+
+      - id: cargo-clippy-gigatoken
+        name: cargo clippy (gigatoken)
+        entry: cargo clippy -p agentshim-gigatoken --all-targets --all-features -- -D warnings
+        language: system
+        files: '^(Cargo\.(toml|lock)|crates/gigatoken-core/.*\.(rs|toml))$'
         pass_filenames: false
 
       - id: cargo-structural-audit
@@ -120,16 +141,40 @@ repos:
 
       - id: cargo-clippy-linux
         name: cargo clippy (linux target)
-        entry: cargo clippy --target x86_64-unknown-linux-gnu --all-targets -- -D warnings
+        entry: cargo clippy --target x86_64-unknown-linux-gnu -p agentshim -p agentshim-core -p agentshim-napi -p agentshim-test-support --all-targets -- -D warnings
         language: system
         stages: [pre-push]
-        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|crates/.*\.(rs|toml)|tests/.*\.rs|benches/.*\.rs)$'
+        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|crates/(core|napi|test-support)/.*\.(rs|toml)|tests/.*\.rs|benches/.*\.rs)$'
         pass_filenames: false
 
-      - id: cargo-test
-        name: cargo test
-        entry: cargo test --locked
+      - id: cargo-test-core
+        name: cargo test (core & host)
+        entry: cargo test --locked -p agentshim -p agentshim-core -p agentshim-napi -p agentshim-test-support --tests
         language: system
         stages: [pre-push]
-        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|crates/.*\.(rs|toml)|tests/.*\.rs)$'
+        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|crates/(core|napi|test-support)/.*\.(rs|toml)|tests/.*\.rs)$'
+        pass_filenames: false
+
+      - id: cargo-test-pdf
+        name: cargo test (pdf-read)
+        entry: cargo test --locked -p agentshim-pdf-read --tests
+        language: system
+        stages: [pre-push]
+        files: '^(Cargo\.(toml|lock)|crates/pdf-read-core/.*\.(rs|toml))$'
+        pass_filenames: false
+
+      - id: cargo-test-office
+        name: cargo test (office-read)
+        entry: cargo test --locked -p agentshim-office-read --tests
+        language: system
+        stages: [pre-push]
+        files: '^(Cargo\.(toml|lock)|crates/office-read-core/.*\.(rs|toml))$'
+        pass_filenames: false
+
+      - id: cargo-test-gigatoken
+        name: cargo test (gigatoken)
+        entry: cargo test --locked -p agentshim-gigatoken --tests
+        language: system
+        stages: [pre-push]
+        files: '^(Cargo\.(toml|lock)|crates/gigatoken-core/.*\.(rs|toml))$'
         pass_filenames: false

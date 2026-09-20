@@ -1,5 +1,6 @@
 use super::common::{fixtures::*, session::*};
 use super::*;
+use agentshim_test_support::poll::{poll_until_within, wait_for_quiet};
 
 /// L1: process shutdown starts at the global cancellation — the EOF observed on stdin —
 /// and runs in parallel with the protocol drain, so detached trees die inside the shared
@@ -31,23 +32,17 @@ fn stdin_eof_terminates_detached_trees_while_the_drain_is_still_blocked() {
     );
     assert_eq!(detached["result"]["isError"], false);
     let marker = fixture.path().join("eof-marker");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        if std::fs::read_to_string(&marker).is_ok_and(|body| !body.is_empty()) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    assert!(
-        !std::fs::read_to_string(&marker)
-            .unwrap_or_default()
-            .is_empty(),
-        "the detached tree did not start"
-    );
+    poll_until_within(Duration::from_secs(5), "the detached tree to start", || {
+        std::fs::read_to_string(&marker)
+            .ok()
+            .filter(|body| !body.is_empty())
+            .map(|_| ())
+    });
 
     // Four concurrent foreground responses, each truncated only at the per-call token
     // ceiling, total more than the stdout pipe holds. Nothing reads them, so the rmcp
-    // drain stays pending after EOF.
+    // drain stays pending after EOF. Nothing observable reports that the drain is
+    // saturated, so the settle wait is a deliberate fixed window.
     for id in 3..7 {
         session.send(&modern_request(id, "tools/call", {
             let mut call = empty_params();
@@ -59,29 +54,24 @@ fn stdin_eof_terminates_detached_trees_while_the_drain_is_still_blocked() {
             call
         }));
     }
-    std::thread::sleep(Duration::from_millis(1_000));
+    std::thread::sleep(Duration::from_millis(1_000)); // sleep-allow: no observable event reports drain saturation
     session.stdin.take();
     let eof = Instant::now();
-    std::thread::sleep(Duration::from_secs(2));
 
-    let observed = std::fs::read_to_string(&marker).unwrap_or_default().len();
-    std::thread::sleep(Duration::from_millis(750));
-    let after = std::fs::read_to_string(&marker).unwrap_or_default().len();
-    assert_eq!(
-        after, observed,
-        "the detached tree kept running {observed} bytes past an EOF observed two seconds ago"
+    // The detached tree must stop writing inside the shared shutdown deadline; a quiet
+    // marker window replaces a fixed two-second guess followed by a short recheck.
+    wait_for_quiet(
+        &marker,
+        Duration::from_millis(750),
+        eof + Duration::from_secs(10),
+        "the detached tree",
     );
 
-    let status = loop {
-        if let Some(status) = session.child.try_wait().expect("poll server") {
-            break status;
-        }
-        if Instant::now() >= eof + Duration::from_secs(10) {
-            let _ = session.child.kill();
-            panic!("server did not exit after the drain unblocked");
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    };
+    let status = poll_until_within(
+        Duration::from_secs(10),
+        "server exit after drain unblock",
+        || session.child.try_wait().expect("poll server"),
+    );
     assert!(status.success(), "server exited with {status}");
 }
 
@@ -168,7 +158,36 @@ fn bash_env_and_env_are_not_sourced_by_foreground_or_detached_bash() {
         }),
     );
     assert_eq!(detached["result"]["isError"], false);
-    std::thread::sleep(Duration::from_millis(750));
+    let job_id = response_text(&detached)
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("job_id="))
+        .expect("job_id")
+        .to_owned();
+    // Wait for the detached job to reach a terminal state instead of guessing a settle
+    // delay; only then is "the marker never appeared" a verdict about BASH_ENV sourcing
+    // rather than about a shell that had not started yet.
+    let settled = poll_until_within(
+        Duration::from_secs(10),
+        "the detached probe to settle",
+        || {
+            let status = session.call_tool(
+                4,
+                "bash_status",
+                json!({ "job_id": job_id, "tail_bytes": 0 }),
+            );
+            if response_text(&status).contains("State: running")
+                || response_text(&status).contains("State: finalizing")
+            {
+                None
+            } else {
+                Some(response_text(&status).to_owned())
+            }
+        },
+    );
+    assert!(
+        !settled.contains("State: outcome_uncertain"),
+        "detached probe ended uncertain: {settled}"
+    );
 
     assert!(
         !fixture.path().join("bash-env-marker").exists(),
@@ -270,12 +289,13 @@ fn detached_job_status_and_termination_work_over_real_stdio_at_capacity() {
     assert!(response_text(&terminated).contains("Outcome: verified"));
 
     let marker = fixture.path().join("marker");
-    let observed = std::fs::metadata(&marker).map_or(0, |metadata| metadata.len());
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(
-        std::fs::metadata(&marker).map_or(0, |metadata| metadata.len()),
-        observed,
-        "terminated process tree kept writing"
+    // "Outcome: verified" reports the kill landed; the quiet window confirms the tree
+    // actually stopped writing instead of trusting a fixed 300 ms pause.
+    wait_for_quiet(
+        &marker,
+        Duration::from_millis(300),
+        Instant::now() + Duration::from_secs(10),
+        "the terminated tree",
     );
     let terminal = session.call_tool(
         5,

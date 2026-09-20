@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { Worker } from 'node:worker_threads'
 import { afterEach, describe, expect, it } from 'vitest'
+import { sleep, waitForCondition } from './helpers/wait.ts'
 import {
   backgroundJobTimeoutMaxMs,
   loadNativeAddon,
@@ -37,6 +38,16 @@ async function stageAddon(): Promise<string | undefined> {
 }
 
 const stagedAddon = await stageAddon()
+
+// A missing addon must never be silent: in CI it fails the suite outright, and
+// locally it skips with a loud warning instead of a green run nobody noticed.
+if (stagedAddon === undefined) {
+  const message = 'native.spec.ts requires the built addon; run `cargo build -p agentshim-napi` first'
+  if (process.env.CI) {
+    throw new Error(message)
+  }
+  console.warn(`[SKIP] ${message}`)
+}
 
 const originalEnv = process.env.AGENTSHIM_DSH_NATIVE_DLL
 const originalBackgroundTimeout = process.env.AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX
@@ -522,9 +533,9 @@ describe('native addon loading', () => {
     const outcome = await handle.done()
     expect(outcome.status).toBe('timed_out')
     const first = (await stat(marker)).size
-    await new Promise(resolve => setTimeout(resolve, 150))
-    const second = (await stat(marker)).size
-    expect(second).toBe(first)
+    // The timed-out tree must stop writing: observe the marker instead of
+    // trusting a fixed 150 ms settle pause.
+    await waitForCondition(async () => (await stat(marker)).size === first, 5_000, 'the timed-out tree to stop writing')
     await handle.dispose()
     await engine.close()
   })
@@ -543,7 +554,10 @@ describe('native addon loading', () => {
     })
     const handle = engine.startBackgroundPrepared(prepared.handle)
     const done = handle.done()
-    await new Promise(resolve => setTimeout(resolve, 100))
+    // Deliberately races the 100 ms timeout against cancel; there is no
+    // observable event for "at the same time as the timeout".
+    // sleep-allow: race-window setup
+    await sleep(100)
     handle.cancel('race with timeout')
     const close = engine.close()
     const outcome = await done
@@ -641,7 +655,10 @@ describe('native addon loading', () => {
       }
     }
     await worker.terminate()
-    await new Promise(resolve => setTimeout(resolve, 2_000))
+    // Negative assertion: the orphan marker must never appear, so the wait has
+    // to outlast the child's 1.5 s write timer — no event can prove absence.
+    // sleep-allow: absence window for the orphan marker
+    await sleep(2_000)
     await expect(access(orphanMarker)).rejects.toThrow()
   })
 
@@ -687,7 +704,10 @@ describe('native addon loading', () => {
       }
     }
     await worker.terminate()
-    await new Promise(resolve => setTimeout(resolve, 2_000))
+    // Negative assertion: the orphan marker must never appear, so the wait has
+    // to outlast the child's 1.5 s write timer — no event can prove absence.
+    // sleep-allow: absence window for the orphan marker
+    await sleep(2_000)
     await expect(access(orphanMarker)).rejects.toThrow()
   })
 })

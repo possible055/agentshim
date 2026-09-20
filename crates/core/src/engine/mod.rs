@@ -693,11 +693,12 @@ mod tests {
             grep::GrepRequest,
             read::{
                 FORCED_PDF_BLOCK_MS, FORCED_PDF_RUNTIME_LIMIT, ReadError, ReadRequest,
-                global_read_state_guard, pdf_with_text,
+                global_read_state_guard,
             },
             run_program::ProcessRequest,
         },
     };
+    use agentshim_test_support::pdf::pdf_with_text;
 
     fn context() -> OperationContext {
         OperationContext::new(

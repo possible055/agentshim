@@ -3,6 +3,7 @@ use std::{fs, path::Path, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 use crate::output::SkipReason;
+use crate::test_support::access as root_at;
 #[cfg(feature = "bench-internals")]
 use crate::tools::grep::execute_profiled;
 use crate::tools::grep::{
@@ -12,7 +13,7 @@ use crate::tools::grep::{
     execute_with_traversal, execute_with_variant, render, render_with_budget, search_file_with,
 };
 use crate::{
-    path::{FileAccess, ReadScope, RepositoryRoot},
+    path::FileAccess,
     runtime::{MIN_TOOL_MEMORY_BYTES, MemoryReservation, RuntimeConfig, RuntimeResources},
 };
 
@@ -50,13 +51,6 @@ fn fixture() -> (tempfile::TempDir, Arc<FileAccess>) {
     fs::write(fixture.path().join(".gitignore"), "ignored.rs\n").expect("gitignore");
     let root = root_at(fixture.path());
     (fixture, root)
-}
-
-fn root_at(dir: &Path) -> Arc<FileAccess> {
-    Arc::new(FileAccess::new(
-        Arc::new(RepositoryRoot::open(dir).expect("root")),
-        ReadScope::Normal,
-    ))
 }
 
 fn content_plan() -> SearchPlan {

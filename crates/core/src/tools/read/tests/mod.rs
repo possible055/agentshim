@@ -1,12 +1,13 @@
-use std::{fs, sync::Arc};
+use std::fs;
 
+use agentshim_test_support::pdf::*;
 use base64::Engine as _;
 use encoding_rs::{BIG5, GB18030, GBK};
 use tokio_util::sync::CancellationToken;
 
-use crate::path::{FileAccess, ReadScope, RepositoryRoot};
+use crate::path::ReadScope;
 use crate::runtime::DEFAULT_PDF_TEXT_MEMORY_BYTES;
-use crate::tools::read::test_support::*;
+use crate::test_support::{access, access_with_scope};
 use crate::tools::read::{
     AFTER_READ_HOOK, Attempt, BEFORE_READ_HOOK, DecodeError, DocumentMemoryBudgets,
     MAX_IMAGE_BASE64_BYTES, MAX_LINE_COUNT, PdfMode, ReadError, ReadRequest,
@@ -15,17 +16,6 @@ use crate::tools::read::{
 
 fn budgets() -> DocumentMemoryBudgets {
     DocumentMemoryBudgets::defaults()
-}
-
-fn access(path: &std::path::Path) -> Arc<FileAccess> {
-    access_with_scope(path, ReadScope::Normal)
-}
-
-fn access_with_scope(path: &std::path::Path, scope: ReadScope) -> Arc<FileAccess> {
-    Arc::new(FileAccess::new(
-        Arc::new(RepositoryRoot::open(path).expect("root")),
-        scope,
-    ))
 }
 
 fn request(path: &str) -> ReadRequest {

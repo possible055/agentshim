@@ -10,6 +10,9 @@ pub mod runtime;
 pub mod tools;
 pub mod traversal;
 
+#[cfg(any(test, feature = "test-hooks"))]
+pub mod test_support;
+
 pub use engine::{
     AuxiliaryError, OperationContext, PreparedBash, PreparedRunProgram, ProcessEnvironment,
     ToolEngine,

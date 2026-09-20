@@ -6,6 +6,8 @@ use std::{
 
 use serde_json::{Map, Value, json};
 
+pub use agentshim_test_support::pdf::{minimal_pdf, pdf_full_page_image};
+
 pub fn modern_meta() -> Value {
     json!({
         "io.modelcontextprotocol/protocolVersion": "2026-07-28",
@@ -37,38 +39,8 @@ pub fn response_text(response: &Value) -> &str {
         .expect("tool response text")
 }
 
-pub fn minimal_pdf(content: &[u8]) -> Vec<u8> {
-    agentshim_core::tools::read::minimal_pdf(content)
-}
-
 pub fn pdf_with_text() -> Vec<u8> {
     minimal_pdf(b"BT /F1 18 Tf 20 150 Td (PDF image block) Tj ET")
-}
-
-pub fn pdf_full_page_image() -> Vec<u8> {
-    let pixels = vec![0x80_u8; 80 * 80 * 3];
-    let mut image = format!(
-        "<< /Type /XObject /Subtype /Image /Width 80 /Height 80 /ColorSpace /DeviceRGB \
-         /BitsPerComponent 8 /Length {} >>\nstream\n",
-        pixels.len()
-    )
-    .into_bytes();
-    image.extend_from_slice(&pixels);
-    image.extend_from_slice(b"\nendstream");
-    let operations = b"q 200 0 0 200 0 0 cm /Im0 Do Q";
-    let mut content = format!("<< /Length {} >>\nstream\n", operations.len()).into_bytes();
-    content.extend_from_slice(operations);
-    content.extend_from_slice(b"\nendstream");
-
-    agentshim_core::tools::read::assemble_pdf(&[
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources \
-          << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>"
-            .to_vec(),
-        image,
-        content,
-    ])
 }
 
 pub fn jsonl_paths(directory: &Path) -> Vec<PathBuf> {

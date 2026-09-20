@@ -1,7 +1,7 @@
 use super::*;
 
 fn pdf_fixture() -> Vec<u8> {
-    agentshim_core::tools::read::minimal_pdf(b"BT /F1 18 Tf 20 150 Td (PDF gate probe) Tj ET")
+    agentshim_test_support::pdf::minimal_pdf(b"BT /F1 18 Tf 20 150 Td (PDF gate probe) Tj ET")
 }
 
 struct ForcedPdfHooks;

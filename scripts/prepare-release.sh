@@ -42,6 +42,8 @@ repository=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 manifest_path=$repository/Cargo.toml
 core_manifest_path=$repository/crates/core/Cargo.toml
 napi_manifest_path=$repository/crates/napi/Cargo.toml
+test_support_manifest_path=$repository/crates/test-support/Cargo.toml
+office_manifest_path=$repository/crates/office-read-core/Cargo.toml
 lock_path=$repository/Cargo.lock
 
 dsh_package_path=$repository/adapters/dsh/package.json
@@ -183,11 +185,32 @@ update_cargo_manifest() {
         $0 ~ /^agentshim-core[[:space:]]*=/ && $0 ~ /version[[:space:]]*=[[:space:]]*"[^"]+"/ {
             sub(/version[[:space:]]*=[[:space:]]*"[^"]+"/, "version = \"" version "\"")
         }
+        $0 ~ /^agentshim-test-support[[:space:]]*=/ && $0 ~ /version[[:space:]]*=[[:space:]]*"[^"]+"/ {
+            sub(/version[[:space:]]*=[[:space:]]*"[^"]+"/, "version = \"" version "\"")
+        }
         { print }
         END { if (!changed) exit 1 }
     ' "$target_manifest" > "$tmp_manifest" || {
         rm -f "$tmp_manifest"
         echo "could not update version in $target_manifest" >&2
+        exit 1
+    }
+    mv "$tmp_manifest" "$target_manifest"
+}
+
+update_local_dependency_version() {
+    target_manifest=$1
+    target_dep=$2
+    target_version=$3
+    tmp_manifest=$(mktemp)
+    awk -v dep="$target_dep" -v version="$target_version" '
+        $0 ~ ("^" dep "[[:space:]]*=") && $0 ~ /version[[:space:]]*=[[:space:]]*"[^"]+"/ {
+            sub(/version[[:space:]]*=[[:space:]]*"[^"]+"/, "version = \"" version "\"")
+        }
+        { print }
+    ' "$target_manifest" > "$tmp_manifest" || {
+        rm -f "$tmp_manifest"
+        echo "could not update dependency $target_dep in $target_manifest" >&2
         exit 1
     }
     mv "$tmp_manifest" "$target_manifest"
@@ -208,6 +231,8 @@ update_json_package() {
 update_cargo_manifest "$manifest_path" "$version"
 update_cargo_manifest "$core_manifest_path" "$version"
 update_cargo_manifest "$napi_manifest_path" "$version"
+update_cargo_manifest "$test_support_manifest_path" "$version"
+update_local_dependency_version "$office_manifest_path" "agentshim-test-support" "$version"
 
 # Update DSH package manifests
 update_json_package "$dsh_package_path" "$version"

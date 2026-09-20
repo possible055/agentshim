@@ -1,7 +1,6 @@
 use std::{
     fs::File,
     io::Write,
-    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -12,13 +11,7 @@ use agentshim_office_read::{
     CancelSignal, OfficeFormat, OfficeLogicalCursor, OfficeReadDocument, OfficeReadError,
     OfficeReadLimits,
 };
-
-fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join(name)
-}
+use agentshim_test_support::office::fixture;
 
 fn read_all(name: &str, hint: OfficeFormat) -> (OfficeFormat, String) {
     let mut document = OfficeReadDocument::from_file(

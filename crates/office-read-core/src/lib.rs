@@ -669,13 +669,7 @@ fn map_ppt_error(error: ppt::PptError) -> OfficeReadError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn fixture(name: &str) -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("fixtures")
-            .join(name)
-    }
+    use agentshim_test_support::office::fixture;
 
     fn oracle(document: &OfficeReadDocument) -> String {
         match &document.document {

@@ -204,14 +204,34 @@ fn detached_job_status_retention_and_termination_soak() {
             .is_empty(),
         "controlled descendants survived the 16-owner termination"
     );
-    thread::sleep(Duration::from_millis(BURST_QUIET_MS));
+    // Event-driven settle: wait until every terminated tree's handles have drained
+    // instead of assuming 2.1 s is always enough.
+    poll_until_within(
+        Duration::from_secs(10),
+        "terminated trees to drain their handles",
+        || {
+            platform::sample(session.pid())
+                .ok()
+                .filter(|sample| sample.descendants.is_empty())
+                .map(|_| ())
+        },
+    );
 
     let mut samples = Vec::with_capacity(iterations);
     let mut ids = VecDeque::with_capacity(iterations);
     for iteration in 0..iterations {
-        if iteration > 0 && iteration % 6 == 0 {
-            thread::sleep(Duration::from_millis(BURST_QUIET_MS));
-        }
+        // The previous churn job reported completion, but its pipes and handles drain
+        // asynchronously; wait for the observable signal instead of a fixed pause.
+        poll_until_within(
+            Duration::from_secs(5),
+            "the previous churn tree to drain",
+            || {
+                platform::sample(session.pid())
+                    .ok()
+                    .filter(|sample| sample.descendants.is_empty())
+                    .map(|_| ())
+            },
+        );
         let command = if iteration == 0 {
             "head -c 4194304 /dev/zero | tr '\\0' x"
         } else {

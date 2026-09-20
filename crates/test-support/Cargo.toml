@@ -1,0 +1,11 @@
+[package]
+name = "agentshim-test-support"
+version = "0.1.6-alpha.2"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+description = "Shared test fixtures and polling helpers for agentshim workspace tests"
+publish = false
+
+[dev-dependencies]
+tempfile = "3.20.0"

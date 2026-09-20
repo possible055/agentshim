@@ -313,7 +313,7 @@ mod tests {
         }
         #[cfg(windows)]
         {
-            let error = fs::rename(&root_dir, &fixture.path().join("moved"))
+            let error = fs::rename(&root_dir, fixture.path().join("moved"))
                 .expect_err("held Windows root blocks replacement");
             assert!(
                 matches!(error.raw_os_error(), Some(5 | 32)),

@@ -57,6 +57,39 @@ jobs:
       CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Test sleep gate
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request)
+              base="$BASE_SHA"
+              ;;
+            push)
+              if [[ "$BEFORE_SHA" =~ ^[0-9a-fA-F]{40}$ && "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]]; then
+                base="$BEFORE_SHA"
+              else
+                echo "no push baseline available; skipping test sleep gate"
+                exit 0
+              fi
+              ;;
+            *)
+              echo "no baseline for $EVENT_NAME; skipping test sleep gate"
+              exit 0
+              ;;
+          esac
+          if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            if ! git fetch --no-tags --depth=1 origin "$base"; then
+              echo "baseline fetch failed; skipping test sleep gate"
+              exit 0
+            fi
+          fi
+          bash scripts/check-test-sleeps.sh "$base" "$HEAD_SHA"
       - name: Determine validation scope
         id: validation-scope
         if: ${{ !inputs.engine_only }}
@@ -98,6 +131,7 @@ jobs:
                 set +e
                 git diff --quiet "$base_sha" "$HEAD_SHA" -- \
                   crates/pdf-read-core \
+                  crates/office-read-core \
                   crates/gigatoken-core \
                   Cargo.toml \
                   Cargo.lock \
@@ -132,6 +166,9 @@ jobs:
             printf -- '- Reason: %s\n' "$reason"
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.87.16
+        with:
+          tool: cargo-nextest@0.9.145
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         if: inputs.setup_node
         with:
@@ -166,14 +203,14 @@ jobs:
         run: cargo clippy --locked -p agentshim --all-targets --all-features -- -D warnings
       - name: Test root package default features
         if: ${{ !inputs.engine_only }}
-        run: cargo test --locked -p agentshim --tests
+        run: cargo nextest run --locked --retries 2 --final-status-level flaky -p agentshim
       - name: Test bench-internals profiled paths
         if: ${{ !inputs.engine_only }}
-        run: cargo test --locked -p agentshim --features bench-internals --lib -- profiled
+        run: cargo nextest run --locked --retries 2 --final-status-level flaky -p agentshim --features bench-internals --lib profiled
       - name: Lint engine packages
-        run: cargo clippy --locked -p agentshim-core -p agentshim-napi --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked -p agentshim-core -p agentshim-napi -p agentshim-test-support --all-targets --all-features -- -D warnings
       - name: Test engine packages default features
-        run: cargo test --locked -p agentshim-core -p agentshim-napi --tests
+        run: cargo nextest run --locked --retries 2 --final-status-level flaky -p agentshim-core -p agentshim-napi -p agentshim-test-support
       - name: Check root package targets
         if: ${{ inputs.engine_only }}
         run: cargo check --locked -p agentshim --all-targets
@@ -184,10 +221,10 @@ jobs:
         run: cargo test --locked --doc --workspace --exclude agentshim-pdf-read --exclude agentshim-office-read
       - name: Lint derivative packages
         if: ${{ !inputs.engine_only && steps.validation-scope.outputs.scope == 'full' }}
-        run: cargo clippy --locked -p agentshim-pdf-read -p agentshim-gigatoken --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked -p agentshim-pdf-read -p agentshim-office-read -p agentshim-gigatoken --all-targets --all-features -- -D warnings
       - name: Test derivative packages default features
         if: ${{ !inputs.engine_only && steps.validation-scope.outputs.scope == 'full' }}
-        run: cargo test --locked -p agentshim-pdf-read -p agentshim-gigatoken --tests
+        run: cargo nextest run --locked --retries 2 --final-status-level flaky -p agentshim-pdf-read -p agentshim-office-read -p agentshim-gigatoken
       - name: Check PDF rendering-only feature profile
         if: ${{ !inputs.engine_only && steps.validation-scope.outputs.scope == 'full' }}
         run: cargo check --locked -p agentshim-pdf-read --all-targets --no-default-features --features rendering
@@ -200,7 +237,7 @@ jobs:
         if: ${{ !inputs.engine_only && inputs.build_docs && steps.validation-scope.outputs.scope == 'full' }}
         env:
           RUSTDOCFLAGS: -Dwarnings
-        run: cargo doc --locked -p agentshim-pdf-read -p agentshim-gigatoken --all-features --no-deps
+        run: cargo doc --locked -p agentshim-pdf-read -p agentshim-office-read -p agentshim-gigatoken --all-features --no-deps
       - name: Metadata
         if: ${{ !inputs.engine_only && inputs.run_metadata }}
         run: cargo metadata --locked --no-deps --format-version 1

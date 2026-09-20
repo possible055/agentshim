@@ -117,6 +117,7 @@ function Update-CargoManifestVersion {
     $content = [IO.File]::ReadAllText($Path)
     $updated = Set-PackageVersion -Content $content -NewVersion $NewVersion
     $updated = Set-LocalDependencyVersion -Content $updated -Dependency "agentshim-core" -NewVersion $NewVersion
+    $updated = Set-LocalDependencyVersion -Content $updated -Dependency "agentshim-test-support" -NewVersion $NewVersion
     [IO.File]::WriteAllText($Path, $updated, [Text.UTF8Encoding]::new($false))
 }
 
@@ -143,6 +144,8 @@ $repository = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $manifestPath = Join-Path $repository "Cargo.toml"
 $coreManifestPath = Join-Path $repository "crates/core/Cargo.toml"
 $napiManifestPath = Join-Path $repository "crates/napi/Cargo.toml"
+$testSupportManifestPath = Join-Path $repository "crates/test-support/Cargo.toml"
+$officeManifestPath = Join-Path $repository "crates/office-read-core/Cargo.toml"
 $lockPath = Join-Path $repository "Cargo.lock"
 
 $dshPackagePath = Join-Path $repository "adapters/dsh/package.json"
@@ -206,6 +209,10 @@ if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
 Update-CargoManifestVersion -Path $manifestPath -NewVersion $Version
 Update-CargoManifestVersion -Path $coreManifestPath -NewVersion $Version
 Update-CargoManifestVersion -Path $napiManifestPath -NewVersion $Version
+Update-CargoManifestVersion -Path $testSupportManifestPath -NewVersion $Version
+$officeContent = [IO.File]::ReadAllText($officeManifestPath)
+$officeUpdated = Set-LocalDependencyVersion -Content $officeContent -Dependency "agentshim-test-support" -NewVersion $Version
+[IO.File]::WriteAllText($officeManifestPath, $officeUpdated, [Text.UTF8Encoding]::new($false))
 
 # Update DSH root and platform npm package.json manifests
 Update-JsonPackageVersion -Path $dshPackagePath -NewVersion $Version

@@ -36,6 +36,7 @@ windows-sys = { version = "0.61.0", features = ["Wdk_System_SystemServices", "Wi
 libc = "0.2.172"
 
 [dev-dependencies]
+agentshim-test-support = { version = "0.1.6-alpha.2", path = "../test-support" }
 tempfile = "3.20.0"
 
 [features]

@@ -1,8 +1,35 @@
 use super::common::{fixtures::*, session::*};
 use super::*;
+use agentshim_test_support::poll::poll_until_within;
+use std::path::PathBuf;
 
 #[cfg(unix)]
 use std::{os::unix::process::CommandExt, process::Stdio};
+
+/// Releases a fixture child when the owning test ends. The stop file must only
+/// appear after the child-liveness assertions, so the guard — not an explicit
+/// write — owns the release; a panicking test still releases its child instead
+/// of leaving a 30-second orphan behind.
+pub struct FixtureStopFile(pub PathBuf);
+
+impl Drop for FixtureStopFile {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.0, b"stop");
+    }
+}
+
+/// Runs the fixture child until the server kills it, the test releases the stop
+/// file, or the 30 s ceiling — matching the spawn timeout — passes. Polling for
+/// release replaces the old unconditional 30-second sleep, which turned every
+/// crashed run into a lingering orphan.
+fn hold_until_released(stop_env: &str) {
+    let stop_file =
+        std::env::var_os(stop_env).unwrap_or_else(|| panic!("fixture stop file {stop_env}"));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !std::path::Path::new(&stop_file).exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(50)); // sleep-allow: fixture child polls for its release signal
+    }
+}
 
 #[test]
 fn eof_process_child_fixture() {
@@ -11,13 +38,15 @@ fn eof_process_child_fixture() {
     }
     let pid_file = std::env::var_os("AGENTSHIM_EOF_PID_FILE").expect("fixture PID file");
     std::fs::write(pid_file, std::process::id().to_string()).expect("write fixture PID");
-    thread::sleep(Duration::from_secs(30));
+    hold_until_released("AGENTSHIM_EOF_STOP_FILE");
 }
 
 #[test]
 fn stdin_eof_cancels_in_flight_process_and_exits_server() {
     let fixture = tempfile::tempdir().expect("fixture");
     let pid_file = fixture.path().join("eof-child.pid");
+    let stop_file = fixture.path().join("eof-child.stop");
+    let _release_child = FixtureStopFile(stop_file.clone());
     let executable = std::env::current_exe().expect("integration test executable");
     let mut session = TestSession::start();
     session.send(&modern_request(1, "server/discover", empty_params()));
@@ -34,48 +63,38 @@ fn stdin_eof_cancels_in_flight_process_and_exits_server() {
             "env": {
                 "AGENTSHIM_EOF_FIXTURE": "child",
                 "AGENTSHIM_EOF_PID_FILE": pid_file,
+                "AGENTSHIM_EOF_STOP_FILE": stop_file,
             },
             "timeout_ms": 30_000,
         }),
     );
     session.send(&modern_request(2, "tools/call", call));
 
-    let child_start_deadline = Instant::now() + Duration::from_secs(5);
-    let child_pid = loop {
-        if let Some(pid) = std::fs::read_to_string(&pid_file)
-            .ok()
-            .and_then(|value| value.trim().parse::<u32>().ok())
-        {
-            break pid;
-        }
-        assert!(
-            Instant::now() < child_start_deadline,
-            "in-flight child did not publish its PID"
-        );
-        thread::sleep(Duration::from_millis(10));
-    };
+    let child_pid = poll_until_within(
+        Duration::from_secs(5),
+        "the in-flight child to publish its PID",
+        || {
+            std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|value| value.trim().parse::<u32>().ok())
+        },
+    );
 
     session.stdin.take();
-    let shutdown_deadline = Instant::now() + Duration::from_secs(12);
-    let status = loop {
-        if let Some(status) = session.child.try_wait().expect("poll server") {
-            break status;
-        }
-        if Instant::now() >= shutdown_deadline {
-            let _ = session.child.kill();
-            panic!("server did not exit within shutdown and cleanup bounds");
-        }
-        thread::sleep(Duration::from_millis(10));
-    };
-    assert!(status.success(), "server exited with {status}");
-
-    let child_exit_deadline = Instant::now() + Duration::from_secs(2);
-    while process_is_running(child_pid) && Instant::now() < child_exit_deadline {
-        thread::sleep(Duration::from_millis(10));
-    }
+    let shutdown_status = poll_until_within(
+        Duration::from_secs(12),
+        "server exit within shutdown and cleanup bounds",
+        || session.child.try_wait().expect("poll server"),
+    );
     assert!(
-        !process_is_running(child_pid),
-        "in-flight child survived server EOF shutdown"
+        shutdown_status.success(),
+        "server exited with {shutdown_status}"
+    );
+
+    poll_until_within(
+        Duration::from_secs(2),
+        "the in-flight child to die at server EOF shutdown",
+        || (!process_is_running(child_pid)).then_some(()),
     );
 }
 
@@ -101,6 +120,10 @@ fn unix_outcome_uncertain_parent_fixture() {
         ])
         .env("AGENTSHIM_OUTCOME_UNCERTAIN_FIXTURE", "helper")
         .env("AGENTSHIM_OUTCOME_UNCERTAIN_PID_FILE", &pid_file)
+        .env(
+            "AGENTSHIM_OUTCOME_UNCERTAIN_STOP_FILE",
+            std::env::var_os("AGENTSHIM_OUTCOME_UNCERTAIN_STOP_FILE").expect("fixture stop file"),
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
@@ -135,7 +158,7 @@ fn unix_outcome_uncertain_helper_fixture() {
     let pid_file =
         std::env::var_os("AGENTSHIM_OUTCOME_UNCERTAIN_PID_FILE").expect("fixture PID file");
     std::fs::write(pid_file, std::process::id().to_string()).expect("write helper PID");
-    thread::sleep(Duration::from_secs(30));
+    hold_until_released("AGENTSHIM_OUTCOME_UNCERTAIN_STOP_FILE");
 }
 
 #[cfg(unix)]
@@ -143,6 +166,8 @@ fn unix_outcome_uncertain_helper_fixture() {
 fn session_escaped_descendant_preserves_outcome_uncertain_wire_contract() {
     let fixture = tempfile::tempdir().expect("fixture");
     let pid_file = fixture.path().join("session-escaped.pid");
+    let stop_file = fixture.path().join("session-escaped.stop");
+    let _release_helper = FixtureStopFile(stop_file.clone());
     let executable = std::env::current_exe().expect("integration test executable");
     let mut session = TestSession::start();
     session.send(&modern_request(1, "server/discover", empty_params()));
@@ -159,26 +184,22 @@ fn session_escaped_descendant_preserves_outcome_uncertain_wire_contract() {
             "env": {
                 "AGENTSHIM_OUTCOME_UNCERTAIN_FIXTURE": "parent",
                 "AGENTSHIM_OUTCOME_UNCERTAIN_PID_FILE": pid_file,
+                "AGENTSHIM_OUTCOME_UNCERTAIN_STOP_FILE": stop_file,
             },
             "timeout_ms": 10_000,
         }),
     );
     let started = Instant::now();
     session.send(&modern_request(2, "tools/call", call));
-    let helper_start_deadline = Instant::now() + Duration::from_secs(3);
-    let helper_pid = loop {
-        if let Some(pid) = std::fs::read_to_string(&pid_file)
-            .ok()
-            .and_then(|value| value.trim().parse::<u32>().ok())
-        {
-            break pid;
-        }
-        assert!(
-            Instant::now() < helper_start_deadline,
-            "session-escaped helper did not record its PID"
-        );
-        thread::sleep(Duration::from_millis(10));
-    };
+    let helper_pid = poll_until_within(
+        Duration::from_secs(3),
+        "the session-escaped helper to record its PID",
+        || {
+            std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|value| value.trim().parse::<u32>().ok())
+        },
+    );
     let mut helper = EscapedHelper::new(helper_pid);
     let response = session.receive();
     assert!(

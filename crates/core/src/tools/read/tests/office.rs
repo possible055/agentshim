@@ -1,14 +1,6 @@
 use super::*;
 use crate::output::TestCallBudget;
-
-fn fixture(name: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("office-read-core")
-        .join("tests")
-        .join("fixtures")
-        .join(name)
-}
+use agentshim_test_support::office::fixture;
 
 #[test]
 fn office_read_uses_markdown_and_replayable_cursor() {

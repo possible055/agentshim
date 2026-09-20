@@ -10,13 +10,7 @@ fn modern_lifecycle_serves_a_tool_call_and_shuts_down_at_eof() {
     assert_eq!(discover["id"], 1);
     assert_eq!(
         discover["result"]["supportedVersions"],
-        json!([
-            "2026-07-28",
-            "2025-11-25",
-            "2025-06-18",
-            "2025-03-26",
-            "2024-11-05"
-        ])
+        json!(agentshim::supported_protocol_versions())
     );
     assert_eq!(discover["result"]["capabilities"], json!({ "tools": {} }));
 
@@ -394,13 +388,7 @@ fn initialize_uses_the_native_legacy_lifecycle() {
 
 #[test]
 fn initialize_accepts_all_supported_versions() {
-    for protocol_version in [
-        "2026-07-28",
-        "2025-11-25",
-        "2025-06-18",
-        "2025-03-26",
-        "2024-11-05",
-    ] {
+    for protocol_version in agentshim::supported_protocol_versions() {
         let mut session = TestSession::start();
         session.send(&json!({
             "jsonrpc": "2.0",

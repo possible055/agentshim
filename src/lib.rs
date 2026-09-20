@@ -35,7 +35,7 @@ pub fn bash_report() -> Result<(std::path::PathBuf, String), String> {
     engine.bash_runtime().map_err(|error| error.to_string())
 }
 pub use runtime::RuntimeConfig as RuntimeLimits;
-pub use server::{AgentShim, AgentShimBuilder};
+pub use server::{AgentShim, AgentShimBuilder, supported_protocol_versions};
 
 #[cfg(feature = "bench-internals")]
 #[doc(hidden)]

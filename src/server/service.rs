@@ -44,6 +44,16 @@ const SUPPORTED_PROTOCOLS: &[ProtocolVersion] = &[
     ProtocolVersion::V_2025_03_26,
     ProtocolVersion::V_2024_11_05,
 ];
+
+/// The advertised protocol versions as strings. Single source for tests that
+/// assert the discovery contract, so the list is only ever written once.
+#[must_use]
+pub fn supported_protocol_versions() -> Vec<String> {
+    SUPPORTED_PROTOCOLS
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
 const TOOLSET: &str = "read,grep,glob,run_program,bash,bash_status";
 const TOOL_COUNT: u64 = 6;
 const TOOLS_CACHE_TTL_MS: u64 = 300_000;

@@ -1,6 +1,6 @@
 use agentshim::{
     AgentShim, NEXT_OFFSET_FIELD, NEXT_START_LINE_FIELD, PARTIAL_MARKER, PDF_CURSOR_FIELD,
-    ReadScope,
+    ReadScope, supported_protocol_versions,
 };
 use serde_json::{Value, json};
 
@@ -71,13 +71,8 @@ fn server_discover_advertises_supported_versions_and_tool_capability() {
     let discover = serde_json::to_value(AgentShim::discovery_result()).expect("serialize discover");
     assert_eq!(
         discover["supportedVersions"],
-        json!([
-            "2026-07-28",
-            "2025-11-25",
-            "2025-06-18",
-            "2025-03-26",
-            "2024-11-05"
-        ])
+        json!(supported_protocol_versions()),
+        "the wire discovery must carry exactly the versions of the single source list"
     );
     assert_eq!(discover["capabilities"], json!({ "tools": {} }));
 }

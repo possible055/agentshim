@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path, sync::Arc};
+    use std::{fs, path::Path};
 
     use tokio_util::sync::CancellationToken;
 
@@ -12,22 +12,16 @@ mod tests {
         execute_with_traversal_and_budget, render, render_with_budget,
     };
     use crate::{
-        path::{FileAccess, ReadScope, RepositoryRoot},
+        path::RepositoryRoot,
         runtime::{
             DEFAULT_GLOB_MEMORY_BYTES, MIN_TOOL_MEMORY_BYTES, MemoryReservation, RuntimeConfig,
             RuntimeResources,
         },
+        test_support::access,
         traversal::TraversalSummary,
     };
 
     const TEST_LANES: usize = 4;
-
-    fn access(path: &Path) -> Arc<FileAccess> {
-        Arc::new(FileAccess::new(
-            Arc::new(RepositoryRoot::open(path).expect("root")),
-            ReadScope::Normal,
-        ))
-    }
 
     fn request(pattern: &str) -> GlobRequest {
         GlobRequest {
