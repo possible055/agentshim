@@ -184,9 +184,22 @@ jobs:
               ))
             | first
             | .html_url
-          ' <<<"$dsh_runs")"; then
-            echo "commit $commit_sha has no successful completed DSH adapter CI push run on main" >&2
-            exit 1
+          ' <<<"$dsh_runs" 2>/dev/null)"; then
+            dsh_runs_all="$(gh api -X GET \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/dsh-adapter.yml/runs" \
+              -f branch=main \
+              -f event=push \
+              -f status=completed \
+              -f per_page=10)"
+            latest_conclusion="$(jq -er '.workflow_runs[0].conclusion // empty' <<<"$dsh_runs_all" 2>/dev/null || true)"
+            latest_sha="$(jq -er '.workflow_runs[0].head_sha // empty' <<<"$dsh_runs_all" 2>/dev/null || true)"
+            if [[ "$latest_conclusion" == "success" && -n "$latest_sha" ]] && git merge-base --is-ancestor "$latest_sha" "$commit_sha"; then
+              dsh_ci_url="$(jq -er '.workflow_runs[0].html_url' <<<"$dsh_runs_all")"
+              echo "commit $commit_sha did not trigger dsh-adapter.yml; validated against ancestor run on $latest_sha: $dsh_ci_url"
+            else
+              echo "commit $commit_sha has no successful completed DSH adapter CI push run on main" >&2
+              exit 1
+            fi
           fi
 
           if [[ "$version" == *-* ]]; then
