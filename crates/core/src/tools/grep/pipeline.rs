@@ -7,6 +7,7 @@ use std::{
 use crossbeam_channel::{Receiver, RecvTimeoutError, SendTimeoutError, Sender};
 use grep_regex::RegexMatcher;
 use grep_searcher::Searcher;
+use ignore::types::Types;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
 
@@ -14,6 +15,7 @@ use crate::{
     output::SkipReason,
     path::{FileAccess, ResolvedPath},
     runtime::{FileWorkCredit, FileWorkPool, MemoryReservation, RuntimeResources},
+    tools::filter::CompiledGlobFilter,
     traversal::{
         OwnedTraversalEntry, ParallelTraversal, ParallelTraversalCallbacks, TraversalControl,
         TraversalEntry, TraversalSummary, prefer_parallel_root, walk, walk_parallel_batched,
@@ -109,7 +111,8 @@ pub fn pipelined_search(
     access: &Arc<FileAccess>,
     base: &ResolvedPath,
     matcher: Arc<RegexMatcher>,
-    glob: Option<&globset::GlobMatcher>,
+    glob: Option<&CompiledGlobFilter>,
+    types: Option<&Types>,
     include_ignored: bool,
     cancellation: &CancellationToken,
     traversal: GrepTraversal,
@@ -153,13 +156,14 @@ pub fn pipelined_search(
     let queue_capacity = outcome_queue_capacity(plan.memory.request_bytes, outcome_bytes, &pool);
     let (sender, receiver) = crossbeam_channel::bounded(queue_capacity);
     if single_file {
-        search_single_file(base, glob, request, &context, &state);
+        search_single_file(base, glob, types, request, &context, &state);
     } else {
         let traversal_span = profiler.span(GrepStage::Pipeline);
         let summary = traverse(
             access,
             base,
             glob,
+            types,
             include_ignored,
             cancellation,
             traversal,
@@ -200,12 +204,20 @@ pub fn pipelined_search(
 
 fn search_single_file(
     base: &ResolvedPath,
-    glob: Option<&globset::GlobMatcher>,
+    glob: Option<&CompiledGlobFilter>,
+    types: Option<&Types>,
     request: &GrepRequest,
     context: &PipelineContext,
     state: &SharedPipelineState,
 ) {
-    let matches = glob.is_none_or(|glob| base.slash_path().is_some_and(|path| glob.is_match(path)));
+    if let Some(types) = types {
+        if !types.matched(base.absolute(), false).is_whitelist() {
+            return;
+        }
+    }
+    let file_name = base.absolute().file_name().unwrap_or_default();
+    let match_path = Path::new(file_name);
+    let matches = glob.is_none_or(|glob| glob.is_match(file_name, match_path, Some(base.key())));
     if !matches {
         return;
     }
@@ -241,7 +253,8 @@ fn search_single_file(
 fn traverse(
     access: &Arc<FileAccess>,
     base: &ResolvedPath,
-    glob: Option<&globset::GlobMatcher>,
+    glob: Option<&CompiledGlobFilter>,
+    types: Option<&Types>,
     include_ignored: bool,
     cancellation: &CancellationToken,
     requested: GrepTraversal,
@@ -254,13 +267,13 @@ fn traverse(
     pool: &Arc<FileWorkPool>,
 ) -> Result<TraversalSummary, GrepError> {
     let selected = resolve_traversal(access, base, requested, pool);
-    let prefilter = |entry: TraversalEntry<'_>| matches_candidate_entry(glob, entry);
+    let prefilter = |entry: TraversalEntry<'_>| matches_candidate_entry(glob, types, entry);
     let serial_visit = |entry: TraversalEntry<'_>| {
         let mut state = state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         visit_entry(
-            access, base, glob, entry, request, context, &mut state, sender, receiver, pool,
+            access, base, glob, types, entry, request, context, &mut state, sender, receiver, pool,
         )
     };
     let parallel_visit = |batch: &[OwnedTraversalEntry]| {
@@ -355,7 +368,8 @@ fn resolve_traversal(
 fn visit_entry(
     access: &FileAccess,
     base: &ResolvedPath,
-    glob: Option<&globset::GlobMatcher>,
+    glob: Option<&CompiledGlobFilter>,
+    types: Option<&Types>,
     entry: TraversalEntry<'_>,
     request: &GrepRequest,
     context: &PipelineContext,
@@ -367,7 +381,7 @@ fn visit_entry(
     if state.stopped {
         return TraversalControl::Stop;
     }
-    if !matches_candidate_entry(glob, entry) {
+    if !matches_candidate_entry(glob, types, entry) {
         return TraversalControl::Continue;
     }
     let path = match access.resolve_walked_entry(base, entry.key, entry.absolute) {
@@ -400,11 +414,23 @@ fn candidate_from_owned_entry(
     candidate(access.resolve_walked_entry(base, &entry.key, &entry.absolute)?)
 }
 
-fn matches_candidate_entry(glob: Option<&globset::GlobMatcher>, entry: TraversalEntry<'_>) -> bool {
-    entry
+fn matches_candidate_entry(
+    glob: Option<&CompiledGlobFilter>,
+    types: Option<&Types>,
+    entry: TraversalEntry<'_>,
+) -> bool {
+    let is_candidate = entry
         .file_type
-        .is_some_and(|file_type| file_type.is_file() || file_type.is_symlink())
-        && glob.is_none_or(|glob| glob.is_match(entry.key))
+        .is_some_and(|file_type| file_type.is_file() || file_type.is_symlink());
+    if !is_candidate {
+        return false;
+    }
+    if let Some(types) = types {
+        if !types.matched(entry.match_path, false).is_whitelist() {
+            return false;
+        }
+    }
+    glob.is_none_or(|glob| glob.is_match(entry.file_name, entry.match_path, Some(entry.key)))
 }
 
 fn schedule_candidate(

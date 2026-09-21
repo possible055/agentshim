@@ -25,7 +25,7 @@ mod tests {
 
     fn request(pattern: &str) -> GlobRequest {
         GlobRequest {
-            pattern: pattern.to_owned(),
+            pattern: pattern.into(),
             path: None,
             include_ignored: None,
             entry_type: None,
@@ -668,5 +668,71 @@ mod tests {
         assert!(output.contains("Scan stopped: more than "));
         assert!(output.contains(" paths matched; narrow pattern or path."));
         assert!(output.contains("Partial: next_offset="));
+    }
+
+    #[test]
+    fn glob_matches_basename_recursively_under_subpath() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let sub_dir = fixture.path().join("crates").join("core").join("src");
+        fs::create_dir_all(&sub_dir).expect("create sub dirs");
+        fs::write(sub_dir.join("filter.rs"), "pub struct Test;").expect("write file");
+        fs::write(sub_dir.join("readme.md"), "# Readme").expect("write file");
+
+        let root = access(fixture.path());
+        let mut query = request("*.rs");
+        query.path = Some("crates/core".to_owned());
+
+        let output =
+            execute(&root, &query, TEST_LANES, &CancellationToken::new()).expect("glob execute");
+        assert!(
+            output.contains("filter.rs"),
+            "basename *.rs under crates/core should match recursively: {output}"
+        );
+        assert!(
+            !output.contains("readme.md"),
+            "non-matching file should not match"
+        );
+    }
+
+    #[test]
+    fn glob_handles_redundant_repo_prefix_in_pattern() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let sub_dir = fixture.path().join("crates").join("core").join("src");
+        fs::create_dir_all(&sub_dir).expect("create sub dirs");
+        fs::write(sub_dir.join("filter.rs"), "pub struct Test;").expect("write file");
+
+        let root = access(fixture.path());
+        let mut query = request("crates/core/src/*.rs");
+        query.path = Some("crates/core".to_owned());
+
+        let output =
+            execute(&root, &query, TEST_LANES, &CancellationToken::new()).expect("glob execute");
+        assert!(
+            output.contains("filter.rs"),
+            "redundant prefix crates/core should be resolved resilience: {output}"
+        );
+    }
+
+    #[test]
+    fn glob_supports_array_patterns_and_negation() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let dir = fixture.path().join("src");
+        fs::create_dir_all(&dir).expect("src dir");
+        fs::write(dir.join("main.rs"), "fn main() {}").expect("write main");
+        fs::write(dir.join("lib.rs"), "pub fn lib() {}").expect("write lib");
+        fs::write(dir.join("main_test.rs"), "#[test] fn t() {}").expect("write test");
+
+        let root = access(fixture.path());
+        let mut query = request("*.rs");
+        query.pattern = vec!["*.rs".to_owned(), "!*_test.rs".to_owned()].into();
+
+        let output =
+            execute(&root, &query, TEST_LANES, &CancellationToken::new()).expect("glob execute");
+        assert!(output.contains("main.rs"));
+        assert!(output.contains("lib.rs"));
+        assert!(
+            !output.contains("main_test.rs"),
+            "negated pattern must exclude main_test.rs: {output}"
+        );
     }
 }

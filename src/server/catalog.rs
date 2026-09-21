@@ -95,14 +95,14 @@ fn read_tool(read_scope: ReadScope) -> Tool {
 fn grep_tool(read_scope: ReadScope) -> Tool {
     let (description, path_description, glob_description) = match read_scope {
         ReadScope::Normal => (
-            "Search file contents under the repository root using Rust regex or fixed strings. If output is truncated, a trailing Partial: next_offset=N indicates a best-effort continuation. Results are not sorted; narrow your pattern or path for precise pagination.",
+            "Search file contents using Rust regex or fixed strings. If output is truncated, a trailing Partial: next_offset=N indicates a best-effort continuation. Results are not sorted; narrow your pattern or path for precise pagination.",
             "Optional platform-native file or directory to search. Relative paths resolve against the repository root.",
-            "Optional case-sensitive glob over repository-root-relative paths.",
+            "Optional glob pattern or array of patterns (supports '!' negation) relative to the search path. Patterns without '/' match file basenames recursively.",
         ),
         ReadScope::Unrestricted => (
             "Search file contents using Rust regex or fixed strings. Relative paths resolve against the repository root; absolute paths may reach supported locations outside it. If output is truncated, a trailing Partial: next_offset=N indicates a best-effort continuation. Results are not sorted; narrow your pattern or path for precise pagination.",
             "Optional platform-native file or directory to search. Relative paths resolve against the repository root; absolute paths may reach supported local filesystems.",
-            "Optional case-sensitive glob over repository-root-relative paths, or request-path-relative paths for external absolute inputs.",
+            "Optional glob pattern or array of patterns (supports '!' negation) relative to the search path. Patterns without '/' match file basenames recursively.",
         ),
     };
     Tool::new(
@@ -172,6 +172,10 @@ fn grep_tool(read_scope: ReadScope) -> Tool {
                 "pattern": {
                     "type": "string",
                     "description": "Search pattern (Rust regex by default, or literal string when fixed_strings is true)."
+                },
+                "type": {
+                    "type": "string",
+                    "description": "Optional file type filter (e.g. 'rust', 'python', 'js', 'ts', 'go', 'java', 'markdown')."
                 }
             },
             "required": ["pattern"]
@@ -186,12 +190,12 @@ fn glob_tool(read_scope: ReadScope) -> Tool {
         ReadScope::Normal => (
             "Find paths under the repository root using a glob pattern. Returns files by default; use type to find directories or any entry. If output is truncated, a trailing Partial: next_offset=N indicates a best-effort continuation. Results are not sorted; narrow your pattern or path for precise pagination.",
             "Platform-native directory to traverse. Relative paths resolve against the repository root.",
-            "Case-sensitive glob over repository-root-relative paths.",
+            "Glob pattern or array of patterns (supports '!' negation) relative to the search path. Patterns without '/' match file basenames recursively.",
         ),
         ReadScope::Unrestricted => (
             "Find local filesystem paths using a glob pattern. Returns files by default; use type to find directories or any entry. Relative paths resolve against the repository root; absolute paths may reach supported locations outside it. If output is truncated, a trailing Partial: next_offset=N indicates a best-effort continuation. Results are not sorted; narrow your pattern or path for precise pagination.",
             "Platform-native directory to traverse. Relative paths resolve against the repository root; absolute paths may reach supported local filesystems.",
-            "Case-sensitive glob over repository-root-relative paths, or request-path-relative paths for external absolute inputs.",
+            "Glob pattern or array of patterns (supports '!' negation) relative to the search path. Patterns without '/' match file basenames recursively.",
         ),
     };
     Tool::new(

@@ -2,6 +2,7 @@ use std::{cell::Cell, ops::Deref};
 
 pub mod bash;
 pub mod exec;
+pub mod filter;
 pub mod glob;
 pub mod grep;
 pub mod read;

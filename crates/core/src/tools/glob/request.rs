@@ -11,14 +11,16 @@ use super::{
     result::{BoundedCollector, GlobMatch, render_with_budget},
 };
 
-use globset::GlobBuilder;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     path::{FileAccess, PathError, ResolvedPath},
     runtime::{FileWorkCredit, RuntimeResources},
-    tools::ToolOutput,
+    tools::{
+        ToolOutput,
+        filter::{CompiledGlobFilter, GlobPatterns, resolve_literal_prefix},
+    },
     traversal::{
         ParallelTraversal, ParallelTraversalCallbacks, TraversalControl, TraversalEntry,
         TraversalError, TraversalSummary, prefer_parallel_root, walk, walk_parallel_batched,
@@ -52,7 +54,7 @@ pub enum GlobEntryType {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GlobRequest {
-    pub pattern: String,
+    pub pattern: GlobPatterns,
     pub path: Option<String>,
     pub include_ignored: Option<bool>,
     #[serde(rename = "type")]
@@ -68,14 +70,8 @@ impl GlobRequest {
     ///
     /// Returns a validation error for empty/NUL values or a limit outside 1..=1,000.
     pub fn validate(&self) -> Result<(), GlobError> {
-        if self.pattern.is_empty() {
-            return Err(GlobError::Validation(
-                "pattern must not be empty".to_owned(),
-            ));
-        }
-        if self.pattern.contains('\0')
-            || self.path.as_deref().is_some_and(|path| path.contains('\0'))
-        {
+        self.pattern.validate().map_err(GlobError::Validation)?;
+        if self.path.as_deref().is_some_and(|path| path.contains('\0')) {
             return Err(GlobError::Validation(
                 "pattern and path must not contain NUL".to_owned(),
             ));
@@ -310,15 +306,10 @@ fn execute_inner_with_traversal(
     let file_work_pool = resources.file_work_pool();
     let setup_span = profiler.span(GlobStage::Setup);
     request.validate()?;
-    let matcher = GlobBuilder::new(&request.pattern)
-        .literal_separator(true)
-        .backslash_escape(false)
-        .build()
-        .map_err(|error| GlobError::Pattern(error.to_string()))?
-        .compile_matcher();
-    let literal_prefix = crate::traversal::literal_path_prefix(&request.pattern);
+    let matcher = CompiledGlobFilter::compile(&request.pattern).map_err(GlobError::Pattern)?;
     let base_input = request.path.as_deref().unwrap_or(".");
     let base = access.resolve(Path::new(base_input))?;
+    let literal_prefix = resolve_literal_prefix(&request.pattern, &base);
     let selection = select_glob_traversal(access, &base, traversal, &file_work_pool);
     let traversal = selection.traversal;
     let offset = request.offset.unwrap_or(0);
@@ -460,18 +451,19 @@ fn matches_entry_type(entry_type: GlobEntryType, file_type: Option<std::fs::File
 }
 
 fn matches_glob_entry(
-    matcher: &globset::GlobMatcher,
+    matcher: &CompiledGlobFilter,
     entry_type: GlobEntryType,
     entry: TraversalEntry<'_>,
 ) -> bool {
-    matches_entry_type(entry_type, entry.file_type) && matcher.is_match(entry.key)
+    matches_entry_type(entry_type, entry.file_type)
+        && matcher.is_match(entry.file_name, entry.match_path, Some(entry.key))
 }
 
 fn collect_serial(
     access: &FileAccess,
     base: &ResolvedPath,
     cancellation: &CancellationToken,
-    matcher: &globset::GlobMatcher,
+    matcher: &CompiledGlobFilter,
     mut collection: GlobCollection,
     plan: GlobCollectPlan<'_>,
 ) -> Result<(GlobCollection, TraversalSummary), GlobError> {
@@ -513,7 +505,7 @@ fn collect_parallel(
     access: &FileAccess,
     base: &ResolvedPath,
     cancellation: &CancellationToken,
-    matcher: &globset::GlobMatcher,
+    matcher: &CompiledGlobFilter,
     collection: GlobCollection,
     profiler: &GlobProfiler,
     plan: GlobCollectPlan<'_>,

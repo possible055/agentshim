@@ -159,7 +159,8 @@ impl Engine {
         let request = grep::GrepRequest {
             pattern: args.pattern,
             path: args.path,
-            glob: args.glob,
+            glob: args.glob.map(Into::into),
+            file_type: args.file_type,
             mode,
             fixed_strings: args.fixed_strings,
             case,
@@ -215,7 +216,7 @@ impl Engine {
             }
         };
         let request = glob::GlobRequest {
-            pattern: args.pattern,
+            pattern: args.pattern.into(),
             path: args.path,
             include_ignored: args.include_ignored,
             entry_type,
@@ -258,6 +259,7 @@ pub struct GrepArgs {
     pub pattern: String,
     pub path: Option<String>,
     pub glob: Option<String>,
+    pub file_type: Option<String>,
     pub mode: Option<String>,
     pub fixed_strings: Option<bool>,
     pub case: Option<String>,

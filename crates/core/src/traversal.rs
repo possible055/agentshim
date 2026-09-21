@@ -78,6 +78,8 @@ impl TraversalSummary {
 #[derive(Clone, Copy, Debug)]
 pub struct TraversalEntry<'a> {
     pub key: &'a Path,
+    pub match_path: &'a Path,
+    pub file_name: &'a std::ffi::OsStr,
     pub absolute: &'a Path,
     pub file_type: Option<std::fs::FileType>,
 }
@@ -85,6 +87,8 @@ pub struct TraversalEntry<'a> {
 #[derive(Clone, Debug)]
 pub struct OwnedTraversalEntry {
     pub key: PathBuf,
+    pub match_path: PathBuf,
+    pub file_name: std::ffi::OsString,
     pub absolute: PathBuf,
     pub file_type: Option<std::fs::FileType>,
 }
@@ -157,8 +161,14 @@ pub fn walk(
                 continue;
             }
         };
+        let match_path = entry
+            .path()
+            .strip_prefix(base.absolute())
+            .unwrap_or_else(|_| entry.path());
         if visitor(TraversalEntry {
             key: &key,
+            match_path,
+            file_name: entry.file_name(),
             absolute: entry.path(),
             file_type: entry.file_type(),
         }) == TraversalControl::Stop
@@ -286,8 +296,15 @@ where
                     return WalkState::Continue;
                 }
             };
+            let match_path = entry
+                .path()
+                .strip_prefix(base.absolute())
+                .unwrap_or_else(|_| entry.path());
+            let file_name = entry.file_name();
             if !prefilter(TraversalEntry {
                 key: &key,
+                match_path,
+                file_name,
                 absolute: entry.path(),
                 file_type: entry.file_type(),
             }) {
@@ -295,6 +312,8 @@ where
             }
             pending.entries.push(OwnedTraversalEntry {
                 key: key.into_owned(),
+                match_path: match_path.to_path_buf(),
+                file_name: file_name.to_os_string(),
                 absolute: entry.path().to_path_buf(),
                 file_type: entry.file_type(),
             });
@@ -347,7 +366,7 @@ pub fn literal_path_prefix(pattern: &str) -> Option<PathBuf> {
 
 fn configure_entry_filter(
     builder: &mut WalkBuilder,
-    access: &FileAccess,
+    _access: &FileAccess,
     base: &ResolvedPath,
     literal_prefix: Option<&Path>,
 ) {
@@ -355,7 +374,7 @@ fn configure_entry_filter(
         builder.filter_entry(|entry| entry.depth() == 0 || !is_blocked_directory_entry(entry));
         return;
     };
-    let logical_root = traversal_logical_root(access, base).to_path_buf();
+    let base_absolute = base.absolute().to_path_buf();
     let literal_prefix = literal_prefix.to_path_buf();
     builder.filter_entry(move |entry| {
         if entry.depth() == 0 {
@@ -364,7 +383,7 @@ fn configure_entry_filter(
         if is_blocked_directory_entry(entry) {
             return false;
         }
-        let Ok(key) = entry.path().strip_prefix(&logical_root) else {
+        let Ok(key) = entry.path().strip_prefix(&base_absolute) else {
             return true;
         };
         literal_prefix.starts_with(key) || key.starts_with(&literal_prefix)

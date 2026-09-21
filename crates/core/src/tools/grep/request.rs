@@ -1,6 +1,5 @@
 use std::{io, sync::Arc};
 
-use globset::GlobBuilder;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -16,7 +15,10 @@ use super::{
 use crate::{
     path::{FileAccess, PathError},
     runtime::{MemoryReservation, RuntimeResources},
-    tools::ToolOutput,
+    tools::{
+        ToolOutput,
+        filter::{CompiledGlobFilter, GlobPatterns, build_type_filter, resolve_literal_prefix},
+    },
     traversal::TraversalError,
 };
 
@@ -274,7 +276,9 @@ pub enum CaseMode {
 pub struct GrepRequest {
     pub pattern: String,
     pub path: Option<String>,
-    pub glob: Option<String>,
+    pub glob: Option<GlobPatterns>,
+    #[serde(rename = "type")]
+    pub file_type: Option<String>,
     pub mode: Option<GrepMode>,
     pub fixed_strings: Option<bool>,
     pub case: Option<CaseMode>,
@@ -295,11 +299,17 @@ impl GrepRequest {
     pub fn validate(&self) -> Result<(), GrepError> {
         if self.pattern.contains('\0')
             || self.path.as_deref().is_some_and(|path| path.contains('\0'))
-            || self.glob.as_deref().is_some_and(|glob| glob.contains('\0'))
+            || self
+                .file_type
+                .as_deref()
+                .is_some_and(|ft| ft.contains('\0'))
         {
             return Err(GrepError::Validation(
-                "pattern, path, and glob must not contain NUL".to_owned(),
+                "pattern, path, and type must not contain NUL".to_owned(),
             ));
+        }
+        if let Some(glob) = &self.glob {
+            glob.validate().map_err(GrepError::Validation)?;
         }
         if self.context_lines.unwrap_or(0) > MAX_CONTEXT {
             return Err(GrepError::Validation(
@@ -683,24 +693,19 @@ fn execute_inner(
     let setup_span = profiler.span(GrepStage::Setup);
     request.validate()?;
     let matcher = Arc::new(build_matcher(request)?);
-    let glob = request
-        .glob
-        .as_deref()
-        .map(|pattern| {
-            GlobBuilder::new(pattern)
-                .literal_separator(true)
-                .backslash_escape(false)
-                .build()
-                .map(|glob| glob.compile_matcher())
-                .map_err(|error| GrepError::Glob(error.to_string()))
-        })
-        .transpose()?;
-    let literal_prefix = request
-        .glob
-        .as_deref()
-        .and_then(crate::traversal::literal_path_prefix);
     let base = access.resolve(std::path::Path::new(request.path.as_deref().unwrap_or(".")))?;
     let single_file = access.metadata_kind(&base)?.is_file;
+    let glob = request
+        .glob
+        .as_ref()
+        .map(CompiledGlobFilter::compile)
+        .transpose()
+        .map_err(GrepError::Glob)?;
+    let literal_prefix = request
+        .glob
+        .as_ref()
+        .and_then(|patterns| resolve_literal_prefix(patterns, &base));
+    let types = build_type_filter(request.file_type.as_deref()).map_err(GrepError::Validation)?;
     let (encoding, fallback_encoding) = request.resolved_encodings_inner(single_file)?;
     drop(setup_span);
     let mode = request.mode.unwrap_or_default();
@@ -730,6 +735,7 @@ fn execute_inner(
         &base,
         matcher,
         glob.as_ref(),
+        types.as_ref(),
         include_ignored,
         cancellation,
         traversal,

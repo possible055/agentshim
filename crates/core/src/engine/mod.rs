@@ -743,7 +743,7 @@ mod tests {
         let glob = engine
             .glob(
                 GlobRequest {
-                    pattern: "*.md".to_owned(),
+                    pattern: "*.md".into(),
                     path: None,
                     include_ignored: None,
                     entry_type: None,
@@ -762,6 +762,7 @@ mod tests {
                     pattern: "needle".to_owned(),
                     path: Some(".".to_owned()),
                     glob: None,
+                    file_type: None,
                     mode: None,
                     fixed_strings: Some(true),
                     case: None,

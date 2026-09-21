@@ -2,6 +2,7 @@ mod profile;
 mod request;
 mod result;
 
+pub use crate::tools::filter::GlobPatterns;
 #[cfg(feature = "bench-internals")]
 pub use profile::{GlobStageTimings, ProfiledGlob};
 pub use request::GlobEntryType;

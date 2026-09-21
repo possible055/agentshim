@@ -25,7 +25,8 @@ fn request(pattern: &str) -> GrepRequest {
     GrepRequest {
         pattern: pattern.to_owned(),
         path: None,
-        glob: Some("**/*.rs".to_owned()),
+        glob: Some("**/*.rs".into()),
+        file_type: None,
         mode: None,
         fixed_strings: None,
         case: None,
@@ -127,7 +128,7 @@ fn empty_results_distinguish_an_empty_search_from_an_empty_page() {
 fn grep_results_are_deterministic_across_workers_and_glob_settings() {
     let (_fixture, root) = fixture();
     let cancellation = CancellationToken::new();
-    for glob in [Some("**/*.rs".to_owned()), None] {
+    for glob in [Some("**/*.rs".into()), None] {
         let mut query = request("needle");
         query.glob = glob;
         query.fixed_strings = Some(true);
@@ -371,7 +372,7 @@ fn literal_prefix_glob_matches_full_traversal_candidates() {
     query.mode = Some(GrepMode::Count);
     let cancellation = CancellationToken::new();
     for glob in ["src/*.rs", "**/src/*.rs"] {
-        query.glob = Some(glob.to_owned());
+        query.glob = Some(glob.to_owned().into());
         let output = execute(&root, &query, 4, &cancellation).expect("literal prefix grep");
         assert!(output.contains("src/a.rs"), "glob={glob} missed src/a.rs");
         assert!(output.contains("src/b.rs"), "glob={glob} missed src/b.rs");
@@ -460,4 +461,72 @@ fn candidate_collection_holds_its_memory_reservation_until_drop() {
     );
     drop(collection);
     assert_eq!(resources.available_memory_bytes(), config.memory_bytes);
+}
+
+#[test]
+fn grep_matches_basename_recursively_under_subpath() {
+    let (_fixture, root) = fixture();
+    let cancellation = CancellationToken::new();
+    let mut query = request("needle");
+    query.path = Some("src".to_owned());
+    query.glob = Some("*.rs".into());
+
+    let output = execute(&root, &query, 4, &cancellation).expect("grep execute");
+    assert!(
+        output.contains("src/a.rs"),
+        "glob *.rs should match src/a.rs: {output}"
+    );
+    assert!(
+        output.contains("src/b.rs"),
+        "glob *.rs should match src/b.rs: {output}"
+    );
+}
+
+#[test]
+fn grep_supports_array_patterns_and_negation() {
+    let (_fixture, root) = fixture();
+    let cancellation = CancellationToken::new();
+    let mut query = request("needle");
+    query.glob = Some(vec!["*.rs".to_owned(), "!*b.rs".to_owned()].into());
+
+    let output = execute(&root, &query, 4, &cancellation).expect("grep execute");
+    assert!(output.contains("src/a.rs"), "should include src/a.rs");
+    assert!(
+        !output.contains("src/b.rs"),
+        "negated glob !*b.rs must exclude src/b.rs: {output}"
+    );
+}
+
+#[test]
+fn grep_filters_by_type() {
+    let (fixture_dir, root) = fixture();
+    fs::write(fixture_dir.path().join("src/notes.txt"), "needle in txt\n").expect("write txt");
+    let cancellation = CancellationToken::new();
+
+    let mut query = request("needle");
+    query.glob = None;
+    query.file_type = Some("rust".to_owned());
+
+    let output = execute(&root, &query, 4, &cancellation).expect("grep rust type");
+    assert!(output.contains("src/a.rs"));
+    assert!(
+        !output.contains("src/notes.txt"),
+        "type: rust must exclude notes.txt: {output}"
+    );
+}
+
+#[test]
+fn grep_single_file_supports_basename_and_type() {
+    let (_fixture, root) = fixture();
+    let cancellation = CancellationToken::new();
+    let mut query = request("needle");
+    query.path = Some("src/a.rs".to_owned());
+    query.glob = Some("*.rs".into());
+    query.file_type = Some("rust".to_owned());
+
+    let output = execute(&root, &query, 1, &cancellation).expect("single file grep");
+    assert!(
+        output.contains("src/a.rs"),
+        "single file grep should match: {output}"
+    );
 }
