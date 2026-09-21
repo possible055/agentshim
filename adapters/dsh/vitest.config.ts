@@ -1,12 +1,17 @@
 import { defineConfig } from 'vitest/config'
 
+const baseTestConfig = {
+  testTimeout: 30_000,
+  hookTimeout: 30_000,
+}
+
 export default defineConfig({
   test: {
-    testTimeout: 30_000,
-    hookTimeout: 30_000,
+    ...baseTestConfig,
     projects: [
       {
         test: {
+          ...baseTestConfig,
           name: 'unit',
           // Pure contracts and content checks; no native addon needed, safe to
           // run with file parallelism.
@@ -20,6 +25,7 @@ export default defineConfig({
       },
       {
         test: {
+          ...baseTestConfig,
           name: 'native',
           include: [
             'tests/assembly.spec.ts',

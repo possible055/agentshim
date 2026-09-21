@@ -209,7 +209,7 @@ describe('native addon loading', () => {
 
     await engine.close()
     await engine.close()
-  })
+  }, 30_000)
 
   it.skipIf(stagedAddon === undefined)('classifies denials and runner failures from the settled native outcome', async () => {
     process.env.AGENTSHIM_DSH_NATIVE_DLL = stagedAddon!

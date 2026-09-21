@@ -243,7 +243,9 @@ pub(super) fn measure_open_batches(
 
 pub(super) fn glob_request(directory: &str) -> GlobRequest {
     GlobRequest {
-        pattern: std::env::var(GLOB_PATTERN_ENV).unwrap_or_else(|_| "**/*.rs".to_owned()),
+        pattern: std::env::var(GLOB_PATTERN_ENV)
+            .unwrap_or_else(|_| "**/*.rs".to_owned())
+            .into(),
         path: Some(directory.to_owned()),
         include_ignored: None,
         entry_type: None,
@@ -321,7 +323,12 @@ pub(super) fn grep_request(directory: &str, files: usize) -> GrepRequest {
     GrepRequest {
         pattern: "needle-".to_owned(),
         path: Some(directory.to_owned()),
-        glob: Some(std::env::var(GREP_GLOB_ENV).unwrap_or_else(|_| workload.glob().to_owned())),
+        glob: Some(
+            std::env::var(GREP_GLOB_ENV)
+                .unwrap_or_else(|_| workload.glob().to_owned())
+                .into(),
+        ),
+        file_type: None,
         mode: Some(grep_mode()),
         fixed_strings: Some(true),
         case: None,
