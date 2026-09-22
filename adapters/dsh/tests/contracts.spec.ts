@@ -4,9 +4,12 @@ import { describe, expect, it } from 'vitest'
 import {
   bashParameters,
   bashStatusParameters,
+  globParameters,
+  grepParameters,
   PUBLIC_TOOL_NAMES,
   readOutputSchema,
   readParameters,
+  assertPattern,
 } from '../src/contracts.ts'
 
 const divergence = JSON.parse(await readFile(
@@ -35,6 +38,27 @@ describe('native public contracts', () => {
   it('exposes byte continuation only through the read artifact offset', () => {
     expect(readParameters.artifact_offset).toMatchObject({ type: 'integer' })
     expect(Object.keys(readParameters)).not.toContain('_agentshimReadGrant')
+  })
+
+  it('declares type filtering and multi-pattern oneOf for grep and glob', () => {
+    expect(grepParameters.type).toMatchObject({ type: 'string' })
+    expect(grepParameters.glob).toHaveProperty('oneOf')
+    expect(globParameters.pattern).toHaveProperty('oneOf')
+  })
+
+  it('keeps regex punctuation distinct from glob negation', () => {
+    expect(() => assertPattern('!', 'pattern', 8192)).not.toThrow()
+    expect(() => assertPattern('!', 'pattern', 1024, true)).toThrow(/contain a pattern after/)
+  })
+
+  it('gives a cold-start model defaults and continuation instructions', () => {
+    expect(readParameters.start_line).toMatchObject({ default: 1 })
+    expect(readParameters.pdf_mode).toMatchObject({ default: 'auto' })
+    expect(grepParameters.limit).toMatchObject({ default: 200 })
+    expect(globParameters.path).toMatchObject({ default: '.' })
+    expect(bashParameters.run_in_background).toMatchObject({ default: false })
+    expect(bashParameters.timeoutMs).toMatchObject({ type: 'integer' })
+    expect(bashStatusParameters.job_id.description).toContain('job ID returned by bash')
   })
 
   it('matches the intentional DSH bash ownership divergence snapshot', () => {

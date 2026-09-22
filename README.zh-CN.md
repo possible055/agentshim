@@ -6,7 +6,7 @@ AgentShim 为 coding agent 提供一组精简而专注的源代码工具。Codex
 
 ## 为什么使用
 
-- **受限的文件访问。** `read`、`grep` 和 `glob` 默认仅在仓库内操作，可选访问 Codex skill 和 plugin 目录。
+- **可预测的文件访问。** 为保持兼容，`read`、`grep` 和 `glob` 默认使用 unrestricted；需要仓库、skill 与 plugin 边界时显式设置 `--read-scope normal`。该 read scope 不会限制所启动进程的可见范围。
 - **可管理的长时间 Bash。** `run_program` 接收单一可执行文件和字面量参数。`bash` 处理 POSIX 命令组合，也可用 instance-bound `job_id` detach；`bash_status` 回报生命周期、primary exit status 与 bounded log tail，`bash` 还能终止完整的 server-owned tree。
 - **跨平台。** 完全支持 Windows x86-64，并为 Linux x86-64、Linux ARM64 与 macOS Apple Silicon 提供兼容性发行资产。
 - **可读结构化文档。** `read` 可返回 PDF 页面文字或渲染图片，也可将 DOCX、XLSX、PPTX、DOC、XLS 与 PPT 转为 Markdown；长文档带续读游标。
@@ -140,7 +140,9 @@ DSH 通过平台 addon 在进程内加载 `agentshim-core`；它不会启动 MCP
 args = ["serve", "--read-scope", "normal"]
 ```
 
-`--read-scope` 只约束 `read`、`grep` 和 `glob`。`run_program` 或 `bash` 启动的程序会继承服务用户的完整文件系统权限——需要真正隔离时请使用 OS sandbox。
+`--read-scope` 只约束 `read`、`grep` 和 `glob`。MCP 不提供进程 sandbox；`run_program` 或 `bash` 启动的程序会继承服务用户的完整文件系统权限。DSH 若组合了官方 `ctx.sandbox`／`ctx.sandboxPolicy`，则由该官方服务负责 exact argv 的 confinement。
+
+版本化的跨 adapter contract 是 [`contracts/tool-contract-v1.json`](contracts/tool-contract-v1.json)。MCP 保留 `error.code` 的 legacy class；有 v1 对应的 class 才会在 `error.canonicalCode` 中规范化，尚未对应的 class 则保留原名。
 
 ### 长时间任务
 

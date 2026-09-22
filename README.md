@@ -6,7 +6,7 @@ AgentShim gives coding agents a small, focused set of tools for working with sou
 
 ## Why use it
 
-- **Bounded file access.** `read`, `grep`, and `glob` stay inside your repository by default, with optional access to Codex skill and plugin directories.
+- **Predictable file access.** `read`, `grep`, and `glob` use unrestricted scope by default for compatibility; opt into `--read-scope normal` when repository/skill/plugin boundaries are required. This read scope does not constrain spawned processes.
 - **Managed long-running Bash.** `run_program` takes one executable and literal arguments. `bash` handles POSIX composition and can detach work under an instance-bound `job_id`; `bash_status` reports lifecycle, primary exit status, and a bounded log tail, while `bash` can terminate the complete owned tree.
 - **Cross-platform.** Full support for Windows x86-64, with compatibility release assets for Linux x86-64, Linux ARM64, and macOS Apple Silicon.
 - **Reads structured documents.** `read` returns PDF page text or rendered images and Markdown for DOCX, XLSX, PPTX, DOC, XLS, and PPT, with continuation cursors for long documents.
@@ -140,7 +140,11 @@ Controls which paths `read`, `grep`, and `glob` may access outside the repositor
 args = ["serve", "--read-scope", "normal"]
 ```
 
-`--read-scope` only bounds `read`, `grep`, and `glob`. Programs launched by `run_program` or `bash` inherit the server user's full filesystem access — use an OS sandbox when you need real isolation.
+`--read-scope` only bounds `read`, `grep`, and `glob`. MCP process tools deliberately remain unrestricted and inherit the filesystem access of the server user; agentshim does not add a process sandbox.
+
+The DSH adapter uses the official DSH `ctx.sandbox` and `ctx.sandboxPolicy` services when they are composed. It passes the prepared, exact argv through that service and never substitutes a second sandbox provider or silently retries an unconfined command after confinement fails.
+
+The versioned cross-adapter contract is [`contracts/tool-contract-v1.json`](contracts/tool-contract-v1.json). The generator also checks in the MCP JSON-Schema projection and DSH parameter/output projection under [`contracts/generated/`](contracts/generated/). Validate every projection with `python3 scripts/generate-contracts.py --check`. MCP keeps legacy error classes in `error.code`; classes with a v1 mapping are normalized in `error.canonicalCode`, while unmapped legacy classes retain their class name.
 
 ### Long-running work
 

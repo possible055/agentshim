@@ -19,6 +19,7 @@ use agentshim_core::platform::process::DetachedTree;
 use agentshim_core::tools::exec::CaptureSink;
 
 use crate::capture::{ArtifactRecord, CAPTURE_IO_FAILED_CODE, CallCapture, should_publish};
+use crate::classify::{Classification, SandboxAttribution, classify};
 use crate::process::{NativeFailure, NativeVoidResult, process_failure};
 use crate::state::{EngineState, detached_native_work, native_promise};
 
@@ -32,6 +33,10 @@ const DRAIN_CHUNK_BYTES: usize = 8 * 1024;
 /// Maximum time to wait for the process tree to fully settle after the primary
 /// process exits or after a cancellation request.
 const SETTLE_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Keep enough merged output to classify official DSH sandbox evidence without
+/// retaining an unbounded copy of a background job's output.
+const CLASSIFICATION_BYTES: usize = 1024 * 1024;
 
 /// One published raw capture artifact stream.
 #[napi(object)]
@@ -53,6 +58,8 @@ pub struct NativeJobOutcome {
     pub limit_exceeded: bool,
     pub artifacts: Vec<ArtifactPublished>,
     pub failure: Option<NativeFailure>,
+    pub denied: bool,
+    pub runner_failed: bool,
 }
 
 #[napi(object, object_from_js = false)]
@@ -135,6 +142,8 @@ pub(crate) struct BackgroundJob {
     thread_done: AtomicBool,
     finished: CancellationToken,
     artifacts: Arc<Mutex<Vec<ArtifactRecord>>>,
+    attribution: Option<SandboxAttribution>,
+    classification_output: Mutex<Vec<u8>>,
     inline_output_bytes: u64,
     cancel_reason: Mutex<Option<String>>,
     done_tx: tokio::sync::watch::Sender<Option<NativeJobOutcome>>,
@@ -162,6 +171,34 @@ enum TreeState {
 }
 
 impl BackgroundJob {
+    fn observe_output(&self, chunk: &[u8]) {
+        if self.attribution.is_none() {
+            return;
+        }
+        let Ok(mut output) = self.classification_output.lock() else {
+            return;
+        };
+        let remaining = CLASSIFICATION_BYTES.saturating_sub(output.len());
+        if remaining > 0 {
+            output.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        }
+    }
+
+    fn classification(&self, exit_code: Option<&str>) -> Classification {
+        let Some(attribution) = self.attribution.as_ref() else {
+            return Classification {
+                denied: false,
+                runner_failed: false,
+            };
+        };
+        let output = self
+            .classification_output
+            .lock()
+            .map(|value| String::from_utf8_lossy(&value).into_owned())
+            .unwrap_or_default();
+        classify(exit_code, &output, attribution)
+    }
+
     fn settle(&self, outcome: NativeJobOutcome) {
         if self.settled.swap(true, Ordering::SeqCst) {
             return;
@@ -266,6 +303,7 @@ fn drain_and_settle(job: Arc<BackgroundJob>, mut reader: std::fs::File) {
         match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
+                job.observe_output(&buf[..n]);
                 if let Err(error) = job.capture.append(0, &buf[..n]) {
                     capture_error = Some(error.to_string());
                     job.cancel_explicit(None);
@@ -293,6 +331,7 @@ fn drain_and_settle(job: Arc<BackgroundJob>, mut reader: std::fs::File) {
 
 fn finish_job(job: &BackgroundJob, capture_error: Option<String>) {
     let tree_result = settle_tree(job);
+    let classification = job.classification(tree_result.exit_code.as_deref());
     let limit_exceeded = job.capture.exceeded();
     let complete = !limit_exceeded && tree_result.cause.is_none();
     let records = match job.capture.publish(complete) {
@@ -322,6 +361,8 @@ fn finish_job(job: &BackgroundJob, capture_error: Option<String>) {
                         "limitBytes": job.capture.max_bytes,
                     })),
                 }),
+                denied: classification.denied,
+                runner_failed: classification.runner_failed,
             });
             return;
         }
@@ -330,6 +371,7 @@ fn finish_job(job: &BackgroundJob, capture_error: Option<String>) {
         job,
         capture_error,
         tree_result,
+        classification,
         limit_exceeded,
         complete,
         records,
@@ -373,6 +415,7 @@ fn finish_published_job(
     job: &BackgroundJob,
     capture_error: Option<String>,
     tree_result: TreeResult,
+    classification: Classification,
     limit_exceeded: bool,
     complete: bool,
     records: Vec<ArtifactRecord>,
@@ -447,6 +490,8 @@ fn finish_published_job(
         limit_exceeded,
         artifacts,
         failure,
+        denied: classification.denied,
+        runner_failed: classification.runner_failed,
     });
 }
 
@@ -674,6 +719,8 @@ fn start_drain_thread(
                             "operation": "background_drain",
                         })),
                     }),
+                    denied: false,
+                    runner_failed: false,
                 });
             }
             job.thread_done.store(true, Ordering::SeqCst);
@@ -716,6 +763,7 @@ pub(crate) fn start_background_prepared(
     call_id: String,
     handle: String,
     wrapped_argv: Option<&[String]>,
+    attribution: Option<SandboxAttribution>,
 ) -> std::result::Result<EngineJobHandle, NativeFailure> {
     if state.shutdown.is_cancelled() {
         return Err(NativeFailure::engine_closed());
@@ -781,6 +829,8 @@ pub(crate) fn start_background_prepared(
         thread_done: AtomicBool::new(false),
         finished: CancellationToken::new(),
         artifacts: Arc::clone(&state.artifacts),
+        attribution,
+        classification_output: Mutex::new(Vec::new()),
         inline_output_bytes: state.output_limits.capture_publish_bytes(),
         cancel_reason: Mutex::new(None),
         done_tx,

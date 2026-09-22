@@ -3,9 +3,9 @@ import { HarnessError } from '@deepseek-ai/dsh-llm'
 import type { JobId, JobOutcome } from '@deepseek-ai/dsh-jobs'
 import { TOOL_ABORTED } from '@deepseek-ai/dsh-tools'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { ProcessPolicy } from './policy.ts'
+import type { ProcessPolicy, SandboxAttribution } from './policy.ts'
 import { nativeBashArgs } from './native.ts'
-import type { NativeEngine } from './native.ts'
+import type { NativeEngine, NativeJobOutcome, NativeSandboxAttribution } from './native.ts'
 
 const JOB_OUTPUT_LIMIT_BYTES = 64 * 1024
 
@@ -15,8 +15,28 @@ interface ManagedHooks {
   readOutput(): string
 }
 
+export interface BackgroundSandboxObservation {
+  readonly mode: string
+  readonly enforcement?: 'full' | 'partial'
+}
+
+export interface BackgroundOutcomeSnapshot {
+  readonly outcome?: NativeJobOutcome
+  readonly sandbox?: BackgroundSandboxObservation
+  readonly error?: string
+}
+
+interface BackgroundOutcomeRecord {
+  readonly sandbox?: BackgroundSandboxObservation
+  outcome?: NativeJobOutcome
+  error?: string
+}
+
+const MAX_OUTCOME_RECORDS = 256
+
 export class BackgroundJobManager {
   private readonly active = new Set<ManagedHooks>()
+  private readonly outcomes = new Map<string, BackgroundOutcomeRecord>()
 
   track(hooks: ManagedHooks): ManagedHooks {
     this.active.add(hooks)
@@ -24,10 +44,35 @@ export class BackgroundJobManager {
     return hooks
   }
 
+  rememberOutcome(
+    jobId: string,
+    promise: Promise<NativeJobOutcome>,
+    sandbox: BackgroundSandboxObservation | undefined,
+  ): void {
+    const record: BackgroundOutcomeRecord = sandbox === undefined ? {} : { sandbox }
+    this.outcomes.set(jobId, record)
+    while (this.outcomes.size > MAX_OUTCOME_RECORDS) {
+      const oldest = this.outcomes.keys().next().value
+      if (oldest === undefined) break
+      this.outcomes.delete(oldest)
+    }
+    void promise.then(
+      outcome => { record.outcome = outcome },
+      error => { record.error = error instanceof Error ? error.message : String(error) },
+    )
+  }
+
+  outcome(jobId: string): BackgroundOutcomeSnapshot | undefined {
+    const record = this.outcomes.get(jobId)
+    if (record === undefined) return undefined
+    return record
+  }
+
   async dispose(): Promise<void> {
     const active = [...this.active]
     for (const hooks of active) hooks.cancel('dsh-agentshim plugin unloaded')
     await Promise.allSettled(active.map(hooks => hooks.done))
+    this.outcomes.clear()
   }
 }
 
@@ -40,6 +85,23 @@ function abortedError(): HarnessError {
 export interface BackgroundBashInput {
   readonly command: string
   readonly wire: Record<string, unknown>
+}
+
+function nativeAttribution(attribution: SandboxAttribution | undefined): NativeSandboxAttribution | undefined {
+  if (attribution === undefined) return undefined
+  const denialSignatures = attribution.denialSignatures.length === 0 ? undefined : [...attribution.denialSignatures]
+  const runnerFailureRules = attribution.runnerFailureRules.length === 0
+    ? undefined
+    : attribution.runnerFailureRules.map(rule => ({
+        ...(rule.allowedExitCodes === undefined ? {} : { allowedExitCodes: [...rule.allowedExitCodes] }),
+        fatalSignatures: [...rule.fatalSignatures],
+        ...(rule.informationalLines === undefined ? {} : { informationalLines: [...rule.informationalLines] }),
+      }))
+  if (denialSignatures === undefined && runnerFailureRules === undefined) return undefined
+  return {
+    ...(denialSignatures === undefined ? {} : { denialSignatures }),
+    ...(runnerFailureRules === undefined ? {} : { runnerFailureRules }),
+  }
 }
 
 /**
@@ -67,18 +129,21 @@ export async function startBackgroundBashNative(
     }
     if (exec.signal.aborted) throw abortedError()
     const wrappedArgv = decision.wrappedArgv === undefined ? undefined : [...decision.wrappedArgv]
+    let nativeOutcomePromise: Promise<NativeJobOutcome> | undefined
 
-    return await jobs.start({
+    const jobId = await jobs.start({
     kind: 'bash',
     label: input.command,
     outputLimitBytes: JOB_OUTPUT_LIMIT_BYTES,
     ...(exec.agent === undefined ? {} : { owner: exec.agent }),
     run: () => {
-      const handle = engine.startBackgroundPrepared(prepared.handle, wrappedArgv)
+      const handle = engine.startBackgroundPrepared(prepared.handle, wrappedArgv, nativeAttribution(decision.attribution))
       let cancelled = false
+      const outcomePromise = handle.done()
+      nativeOutcomePromise = outcomePromise
       const done = (async (): Promise<JobOutcome> => {
         try {
-          const outcome = await handle.done()
+          const outcome = await outcomePromise
           if (outcome.status === 'killed') return { status: 'killed', detail: outcome.detail }
           if (outcome.status === 'timed_out') return { status: 'failed', detail: `timed_out: ${outcome.detail}` }
           if (outcome.status === 'failed') return { status: 'failed', detail: outcome.detail }
@@ -100,6 +165,20 @@ export async function startBackgroundBashNative(
       })
     },
     })
+    if (nativeOutcomePromise === undefined) {
+      throw new HarnessError('background job did not create a native outcome promise', 'AGENTSHIM_BACKGROUND_FAILED')
+    }
+    manager.rememberOutcome(
+      jobId,
+      nativeOutcomePromise,
+      decision.attribution === undefined
+        ? undefined
+        : {
+            mode: decision.attribution.mode,
+            ...(decision.attribution.enforcement === undefined ? {} : { enforcement: decision.attribution.enforcement }),
+          },
+    )
+    return jobId
   } catch (error) {
     engine.discardPrepared(prepared.handle)
     throw error

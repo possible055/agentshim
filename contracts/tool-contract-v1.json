@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentshim.dev/contracts/tool-contract-v1.json",
+  "version": 1,
+  "toolNames": ["read", "grep", "glob", "run_program", "bash", "bash_status"],
+  "limits": {
+    "globPatternCount": 32,
+    "globPatternChars": 1024,
+    "grepPatternChars": 8192,
+    "contextLines": 20,
+    "resultLimit": 1000,
+    "stdinChars": 1048576
+  },
+  "semantics": {
+    "readScope": {
+      "values": ["normal", "unrestricted"],
+      "default": "unrestricted",
+      "appliesTo": ["read", "grep", "glob"]
+    },
+    "globPatterns": {
+      "shape": ["string", "array<string>"],
+      "maxItems": 32,
+      "maxItemChars": 1024,
+      "negationPrefix": "!",
+      "negationRequiresPattern": true
+    }
+  },
+  "modelGuidance": {
+    "read": {
+      "description": "Read one file as numbered lines. Use PDF pages/pdf_mode or Office cursors for structured documents; pass Partial: next_start_line=N as start_line to continue. Read scope defaults to unrestricted; normal scope permits the session root and approved extension roots.",
+      "defaults": {
+        "start_line": 1,
+        "pdf_mode": "auto"
+      }
+    },
+    "grep": {
+      "description": "Search files with Rust regex, or literal text with fixed_strings=true. Narrow with glob/type/mode and continue Partial: next_offset=N with offset. Read scope defaults to unrestricted; normal scope permits the session root and approved extension roots.",
+      "defaults": {
+        "case": "smart",
+        "context_lines": 0,
+        "fixed_strings": false,
+        "limit": 200,
+        "mode": "content",
+        "offset": 0
+      }
+    },
+    "glob": {
+      "description": "Find files or directories with a bounded case-sensitive glob. Use an array for include/exclude patterns and continue Partial: next_offset=N with offset. Read scope defaults to unrestricted; normal scope permits the session root and approved extension roots.",
+      "defaults": {
+        "path": ".",
+        "type": "file",
+        "limit": 200,
+        "offset": 0
+      }
+    },
+    "run_program": {
+      "description": "Run one executable with literal argv and no shell. A nonzero exit is returned with its status and output; process access is independent from read scope. Use bash for pipelines, redirection, or shell composition.",
+      "defaults": {
+        "args": [],
+        "cwd": ".",
+        "env": {},
+        "unset_env": []
+      }
+    },
+    "bash": {
+      "description": "Run non-interactive POSIX Bash and return merged output plus exit status. Process access is independent from read scope. MCP long work uses detach=true with a repository-local log_path, then bash_status; DSH long work uses run_in_background=true, requires a short description, then bash_status.",
+      "defaults": {
+        "detach": false,
+        "run_in_background": false,
+        "msys_argument_conversion": "default"
+      }
+    },
+    "bash_status": {
+      "description": "Inspect the lifecycle and final outcome of the job ID returned by a background bash call; MCP returns bounded log pages while DSH returns the official job snapshot. Repeat until terminal status.",
+      "defaults": {
+        "tail_bytes": 8192,
+        "wait_ms": 0
+      }
+    }
+  },
+  "canonical": {
+    "processRequest": {
+      "fields": ["program", "args", "cwd", "env", "unsetEnv", "stdin", "timeoutMs"],
+      "argvIsLiteral": true,
+      "cwdIsCanonicalBeforeSpawn": true
+    },
+    "bashRequest": {
+      "fields": ["command", "cwd", "timeoutMs", "detach", "logPath", "msysArgumentConversion"]
+    },
+    "processOutcome": {
+      "fields": ["status", "exitCode", "stdout", "stderr", "artifacts", "limitExceeded", "failure", "sandbox", "denied", "runnerFailed", "outcomeUncertain"],
+      "adapterExtensions": {
+        "dsh": ["sandbox", "denied", "runnerFailed"],
+        "mcp": []
+      }
+    },
+    "backgroundOutcome": {
+      "fields": ["status", "detail", "exitCode", "failure", "artifacts", "limitExceeded", "sandbox", "denied", "runnerFailed"]
+    }
+  },
+  "artifacts": {
+    "mcpSchema": "generated/mcp-tools-v1.json",
+    "dshSchema": "generated/dsh-tools-v1.json"
+  },
+  "errorCodes": [
+    "INVALID_ARGS",
+    "AGENTSHIM_CANCELLED",
+    "AGENTSHIM_TIMEOUT",
+    "AGENTSHIM_RESOURCE_BUSY",
+    "AGENTSHIM_OUTCOME_UNCERTAIN",
+    "AGENTSHIM_CAPTURE_FAILED"
+  ],
+  "canonicalCodePolicy": {
+    "mapped": "Use one of errorCodes for shared cross-adapter semantics.",
+    "unmappedMcp": "Preserve the legacy MCP error class in canonicalCode until a versioned mapping is added."
+  },
+  "adapterErrorCodes": {
+    "dsh": ["SANDBOX_UNAVAILABLE"]
+  },
+  "wireMappings": {
+    "mcp": {
+      "bash.cwd": "cwd",
+      "bash.background": "detach",
+      "bash.timeoutMs": "timeout_ms",
+      "errorCode": "legacy MCP class; compare error.canonicalCode for v1 semantics"
+    },
+    "dsh": {
+      "bash.cwd": "workdir",
+      "bash.background": "run_in_background",
+      "bash.timeoutMs": "timeoutMs",
+      "errorCode": "NativeFailure.code"
+    }
+  }
+}

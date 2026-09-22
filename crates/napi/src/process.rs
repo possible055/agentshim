@@ -323,6 +323,11 @@ pub struct ProcessOutcome {
     pub stdout: ProcessStreamOutcome,
     pub stderr: ProcessStreamOutcome,
     pub artifacts: Vec<ArtifactInfo>,
+    /// Whether the bounded native capture stopped the process before all output
+    /// could be retained.
+    pub limit_exceeded: bool,
+    /// Whether process-tree cleanup could not prove that the launch was quiescent.
+    pub outcome_uncertain: bool,
     pub failure: Option<NativeFailure>,
     /// Sandbox classification of this spawn against the passed attribution;
     /// both stay false when no attribution was supplied.
@@ -426,7 +431,15 @@ fn settle_outcome(
         agentshim_core::tools::exec::ProcessError,
     >,
 ) -> NativeResult<ProcessOutcome> {
-    let complete = !capture.exceeded() && result.is_ok();
+    let limit_exceeded = capture.exceeded();
+    let outcome_uncertain = match &result {
+        Err(agentshim_core::tools::exec::ProcessError::OutcomeUncertain) => true,
+        Err(agentshim_core::tools::exec::ProcessError::Timeout { details, .. }) => {
+            details.termination_outcome == "uncertain"
+        }
+        _ => false,
+    };
+    let complete = !limit_exceeded && result.is_ok();
     let records = match capture.publish(complete) {
         Ok(records) => records,
         Err(error) => {
@@ -468,6 +481,8 @@ fn settle_outcome(
                 stdout,
                 stderr: stderr_stream,
                 artifacts,
+                limit_exceeded,
+                outcome_uncertain,
                 failure: None,
                 denied: classification.denied,
                 runner_failed: classification.runner_failed,
@@ -481,7 +496,7 @@ fn settle_outcome(
                 },
                 |attribution| classify(None, &error.to_string(), attribution),
             );
-            let failure = if capture.exceeded() {
+            let failure = if limit_exceeded {
                 NativeFailure::new(
                     CAPTURE_LIMIT_EXCEEDED_CODE,
                     "capture limit exceeded",
@@ -508,6 +523,8 @@ fn settle_outcome(
                 stdout: stream_fact(None, "stdout", &artifacts),
                 stderr: stream_fact(None, "stderr", &artifacts),
                 artifacts,
+                limit_exceeded,
+                outcome_uncertain,
                 failure: Some(failure),
                 denied: classification.denied,
                 runner_failed: classification.runner_failed,

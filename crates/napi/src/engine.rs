@@ -486,6 +486,7 @@ impl Engine {
         call_id: String,
         handle: String,
         wrapped_argv: Option<Vec<String>>,
+        attribution: Option<crate::classify::SandboxAttribution>,
     ) -> Result<NativeJobHandleResult> {
         self.settled(
             "background",
@@ -495,6 +496,7 @@ impl Engine {
                 call_id,
                 handle,
                 wrapped_argv.as_deref(),
+                attribution,
             ) {
                 Ok(value) => Ok(NativeJobHandleResult {
                     value: Some(value),

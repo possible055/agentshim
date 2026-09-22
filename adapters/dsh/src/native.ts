@@ -58,7 +58,8 @@ export interface NativeReadArgs {
 export interface NativeGrepArgs {
   readonly pattern: string
   readonly path?: string
-  readonly glob?: string
+  readonly glob?: string | readonly string[]
+  readonly fileType?: string
   readonly mode?: 'content' | 'files' | 'count'
   readonly fixedStrings?: boolean
   readonly case?: 'smart' | 'sensitive' | 'insensitive'
@@ -71,7 +72,7 @@ export interface NativeGrepArgs {
 }
 
 export interface NativeGlobArgs {
-  readonly pattern: string
+  readonly pattern: string | readonly string[]
   readonly path?: string
   readonly includeIgnored?: boolean
   readonly entryType?: 'file' | 'directory' | 'any'
@@ -118,6 +119,8 @@ export interface NativeProcessOutcome {
   readonly stdout: NativeProcessStream
   readonly stderr: NativeProcessStream
   readonly artifacts: NativeArtifactInfo[]
+  readonly limitExceeded: boolean
+  readonly outcomeUncertain: boolean
   readonly failure?: NativeFailure
   readonly denied: boolean
   readonly runnerFailed: boolean
@@ -132,9 +135,10 @@ export interface NativeRunnerFailureRule {
 
 /**
  * Sandbox classification inputs for one confined spawn: the backend's denial
- * dialect and runner-failure rules, exactly as `SandboxProvider.confine`
- * produced them for the wrapped argv. The native engine is the single
- * classification authority; the adapter only consumes the outcome flags.
+ * dialect and runner-failure rules, exactly as the official DSH sandbox
+ * service produced them for the wrapped argv. The native engine is the
+ * single classification authority; the adapter only consumes the outcome
+ * flags.
  */
 export interface NativeSandboxAttribution {
   readonly denialSignatures?: readonly string[]
@@ -155,7 +159,7 @@ export interface NativeBashArgs {
   readonly command: string
   readonly cwd?: string
   readonly timeoutMs?: number
-  readonly msysArgumentConversion?: 'enabled' | 'disabled'
+  readonly msysArgumentConversion?: 'default' | 'disabled'
   readonly background?: boolean
 }
 
@@ -182,7 +186,7 @@ export function nativeBashArgs(wire: Record<string, unknown>, background = false
     command: wire.command as string,
     ...(wire.cwd === undefined ? {} : { cwd: wire.cwd as string }),
     ...(wire.timeout_ms === undefined ? {} : { timeoutMs: wire.timeout_ms as number }),
-    ...(wire.msys_argument_conversion === undefined ? {} : { msysArgumentConversion: wire.msys_argument_conversion as 'enabled' | 'disabled' }),
+    ...(wire.msys_argument_conversion === undefined ? {} : { msysArgumentConversion: wire.msys_argument_conversion as 'default' | 'disabled' }),
     ...(background ? { background: true } : {}),
   }
 }
@@ -201,6 +205,8 @@ export interface NativeJobOutcome {
   readonly limitExceeded: boolean
   readonly artifacts: readonly NativeArtifactPublished[]
   readonly failure?: NativeFailure
+  readonly denied?: boolean
+  readonly runnerFailed?: boolean
 }
 
 export interface NativeJobHandle {
@@ -228,7 +234,7 @@ interface RawNativeEngine {
   prepareRunProgram(callId: string, args: NativeRunProgramArgs): NativeResult<NativePreparedProcess>
   prepareBash(callId: string, args: NativeBashArgs): NativeResult<NativePreparedProcess>
   spawnPrepared(callId: string, handle: string, wrappedArgv?: readonly string[], attribution?: NativeSandboxAttribution): Promise<NativeResult<NativeProcessOutcome>>
-  startBackgroundPrepared(callId: string, handle: string, wrappedArgv?: readonly string[]): NativeResult<RawNativeJobHandle>
+  startBackgroundPrepared(callId: string, handle: string, wrappedArgv?: readonly string[], attribution?: NativeSandboxAttribution): NativeResult<RawNativeJobHandle>
   close(): Promise<NativeResult<boolean>>
 }
 
@@ -244,7 +250,7 @@ export interface NativeEngine {
   prepareRunProgram(args: NativeRunProgramArgs, signal?: AbortSignal): NativePreparedProcess
   prepareBash(args: NativeBashArgs, signal?: AbortSignal): NativePreparedProcess
   spawnPrepared(handle: string, wrappedArgv?: readonly string[], attribution?: NativeSandboxAttribution): Promise<NativeProcessOutcome>
-  startBackgroundPrepared(handle: string, wrappedArgv?: readonly string[]): NativeJobHandle
+  startBackgroundPrepared(handle: string, wrappedArgv?: readonly string[], attribution?: NativeSandboxAttribution): NativeJobHandle
   discardPrepared(handle: string): void
   close(): Promise<void>
 }
@@ -384,14 +390,14 @@ class NativeEngineAdapter implements NativeEngine {
     }
   }
 
-  startBackgroundPrepared(handle: string, wrappedArgv?: readonly string[]): NativeJobHandle {
+  startBackgroundPrepared(handle: string, wrappedArgv?: readonly string[], attribution?: NativeSandboxAttribution): NativeJobHandle {
     const lease = this.pending.get(handle)
     if (lease === undefined) {
       throw new HarnessError('prepared handle is unknown or already started', 'AGENTSHIM_PREPARED_HANDLE_INVALID')
     }
     this.pending.delete(handle)
     try {
-      const raw = unwrapNativeResult(this.raw.startBackgroundPrepared(lease.callId, handle, wrappedArgv))
+      const raw = unwrapNativeResult(this.raw.startBackgroundPrepared(lease.callId, handle, wrappedArgv, attribution))
       this.release(lease)
       return new NativeJobHandleAdapter(raw)
     } catch (error) {

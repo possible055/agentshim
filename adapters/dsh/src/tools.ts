@@ -14,9 +14,13 @@ import {
 import type { ProcessPolicy, SandboxAttribution } from './policy.ts'
 import {
   assertExactKeys,
+  assertBoolean,
+  assertEnum,
   assertIntegerRange,
   assertNonEmpty,
-  assertPositive,
+  assertOptionalString,
+  assertPattern,
+  assertStringArray,
   assertStringRecord,
   bashOutputSchema,
   bashParameters,
@@ -31,6 +35,9 @@ import {
   runProgramParameters,
   textOutputSchema,
   grepParameters,
+  MAX_GLOB_PATTERNS,
+  MAX_GLOB_PATTERN_CHARS,
+  MAX_GREP_PATTERN_CHARS,
 } from './contracts.ts'
 import { startBackgroundBashNative } from './jobs.ts'
 import type { BackgroundJobManager } from './jobs.ts'
@@ -53,7 +60,6 @@ export interface ToolDependencies {
   readonly config: ResolvedPluginConfig
   readonly jobs: BackgroundJobManager
   readonly native: NativeEngine
-  readonly root: string
 }
 
 function nativeReadArgs(args: Record<string, unknown>): NativeReadArgs {
@@ -74,7 +80,8 @@ function nativeGrepArgs(args: Record<string, unknown>): NativeGrepArgs {
   return {
     pattern: args.pattern as string,
     ...(args.path === undefined ? {} : { path: args.path as string }),
-    ...(args.glob === undefined ? {} : { glob: args.glob as string }),
+    ...(args.glob === undefined ? {} : { glob: args.glob as string | readonly string[] }),
+    ...(args.type === undefined ? {} : { fileType: args.type as string }),
     ...(args.mode === undefined ? {} : { mode: args.mode as 'content' | 'files' | 'count' }),
     ...(args.fixed_strings === undefined ? {} : { fixedStrings: args.fixed_strings as boolean }),
     ...(args.case === undefined ? {} : { case: args.case as 'smart' | 'sensitive' | 'insensitive' }),
@@ -89,7 +96,7 @@ function nativeGrepArgs(args: Record<string, unknown>): NativeGrepArgs {
 
 function nativeGlobArgs(args: Record<string, unknown>): NativeGlobArgs {
   return {
-    pattern: args.pattern as string,
+    pattern: args.pattern as string | readonly string[],
     ...(args.path === undefined ? {} : { path: args.path as string }),
     ...(args.include_ignored === undefined ? {} : { includeIgnored: args.include_ignored as boolean }),
     ...(args.type === undefined ? {} : { entryType: args.type as 'file' | 'directory' | 'any' }),
@@ -227,18 +234,21 @@ async function executeProcessNative(
     const notices = outcome.artifacts
       .map(artifact => `Full raw ${artifact.stream}: ${artifact.path} (${artifact.bytes} bytes${artifact.complete ? '' : ', incomplete'})`)
     const text = [outcome.text, ...notices].join('\n')
+    const hasClassification = typeof outcome.denied === 'boolean' && typeof outcome.runnerFailed === 'boolean'
     return {
       kind: 'foreground' as const,
       text,
       exitCode: outcome.exitCode ?? (outcome.childNonzero ? '1' : '0'),
       stdout: processStream(outcome.stdout),
       stderr: processStream(outcome.stderr),
-      ...(decision.attribution === undefined ? {} : {
+      limitExceeded: outcome.limitExceeded ?? false,
+      outcomeUncertain: outcome.outcomeUncertain ?? false,
+      ...(decision.attribution === undefined || !hasClassification ? {} : {
         sandbox: {
           mode: decision.attribution.mode,
           ...(decision.attribution.enforcement === undefined ? {} : { enforcement: decision.attribution.enforcement }),
-          denied: outcome.denied,
-          runnerFailed: outcome.runnerFailed,
+          denied: outcome.denied as boolean,
+          runnerFailed: outcome.runnerFailed as boolean,
         },
       }),
     }
@@ -251,6 +261,11 @@ async function executeProcessNative(
 function validateReadArgs(args: Record<string, unknown> & { path: string; line_count?: number; start_line?: number; pages?: string; pdf_cursor?: string; office_cursor?: string; artifact_offset?: number }): void {
   assertExactKeys(args, Object.keys(readParameters))
   assertNonEmpty(args.path, 'path')
+  assertOptionalString(args.encoding, 'encoding')
+  assertOptionalString(args.pages, 'pages')
+  assertOptionalString(args.pdf_cursor, 'pdf_cursor')
+  assertOptionalString(args.office_cursor, 'office_cursor')
+  assertEnum(args.pdf_mode, 'pdf_mode', ['auto', 'text', 'image'] as const)
   assertIntegerRange(args.line_count, 'line_count', 1, 2000)
   assertIntegerRange(args.start_line, 'start_line', 1)
   if (args.pages !== undefined && !/^[1-9][0-9]*(-[1-9][0-9]*)?$/.test(args.pages)) {
@@ -261,19 +276,59 @@ function validateReadArgs(args: Record<string, unknown> & { path: string; line_c
   assertIntegerRange(args.artifact_offset, 'artifact_offset', 0)
 }
 
-function validateGrepArgs(args: Record<string, unknown> & { pattern: string; context_lines?: number; limit?: number; offset?: number; encoding?: string; fallback_encoding?: string }): void {
+function validateGrepArgs(args: Record<string, unknown> & { pattern: string; glob?: string | readonly string[]; type?: string; context_lines?: number; limit?: number; offset?: number; encoding?: string; fallback_encoding?: string }): void {
   assertExactKeys(args, Object.keys(grepParameters))
+  assertPattern(args.pattern, 'pattern', MAX_GREP_PATTERN_CHARS)
+  assertEnum(args.case, 'case', ['smart', 'sensitive', 'insensitive'] as const)
+  assertBoolean(args.fixed_strings, 'fixed_strings')
+  assertBoolean(args.include_ignored, 'include_ignored')
+  assertEnum(args.mode, 'mode', ['content', 'files', 'count'] as const)
+  assertOptionalString(args.path, 'path')
+  assertOptionalString(args.type, 'type')
+  assertOptionalString(args.encoding, 'encoding')
+  assertOptionalString(args.fallback_encoding, 'fallback_encoding')
   assertIntegerRange(args.context_lines, 'context_lines', 0, 20)
   assertIntegerRange(args.limit, 'limit', 1, 1000)
   assertIntegerRange(args.offset, 'offset', 0)
+  if (args.glob !== undefined) {
+    if (typeof args.glob === 'string') {
+      assertPattern(args.glob, 'glob', MAX_GLOB_PATTERN_CHARS, true)
+    } else if (Array.isArray(args.glob)) {
+      if (args.glob.length === 0 || args.glob.length > MAX_GLOB_PATTERNS) {
+        throw new HarnessError(`invalid arguments: glob must contain 1 through ${MAX_GLOB_PATTERNS} entries`, 'INVALID_ARGS')
+      }
+      for (const pattern of args.glob) {
+        if (typeof pattern !== 'string') throw new HarnessError('invalid arguments: glob entries must be strings', 'INVALID_ARGS')
+        assertPattern(pattern, 'glob entry', MAX_GLOB_PATTERN_CHARS, true)
+      }
+    } else {
+      throw new HarnessError('invalid arguments: glob must be a string or string array', 'INVALID_ARGS')
+    }
+  }
+  if (args.type !== undefined) assertNonEmpty(args.type, 'type')
   if (args.encoding !== undefined && args.fallback_encoding !== undefined) {
     throw new HarnessError('invalid arguments: encoding and fallback_encoding are mutually exclusive', 'INVALID_ARGS')
   }
 }
 
-function validateGlobArgs(args: Record<string, unknown> & { pattern: string; limit?: number; offset?: number }): void {
+function validateGlobArgs(args: Record<string, unknown> & { pattern: string | readonly string[]; limit?: number; offset?: number }): void {
   assertExactKeys(args, Object.keys(globParameters))
-  assertNonEmpty(args.pattern, 'pattern')
+  assertBoolean(args.include_ignored, 'include_ignored')
+  assertOptionalString(args.path, 'path')
+  assertEnum(args.type, 'type', ['file', 'directory', 'any'] as const)
+  if (typeof args.pattern === 'string') {
+    assertPattern(args.pattern, 'pattern', MAX_GLOB_PATTERN_CHARS, true)
+  } else if (Array.isArray(args.pattern)) {
+    if (args.pattern.length === 0 || args.pattern.length > MAX_GLOB_PATTERNS) {
+      throw new HarnessError(`invalid arguments: pattern must contain 1 through ${MAX_GLOB_PATTERNS} entries`, 'INVALID_ARGS')
+    }
+    for (const pattern of args.pattern) {
+      if (typeof pattern !== 'string') throw new HarnessError('invalid arguments: pattern entries must be strings', 'INVALID_ARGS')
+      assertPattern(pattern, 'pattern entry', MAX_GLOB_PATTERN_CHARS, true)
+    }
+  } else {
+    throw new HarnessError('invalid arguments: pattern must be a string or string array', 'INVALID_ARGS')
+  }
   assertIntegerRange(args.limit, 'limit', 1, 1000)
   assertIntegerRange(args.offset, 'offset', 0)
 }
@@ -299,10 +354,16 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
     ...bashParameters,
     ...(processPolicy.advertisesEscalation ? escalationParameters : {}),
   }
+  const readScopeGuidance = deps.config.readScope === 'normal'
+    ? ' Normal read scope permits the agent session cwd and configured extension roots; other paths are rejected.'
+    : ' Unrestricted read scope also permits supported absolute paths.'
+  const processScopeGuidance = processPolicy.advertisesEscalation
+    ? ' Process access is governed only by the official DSH sandbox services when composed.'
+    : ' Process access is unconfined because no official DSH sandbox service is composed.'
 
   const read = defineTool({
     name: 'read',
-    description: 'Read one file as numbered lines, or render PDF text and images. Returns partial continuation lines if output exceeds limits.',
+    description: `Read one file from the agent session cwd as numbered lines; use PDF/Office cursors to continue structured documents.${readScopeGuidance}`,
     parameters: readParameters,
     output: { schema: readOutputSchema, render: (_args, value) => renderRead(value) },
     timeoutMs: deps.config.toolCallTimeoutMs,
@@ -324,7 +385,7 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
 
   const grep = defineTool({
     name: 'grep',
-    description: 'Search file contents using regular expressions or fixed strings. Returns partial continuation offsets if output exceeds limits.',
+    description: `Search files under the agent session cwd with Rust regex or fixed text; continue Partial results with offset.${readScopeGuidance}`,
     parameters: grepParameters,
     output: { schema: textOutputSchema('grep'), render: (_args, value) => textBlock(value.text) },
     timeoutMs: deps.config.toolCallTimeoutMs,
@@ -339,7 +400,7 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
 
   const glob = defineTool({
     name: 'glob',
-    description: 'Find filesystem paths matching a glob pattern. Returns partial continuation offsets if output exceeds limits.',
+    description: `Find files or directories under the agent session cwd with a bounded glob pattern; continue Partial results with offset.${readScopeGuidance}`,
     parameters: globParameters,
     output: { schema: textOutputSchema('glob'), render: (_args, value) => textBlock(value.text) },
     timeoutMs: deps.config.toolCallTimeoutMs,
@@ -354,14 +415,18 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
 
   const runProgram = defineTool({
     name: 'run_program',
-    description: 'Run a local program directly with literal arguments without a shell. Use bash if shell composition is required.',
+    description: `Run one executable with literal argv from the agent session cwd (override with cwd), without a shell; use bash for composition.${processScopeGuidance}`,
     parameters: processParameters,
     output: { schema: processOutputSchema, render: (_args, value) => textBlock(value.text) },
     timeoutMs: deps.config.toolCallTimeoutMs,
     async execute(args, exec) {
       assertExactKeys(args, processKeys(runProgramParameters, processPolicy.advertisesEscalation))
       assertNonEmpty(args.program, 'program')
-      assertPositive(args.timeout_ms, 'timeout_ms')
+      assertStringArray(args.args, 'args')
+      assertOptionalString(args.cwd, 'cwd')
+      assertStringArray(args.unset_env, 'unset_env')
+      if (args.stdin !== undefined && args.stdin !== null) assertOptionalString(args.stdin, 'stdin')
+      assertIntegerRange(args.timeout_ms, 'timeout_ms', 1)
       assertStringRecord(args.env, 'env')
       return executeProcessNative(deps, processPolicy, 'run_program', args, exec)
     },
@@ -371,7 +436,7 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
 
   const bash = defineTool({
     name: 'bash',
-    description: 'Run a non-interactive POSIX Bash command line. Set run_in_background=true for background jobs.',
+    description: `Run non-interactive POSIX Bash in the agent session cwd (override with workdir); provide a short description, and use run_in_background=true for long work before polling bash_status.${processScopeGuidance}`,
     parameters: shellParameters,
     output: { schema: bashOutputSchema, render: (_args, value) => value.kind === 'background' ? textBlock(`started background job ${value.jobId}`) : textBlock(value.text) },
     timeoutMs: deps.config.toolCallTimeoutMs,
@@ -379,7 +444,10 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
       assertExactKeys(args, processKeys(bashParameters, processPolicy.advertisesEscalation))
       assertNonEmpty(args.command, 'command')
       assertNonEmpty(args.description, 'description')
-      assertPositive(args.timeoutMs, 'timeoutMs')
+      assertOptionalString(args.workdir, 'workdir')
+      assertEnum(args.msys_argument_conversion, 'msys_argument_conversion', ['default', 'disabled'] as const)
+      assertBoolean(args.run_in_background, 'run_in_background')
+      assertIntegerRange(args.timeoutMs, 'timeoutMs', 1)
       const commonWire = {
         command: args.command,
         ...(args.workdir === undefined ? {} : { cwd: args.workdir }),
@@ -411,7 +479,7 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
 
   const bashStatus = defineTool({
     name: 'bash_status',
-    description: 'Get the status snapshot for a background Bash job.',
+    description: "Get lifecycle and final outcome metadata for a background Bash job returned by this agent's bash; repeat until terminal status.",
     parameters: bashStatusParameters,
     output: {
       schema: bashStatusOutputSchema,
@@ -420,6 +488,14 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
         `Status: ${value.status}`,
         `Label: ${value.label}`,
         ...(value.detail === undefined ? [] : [`Detail: ${value.detail}`]),
+        ...(value.exitCode === undefined ? [] : [`Exit code: ${value.exitCode ?? 'unknown'}`]),
+        ...(value.sandbox === undefined ? [] : [
+          `Sandbox: ${value.sandbox.mode}${value.sandbox.enforcement === undefined ? '' : ` (${value.sandbox.enforcement})`}`,
+          `Sandbox denied: ${String(value.sandbox.denied)}`,
+          `Sandbox runner failed: ${String(value.sandbox.runnerFailed)}`,
+        ]),
+        ...(value.failure === undefined ? [] : [`Failure: ${value.failure.code}: ${value.failure.message}`]),
+        ...(value.artifacts === undefined || value.artifacts.length === 0 ? [] : [`Artifacts: ${value.artifacts.map(artifact => artifact.path).join(', ')}`]),
       ].join('\n')),
     },
     timeoutMs: deps.config.toolCallTimeoutMs,
@@ -432,12 +508,54 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
         throw new HarnessError('background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs', 'AGENTSHIM_BACKGROUND_UNAVAILABLE')
       }
       const snapshot = jobs.get(JobId(args.job_id), exec.agent)
+      const native = deps.jobs.outcome(snapshot.id)
+      const nativeOutcome = native?.outcome
+      const hasClassification = nativeOutcome !== undefined
+        && typeof nativeOutcome.denied === 'boolean'
+        && typeof nativeOutcome.runnerFailed === 'boolean'
+      const sandbox = nativeOutcome === undefined || native === undefined || native.sandbox === undefined || !hasClassification
+        ? undefined
+        : {
+            mode: native.sandbox.mode,
+            ...(native.sandbox.enforcement === undefined ? {} : { enforcement: native.sandbox.enforcement }),
+            denied: nativeOutcome.denied as boolean,
+            runnerFailed: nativeOutcome.runnerFailed as boolean,
+          }
       return {
         kind: 'status' as const,
         jobId: snapshot.id,
         status: snapshot.status,
         label: snapshot.label,
         ...(snapshot.detail === undefined ? {} : { detail: snapshot.detail }),
+        ...(nativeOutcome === undefined ? {} : {
+          exitCode: nativeOutcome.exitCode ?? null,
+          ...(nativeOutcome.failure === undefined ? {} : { failure: {
+            code: nativeOutcome.failure.code,
+            message: nativeOutcome.failure.message,
+            retryable: nativeOutcome.failure.retryable,
+          } }),
+          artifacts: [...(nativeOutcome.artifacts ?? [])],
+          limitExceeded: nativeOutcome.limitExceeded ?? false,
+          ...(typeof nativeOutcome.denied !== 'boolean' ? {} : { denied: nativeOutcome.denied }),
+          ...(typeof nativeOutcome.runnerFailed !== 'boolean' ? {} : { runnerFailed: nativeOutcome.runnerFailed }),
+          ...(sandbox === undefined ? {} : { sandbox }),
+        }),
+        ...(native?.error === undefined ? {} : { failure: {
+          code: 'AGENTSHIM_BACKGROUND_OUTCOME_FAILED',
+          message: native.error,
+          retryable: true,
+        },
+          exitCode: null,
+          artifacts: [],
+          denied: false,
+          runnerFailed: false,
+          ...(native.sandbox === undefined ? {} : { sandbox: {
+            mode: native.sandbox.mode,
+            ...(native.sandbox.enforcement === undefined ? {} : { enforcement: native.sandbox.enforcement }),
+            denied: false,
+            runnerFailed: false,
+          } }),
+        }),
       }
     },
     presentCall: presentBashStatusCall,

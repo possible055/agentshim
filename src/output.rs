@@ -16,8 +16,8 @@ pub(crate) use token_gate::{
 
 pub use agentshim_core::output::{
     CALL_OUTPUT_TOKEN_LIMIT, MAX_OUTPUT_BYTES, MIN_OUTPUT_BYTES, MODEL_BYTE_LIMIT,
-    NEXT_OFFSET_FIELD, NEXT_START_LINE_FIELD, OUTPUT_BYTES_ENV, OutputError, PARTIAL_MARKER,
-    PDF_CURSOR_FIELD, ProjectedTokenCost, ProjectionDecision, tool_error_structure,
+    NEXT_OFFSET_FIELD, NEXT_START_LINE_FIELD, OFFICE_CURSOR_FIELD, OUTPUT_BYTES_ENV, OutputError,
+    PARTIAL_MARKER, PDF_CURSOR_FIELD, ProjectedTokenCost, ProjectionDecision, tool_error_structure,
     tool_result_encoded_len,
 };
 

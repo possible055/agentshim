@@ -1,6 +1,6 @@
 use agentshim::{
-    AgentShim, NEXT_OFFSET_FIELD, NEXT_START_LINE_FIELD, PARTIAL_MARKER, PDF_CURSOR_FIELD,
-    ReadScope, supported_protocol_versions,
+    AgentShim, NEXT_OFFSET_FIELD, NEXT_START_LINE_FIELD, OFFICE_CURSOR_FIELD, PARTIAL_MARKER,
+    PDF_CURSOR_FIELD, ReadScope, supported_protocol_versions,
 };
 use serde_json::{Value, json};
 
@@ -55,6 +55,12 @@ fn descriptions_quote_real_continuation_markers() {
         assert!(
             tool(tools, "read").to_string().contains(PDF_CURSOR_FIELD),
             "read must name the PDF continuation argument the renderer actually emits"
+        );
+        assert!(
+            tool(tools, "read")
+                .to_string()
+                .contains(OFFICE_CURSOR_FIELD),
+            "read must name the Office continuation argument the renderer actually emits"
         );
     }
 }
@@ -157,6 +163,7 @@ fn bash_job_tools_have_fixed_order_and_mutually_exclusive_schemas() {
         json!(["command", "detach", "log_path"])
     );
     assert_eq!(alternatives[1]["properties"]["detach"]["const"], true);
+    assert_eq!(alternatives[1]["properties"]["log_path"]["minLength"], 1);
     assert_eq!(alternatives[2]["required"], json!(["action", "job_id"]));
     assert_eq!(
         alternatives[2]["properties"]["action"]["const"],
@@ -173,6 +180,45 @@ fn bash_job_tools_have_fixed_order_and_mutually_exclusive_schemas() {
     assert_eq!(status_schema["properties"]["tail_bytes"]["maximum"], 16384);
     assert_eq!(status_schema["properties"]["tail_bytes"]["default"], 8192);
     assert_eq!(status_schema["properties"]["wait_ms"]["maximum"], 1000);
+}
+
+#[test]
+fn generated_cross_adapter_projections_pin_shared_limits() {
+    let mcp: Value = serde_json::from_str(include_str!("../contracts/generated/mcp-tools-v1.json"))
+        .expect("MCP contract projection");
+    assert_eq!(mcp["version"], 1);
+    assert_eq!(mcp["dialect"], "mcp");
+    assert_eq!(
+        mcp["tools"]["glob"]["properties"]["pattern"]["anyOf"][1]["maxItems"],
+        32
+    );
+    assert_eq!(
+        mcp["tools"]["grep"]["properties"]["pattern"]["maxLength"],
+        8192
+    );
+    assert!(
+        mcp["tools"]["grep"]["properties"]["pattern"]
+            .get("not")
+            .is_none()
+    );
+    assert!(mcp["tools"]["glob"]["properties"]["pattern"]["anyOf"][0]["not"].is_object());
+    assert!(
+        mcp["tools"]["read"]["description"]
+            .as_str()
+            .is_some_and(|text| text.contains("Partial: next_start_line=N"))
+    );
+    assert_eq!(mcp["tools"]["grep"]["properties"]["limit"]["default"], 200);
+
+    let dsh: Value = serde_json::from_str(include_str!("../contracts/generated/dsh-tools-v1.json"))
+        .expect("DSH contract projection");
+    assert_eq!(dsh["version"], 1);
+    assert_eq!(dsh["dialect"], "dsh");
+    assert_eq!(dsh["outputs"]["process"]["sandbox"]["type"], "object");
+    assert!(dsh["descriptions"]["bash_status"].is_string());
+    assert_eq!(dsh["parameters"]["glob"]["limit"]["default"], 200);
+    assert_eq!(dsh["parameters"]["bash"]["timeoutMs"]["type"], "integer");
+    assert!(dsh["parameters"]["grep"]["pattern"].get("not").is_none());
+    assert!(dsh["parameters"]["glob"]["pattern"]["oneOf"][0]["not"].is_object());
 }
 
 fn tool<'a>(tools: &'a [Value], name: &str) -> &'a Value {

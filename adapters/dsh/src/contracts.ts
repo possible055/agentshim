@@ -5,67 +5,86 @@ export const PUBLIC_TOOL_NAMES = ['read', 'grep', 'glob', 'run_program', 'bash',
 
 export type PublicToolName = (typeof PUBLIC_TOOL_NAMES)[number]
 
+export const MAX_GLOB_PATTERNS = 32
+export const MAX_GLOB_PATTERN_CHARS = 1024
+export const MAX_GREP_PATTERN_CHARS = 8192
+
 export const readParameters = {
-  path: { type: 'string', required: true, description: 'Platform-native path to one file.' },
-  artifact_offset: { type: 'integer', description: 'Byte offset for reading binary content.' },
-  encoding: { type: 'string', description: 'Optional WHATWG encoding label.' },
-  line_count: { type: 'integer', description: 'Maximum lines to return, from 1 through 2000.' },
-  pages: { type: 'string', description: 'PDF page or inclusive page range, such as "3" or "1-5".' },
-  pdf_mode: { type: 'string', enum: ['auto', 'text', 'image'], description: 'PDF output mode.' },
-  pdf_cursor: { type: 'string', description: 'Opaque continuation cursor returned by a previous PDF read.' },
-  office_cursor: { type: 'string', description: 'Opaque continuation cursor returned by a previous Office read.' },
-  start_line: { type: 'integer', description: 'One-based first line.' },
+  path: { type: 'string', required: true, description: 'Required file path, resolved from the current agent session cwd; normal scope may also allow configured extension roots.' },
+  artifact_offset: { type: 'integer', description: 'Byte offset for a published binary capture artifact.' },
+  encoding: { type: 'string', description: 'Optional WHATWG encoding label; omit for automatic detection.' },
+  line_count: { type: 'integer', description: 'Maximum lines to return, from 1 through 2000; omit to use the output budget.' },
+  pages: { type: 'string', description: 'PDF page or inclusive page range, such as "3" or "1-5"; use instead of line arguments.' },
+  pdf_mode: { type: 'string', enum: ['auto', 'text', 'image'], default: 'auto', description: 'PDF output: auto/text returns Markdown pages; image returns rendered PNG blocks.' },
+  pdf_cursor: { type: 'string', description: 'Opaque PDF cursor returned by a previous read; pass it unchanged to continue.' },
+  office_cursor: { type: 'string', description: 'Opaque Office cursor returned by a previous read; pass it unchanged to continue.' },
+  start_line: { type: 'integer', default: 1, description: 'One-based first line; pass next_start_line from Partial output to continue.' },
 } as const satisfies ParameterSchemaSpec
 
 export const grepParameters = {
-  pattern: { type: 'string', required: true, description: 'Rust regex, or literal text when fixed_strings is true.' },
-  case: { type: 'string', enum: ['smart', 'sensitive', 'insensitive'], description: 'Case-sensitivity policy.' },
-  context_lines: { type: 'integer', description: 'Context lines before and after each match, from 0 through 20.' },
-  encoding: { type: 'string', description: 'Encoding for a single-file search.' },
-  fallback_encoding: { type: 'string', description: 'Fallback encoding for undecodable files in a directory search.' },
-  fixed_strings: { type: 'boolean', description: 'Treat pattern as literal text.' },
-  glob: { type: 'string', description: 'Case-sensitive path filter.' },
-  include_ignored: { type: 'boolean', description: 'Include gitignored paths, except hard exclusions.' },
-  limit: { type: 'integer', description: 'Maximum entries, from 1 through 1000.' },
-  mode: { type: 'string', enum: ['content', 'files', 'count'], description: 'Result projection.' },
-  offset: { type: 'integer', description: 'Zero-based continuation offset.' },
-  path: { type: 'string', description: 'File or directory to search.' },
+  pattern: { type: 'string', required: true, description: 'Required Rust regex, or literal text when fixed_strings=true; 1–8192 Unicode characters.' },
+  case: { type: 'string', enum: ['smart', 'sensitive', 'insensitive'], default: 'smart', description: 'Case policy: smart is sensitive when the pattern contains uppercase.' },
+  context_lines: { type: 'integer', default: 0, description: 'Context lines before and after each match, from 0 through 20.' },
+  encoding: { type: 'string', description: 'Encoding for a single-file search; mutually exclusive with fallback_encoding.' },
+  fallback_encoding: { type: 'string', description: 'Fallback encoding for undecodable files in a directory search; mutually exclusive with encoding.' },
+  fixed_strings: { type: 'boolean', default: false, description: 'Treat pattern as literal text instead of Rust regex.' },
+  glob: {
+    oneOf: [
+      { type: 'string' },
+      { type: 'array', items: { type: 'string' } },
+    ],
+    description: 'Optional case-sensitive path filter or array of up to 32 filters; each is 1–1024 Unicode characters and ! excludes a pattern.',
+  },
+  include_ignored: { type: 'boolean', description: 'Include gitignored paths; omit to use the configured DSH filesystem policy.' },
+  limit: { type: 'integer', default: 200, description: 'Maximum entries, from 1 through 1000.' },
+  mode: { type: 'string', enum: ['content', 'files', 'count'], default: 'content', description: 'Result projection: matching lines, paths, or path:count summaries.' },
+  offset: { type: 'integer', default: 0, description: 'Zero-based continuation offset; pass next_offset from Partial output.' },
+  path: { type: 'string', default: '.', description: 'File or directory, resolved from the current agent session cwd; normal scope may also allow configured extension roots.' },
+  type: { type: 'string', description: 'Optional file type filter, for example rust, python, js, ts, go, java, or markdown.' },
 } as const satisfies ParameterSchemaSpec
 
 export const globParameters = {
-  pattern: { type: 'string', required: true, description: 'Case-sensitive glob pattern.' },
-  include_ignored: { type: 'boolean', description: 'Include gitignored paths, except hard exclusions.' },
-  limit: { type: 'integer', description: 'Maximum paths, from 1 through 1000.' },
-  offset: { type: 'integer', description: 'Zero-based continuation offset.' },
-  path: { type: 'string', description: 'Directory to traverse.' },
-  type: { type: 'string', enum: ['file', 'directory', 'any'], description: 'Filesystem entry kind.' },
+  pattern: {
+    oneOf: [
+      { type: 'string' },
+      { type: 'array', items: { type: 'string' } },
+    ],
+    required: true,
+    description: 'Required case-sensitive glob pattern or array of up to 32 patterns; each is 1–1024 Unicode characters and ! excludes a pattern.',
+  },
+  include_ignored: { type: 'boolean', description: 'Include gitignored paths; omit to use the configured DSH filesystem policy.' },
+  limit: { type: 'integer', default: 200, description: 'Maximum paths, from 1 through 1000.' },
+  offset: { type: 'integer', default: 0, description: 'Zero-based continuation offset; pass next_offset from Partial output.' },
+  path: { type: 'string', default: '.', description: 'Directory to traverse, resolved from the current agent session cwd; normal scope may also allow configured extension roots.' },
+  type: { type: 'string', enum: ['file', 'directory', 'any'], default: 'file', description: 'Filesystem entry kind: file, directory, or any.' },
 } as const satisfies ParameterSchemaSpec
 
 export const runProgramParameters = {
-  program: { type: 'string', required: true, description: 'Program name or executable path.' },
-  args: { type: 'array', items: { type: 'string' }, description: 'Literal argv elements.' },
-  cwd: { type: 'string', description: 'Working directory.' },
+  program: { type: 'string', required: true, description: 'Required executable name or path; runs with literal argv and no shell.' },
+  args: { type: 'array', items: { type: 'string' }, default: [], description: 'Literal argv elements; do not add shell quoting.' },
+  cwd: { type: 'string', default: '.', description: 'Working directory, resolved from the current agent session cwd; omit for the session cwd.' },
   env: {
     type: 'object',
     additionalProperties: true,
-    description: 'String-valued environment overrides.',
+    default: {},
+    description: 'String-valued environment overrides; omitted variables are inherited.' ,
   },
-  unset_env: { type: 'array', items: { type: 'string' }, description: 'Inherited environment variables to remove.' },
-  stdin: { oneOf: [{ type: 'string' }, { type: 'null' }], description: 'Optional UTF-8 standard input.' },
-  timeout_ms: { type: 'integer', description: 'Positive execution timeout in milliseconds.' },
+  unset_env: { type: 'array', items: { type: 'string' }, default: [], description: 'Inherited environment variables to remove.' },
+  stdin: { oneOf: [{ type: 'string' }, { type: 'null' }], description: 'Optional UTF-8 stdin, up to 1 MiB; omission or null closes stdin.' },
+  timeout_ms: { type: 'integer', description: 'Positive execution timeout in milliseconds; omit for the configured DSH default.' },
 } as const satisfies ParameterSchemaSpec
 
 export const bashParameters = {
-  command: { type: 'string', required: true, description: 'POSIX bash command line.' },
-  description: { type: 'string', required: true, description: 'Short description of the command purpose.' },
-  timeoutMs: { type: 'number', description: 'Positive runtime timeout in milliseconds; background values may only shorten the configured maximum.' },
-  workdir: { type: 'string', description: 'Working directory; relative paths resolve against the workspace.' },
-  run_in_background: { type: 'boolean', description: 'Run as a background job.' },
-  msys_argument_conversion: { type: 'string', enum: ['default', 'disabled'], description: 'Windows only: Git Bash argument conversion mode.' },
+  command: { type: 'string', required: true, description: 'Required non-interactive POSIX Bash command; use shell syntax here, not PowerShell.' },
+  description: { type: 'string', required: true, description: 'Required short purpose shown to the user; describe the side effect in 5–10 words, not the command syntax.' },
+  timeoutMs: { type: 'integer', description: 'Positive integer timeout in milliseconds; background values may only shorten the configured maximum.' },
+  workdir: { type: 'string', default: '.', description: 'Working directory, resolved from the current agent session cwd; omit for the session cwd.' },
+  run_in_background: { type: 'boolean', default: false, description: 'Run as a managed background job; poll bash_status with the returned job ID.' },
+  msys_argument_conversion: { type: 'string', enum: ['default', 'disabled'], default: 'default', description: 'Windows only: Git Bash argument conversion mode.' },
 } as const satisfies ParameterSchemaSpec
 
 export const bashStatusParameters = {
-  job_id: { type: 'string', required: true, description: 'Background job ID returned by bash.' },
+  job_id: { type: 'string', required: true, description: "Required job ID returned by bash for this agent with run_in_background=true; repeat until terminal status." },
 } as const satisfies ParameterSchemaSpec
 
 export const escalationParameters = {
@@ -128,6 +147,27 @@ const sandboxOutputSchema = {
   },
 } as const satisfies ValueSchemaSpec
 
+const failureOutputSchema = {
+  type: 'object',
+  additionalProperties: true,
+  properties: {
+    code: { type: 'string', required: true },
+    message: { type: 'string', required: true },
+    retryable: { type: 'boolean', required: true },
+  },
+} as const satisfies ValueSchemaSpec
+
+const artifactOutputSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    path: { type: 'string', required: true },
+    bytes: { type: 'integer', required: true },
+    complete: { type: 'boolean', required: true },
+    stream: { type: 'string', required: true },
+  },
+} as const satisfies ValueSchemaSpec
+
 const processStreamSchema = {
   type: 'object',
   additionalProperties: false,
@@ -158,6 +198,8 @@ export const processOutputSchema = {
     exitCode: { oneOf: [{ type: 'string' }, { type: 'null' }], required: true },
     stdout: { ...processStreamSchema, required: true },
     stderr: { ...processStreamSchema, required: true },
+    limitExceeded: { type: 'boolean', required: true },
+    outcomeUncertain: { type: 'boolean', required: true },
     sandbox: sandboxOutputSchema,
   },
 } as const satisfies ValueSchemaSpec
@@ -185,6 +227,22 @@ export const bashStatusOutputSchema = {
     status: { type: 'string', required: true },
     label: { type: 'string', required: true },
     detail: { type: 'string' },
+    exitCode: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+    failure: failureOutputSchema,
+    artifacts: { type: 'array', items: artifactOutputSchema },
+    limitExceeded: { type: 'boolean' },
+    sandbox: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        mode: { type: 'string', required: true },
+        enforcement: { type: 'string' },
+        denied: { type: 'boolean', required: true },
+        runnerFailed: { type: 'boolean', required: true },
+      },
+    },
+    denied: { type: 'boolean' },
+    runnerFailed: { type: 'boolean' },
   },
 } as const satisfies ValueSchemaSpec
 
@@ -193,8 +251,55 @@ export function assertExactKeys(args: Record<string, unknown>, allowed: readonly
   if (unknown.length > 0) throw new HarnessError(`invalid arguments: unknown properties: ${unknown.join(', ')}`, 'INVALID_ARGS')
 }
 
-export function assertNonEmpty(value: string, name: string): void {
+export function assertNonEmpty(value: unknown, name: string): asserts value is string {
+  if (typeof value !== 'string') throw new HarnessError(`invalid arguments: ${name} must be a string`, 'INVALID_ARGS')
   if (value.trim().length === 0) throw new HarnessError(`invalid arguments: ${name} must be non-empty`, 'INVALID_ARGS')
+}
+
+export function unicodeLength(value: string): number {
+  return Array.from(value).length
+}
+
+export function assertPattern(
+  value: unknown,
+  name: string,
+  maximum: number,
+  rejectBareNegation = false,
+): asserts value is string {
+  assertNonEmpty(value, name)
+  if (value.includes('\0')) throw new HarnessError(`invalid arguments: ${name} must not contain NUL`, 'INVALID_ARGS')
+  if (rejectBareNegation && value === '!') throw new HarnessError(`invalid arguments: ${name} must contain a pattern after !`, 'INVALID_ARGS')
+  if (unicodeLength(value) > maximum) {
+    throw new HarnessError(`invalid arguments: ${name} must contain at most ${maximum} Unicode characters`, 'INVALID_ARGS')
+  }
+}
+
+export function assertOptionalString(value: unknown, name: string): asserts value is string | undefined {
+  if (value !== undefined && typeof value !== 'string') {
+    throw new HarnessError(`invalid arguments: ${name} must be a string`, 'INVALID_ARGS')
+  }
+}
+
+export function assertStringArray(value: unknown, name: string): asserts value is readonly string[] | undefined {
+  if (value === undefined) return
+  if (!Array.isArray(value)) throw new HarnessError(`invalid arguments: ${name} must be an array`, 'INVALID_ARGS')
+  for (const [index, entry] of value.entries()) {
+    if (typeof entry !== 'string') {
+      throw new HarnessError(`invalid arguments: ${name}[${index}] must be a string`, 'INVALID_ARGS')
+    }
+  }
+}
+
+export function assertBoolean(value: unknown, name: string): asserts value is boolean | undefined {
+  if (value !== undefined && typeof value !== 'boolean') {
+    throw new HarnessError(`invalid arguments: ${name} must be a boolean`, 'INVALID_ARGS')
+  }
+}
+
+export function assertEnum<T extends string>(value: unknown, name: string, values: readonly T[]): asserts value is T | undefined {
+  if (value !== undefined && (typeof value !== 'string' || !values.includes(value as T))) {
+    throw new HarnessError(`invalid arguments: ${name} must be one of ${values.join(', ')}`, 'INVALID_ARGS')
+  }
 }
 
 export function assertIntegerRange(value: number | undefined, name: string, minimum: number, maximum?: number): void {
@@ -210,8 +315,11 @@ export function assertPositive(value: number | undefined, name: string): void {
   }
 }
 
-export function assertStringRecord(value: Record<string, unknown> | undefined, name: string): void {
+export function assertStringRecord(value: unknown, name: string): asserts value is Record<string, string> | undefined {
   if (value === undefined) return
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new HarnessError(`invalid arguments: ${name} must be an object`, 'INVALID_ARGS')
+  }
   for (const [key, entry] of Object.entries(value)) {
     if (typeof entry !== 'string') throw new HarnessError(`invalid arguments: ${name}.${key} must be a string`, 'INVALID_ARGS')
   }

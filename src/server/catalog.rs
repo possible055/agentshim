@@ -27,12 +27,12 @@ pub(super) fn tool_catalog(
 fn read_tool(read_scope: ReadScope) -> Tool {
     let (description, path_description) = match read_scope {
         ReadScope::Normal => (
-            "Read one file as numbered lines. Relative paths resolve against the repository root. If output is truncated, a trailing Partial: next_start_line=N indicates the start line for the next call. PDFs return page Markdown or rendered images; supported Office documents return Markdown and an office_cursor when more remains.",
-            "Platform-native path to the file. Relative paths resolve against the repository root.",
+            "Read one file as numbered lines. The required path is resolved from the repository root or an approved extension root in normal scope; paths outside configured roots are rejected. For PDFs, use pages and pdf_mode; for Office files, follow office_cursor. If output is truncated, pass the trailing Partial: next_start_line=N as start_line.",
+            "Path to the file. Relative paths resolve against the repository root; supported absolute paths must be inside a configured root.",
         ),
         ReadScope::Unrestricted => (
-            "Read one file as numbered lines. Relative paths resolve against the repository root; absolute paths may reach supported locations outside it. If output is truncated, a trailing Partial: next_start_line=N indicates the start line for the next call. PDFs return page Markdown or rendered images; supported Office documents return Markdown and an office_cursor when more remains.",
-            "Platform-native path to the file. Relative paths resolve against the repository root; absolute paths may reach supported local filesystems.",
+            "Read one file as numbered lines. The required path is resolved from the repository root; absolute paths are supported in unrestricted scope. For PDFs, use pages and pdf_mode; for Office files, follow office_cursor. If output is truncated, pass the trailing Partial: next_start_line=N as start_line.",
+            "Path to the file. Relative paths resolve against the repository root; absolute paths are supported.",
         ),
     };
     Tool::new(
@@ -55,7 +55,7 @@ fn read_tool(read_scope: ReadScope) -> Tool {
                 "pages": {
                     "type": "string",
                     "pattern": "^[1-9][0-9]*(-[1-9][0-9]*)?$",
-                    "description": "PDF only: 1-based page number or continuous page range, such as \"3\" or \"1-5\"."
+                    "description": "PDF only: 1-based page number or inclusive range, such as \"3\" or \"1-5\". Use this instead of line arguments."
                 },
                 "path": {
                     "type": "string",
@@ -66,17 +66,17 @@ fn read_tool(read_scope: ReadScope) -> Tool {
                     "type": "string",
                     "enum": ["auto", "text", "image"],
                     "default": "auto",
-                    "description": "PDF only: rendering mode (\"auto\", \"text\", or \"image\"). \"auto\" and \"text\" return page Markdown; \"image\" renders PNG blocks."
+                    "description": "PDF only: \"auto\" or \"text\" returns page Markdown; \"image\" returns PNG blocks. Omit for auto."
                 },
                 "pdf_cursor": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "PDF only: opaque continuation token returned from a previous truncated read."
+                    "description": "PDF only: opaque cursor returned by a previous PDF read; pass it unchanged to continue."
                 },
                 "office_cursor": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Office only: opaque continuation token returned from a previous truncated read."
+                    "description": "Office only: opaque cursor returned by a previous Office read; pass it unchanged to continue."
                 },
                 "start_line": {
                     "type": "integer",
@@ -95,14 +95,14 @@ fn read_tool(read_scope: ReadScope) -> Tool {
 fn grep_tool(read_scope: ReadScope) -> Tool {
     let (description, path_description, glob_description) = match read_scope {
         ReadScope::Normal => (
-            "Search file contents using Rust regex or fixed strings. If output is truncated, a trailing Partial: next_offset=N indicates a best-effort continuation. Results are not sorted; narrow your pattern or path for precise pagination.",
-            "Optional platform-native file or directory to search. Relative paths resolve against the repository root.",
-            "Optional glob pattern or array of patterns (supports '!' negation) relative to the search path. Patterns without '/' match file basenames recursively.",
+            "Search files under the configured normal read roots with Rust regex; set fixed_strings=true for literal text. The required pattern is bounded to 8,192 Unicode characters. Use glob/type/mode to narrow results, then pass Partial: next_offset=N as a best-effort offset. Results are not sorted.",
+            "Optional file or directory to search; omit to search the repository root. Relative paths resolve against the repository root; supported absolute paths must be inside a configured root.",
+            "Optional case-sensitive glob filter or array (up to 32 patterns, each up to 1,024 Unicode characters); prefix a pattern with ! to exclude it. Patterns without '/' match basenames recursively.",
         ),
         ReadScope::Unrestricted => (
-            "Search file contents using Rust regex or fixed strings. Relative paths resolve against the repository root; absolute paths may reach supported locations outside it. If output is truncated, a trailing Partial: next_offset=N indicates a best-effort continuation. Results are not sorted; narrow your pattern or path for precise pagination.",
-            "Optional platform-native file or directory to search. Relative paths resolve against the repository root; absolute paths may reach supported local filesystems.",
-            "Optional glob pattern or array of patterns (supports '!' negation) relative to the search path. Patterns without '/' match file basenames recursively.",
+            "Search files with Rust regex; set fixed_strings=true for literal text. The required pattern is bounded to 8,192 Unicode characters. Relative paths resolve from the repository root and absolute paths are supported in unrestricted scope. Use glob/type/mode to narrow results, then pass Partial: next_offset=N as a best-effort offset. Results are not sorted.",
+            "Optional file or directory to search; omit to search the repository root. Relative paths resolve against the repository root; absolute paths are supported.",
+            "Optional case-sensitive glob filter or array (up to 32 patterns, each up to 1,024 Unicode characters); prefix a pattern with ! to exclude it. Patterns without '/' match basenames recursively.",
         ),
     };
     Tool::new(
@@ -127,24 +127,21 @@ fn grep_tool(read_scope: ReadScope) -> Tool {
                 },
                 "encoding": {
                     "type": "string",
-                    "description": "Single-file search only: WHATWG encoding label (e.g. 'big5', 'gbk') for decoding the target file."
+                    "description": "Single-file search only: WHATWG encoding label (e.g. 'big5', 'gbk') for decoding the target file; mutually exclusive with fallback_encoding."
                 },
                 "fallback_encoding": {
                     "type": "string",
-                    "description": "Directory search only: fallback WHATWG encoding for files whose encoding cannot be determined automatically."
+                    "description": "Directory search only: fallback WHATWG encoding for files whose encoding cannot be determined automatically; mutually exclusive with encoding."
                 },
                 "fixed_strings": {
                     "type": "boolean",
                     "default": false,
                     "description": "Treat pattern as a literal string instead of a regex."
                 },
-                "glob": {
-                    "type": "string",
-                    "description": glob_description
-                },
+                "glob": glob_patterns_schema(glob_description),
                 "include_ignored": {
                     "type": "boolean",
-                    "description": "Set true to include files ignored by .gitignore (system directories like .git remain excluded)."
+                    "description": "Set true to include ignored files; omit to use the server ignore policy. Hard exclusions such as .git remain excluded."
                 },
                 "limit": {
                     "type": "integer",
@@ -171,7 +168,9 @@ fn grep_tool(read_scope: ReadScope) -> Tool {
                 },
                 "pattern": {
                     "type": "string",
-                    "description": "Search pattern (Rust regex by default, or literal string when fixed_strings is true)."
+                    "minLength": 1,
+                    "maxLength": 8192,
+                    "description": "Search pattern (Rust regex syntax without lookaround/backreferences by default, or literal string when fixed_strings is true)."
                 },
                 "type": {
                     "type": "string",
@@ -188,13 +187,13 @@ fn grep_tool(read_scope: ReadScope) -> Tool {
 fn glob_tool(read_scope: ReadScope) -> Tool {
     let (description, path_description, pattern_description) = match read_scope {
         ReadScope::Normal => (
-            "Find paths under the repository root using a glob pattern. Returns files by default; use type to find directories or any entry. If output is truncated, a trailing Partial: next_offset=N indicates a best-effort continuation. Results are not sorted; narrow your pattern or path for precise pagination.",
-            "Platform-native directory to traverse. Relative paths resolve against the repository root.",
+            "Find paths under the configured normal read roots with a case-sensitive glob. The required pattern accepts a string or up to 32 patterns (each up to 1,024 Unicode characters); prefix a pattern with ! to exclude it. Files are returned by default. Pass Partial: next_offset=N as a best-effort offset to continue; results are not sorted.",
+            "Directory path to traverse. Relative paths resolve against the repository root; supported absolute paths must be inside a configured root (defaults to '.').",
             "Glob pattern or array of patterns (supports '!' negation) relative to the search path. Patterns without '/' match file basenames recursively.",
         ),
         ReadScope::Unrestricted => (
-            "Find local filesystem paths using a glob pattern. Returns files by default; use type to find directories or any entry. Relative paths resolve against the repository root; absolute paths may reach supported locations outside it. If output is truncated, a trailing Partial: next_offset=N indicates a best-effort continuation. Results are not sorted; narrow your pattern or path for precise pagination.",
-            "Platform-native directory to traverse. Relative paths resolve against the repository root; absolute paths may reach supported local filesystems.",
+            "Find filesystem paths with a case-sensitive glob. The required pattern accepts a string or up to 32 patterns (each up to 1,024 Unicode characters); prefix a pattern with ! to exclude it. Relative paths resolve from the repository root and absolute paths are supported in unrestricted scope. Pass Partial: next_offset=N as a best-effort offset to continue; results are not sorted.",
+            "Directory path to traverse. Relative paths resolve against the repository root; absolute paths are supported (defaults to '.').",
             "Glob pattern or array of patterns (supports '!' negation) relative to the search path. Patterns without '/' match file basenames recursively.",
         ),
     };
@@ -207,7 +206,7 @@ fn glob_tool(read_scope: ReadScope) -> Tool {
             "properties": {
                 "include_ignored": {
                     "type": "boolean",
-                    "description": "Set true to include paths ignored by .gitignore (system directories like .git remain excluded)."
+                    "description": "Set true to include ignored paths; omit to use the server ignore policy. Hard exclusions such as .git remain excluded."
                 },
                 "limit": {
                     "type": "integer",
@@ -227,11 +226,7 @@ fn glob_tool(read_scope: ReadScope) -> Tool {
                     "default": ".",
                     "description": path_description
                 },
-                "pattern": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": pattern_description
-                },
+                "pattern": glob_patterns_schema(pattern_description),
                 "type": {
                     "type": "string",
                     "enum": ["file", "directory", "any"],
@@ -249,7 +244,7 @@ fn glob_tool(read_scope: ReadScope) -> Tool {
 fn run_program_tool(max: u64, default: u64) -> Tool {
     Tool::new(
         "run_program",
-        "Run a local executable directly with literal arguments without a shell. Arguments are passed literally without shell expansion or quoting. Use bash instead if pipelines, redirection, or shell composition are required.",
+        "Run one local executable with literal argv and no shell. The required program and optional args run from the repository root by default; cwd changes the working directory. Environment overrides and stdin are explicit. A nonzero exit is returned with its exit status and output. MCP does not sandbox spawned processes. Use bash for pipelines, redirection, or shell composition.",
         schema(json!({
             "type": "object",
             "additionalProperties": false,
@@ -262,13 +257,14 @@ fn run_program_tool(max: u64, default: u64) -> Tool {
                 },
                 "cwd": {
                     "type": "string",
-                    "description": "Optional working directory (relative paths resolve against repository root)."
+                    "default": ".",
+                    "description": "Working directory; relative paths resolve from the repository root. Omit to use the repository root."
                 },
                 "env": {
                     "type": "object",
                     "additionalProperties": { "type": "string" },
                     "default": {},
-                    "description": "Environment variables to override."
+                    "description": "String-valued environment overrides; omitted variables are inherited."
                 },
                 "program": {
                     "type": "string",
@@ -278,14 +274,14 @@ fn run_program_tool(max: u64, default: u64) -> Tool {
                 "stdin": {
                     "type": ["string", "null"],
                     "maxLength": 1_048_576,
-                    "description": "Optional UTF-8 standard input string."
+                    "description": "Optional UTF-8 stdin, up to 1 MiB; null or omission closes stdin."
                 },
                 "timeout_ms": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": max,
                     "default": default,
-                    "description": "Execution timeout in milliseconds."
+                    "description": "Positive execution timeout in milliseconds; omission uses the server default."
                 },
                 "unset_env": {
                     "type": "array",
@@ -314,7 +310,7 @@ fn run_program_tool(max: u64, default: u64) -> Tool {
 fn bash_tool(max: u64, default: u64, background_max: u64) -> Tool {
     Tool::new(
         "bash",
-        "Run a POSIX bash command line non-interactively and return merged stdout/stderr with the exit code. Write POSIX bash (never PowerShell) on all platforms; prefer POSIX sh syntax so the command also runs on the BusyBox-w32 ash fallback backend used on Windows when GNU Bash is absent. For long-running commands, set detach=true with a log_path to run in the background and monitor via bash_status.",
+        "Run a non-interactive POSIX Bash command and return merged stdout/stderr plus its exit status. Use portable POSIX sh syntax, not PowerShell. Run in the repository root by default; use detach=true with log_path for long work, then poll bash_status. Foreground nonzero exit is a completed command result, not a tool-call error; use action=terminate with a job_id to stop a detached tree. MCP does not sandbox spawned processes.",
         schema(json!({
             "type": "object",
             "oneOf": [
@@ -329,7 +325,8 @@ fn bash_tool(max: u64, default: u64, background_max: u64) -> Tool {
                 },
                 "cwd": {
                     "type": "string",
-                    "description": "Optional working directory (relative paths resolve against repository root)."
+                    "default": ".",
+                    "description": "Working directory; relative paths resolve from the repository root. Omit to use the repository root."
                 },
                 "detach": {
                     "type": "boolean",
@@ -348,7 +345,7 @@ fn bash_tool(max: u64, default: u64, background_max: u64) -> Tool {
                     "minimum": 1,
                     "maximum": max,
                     "default": default,
-                    "description": "Foreground execution timeout in milliseconds."
+                    "description": "Positive foreground timeout in milliseconds; omission uses the server default."
                 }
               },
               "required": ["command"]
@@ -364,7 +361,8 @@ fn bash_tool(max: u64, default: u64, background_max: u64) -> Tool {
                 },
                 "cwd": {
                   "type": "string",
-                  "description": "Optional working directory (relative paths resolve against repository root)."
+                  "default": ".",
+                  "description": "Working directory; relative paths resolve from the repository root. Omit to use the repository root."
                 },
                 "detach": {
                   "type": "boolean",
@@ -372,8 +370,9 @@ fn bash_tool(max: u64, default: u64, background_max: u64) -> Tool {
                   "description": "Run command as an instance-bound managed background job."
                 },
                 "log_path": {
-                  "type": "string",
-                  "description": "Output log file path for detached execution."
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Required log path for detached output; it must be a repository-local path. Read it with read after completion."
                 },
                 "msys_argument_conversion": {
                   "type": "string",
@@ -386,7 +385,7 @@ fn bash_tool(max: u64, default: u64, background_max: u64) -> Tool {
                   "minimum": 1,
                   "maximum": background_max,
                   "default": background_max,
-                  "description": "Maximum background runtime after the process tree is spawned."
+                  "description": "Maximum background runtime after spawn; omission uses the configured maximum and an explicit value may only shorten it."
                 }
               },
               "required": ["command", "detach", "log_path"]
@@ -424,7 +423,7 @@ fn bash_tool(max: u64, default: u64, background_max: u64) -> Tool {
 fn bash_status_tool() -> Tool {
     Tool::new(
         "bash_status",
-        "Get the status and latest log output of a detached background bash job.",
+        "Get lifecycle status and bounded log output for the job_id returned by bash(detach=true). Repeat while running, status_unknown, finalizing, or terminating until completed, terminated, timed_out, log_quota_exceeded, or outcome_uncertain; use cursor for incremental output and read(log_path) for the full repository log.",
         schema(json!({
             "type": "object",
             "additionalProperties": false,
@@ -457,7 +456,7 @@ fn bash_status_tool() -> Tool {
                     "minimum": 0,
                     "maximum": 1000,
                     "default": 0,
-                    "description": "Maximum snapshot wait only; never changes the job deadline."
+                    "description": "Optional wait duration in milliseconds for new output or status change before returning (long-polling, 0-1000)."
                 }
             },
             "required": ["job_id"]
@@ -479,4 +478,31 @@ fn read_only_annotations() -> ToolAnnotations {
         .read_only(true)
         .destructive(false)
         .open_world(false)
+}
+
+fn glob_patterns_schema(description: &'static str) -> Value {
+    json!({
+        "anyOf": [
+            {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024,
+                "not": { "const": "!" },
+                "description": "Single glob pattern relative to the search path. Patterns without '/' match file basenames recursively."
+            },
+            {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024,
+                    "not": { "const": "!" }
+                },
+                "minItems": 1,
+                "maxItems": 32,
+                "description": "Array of glob patterns (supports '!' negation) relative to the search path."
+            }
+        ],
+        "description": description
+    })
 }

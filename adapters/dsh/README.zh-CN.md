@@ -50,20 +50,21 @@ dsh --profile headless --dump-config
 
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
-| `root` | `process.cwd()` | 规范的本地根目录，作为精确匹配智能体工作目录（agent-cwd）的目标。 |
+| `root` | `process.cwd()` | 仅用于插件激活与配置上下文；每个已安装的 agent process 使用该 agent session 的 canonical cwd；没有 session cwd 的 agent 保持不变。 |
 | `env` | `{}` | 叠加在 DSH 凭据清洗（credential-scrubbed）父环境变量之上的子环境变量。在此设定的 `AGENTSHIM_BASH` 也会在加载时驱动 Bash 探测。接受 GNU Bash 可执行文件（Git Bash `bash.exe`）、BusyBox-w32 派发器二进制文件（`busybox64u.exe`）或按 applet 命名的 BusyBox 副本（`sh.exe`/`ash.exe`/`bash.exe`）；shell 类型与调用形式由探针自动判定。`AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX` 在激活合并后解析一次，因此配置会覆盖父环境中的值。 |
 | `toolCallTimeoutMs` | `600000` | DSH 工具超时阈值；低于 600000 的值会被拒绝，进程超时上限为 590000 毫秒。 |
+| `readScope` | `unrestricted` | 只有显式设置 `normal` 才限制 `read`、`grep` 和 `glob`；它不配置进程 confinement。 |
 | `captureRoot` | 平台数据目录 | 私有持久化进程产物根目录；若显式指定则必须为绝对路径。 |
 | `captureMaxBytes` | `67108864` | 每次进程调用的原始字节上限；范围为 1 MiB 至 1 GiB。 |
 | `captureCleanup` | `never` | 设置为 `never` 或在 `session-end` 时清理当前 Engine 的会话目录。 |
 
-本插件不提供单独的读取范围策略。当原生引擎支持相关路径时，`read`、`grep` 和 `glob` 可以访问工作区之外的路径。DSH 沙箱模式用于约束进程调用产生的写入副作用；它不会限制读取，也不会动态改变只读工具的访问范围。
+`readScope` 默认为 `unrestricted`，显式设置 `normal` 才限制 `read`、`grep` 和 `glob`。进程 confinement 不由本插件实现：若组合了官方 DSH `ctx.sandbox`／`ctx.sandboxPolicy`，插件只委托 exact argv；若服务缺失则保持原有 unconfined 行为。
 
 ## 进程与后台行为
 
 在 DSH 沙箱策略封装确切的 argv 之前，每个进程调用都已完成预先准备。`read-only` 和 `workspace-write` 调用使用 `ctx.sandbox.confine()`；经批准的 `danger-full-access` 调用保持单次生效。沙箱隔离失败绝不会回退至未隔离状态重试。
 
-`run_in_background: true` 会注册一个由 DSH 管理的后台任务。其公开的 `timeoutMs` 从成功创建子进程起算；若省略则使用 `AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX`（默认为 1800 秒，有效范围 600–14400），显式指定的值只能缩短此超时。超时会导致原生 `timed_out` 结果并标记 DSH 任务失败。可配合 `job_output`、`job_list` 和 `job_kill` 使用；`bash_status` 与 `jobs.wait` 仅用于等待或观测，绝不修改超时截止时间。插件卸载与所有者销毁采用竞争机制，安全等待进程树、管道、产物发布与原生线程全部完成。
+`run_in_background: true` 会注册一个由 DSH 管理的后台任务。其公开的 `timeoutMs` 从成功创建子进程起算；若省略则使用 `AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX`（默认为 1800 秒，有效范围 600–14400），显式指定的值只能缩短此超时。超时会导致原生 `timed_out` 结果并标记 DSH 任务失败。原生结果 settle 后，`bash_status` 会保留 DSH snapshot，并额外暴露 exit code、failure、artifacts、`limitExceeded`、官方 sandbox attribution 与 denial/runner-failure flags。标准生命周期仍使用 `job_output`、`job_list` 和 `job_kill`；插件卸载与所有者销毁采用竞争机制，安全等待进程树、管道、产物发布与原生线程全部完成。
 
 ## PDF 图像与产物
 

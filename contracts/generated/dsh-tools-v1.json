@@ -1,0 +1,365 @@
+{
+  "$id": "https://agentshim.dev/contracts/generated/dsh-tools-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "descriptions": {
+    "bash": "Run non-interactive POSIX Bash and return merged output plus exit status. Process access is independent from read scope. MCP long work uses detach=true with a repository-local log_path, then bash_status; DSH long work uses run_in_background=true, requires a short description, then bash_status.",
+    "bash_status": "Inspect the lifecycle and final outcome of the job ID returned by a background bash call; MCP returns bounded log pages while DSH returns the official job snapshot. Repeat until terminal status.",
+    "glob": "Find files or directories with a bounded case-sensitive glob. Use an array for include/exclude patterns and continue Partial: next_offset=N with offset. Read scope defaults to unrestricted; normal scope permits the session root and approved extension roots.",
+    "grep": "Search files with Rust regex, or literal text with fixed_strings=true. Narrow with glob/type/mode and continue Partial: next_offset=N with offset. Read scope defaults to unrestricted; normal scope permits the session root and approved extension roots.",
+    "read": "Read one file as numbered lines. Use PDF pages/pdf_mode or Office cursors for structured documents; pass Partial: next_start_line=N as start_line to continue. Read scope defaults to unrestricted; normal scope permits the session root and approved extension roots.",
+    "run_program": "Run one executable with literal argv and no shell. A nonzero exit is returned with its status and output; process access is independent from read scope. Use bash for pipelines, redirection, or shell composition."
+  },
+  "dialect": "dsh",
+  "outputs": {
+    "bash_status": {
+      "artifacts": {
+        "type": "array"
+      },
+      "denied": {
+        "type": "boolean"
+      },
+      "detail": {
+        "type": "string"
+      },
+      "exitCode": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "failure": {
+        "type": "object"
+      },
+      "label": {
+        "required": true,
+        "type": "string"
+      },
+      "limitExceeded": {
+        "type": "boolean"
+      },
+      "runnerFailed": {
+        "type": "boolean"
+      },
+      "sandbox": {
+        "type": "object"
+      },
+      "status": {
+        "required": true,
+        "type": "string"
+      }
+    },
+    "process": {
+      "exitCode": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "required": true
+      },
+      "limitExceeded": {
+        "required": true,
+        "type": "boolean"
+      },
+      "outcomeUncertain": {
+        "required": true,
+        "type": "boolean"
+      },
+      "sandbox": {
+        "type": "object"
+      },
+      "stderr": {
+        "required": true,
+        "type": "object"
+      },
+      "stdout": {
+        "required": true,
+        "type": "object"
+      },
+      "text": {
+        "required": true,
+        "type": "string"
+      }
+    }
+  },
+  "parameters": {
+    "bash": {
+      "command": {
+        "minLength": 1,
+        "required": true,
+        "type": "string"
+      },
+      "description": {
+        "minLength": 1,
+        "required": true,
+        "type": "string"
+      },
+      "msys_argument_conversion": {
+        "default": "default",
+        "enum": [
+          "default",
+          "disabled"
+        ],
+        "type": "string"
+      },
+      "run_in_background": {
+        "default": false,
+        "type": "boolean"
+      },
+      "timeoutMs": {
+        "minimum": 1,
+        "type": "integer"
+      },
+      "workdir": {
+        "type": "string"
+      }
+    },
+    "bash_status": {
+      "job_id": {
+        "required": true,
+        "type": "string"
+      }
+    },
+    "glob": {
+      "include_ignored": {
+        "type": "boolean"
+      },
+      "limit": {
+        "default": 200,
+        "maximum": 1000,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "offset": {
+        "default": 0,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "path": {
+        "default": ".",
+        "type": "string"
+      },
+      "pattern": {
+        "oneOf": [
+          {
+            "maxLength": 1024,
+            "minLength": 1,
+            "not": {
+              "const": "!"
+            },
+            "type": "string"
+          },
+          {
+            "items": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "not": {
+                "const": "!"
+              },
+              "type": "string"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "type": "array"
+          }
+        ],
+        "required": true
+      },
+      "type": {
+        "default": "file",
+        "enum": [
+          "file",
+          "directory",
+          "any"
+        ],
+        "type": "string"
+      }
+    },
+    "grep": {
+      "case": {
+        "default": "smart",
+        "enum": [
+          "smart",
+          "sensitive",
+          "insensitive"
+        ],
+        "type": "string"
+      },
+      "context_lines": {
+        "default": 0,
+        "maximum": 20,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "encoding": {
+        "type": "string"
+      },
+      "fallback_encoding": {
+        "type": "string"
+      },
+      "fixed_strings": {
+        "default": false,
+        "type": "boolean"
+      },
+      "glob": {
+        "oneOf": [
+          {
+            "maxLength": 1024,
+            "minLength": 1,
+            "not": {
+              "const": "!"
+            },
+            "type": "string"
+          },
+          {
+            "items": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "not": {
+                "const": "!"
+              },
+              "type": "string"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "type": "array"
+          }
+        ]
+      },
+      "include_ignored": {
+        "type": "boolean"
+      },
+      "limit": {
+        "default": 200,
+        "maximum": 1000,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "mode": {
+        "default": "content",
+        "enum": [
+          "content",
+          "files",
+          "count"
+        ],
+        "type": "string"
+      },
+      "offset": {
+        "default": 0,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "path": {
+        "type": "string"
+      },
+      "pattern": {
+        "maxLength": 8192,
+        "minLength": 1,
+        "required": true,
+        "type": "string"
+      },
+      "type": {
+        "type": "string"
+      }
+    },
+    "read": {
+      "artifact_offset": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "encoding": {
+        "type": "string"
+      },
+      "line_count": {
+        "maximum": 2000,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "office_cursor": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "pages": {
+        "type": "string"
+      },
+      "path": {
+        "minLength": 1,
+        "required": true,
+        "type": "string"
+      },
+      "pdf_cursor": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "pdf_mode": {
+        "default": "auto",
+        "enum": [
+          "auto",
+          "text",
+          "image"
+        ],
+        "type": "string"
+      },
+      "start_line": {
+        "default": 1,
+        "minimum": 1,
+        "type": "integer"
+      }
+    },
+    "run_program": {
+      "args": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "cwd": {
+        "default": ".",
+        "type": "string"
+      },
+      "env": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "default": {},
+        "type": "object"
+      },
+      "program": {
+        "minLength": 1,
+        "required": true,
+        "type": "string"
+      },
+      "stdin": {
+        "oneOf": [
+          {
+            "maxLength": 1048576,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "timeout_ms": {
+        "minimum": 1,
+        "type": "integer"
+      },
+      "unset_env": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      }
+    }
+  },
+  "version": 1
+}

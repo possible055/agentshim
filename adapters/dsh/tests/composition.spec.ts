@@ -126,12 +126,17 @@ describe('DSH native contracts', () => {
     expect(ctx.jobs.read(JobId(value.jobId), agent).text).toBe('background')
 
     const status = await executeTool(ctx, agent, 'bash_status', { job_id: value.jobId })
-    expect((status as unknown as { value: unknown }).value).toEqual({
+    expect((status as unknown as { value: unknown }).value).toMatchObject({
       kind: 'status',
       jobId: 'bash-1',
       status: 'completed',
       label: 'printf background',
       detail: 'exit code: 0',
+      exitCode: '0',
+      artifacts: [],
+      limitExceeded: false,
+      denied: false,
+      runnerFailed: false,
     })
   })
 
@@ -574,6 +579,8 @@ describe('DSH native contracts', () => {
         expect(blocked.isError).toBe(false)
         const blockedValue = (blocked as unknown as { value: { sandbox: { denied: boolean; runnerFailed: boolean }; exitCode: string } }).value
         expect(blockedValue.exitCode).not.toBe('0')
+        expect((blockedValue as unknown as { limitExceeded: boolean; outcomeUncertain: boolean }).limitExceeded).toBe(false)
+        expect((blockedValue as unknown as { limitExceeded: boolean; outcomeUncertain: boolean }).outcomeUncertain).toBe(false)
         expect(blockedValue.sandbox).toEqual({ mode: 'workspace-write', enforcement: 'partial', denied: true, runnerFailed: false })
 
         const runnerFailed = await executeTool(ctx, agent, 'bash', {
@@ -591,6 +598,7 @@ describe('DSH native contracts', () => {
         const framedSandbox = (framed as unknown as { value: { sandbox: { denied: boolean; runnerFailed: boolean } } }).value.sandbox
         expect(framedSandbox.denied).toBe(false)
         expect(framedSandbox.runnerFailed).toBe(false)
+
       } finally {
         await chmod(readonlyFile, 0o644)
         await rm(outside, { recursive: true, force: true })

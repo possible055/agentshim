@@ -29,6 +29,8 @@ export interface Config {
   env: Record<string, string>
   /** DSH tool deadline; the native process ceiling is derived from this shelf. */
   toolCallTimeoutMs: number
+  /** Structured read capability; process sandbox policy remains a separate DSH service. */
+  readScope?: 'normal' | 'unrestricted'
   /** Private persistent root for byte-exact process capture artifacts. */
   captureRoot?: string
   /** Aggregate raw capture ceiling for one process call. */
@@ -41,6 +43,7 @@ export const Config = z.object({
   root: z.string().default(''),
   env: z.dict(String).default({}),
   toolCallTimeoutMs: z.number().min(MIN_TOOL_CALL_TIMEOUT_MS).default(MIN_TOOL_CALL_TIMEOUT_MS),
+  readScope: z.union([z.const('normal'), z.const('unrestricted')]).default('unrestricted'),
   captureRoot: z.string().default(''),
   captureMaxBytes: z.number().min(MIN_CAPTURE_MAX_BYTES).max(MAX_CAPTURE_MAX_BYTES).default(DEFAULT_CAPTURE_MAX_BYTES),
   captureCleanup: z.union([z.const('never'), z.const('session-end')]).default('never'),
@@ -126,7 +129,7 @@ function installAgentTools(
 
     const disposers: Array<() => void> = []
     try {
-      const definitions: ReadonlyMap<string, ToolDefinition> = buildToolDefinitions({ ctx, config: resolved, jobs, native: engine, root })
+      const definitions: ReadonlyMap<string, ToolDefinition> = buildToolDefinitions({ ctx, config: resolved, jobs, native: engine })
       // `tools.get()` takes its viewing scope as an argument and falls back to
       // the GLOBAL layer when none is given. An agent preset registers the
       // model-facing tools into a standing mount that is this agent's scope
@@ -189,7 +192,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const engineEnv = nativeEngineEnv(config.env)
   const hostOptions: NativeHostOptions = {
     env: engineEnv,
-    readScope: 'unrestricted',
+    readScope: resolved.readScope,
     toolTimeoutShelfMs: resolved.toolCallTimeoutMs,
     backgroundJobTimeoutMaxMs: backgroundJobTimeoutMaxMs(engineEnv),
     captureRoot: resolved.captureRoot,

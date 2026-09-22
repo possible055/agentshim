@@ -168,9 +168,18 @@ describe('native addon loading', () => {
     const grep = await engine.grepText({ pattern: 'needle', path: '.', fixedStrings: true })
     expect(grep.text).toContain('notes.md')
 
+    const grepByType = await engine.grepText({ pattern: 'needle', path: '.', fileType: 'markdown' })
+    expect(grepByType.text).toContain('notes.md')
+
+    const grepExcluded = await engine.grepText({ pattern: 'needle', path: '.', glob: ['*.md', '!notes.md'] })
+    expect(grepExcluded.text).not.toContain('notes.md')
+
     const glob = await engine.globText({ pattern: '*.md' })
     expect(glob.text).toContain('notes.md')
     expect(glob.text).not.toContain('other.txt')
+
+    const globArray = await engine.globText({ pattern: ['*.md', '!notes.md'] })
+    expect(globArray.text).not.toContain('notes.md')
 
     await expect(engine.readText({ path: '../escape.md' })).rejects.toThrow()
 

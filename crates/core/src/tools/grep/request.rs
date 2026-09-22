@@ -25,6 +25,7 @@ use crate::{
 pub const DEFAULT_LIMIT: usize = 200;
 const MAX_LIMIT: usize = 1_000;
 const MAX_CONTEXT: usize = 20;
+pub const MAX_PATTERN_CHARS: usize = 8_192;
 pub const MEMORY_SOURCE_BYTES: usize = 256 * 1024;
 pub const SEARCH_HEAP_BYTES: usize = 8 * 1024 * 1024;
 pub const CAPTURE_MEMORY_BYTES: usize = 8 * 1024 * 1024;
@@ -295,8 +296,19 @@ impl GrepRequest {
     ///
     /// # Errors
     ///
-    /// Returns a validation error for NUL, context above 20, or limit outside 1..=1,000.
+    /// Returns a validation error for an empty/NUL/oversized pattern, context above 20,
+    /// or a limit outside 1..=1,000.
     pub fn validate(&self) -> Result<(), GrepError> {
+        if self.pattern.is_empty() {
+            return Err(GrepError::Validation(
+                "pattern must not be empty".to_owned(),
+            ));
+        }
+        if self.pattern.chars().count() > MAX_PATTERN_CHARS {
+            return Err(GrepError::Validation(format!(
+                "pattern must contain at most {MAX_PATTERN_CHARS} characters"
+            )));
+        }
         if self.pattern.contains('\0')
             || self.path.as_deref().is_some_and(|path| path.contains('\0'))
             || self

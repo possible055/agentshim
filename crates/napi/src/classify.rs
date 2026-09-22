@@ -7,6 +7,7 @@ use napi_derive::napi;
 /// full-line equality, then case-insensitive fatal signatures matched within
 /// each remaining stderr line.
 #[napi(object)]
+#[derive(Clone)]
 pub struct RunnerFailureRule {
     pub allowed_exit_codes: Option<Vec<u32>>,
     pub fatal_signatures: Vec<String>,
@@ -14,9 +15,10 @@ pub struct RunnerFailureRule {
 }
 
 /// Sandbox classification inputs for one confined spawn: the backend's denial
-/// dialect and runner-failure rules, exactly as the host's
-/// `SandboxProvider.confine` produced them for the wrapped argv.
+/// dialect and runner-failure rules, exactly as the official DSH sandbox
+/// service produced them for the wrapped argv.
 #[napi(object)]
+#[derive(Clone)]
 pub struct SandboxAttribution {
     pub denial_signatures: Option<Vec<String>>,
     pub runner_failure_rules: Option<Vec<RunnerFailureRule>>,

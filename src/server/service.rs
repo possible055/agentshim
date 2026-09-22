@@ -9,8 +9,8 @@ use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     model::{
         CacheScope, CallToolRequestParams, CallToolResponse, DiscoverResult, Implementation,
-        InitializeRequestParams, InitializeResult, ListToolsResult, PaginatedRequestParams,
-        ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
+        InitializeRequestParams, InitializeResult, ListToolsResult, MetaObject,
+        PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
     },
     service::{NotificationContext, RequestContext},
 };
@@ -34,8 +34,8 @@ use super::{
     response::{diagnostic_tool_error, resource_busy_with_message},
 };
 
-pub const SERVER_INSTRUCTIONS: &str = "Local repository and Codex extension tools for reading source files, searching contents, finding paths, running one program with literal arguments, and running POSIX bash command lines with instance-bound managed detached-job status and termination.";
-pub const UNRESTRICTED_SERVER_INSTRUCTIONS: &str = "Local filesystem tools for reading files, searching contents, and finding paths, plus one program with literal arguments and POSIX bash command lines with instance-bound managed detached-job status and termination. Read scope is the structured access range of read, grep, and glob; it does not bound what a spawned process can reach.";
+pub const SERVER_INSTRUCTIONS: &str = "Local repository tools for reading files, searching with Rust regex or literal text, finding paths with glob patterns, running one program with literal argv, and running POSIX Bash. Continue read Partial: next_start_line=N and grep/glob Partial: next_offset=N values; use bash_status for detached jobs. Normal read scope keeps read/grep/glob inside the configured roots; it does not sandbox spawned processes.";
+pub const UNRESTRICTED_SERVER_INSTRUCTIONS: &str = "Local filesystem tools for reading files, searching with Rust regex or literal text, finding paths with glob patterns, running one program with literal argv, and running POSIX Bash. Continue read Partial: next_start_line=N and grep/glob Partial: next_offset=N values; use bash_status for detached jobs. Unrestricted read scope permits supported absolute paths; it does not bound or sandbox what a spawned process can reach.";
 
 const SUPPORTED_PROTOCOLS: &[ProtocolVersion] = &[
     ProtocolVersion::V_2026_07_28,
@@ -420,9 +420,16 @@ impl AgentShim {
     }
 
     fn configured_tools_result(&self) -> ListToolsResult {
-        ListToolsResult::with_all_items(self.catalog.to_vec())
+        let mut result = ListToolsResult::with_all_items(self.catalog.to_vec())
             .with_ttl_ms(TOOLS_CACHE_TTL_MS)
-            .with_cache_scope(CacheScope::Private)
+            .with_cache_scope(CacheScope::Private);
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            "catalogVersion".to_owned(),
+            serde_json::Value::String(format!("v1-read-{}", self.read_scope())),
+        );
+        result.meta = Some(MetaObject(metadata));
+        result
     }
 
     pub(super) fn max_timeout_ms(&self) -> u64 {
@@ -497,7 +504,23 @@ impl ServerHandler for AgentShim {
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let (protocol, client_name, client_version) = Self::request_identity(&context);
-        let has_cursor = request.is_some_and(|request| request.cursor.is_some());
+        let has_cursor = request
+            .as_ref()
+            .is_some_and(|request| request.cursor.is_some());
+        if has_cursor {
+            tracing::warn!(
+                target: "agentshim",
+                event = "tools_list",
+                phase = "protocol",
+                outcome = "error",
+                error_code = "INVALID_ARGS",
+                reason = "tools/list catalog is not paginated"
+            );
+            return Err(McpError::invalid_params(
+                "tools/list does not accept a cursor because the catalog is not paginated",
+                None,
+            ));
+        }
         let result = self.configured_tools_result();
         tracing::info!(
             target: "agentshim",

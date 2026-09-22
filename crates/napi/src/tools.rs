@@ -156,10 +156,14 @@ impl Engine {
             parse_grep_mode(args.mode.as_deref()).map_err(|error| napi_failure("grep", error))?;
         let case =
             parse_grep_case(args.case.as_deref()).map_err(|error| napi_failure("grep", error))?;
+        let glob = args.glob.map(|glob| match glob {
+            napi::bindgen_prelude::Either::A(single) => single.into(),
+            napi::bindgen_prelude::Either::B(list) => list.into(),
+        });
         let request = grep::GrepRequest {
             pattern: args.pattern,
             path: args.path,
-            glob: args.glob.map(Into::into),
+            glob,
             file_type: args.file_type,
             mode,
             fixed_strings: args.fixed_strings,
@@ -215,8 +219,12 @@ impl Engine {
                 )));
             }
         };
+        let pattern = match args.pattern {
+            napi::bindgen_prelude::Either::A(single) => single.into(),
+            napi::bindgen_prelude::Either::B(list) => list.into(),
+        };
         let request = glob::GlobRequest {
-            pattern: args.pattern.into(),
+            pattern,
             path: args.path,
             include_ignored: args.include_ignored,
             entry_type,
@@ -258,7 +266,7 @@ pub struct ReadArgs {
 pub struct GrepArgs {
     pub pattern: String,
     pub path: Option<String>,
-    pub glob: Option<String>,
+    pub glob: Option<napi::bindgen_prelude::Either<String, Vec<String>>>,
     pub file_type: Option<String>,
     pub mode: Option<String>,
     pub fixed_strings: Option<bool>,
@@ -273,7 +281,7 @@ pub struct GrepArgs {
 
 #[napi_derive::napi(object)]
 pub struct GlobArgs {
-    pub pattern: String,
+    pub pattern: napi::bindgen_prelude::Either<String, Vec<String>>,
     pub path: Option<String>,
     pub include_ignored: Option<bool>,
     pub entry_type: Option<String>,

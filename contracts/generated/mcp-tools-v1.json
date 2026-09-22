@@ -1,0 +1,397 @@
+{
+  "$id": "https://agentshim.dev/contracts/generated/mcp-tools-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "dialect": "mcp",
+  "tools": {
+    "bash": {
+      "description": "Run non-interactive POSIX Bash and return merged output plus exit status. Process access is independent from read scope. MCP long work uses detach=true with a repository-local log_path, then bash_status; DSH long work uses run_in_background=true, requires a short description, then bash_status.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Run non-interactive POSIX Bash and return merged output plus exit status. Process access is independent from read scope. MCP long work uses detach=true with a repository-local log_path, then bash_status; DSH long work uses run_in_background=true, requires a short description, then bash_status.",
+          "properties": {
+            "command": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "detach": {
+              "const": false,
+              "default": false,
+              "type": "boolean"
+            },
+            "msys_argument_conversion": {
+              "default": "default",
+              "enum": [
+                "default",
+                "disabled"
+              ],
+              "type": "string"
+            },
+            "timeout_ms": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Run non-interactive POSIX Bash and return merged output plus exit status. Process access is independent from read scope. MCP long work uses detach=true with a repository-local log_path, then bash_status; DSH long work uses run_in_background=true, requires a short description, then bash_status.",
+          "properties": {
+            "command": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "detach": {
+              "const": true,
+              "type": "boolean"
+            },
+            "log_path": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "msys_argument_conversion": {
+              "default": "default",
+              "enum": [
+                "default",
+                "disabled"
+              ],
+              "type": "string"
+            },
+            "timeout_ms": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "command",
+            "detach",
+            "log_path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "const": "terminate",
+              "type": "string"
+            },
+            "job_id": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "job_id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "bash_status": {
+      "additionalProperties": false,
+      "description": "Inspect the lifecycle and final outcome of the job ID returned by a background bash call; MCP returns bounded log pages while DSH returns the official job snapshot. Repeat until terminal status.",
+      "properties": {
+        "cursor": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "job_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "max_bytes": {
+          "maximum": 16384,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tail_bytes": {
+          "default": 8192,
+          "maximum": 16384,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "wait_ms": {
+          "default": 0,
+          "maximum": 1000,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "type": "object"
+    },
+    "glob": {
+      "additionalProperties": false,
+      "description": "Find files or directories with a bounded case-sensitive glob. Use an array for include/exclude patterns and continue Partial: next_offset=N with offset. Read scope defaults to unrestricted; normal scope permits the session root and approved extension roots.",
+      "properties": {
+        "include_ignored": {
+          "type": "boolean"
+        },
+        "limit": {
+          "default": 200,
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "default": ".",
+          "type": "string"
+        },
+        "pattern": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "minLength": 1,
+              "not": {
+                "const": "!"
+              },
+              "type": "string"
+            },
+            {
+              "items": {
+                "maxLength": 1024,
+                "minLength": 1,
+                "not": {
+                  "const": "!"
+                },
+                "type": "string"
+              },
+              "maxItems": 32,
+              "minItems": 1,
+              "type": "array"
+            }
+          ]
+        },
+        "type": {
+          "default": "file",
+          "enum": [
+            "file",
+            "directory",
+            "any"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "pattern"
+      ],
+      "type": "object"
+    },
+    "grep": {
+      "additionalProperties": false,
+      "description": "Search files with Rust regex, or literal text with fixed_strings=true. Narrow with glob/type/mode and continue Partial: next_offset=N with offset. Read scope defaults to unrestricted; normal scope permits the session root and approved extension roots.",
+      "properties": {
+        "case": {
+          "default": "smart",
+          "enum": [
+            "smart",
+            "sensitive",
+            "insensitive"
+          ],
+          "type": "string"
+        },
+        "context_lines": {
+          "default": 0,
+          "maximum": 20,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "encoding": {
+          "type": "string"
+        },
+        "fallback_encoding": {
+          "type": "string"
+        },
+        "fixed_strings": {
+          "default": false,
+          "type": "boolean"
+        },
+        "glob": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "minLength": 1,
+              "not": {
+                "const": "!"
+              },
+              "type": "string"
+            },
+            {
+              "items": {
+                "maxLength": 1024,
+                "minLength": 1,
+                "not": {
+                  "const": "!"
+                },
+                "type": "string"
+              },
+              "maxItems": 32,
+              "minItems": 1,
+              "type": "array"
+            }
+          ]
+        },
+        "include_ignored": {
+          "type": "boolean"
+        },
+        "limit": {
+          "default": 200,
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "mode": {
+          "default": "content",
+          "enum": [
+            "content",
+            "files",
+            "count"
+          ],
+          "type": "string"
+        },
+        "offset": {
+          "default": 0,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "pattern": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pattern"
+      ],
+      "type": "object"
+    },
+    "read": {
+      "additionalProperties": false,
+      "description": "Read one file as numbered lines. Use PDF pages/pdf_mode or Office cursors for structured documents; pass Partial: next_start_line=N as start_line to continue. Read scope defaults to unrestricted; normal scope permits the session root and approved extension roots.",
+      "properties": {
+        "encoding": {
+          "type": "string"
+        },
+        "line_count": {
+          "maximum": 2000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "office_cursor": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "pages": {
+          "pattern": "^[1-9][0-9]*(-[1-9][0-9]*)?$",
+          "type": "string"
+        },
+        "path": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "pdf_cursor": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "pdf_mode": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "text",
+            "image"
+          ],
+          "type": "string"
+        },
+        "start_line": {
+          "default": 1,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "run_program": {
+      "additionalProperties": false,
+      "description": "Run one executable with literal argv and no shell. A nonzero exit is returned with its status and output; process access is independent from read scope. Use bash for pipelines, redirection, or shell composition.",
+      "properties": {
+        "args": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cwd": {
+          "default": ".",
+          "type": "string"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "program": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "stdin": {
+          "maxLength": 1048576,
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timeout_ms": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "unset_env": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "program"
+      ],
+      "type": "object"
+    }
+  },
+  "version": 1
+}

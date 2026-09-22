@@ -44,7 +44,9 @@ export async function completeReadObservation(ctx: Context, exec: ToolExecution,
 
 function stringField(args: Record<string, unknown>, field: string): string | undefined {
   const value = args[field]
-  return typeof value === 'string' ? value : undefined
+  if (value === undefined) return undefined
+  if (typeof value !== 'string') throw new HarnessError(`invalid arguments: ${field} must be a string`, 'INVALID_ARGS')
+  return value
 }
 
 export interface SandboxAttribution {

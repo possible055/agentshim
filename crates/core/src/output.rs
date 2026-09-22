@@ -136,11 +136,29 @@ pub fn tool_error_structure(
     serde_json::json!({
         "error": {
             "code": code,
+            "canonicalCode": canonical_error_code(code),
             "message": message,
             "retryable": retryable,
             "details": details,
         }
     })
+}
+
+/// MCP keeps its historical error classes on `code` for wire compatibility. Known classes map
+/// to stable v1 codes; unmapped classes are returned unchanged so domain-specific diagnostics
+/// remain distinguishable across adapters.
+pub fn canonical_error_code(code: &str) -> &str {
+    match code {
+        "validation" => "INVALID_ARGS",
+        "client_cancellation" | "shutdown" => "AGENTSHIM_CANCELLED",
+        "resource_timeout" => "AGENTSHIM_TIMEOUT",
+        "resource_busy" => "AGENTSHIM_RESOURCE_BUSY",
+        "outcome_uncertain" => "AGENTSHIM_OUTCOME_UNCERTAIN",
+        "capture_limit_exceeded" | "capture_io_failed" | "capture_protocol" => {
+            "AGENTSHIM_CAPTURE_FAILED"
+        }
+        other => other,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

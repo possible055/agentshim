@@ -9,6 +9,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::path::ResolvedPath;
 
+/// Maximum number of scalar or negated glob rules accepted by one request.
+pub const MAX_GLOB_PATTERNS: usize = 32;
+/// Maximum Unicode scalar length of one glob rule.
+pub const MAX_GLOB_PATTERN_CHARS: usize = 1_024;
+
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(untagged)]
 pub enum GlobPatterns {
@@ -45,9 +50,19 @@ impl GlobPatterns {
         if slice.is_empty() {
             return Err("pattern must not be empty".to_owned());
         }
+        if slice.len() > MAX_GLOB_PATTERNS {
+            return Err(format!(
+                "pattern must contain at most {MAX_GLOB_PATTERNS} entries"
+            ));
+        }
         for pattern in slice {
             if pattern.is_empty() {
                 return Err("pattern must not be empty".to_owned());
+            }
+            if pattern.chars().count() > MAX_GLOB_PATTERN_CHARS {
+                return Err(format!(
+                    "pattern entries must contain at most {MAX_GLOB_PATTERN_CHARS} characters"
+                ));
             }
             if pattern.contains('\0') {
                 return Err("pattern must not contain NUL".to_owned());

@@ -79,12 +79,19 @@ fn shared_constraints_match_mcp_catalog_and_core_validation() {
                 "catalog required mismatch for {}",
                 case.id
             ),
-            "non_empty" => assert_eq!(
-                property["minLength"],
-                json!(1),
-                "catalog non-empty mismatch for {}",
-                case.id
-            ),
+            "non_empty" => {
+                let min_length = property["minLength"].as_u64().or_else(|| {
+                    property["anyOf"]
+                        .as_array()
+                        .and_then(|variants| variants.iter().find_map(|v| v["minLength"].as_u64()))
+                });
+                assert_eq!(
+                    min_length,
+                    Some(1),
+                    "catalog non-empty mismatch for {}",
+                    case.id
+                );
+            }
             "range" | "timeout" => {
                 let candidate = case.args[&case.field].as_u64().expect("range candidate");
                 let below_minimum = property["minimum"]

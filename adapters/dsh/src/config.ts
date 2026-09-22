@@ -8,6 +8,7 @@ export interface PluginConfigInput {
   readonly root: string
   readonly env: Record<string, string>
   readonly toolCallTimeoutMs: number
+  readonly readScope?: 'normal' | 'unrestricted'
   readonly captureRoot?: string
   readonly captureMaxBytes?: number
   readonly captureCleanup?: 'never' | 'session-end'
@@ -15,6 +16,7 @@ export interface PluginConfigInput {
 
 export interface ResolvedPluginConfig extends PluginConfigInput {
   readonly root: string
+  readonly readScope: 'normal' | 'unrestricted'
   readonly captureRoot: string
   readonly captureMaxBytes: number
   readonly captureCleanup: 'never' | 'session-end'
@@ -38,6 +40,7 @@ export async function resolvePluginConfig(input: PluginConfigInput): Promise<Res
   return {
     ...input,
     root,
+    readScope: input.readScope ?? 'unrestricted',
     captureRoot,
     captureMaxBytes: input.captureMaxBytes ?? 64 * 1024 * 1024,
     captureCleanup: input.captureCleanup ?? 'never',
