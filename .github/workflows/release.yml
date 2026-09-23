@@ -134,9 +134,23 @@ jobs:
             fi
           done
 
-          if [[ -n "$(git ls-remote --tags origin "refs/tags/$tag")" ]]; then
-            echo "remote tag $tag already exists" >&2
-            exit 1
+          remote_tag_refs="$(git ls-remote --tags origin \
+            "refs/tags/$tag" \
+            "refs/tags/$tag^{}")"
+          remote_tag_commit="$(awk -v ref="refs/tags/$tag" '
+            $2 == (ref "^{}") { peeled = $1 }
+            $2 == ref { direct = $1 }
+            END {
+              if (peeled != "") print peeled
+              else if (direct != "") print direct
+            }
+          ' <<<"$remote_tag_refs")"
+          if [[ -n "$remote_tag_commit" ]]; then
+            if [[ "$remote_tag_commit" != "$commit_sha" ]]; then
+              echo "remote tag $tag points to $remote_tag_commit; expected $commit_sha" >&2
+              exit 1
+            fi
+            echo "using existing remote tag $tag at $commit_sha"
           fi
 
           runs="$(gh api -X GET \
@@ -624,13 +638,39 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ -n "$(git ls-remote --tags origin "refs/tags/$TAG")" ]]; then
-            echo "remote tag $TAG appeared after preflight" >&2
-            exit 1
+          resolve_remote_tag_commit() {
+            local tag_name="$1"
+            local remote_tag_refs
+            remote_tag_refs="$(git ls-remote --tags origin \
+              "refs/tags/$tag_name" \
+              "refs/tags/$tag_name^{}")"
+            awk -v ref="refs/tags/$tag_name" '
+              $2 == (ref "^{}") { peeled = $1 }
+              $2 == ref { direct = $1 }
+              END {
+                if (peeled != "") print peeled
+                else if (direct != "") print direct
+              }
+            ' <<<"$remote_tag_refs"
+          }
+
+          tag_preexisting=false
+          remote_tag_commit="$(resolve_remote_tag_commit "$TAG")"
+          if [[ -n "$remote_tag_commit" ]]; then
+            if [[ "$remote_tag_commit" != "$COMMIT_SHA" ]]; then
+              echo "remote tag $TAG points to $remote_tag_commit; expected $COMMIT_SHA" >&2
+              exit 1
+            fi
+            tag_preexisting=true
+            echo "using existing remote tag $TAG at $COMMIT_SHA"
           fi
 
           cleanup_failed_release() {
             local ref_json ref_sha ref_type releases release_count is_draft
+            if [[ "$tag_preexisting" == true ]]; then
+              echo "preserving pre-existing tag $TAG after release failure" >&2
+              return
+            fi
             if ! ref_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$TAG" 2>/dev/null)"; then
               echo "no tag was created; no release cleanup is needed" >&2
               return
@@ -704,23 +744,30 @@ jobs:
             LC_ALL=C sort
           )"
           actual_assets="$(jq -r '.assets[].name' <<<"$release" | LC_ALL=C sort)"
+          # Existing tags can make GitHub report a branch in target_commitish;
+          # verify the tag ref itself against the requested commit instead.
+          ref_type="$(jq -r '.object.type' <<<"$ref")"
+          ref_sha="$(jq -r '.object.sha' <<<"$ref")"
+          if [[ "$ref_type" == tag ]]; then
+            tag_object="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/$ref_sha")"
+            ref_type="$(jq -r '.object.type' <<<"$tag_object")"
+            ref_sha="$(jq -r '.object.sha' <<<"$tag_object")"
+          fi
           expected_prerelease=false
           if [[ "$VERSION" == *-* ]]; then
             expected_prerelease=true
           fi
           jq -e \
-            --arg sha "$COMMIT_SHA" \
             --arg tag "$TAG" \
             --argjson prerelease "$expected_prerelease" \
             '.tag_name == $tag
-              and .target_commitish == $sha
               and .draft == false
               and .prerelease == $prerelease' \
             <<<"$release" >/dev/null
-          jq -e \
-            --arg sha "$COMMIT_SHA" \
-            '.object.type == "commit" and .object.sha == $sha' \
-            <<<"$ref" >/dev/null
+          if [[ "$ref_type" != commit || "$ref_sha" != "$COMMIT_SHA" ]]; then
+            echo "tag $TAG resolves to $ref_type $ref_sha; expected commit $COMMIT_SHA" >&2
+            exit 1
+          fi
           if [[ "$actual_assets" != "$expected_assets" ]]; then
             printf 'unexpected published assets:\n%s\n' "$actual_assets" >&2
             exit 1
