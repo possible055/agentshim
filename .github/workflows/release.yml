@@ -704,13 +704,13 @@ jobs:
             echo "removed failed draft release and tag $TAG" >&2
           }
 
-          release_args=(
-            "$TAG"
-            dist/*
-            --target "$COMMIT_SHA"
-            --generate-notes
-            --title "$TAG"
-          )
+          release_args=("$TAG" dist/*)
+          # An existing tag already identifies the target commit. Passing its
+          # older workflow-bearing commit makes GitHub require workflow write.
+          if [[ "$tag_preexisting" != true ]]; then
+            release_args+=(--target "$COMMIT_SHA")
+          fi
+          release_args+=(--generate-notes --title "$TAG")
           if [[ "$VERSION" == *-* ]]; then
             release_args+=(--prerelease)
           fi
