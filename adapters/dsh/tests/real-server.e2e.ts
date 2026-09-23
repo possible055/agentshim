@@ -15,6 +15,7 @@ const createCallId = (llm as { ToolCallId?: (id: string) => any; CallId?: (id: s
 const CallId = createCallId
 import { createScope } from '@deepseek-ai/dsh-scope'
 import ShellExecutor from '@deepseek-ai/dsh-shell'
+import type { ShellExecRequest, ShellExecSpec, ShellExecution } from '@deepseek-ai/dsh-shell'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import * as TimeoutPolicy from '@deepseek-ai/dsh-tool-call-timeout-policy'
@@ -53,15 +54,11 @@ if (enabled && stagedNativeAddon === undefined) {
 if (stagedNativeAddon !== undefined) process.env.AGENTSHIM_DSH_NATIVE_DLL = stagedNativeAddon
 
 class UnconfinedShell extends ShellExecutor {
-  override resolve(): never {
+  override resolve(_request: ShellExecRequest): ShellExecSpec {
     throw new Error('native E2E marker shell must not execute')
   }
 
-  override run(): Promise<never> {
-    return Promise.reject(new Error('native E2E marker shell must not execute'))
-  }
-
-  override start(): Promise<never> {
+  override execute(_spec: ShellExecSpec): Promise<ShellExecution> {
     return Promise.reject(new Error('native E2E marker shell must not execute'))
   }
 }

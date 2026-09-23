@@ -17,7 +17,7 @@ import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { JobId } from '@deepseek-ai/dsh-jobs'
-import type { JobSnapshot } from '@deepseek-ai/dsh-jobs'
+import type { JobChunk, JobView } from '@deepseek-ai/dsh-jobs'
 import * as agentshim from '../../src/index.ts'
 import type { Config } from '../../src/index.ts'
 
@@ -186,10 +186,19 @@ export async function mintPresetAgent(
   return { agent, scope, standing }
 }
 
+export function jobChunksText(chunks: readonly JobChunk[]): string {
+  return chunks.map(chunk => chunk.text).join('')
+}
+
+export function readJobOutput(ctx: Context, agent: Agent, jobId: string, from = 0): { text: string; lossy: boolean; next: number } {
+  const read = ctx.jobs.readAt(JobId(jobId), from, agent.id)
+  return { text: jobChunksText(read.chunks), lossy: read.lossy, next: read.next }
+}
+
 export async function waitForBackgroundOutput(ctx: Context, agent: Agent, jobId: string): Promise<void> {
   const deadline = Date.now() + 5_000
   for (;;) {
-    if (ctx.jobs.read(JobId(jobId), agent).text.includes('background output')) return
+    if (readJobOutput(ctx, agent, jobId).text.includes('background output')) return
     if (Date.now() >= deadline) throw new Error(`background output did not arrive for ${jobId}`)
     await new Promise(resolve => setTimeout(resolve, 10))
   }
@@ -200,19 +209,19 @@ export async function waitForJobTerminal(
   agent: Agent,
   jobId: string,
   timeoutMs = 10_000,
-): Promise<JobSnapshot> {
+): Promise<JobView> {
   const startedAt = performance.now()
-  let snapshot = ctx.jobs.get(JobId(jobId), agent)
+  let snapshot = ctx.jobs.get(JobId(jobId), agent.id)
   while (snapshot.status === 'running' || snapshot.status === 'stopping') {
     const elapsedMs = performance.now() - startedAt
     const remainingMs = Math.ceil(timeoutMs - elapsedMs)
     if (remainingMs <= 0) break
-    snapshot = await ctx.jobs.wait(JobId(jobId), remainingMs, agent)
+    snapshot = await ctx.jobs.wait(JobId(jobId), remainingMs, agent.id)
   }
   if (snapshot.status !== 'running' && snapshot.status !== 'stopping') return snapshot
 
   const elapsedMs = Math.round(performance.now() - startedAt)
-  const outputTail = ctx.jobs.read(JobId(jobId), agent).text.slice(-512)
+  const outputTail = readJobOutput(ctx, agent, jobId, snapshot.output.earliest).text.slice(-512)
   throw new Error(
     `job ${jobId} did not settle within ${timeoutMs}ms; elapsed=${elapsedMs}ms; snapshot=${JSON.stringify(snapshot)}; outputTail=${JSON.stringify(outputTail)}`,
   )

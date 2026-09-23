@@ -52,7 +52,7 @@ git config core.hooksPath scripts/hooks
 
 The wrappers replace `pre-commit install`; hooks generated into `.git/hooks` are ignored once `core.hooksPath` is set.
 
-Pre-commit blocks formatting, native Clippy, unused dependencies, dependency policy violations, and staged secrets. The structural Clippy audit reports cognitive-complexity findings above 30 without blocking; it covers the root, core, N-API, and gigatoken crates and deliberately excludes the retained upstream PDF source. Pre-push runs Linux-target Clippy and the complete locked test suite, including documentation tests.
+Pre-commit blocks formatting, native Clippy, unused dependencies, dependency policy violations, and staged secrets. The structural Clippy audit reports cognitive-complexity findings above 30 without blocking; it covers the root, core, N-API, and gigatoken crates and deliberately excludes the retained upstream PDF source. Pre-push runs the Linux-target Clippy check on Linux (and skips that cross-target check on other hosts) plus the locked package test hooks; documentation tests run in CI.
 
 The dependency gate rejects vulnerabilities, unsound advisories, wildcard registry requirements, unknown sources, and unapproved licenses. Unmaintained advisories do not block this gate because the retained PDF dependency graph currently has no safe replacement for every such crate.
 

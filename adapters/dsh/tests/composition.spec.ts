@@ -31,6 +31,7 @@ import {
   runTool,
   stagedNativeAddon,
   pluginFibers,
+  readJobOutput,
   UnconfinedShell,
   visibleNames,
   waitForBackgroundOutput,
@@ -123,7 +124,7 @@ describe('DSH native contracts', () => {
 
     const snapshot = await waitForJobTerminal(ctx, agent, value.jobId)
     expect(snapshot).toMatchObject({ id: 'bash-1', status: 'completed', detail: 'exit code: 0' })
-    expect(ctx.jobs.read(JobId(value.jobId), agent).text).toBe('background')
+    expect(readJobOutput(ctx, agent, value.jobId).text).toBe('background')
 
     const status = await executeTool(ctx, agent, 'bash_status', { job_id: value.jobId })
     expect((status as unknown as { value: unknown }).value).toMatchObject({
@@ -138,6 +139,38 @@ describe('DSH native contracts', () => {
       denied: false,
       runnerFailed: false,
     })
+  })
+
+  it('fences owned jobs to their session id', async () => {
+    const root = await makeRoot()
+    const ctx = await mountComposition(root, {}, async inner => {
+      await inner.plugin(LocalJobRegistry, {})
+      inner.jobs.attachController('composition-test')
+    })
+    const { agent: owner } = await mintStandardAgent(ctx, 'jobs-owner-fenced', root)
+    const { agent: foreign } = await mintAgent(ctx, 'jobs-foreign', root)
+    await ctx.plugin(class extends Service {
+      constructor(inner: Context) {
+        super(inner, 'agents')
+      }
+      list(): Agent[] {
+        return [owner, foreign]
+      }
+      get(id: string): Agent | undefined {
+        return [owner, foreign].find(agent => agent.id === id)
+      }
+    })
+
+    const started = await executeTool(ctx, owner, 'bash', {
+      command: 'sleep 0.2; printf fenced',
+      description: 'Exercise job ownership fencing',
+      run_in_background: true,
+    })
+    const jobId = (started as unknown as { value: { jobId: string } }).value.jobId
+    expect(() => ctx.jobs.get(JobId(jobId), foreign.id)).toThrow(/another session/)
+    expect(() => ctx.jobs.readAt(JobId(jobId), 0, foreign.id)).toThrow(/another session/)
+    expect(() => ctx.jobs.kill(JobId(jobId), foreign.id)).toThrow(/another session/)
+    await waitForJobTerminal(ctx, owner, jobId)
   })
 
   it('forwards timeoutMs to a background job and settles it as timed out', async () => {
@@ -211,9 +244,16 @@ describe('DSH native contracts', () => {
       const value = (started as unknown as { value: { kind: string; jobId: string } }).value
       expect(value).toEqual({ kind: 'background', jobId: 'bash-1' })
 
+      await waitForCondition(
+        async () => readJobOutput(ctx, agent, value.jobId).text.includes('native-bg-1'),
+        5_000,
+        'native background output to arrive',
+      )
+      const liveSnapshot = ctx.jobs.get(JobId(value.jobId), agent.id)
+      expect(liveSnapshot.status).toBe('running')
       const snapshot = await waitForJobTerminal(ctx, agent, value.jobId)
       expect(snapshot).toMatchObject({ id: 'bash-1', status: 'completed', detail: 'exit code: 0' })
-      const output = ctx.jobs.read(JobId(value.jobId), agent).text
+      const output = readJobOutput(ctx, agent, value.jobId).text
       expect(output).toContain('native-bg-1')
       expect(output).toContain('native-bg-3')
 
@@ -231,7 +271,7 @@ describe('DSH native contracts', () => {
       })
       const longJobId = (longStarted as unknown as { value: { jobId: string } }).value.jobId
       await waitForBackgroundOutput(ctx, agent, longJobId)
-      expect(ctx.jobs.kill(JobId(longJobId), agent, 'native test cancellation')).toBe('requested')
+      expect(ctx.jobs.kill(JobId(longJobId), agent.id, 'native test cancellation')).toBe('requested')
       expect(await waitForJobTerminal(ctx, agent, longJobId)).toMatchObject({ status: 'killed' })
     } finally {
       if (previous === undefined) {

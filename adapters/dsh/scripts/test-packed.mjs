@@ -5,16 +5,22 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const TARGET_DSH_VERSION = '0.1.6-alpha.2'
+const TARGET_DSH_VERSION = '0.1.7-rc.1'
 const PUBLISHED_DSH_VERSIONS = [
   '0.1.5-alpha.1',
   '0.1.5-alpha.2',
   '0.1.5-rc.1',
   '0.1.5-rc.2',
   '0.1.6-alpha.1',
+  '0.1.6-alpha.2',
+  '0.1.7-alpha.1',
+  '0.1.7-alpha.2',
   TARGET_DSH_VERSION,
 ]
-const CORDIS_VERSION = '4.0.2'
+const CORDIS_VERSION = '4.0.4'
+const CORDIS_PLUGIN_GROUP_VERSION = '1.0.4'
+const CORDIS_PLUGIN_LOADER_VERSION = '1.0.5'
+const CORDIS_PLUGIN_INCLUDE_VERSION = '1.0.9'
 const DSH_FAMILY_PACKAGES = [
   '@deepseek-ai/dsh-agent',
   '@deepseek-ai/dsh-attachment-local',
@@ -89,19 +95,57 @@ function runPnpm(args, options = {}) {
 }
 
 function packagesFor(version) {
-  if (version.startsWith('0.1.6-')) {
-    return [
+  if (version.startsWith('0.1.6-') || version.startsWith('0.1.7-')) {
+    const packages = [
       ...DSH_FAMILY_PACKAGES,
       '@deepseek-ai/dsh-ptc-runtime',
       '@deepseek-ai/dsh-ptc-runtime-node',
       '@deepseek-ai/dsh-sandbox-policy',
     ]
+    if (version.startsWith('0.1.7-')) {
+      packages.push('@deepseek-ai/cordis-plugin-group', '@deepseek-ai/dsh-app-boot', '@deepseek-ai/dsh-launch-environment')
+    }
+    return packages
   }
   return [
     ...DSH_FAMILY_PACKAGES,
     '@deepseek-ai/dsh-code-runtime',
     '@deepseek-ai/dsh-code-runtime-worker-thread',
   ]
+}
+
+function versionForPackage(packageName, dshVersion) {
+  return packageName === '@deepseek-ai/cordis-plugin-group' ? CORDIS_PLUGIN_GROUP_VERSION : dshVersion
+}
+
+const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+
+function publishedVersions(packageName) {
+  const result = spawnSync(npmCommand, ['view', packageName, 'versions', '--json'], {
+    encoding: 'utf8',
+    shell: false,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  if (result.error !== undefined) throw result.error
+  if (result.status !== 0) {
+    throw new Error(`npm view ${packageName} versions failed: ${result.stderr.trim()}`)
+  }
+  const parsed = JSON.parse(result.stdout)
+  return new Set(Array.isArray(parsed) ? parsed : [parsed])
+}
+
+function verifyPublishedPackageMatrix(versions) {
+  const packageNames = new Set(versions.flatMap(version => packagesFor(version)))
+  const versionsByPackage = new Map()
+  for (const packageName of packageNames) versionsByPackage.set(packageName, publishedVersions(packageName))
+  for (const version of versions) {
+    for (const packageName of packagesFor(version)) {
+      const expectedVersion = versionForPackage(packageName, version)
+      if (!versionsByPackage.get(packageName).has(expectedVersion)) {
+        throw new Error(`published package matrix is missing ${packageName}@${expectedVersion}`)
+      }
+    }
+  }
 }
 
 function localArchive(path) {
@@ -117,7 +161,9 @@ async function runPackedSmoke({ entryArchive, platformArchive, platformName, ver
 
   const dependencies = {
     '@deepseek-ai/cordis': CORDIS_VERSION,
-    ...Object.fromEntries(packagesFor(version).map(name => [name, version])),
+    '@deepseek-ai/cordis-plugin-include': CORDIS_PLUGIN_INCLUDE_VERSION,
+    '@deepseek-ai/cordis-plugin-loader': CORDIS_PLUGIN_LOADER_VERSION,
+    ...Object.fromEntries(packagesFor(version).map(name => [name, versionForPackage(name, version)])),
     'dsh-agentshim': localArchive(entryArchive),
     [platformName]: localArchive(platformArchive),
   }
@@ -130,7 +176,6 @@ async function runPackedSmoke({ entryArchive, platformArchive, platformName, ver
     'install',
     '--prefer-offline',
     '--ignore-scripts',
-    '--no-optional',
     '--no-frozen-lockfile',
     '--strict-peer-dependencies',
   ], { cwd: consumer })
@@ -278,6 +323,7 @@ try {
 
   const matrix = process.argv.includes('--matrix')
   const versions = matrix ? PUBLISHED_DSH_VERSIONS : [TARGET_DSH_VERSION]
+  if (matrix) verifyPublishedPackageMatrix(versions)
   for (const version of versions) {
     console.log(`packed smoke: DSH ${version}`)
     await runPackedSmoke({

@@ -141,7 +141,11 @@ repos:
 
       - id: cargo-clippy-linux
         name: cargo clippy (linux target)
-        entry: cargo clippy --target x86_64-unknown-linux-gnu -p agentshim -p agentshim-core -p agentshim-napi -p agentshim-test-support --all-targets -- -D warnings
+        entry: >-
+          bash -c 'if [ "$(uname -s)" = Linux ]; then
+          exec cargo clippy --target x86_64-unknown-linux-gnu -p agentshim -p agentshim-core
+          -p agentshim-napi -p agentshim-test-support --all-targets -- -D warnings;
+          fi'
         language: system
         stages: [pre-push]
         files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|crates/(core|napi|test-support)/.*\.(rs|toml)|tests/.*\.rs|benches/.*\.rs)$'

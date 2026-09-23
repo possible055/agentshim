@@ -10,9 +10,8 @@ if command -v pre-commit >/dev/null 2>&1; then
     exec pre-commit "${ARGS[@]}" 1>&2
 fi
 
-uv_python="$HOME/.local/share/uv/tools/pre-commit/bin/python"
-if [ -x "$uv_python" ]; then
-    exec "$uv_python" -m pre_commit "${ARGS[@]}" 1>&2
+if command -v uv >/dev/null 2>&1; then
+    exec uv run --frozen --group dev -- pre-commit "${ARGS[@]}" 1>&2
 fi
 
 echo 'pre-commit not found on PATH; install it or unset core.hooksPath' >&2

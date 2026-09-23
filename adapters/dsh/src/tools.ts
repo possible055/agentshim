@@ -507,7 +507,7 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
       if (jobs === undefined) {
         throw new HarnessError('background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs', 'AGENTSHIM_BACKGROUND_UNAVAILABLE')
       }
-      const snapshot = jobs.get(JobId(args.job_id), exec.agent)
+      const snapshot = jobs.get(JobId(args.job_id), exec.agent?.id)
       const native = deps.jobs.outcome(snapshot.id)
       const nativeOutcome = native?.outcome
       const hasClassification = nativeOutcome !== undefined

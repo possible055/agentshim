@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
-import type { JobId, JobOutcome } from '@deepseek-ai/dsh-jobs'
+import type { JobHandle, JobId, JobOutcome } from '@deepseek-ai/dsh-jobs'
 import { TOOL_ABORTED } from '@deepseek-ai/dsh-tools'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { ProcessPolicy, SandboxAttribution } from './policy.ts'
@@ -8,11 +8,11 @@ import { nativeBashArgs } from './native.ts'
 import type { NativeEngine, NativeJobOutcome, NativeSandboxAttribution } from './native.ts'
 
 const JOB_OUTPUT_LIMIT_BYTES = 64 * 1024
+const JOB_OUTPUT_POLL_MS = 10
 
 interface ManagedHooks {
   cancel(reason?: string): void
   readonly done: Promise<JobOutcome>
-  readOutput(): string
 }
 
 export interface BackgroundSandboxObservation {
@@ -132,38 +132,78 @@ export async function startBackgroundBashNative(
     let nativeOutcomePromise: Promise<NativeJobOutcome> | undefined
 
     const jobId = await jobs.start({
-    kind: 'bash',
-    label: input.command,
-    outputLimitBytes: JOB_OUTPUT_LIMIT_BYTES,
-    ...(exec.agent === undefined ? {} : { owner: exec.agent }),
-    run: () => {
-      const handle = engine.startBackgroundPrepared(prepared.handle, wrappedArgv, nativeAttribution(decision.attribution))
-      let cancelled = false
-      const outcomePromise = handle.done()
-      nativeOutcomePromise = outcomePromise
-      const done = (async (): Promise<JobOutcome> => {
-        try {
-          const outcome = await outcomePromise
-          if (outcome.status === 'killed') return { status: 'killed', detail: outcome.detail }
-          if (outcome.status === 'timed_out') return { status: 'failed', detail: `timed_out: ${outcome.detail}` }
-          if (outcome.status === 'failed') return { status: 'failed', detail: outcome.detail }
-          return { status: 'completed', detail: outcome.detail }
-        } catch (error) {
-          return { status: 'failed', detail: error instanceof Error ? error.message : String(error) }
-        } finally {
-          await handle.dispose().catch(() => {})
+      kind: 'bash',
+      label: input.command,
+      outputLimitBytes: JOB_OUTPUT_LIMIT_BYTES,
+      ...(exec.agent === undefined ? {} : { owner: exec.agent.id }),
+      run: (job: JobHandle) => {
+        const handle = engine.startBackgroundPrepared(prepared.handle, wrappedArgv, nativeAttribution(decision.attribution))
+        let cancelled = false
+        let outputError: unknown
+        const outcomePromise = handle.done()
+        nativeOutcomePromise = outcomePromise
+
+        const appendOutput = (): void => {
+          if (outputError !== undefined) return
+          try {
+            const output = handle.readOutput()
+            if (output.length > 0) job.append(output)
+          } catch (error) {
+            outputError = error
+            try {
+              handle.cancel('background output collection failed')
+            } catch {
+              // The native outcome still drives settlement and reports the read failure.
+            }
+          }
         }
-      })()
-      return manager.track({
-        cancel: (reason?: string) => {
-          if (cancelled) return
-          cancelled = true
-          handle.cancel(reason ?? 'dsh job cancelled')
-        },
-        done,
-        readOutput: () => handle.readOutput(),
-      })
-    },
+
+        const drainOutput = (): void => {
+          appendOutput()
+        }
+
+        const outputTimer = setInterval(appendOutput, JOB_OUTPUT_POLL_MS)
+        appendOutput()
+        const done = (async (): Promise<JobOutcome> => {
+          let outcome: NativeJobOutcome | undefined
+          let outcomeError: unknown
+          try {
+            outcome = await outcomePromise
+          } catch (error) {
+            outcomeError = error
+          }
+          try {
+            drainOutput()
+            if (outputError !== undefined) {
+              return {
+                status: 'failed',
+                detail: `background output collection failed: ${outputError instanceof Error ? outputError.message : String(outputError)}`,
+              }
+            }
+            if (outcomeError !== undefined) {
+              return { status: 'failed', detail: outcomeError instanceof Error ? outcomeError.message : String(outcomeError) }
+            }
+            if (outcome === undefined) return { status: 'failed', detail: 'background job produced no native outcome' }
+            if (outcome.status === 'killed') return { status: 'killed', detail: outcome.detail }
+            if (outcome.status === 'timed_out') return { status: 'failed', detail: `timed_out: ${outcome.detail}` }
+            if (outcome.status === 'failed') return { status: 'failed', detail: outcome.detail }
+            return { status: 'completed', detail: outcome.detail }
+          } catch (error) {
+            return { status: 'failed', detail: error instanceof Error ? error.message : String(error) }
+          } finally {
+            clearInterval(outputTimer)
+            await handle.dispose().catch(() => {})
+          }
+        })()
+        return manager.track({
+          cancel: (reason?: string) => {
+            if (cancelled) return
+            cancelled = true
+            handle.cancel(reason ?? 'dsh job cancelled')
+          },
+          done,
+        })
+      },
     })
     if (nativeOutcomePromise === undefined) {
       throw new HarnessError('background job did not create a native outcome promise', 'AGENTSHIM_BACKGROUND_FAILED')
