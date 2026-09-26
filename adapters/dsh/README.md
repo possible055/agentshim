@@ -5,7 +5,7 @@
 ## Requirements
 
 - Node.js `^22.19.0 || >=24.0.0`.
-- The supported DSH package families are `0.1.5-alpha.1`, `0.1.5-alpha.2`, `0.1.5-rc.1`, `0.1.5-rc.2`, `0.1.6-alpha.1`, `0.1.6-alpha.2`, `0.1.7-alpha.1`, `0.1.7-alpha.2`, and `0.1.7-rc.1`. Development and CI use DSH `0.1.7-rc.1` with Cordis `4.0.4`; the peer declaration retains the supported historical DSH releases.
+- The supported DSH package families are `0.1.5-alpha.1`, `0.1.5-alpha.2`, `0.1.5-rc.1`, `0.1.5-rc.2`, `0.1.6-alpha.1`, `0.1.6-alpha.2`, `0.1.7-alpha.1`, `0.1.7-alpha.2`, `0.1.7-rc.1`, and `0.1.7-rc.2`. Development and CI use DSH `0.1.7-rc.2` with Cordis `4.0.4`; the peer declaration retains the supported historical DSH releases.
 - A local filesystem provider for the configured root.
 - One supported platform: Windows x64 MSVC, macOS ARM64, Linux x64 glibc, or Linux ARM64 glibc.
 - Background Bash requires `ctx.jobs` and a job controller.

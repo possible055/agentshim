@@ -91,9 +91,14 @@ export const escalationParameters = {
   sandbox_permissions: {
     type: 'string',
     enum: ['workspace-write', 'danger-full-access'],
-    description: 'Strictly wider one-shot sandbox mode requiring approval.',
+    description: 'The narrowest wider sandbox mode for a one-shot retry of the exact command the sandbox just denied; '
+      + 'the retry asks the user for approval.',
   },
-  justification: { type: 'string', description: 'Reason shown in the approval request.' },
+  justification: {
+    type: 'string',
+    description: 'Required with sandbox_permissions: one sentence for the user explaining why this exact command '
+      + 'needs the wider access. Use the language of the user’s current request.',
+  },
 } as const satisfies ParameterSchemaSpec
 
 const attachmentSchema = {
