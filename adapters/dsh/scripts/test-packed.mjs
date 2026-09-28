@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const TARGET_DSH_VERSION = '0.1.7-rc.2'
+const TARGET_DSH_VERSION = '0.2.0-rc.1'
 const PUBLISHED_DSH_VERSIONS = [
   '0.1.5-alpha.1',
   '0.1.5-alpha.2',
@@ -16,6 +16,7 @@ const PUBLISHED_DSH_VERSIONS = [
   '0.1.7-alpha.1',
   '0.1.7-alpha.2',
   '0.1.7-rc.1',
+  '0.1.7-rc.2',
   TARGET_DSH_VERSION,
 ]
 const CORDIS_VERSION = '4.0.4'
@@ -96,7 +97,7 @@ function runPnpm(args, options = {}) {
 }
 
 function packagesFor(version) {
-  if (version.startsWith('0.1.6-') || version.startsWith('0.1.7-')) {
+  if (version.startsWith('0.1.6-') || version.startsWith('0.1.7-') || version.startsWith('0.2.0-')) {
     const packages = [
       ...DSH_FAMILY_PACKAGES,
       '@deepseek-ai/dsh-ptc-runtime',
