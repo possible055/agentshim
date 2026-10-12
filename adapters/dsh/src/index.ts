@@ -1,6 +1,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
+import type {} from '@deepseek-ai/dsh-working-directory'
+import { HarnessError } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
 import { MIN_TOOL_CALL_TIMEOUT_MS, resolvePluginConfig } from './config.ts'
 import type { ResolvedPluginConfig } from './config.ts'
@@ -70,18 +72,18 @@ function replacementNames(present: readonly string[]): Array<(typeof PUBLIC_TOOL
 
 interface AgentInstallation {
   readonly disposers: ReadonlyArray<() => void>
-  readonly root: string
+  readonly roots: ReadonlySet<string>
 }
 
 /**
- * Install this adapter's contributions on every agent whose session carries a
- * canonicalizable cwd: restrict only the inherited names that already exist,
+ * Install this adapter's contributions on every agent whose session has a
+ * canonicalizable effective cwd: restrict only the inherited names that already exist,
  * register the matching agent-local definitions bound to a per-cwd native
  * engine, and shadow those prompt sections. The six-tool catalog stays
  * available; a composition that only mounted `bash` also gets its managed-job
  * `bash_status` companion after replacement.
  * Every step is one transaction — a failure rolls back and (for new agents)
- * vetoes publication. Agents without a session cwd, or whose cwd cannot be
+ * vetoes publication. Agents without an effective cwd, or whose cwd cannot be
  * canonicalized or fails bash preflight, are left completely untouched.
  */
 function installAgentTools(
@@ -99,7 +101,7 @@ function installAgentTools(
     for (let index = installation.disposers.length - 1; index >= 0; index--) {
       installation.disposers[index]?.()
     }
-    pool.release(installation.root)
+    for (const root of installation.roots) pool.release(root)
     installed.delete(agent)
   }
 
@@ -113,7 +115,7 @@ function installAgentTools(
       )
       return
     }
-    const cwd = agent.session.header.cwd
+    const cwd = ctx.get('workingDirectory')?.get(agent.session) ?? agent.session.header.cwd
     if (cwd === undefined) return
 
     let acquired: { readonly engine: NativeEngine; readonly root: string }
@@ -128,8 +130,32 @@ function installAgentTools(
     const { engine, root } = acquired
 
     const disposers: Array<() => void> = []
+    const roots = new Set([root])
     try {
-      const definitions: ReadonlyMap<string, ToolDefinition> = buildToolDefinitions({ ctx, config: resolved, jobs, native: engine })
+      const definitions = buildToolDefinitions({ ctx, config: resolved, jobs, native: engine })
+      const definitionsByRoot = new Map([[root, definitions]])
+
+      function definitionsFor(cwd: string): ReadonlyMap<string, ToolDefinition> {
+        const cached = definitionsByRoot.get(cwd)
+        if (cached !== undefined) return cached
+        const acquired = pool.acquire(cwd)
+        const canonical = definitionsByRoot.get(acquired.root)
+        if (canonical !== undefined) {
+          pool.release(acquired.root)
+          return canonical
+        }
+        try {
+          const next = buildToolDefinitions({ ctx, config: resolved, jobs, native: acquired.engine })
+          definitionsByRoot.set(acquired.root, next)
+          // Keep prior engines alive for their running jobs and session artifacts.
+          roots.add(acquired.root)
+          return next
+        } catch (error) {
+          pool.release(acquired.root)
+          throw error
+        }
+      }
+
       // `tools.get()` takes its viewing scope as an argument and falls back to
       // the GLOBAL layer when none is given. An agent preset registers the
       // model-facing tools into a standing mount that is this agent's scope
@@ -139,7 +165,18 @@ function installAgentTools(
       for (const name of replacements) {
         const definition = definitions.get(name)
         if (definition === undefined) throw new Error(`dsh-agentshim: internal error: no definition for "${name}"`)
-        disposers.push(agent.ctx.tools.register(definition))
+        disposers.push(agent.ctx.tools.register({
+          ...definition,
+          async execute(args, exec) {
+            const directories = ctx.get('workingDirectory')
+            if (directories === undefined || name === 'bash_status') return definition.execute(args, exec)
+            const cwd = await directories.ensure(agent, exec.signal)
+            if (!installed.has(agent)) {
+              throw new HarnessError('dsh-agentshim: agent tools have been disposed', 'AGENTSHIM_ENGINE_CLOSED')
+            }
+            return definitionsFor(cwd).get(name)!.execute(args, exec)
+          },
+        }))
       }
       for (const name of replacements) {
         const section = promptByName.get(`tool:${name}`)
@@ -157,7 +194,7 @@ function installAgentTools(
       pool.release(root)
       throw error
     }
-    installed.set(agent, { disposers, root })
+    installed.set(agent, { disposers, roots })
   }
 
   ctx.on('agent/created', ({ agent }) => {

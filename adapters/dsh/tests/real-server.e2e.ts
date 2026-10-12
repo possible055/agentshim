@@ -8,12 +8,11 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import NodePtcRuntime from '@deepseek-ai/dsh-ptc-runtime-node'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
-import * as llm from '@deepseek-ai/dsh-llm'
-const createCallId = (llm as { ToolCallId?: (id: string) => any; CallId?: (id: string) => any }).ToolCallId
-  ?? (llm as { ToolCallId?: (id: string) => any; CallId?: (id: string) => any }).CallId
-  ?? ((id: string) => id)
-const CallId = createCallId
+import { ToolCallId as CallId } from '@deepseek-ai/dsh-llm'
 import { createScope } from '@deepseek-ai/dsh-scope'
+import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionProjections from '@deepseek-ai/dsh-session-projection'
+import WorkingDirectory from '@deepseek-ai/dsh-working-directory'
 import ShellExecutor from '@deepseek-ai/dsh-shell'
 import type { ShellExecRequest, ShellExecSpec, ShellExecution } from '@deepseek-ai/dsh-shell'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
@@ -112,6 +111,7 @@ function registerInheritedCatalog(ctx: Context): void {
 async function startRealComposition(
   mode: ToolPresentationMode = 'native',
   beforeAdapter?: (ctx: Context) => Promise<void>,
+  root = repoRoot,
 ) {
   const captureRoot = await mkdtemp(join(tmpdir(), 'agentshim-real-captures-'))
   const ctx = new Context()
@@ -128,11 +128,14 @@ async function startRealComposition(
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(LocalJobRegistry, {})
   await ctx.plugin(ToolJobs, { completionDelivery: 'quiet' })
-  await ctx.plugin(LocalFileSystem, { cwd: repoRoot })
+  await ctx.plugin(LocalFileSystem, { cwd: root })
+  await ctx.plugin(SessionStore)
+  await ctx.plugin(SessionProjections)
+  await ctx.plugin(WorkingDirectory, { defaultDirectory: root })
   await ctx.plugin(UnconfinedShell)
   await beforeAdapter?.(ctx)
   const adapter = await ctx.plugin(agentshim, {
-    root: repoRoot,
+    root,
     captureRoot,
     env: {},
     toolCallTimeoutMs: MIN_TOOL_CALL_TIMEOUT_MS,
@@ -143,12 +146,7 @@ async function startRealComposition(
   await ctx.plugin(Object.assign((inner: Context) => {
     const draft = {
       id,
-      session: {
-        id,
-        header: { cwd: repoRoot },
-        requestHeader: () => ({ config: {} }),
-        append: () => undefined,
-      },
+      session: inner.sessions.create(SessionId(id), { meta: { cwd: root } }),
       options: { provider: 'stub-provider', model: 'stub-model' },
       status: 'busy',
       inject: () => undefined,
@@ -157,7 +155,7 @@ async function startRealComposition(
     const scope = createScope(inner, draft)
     ;(draft as { ctx?: Context }).ctx = scope.ctx
     agent = draft
-  }, { inject: ['tools', 'systemPrompt'] }))
+  }, { inject: ['tools', 'systemPrompt', 'sessions'] }))
   const unregisterAgent = await ctx.agents.register(agent)
 
   return {
@@ -166,6 +164,7 @@ async function startRealComposition(
     async dispose() {
       unregisterAgent()
       await adapter.dispose()
+      await ctx.fiber.dispose()
       await rm(captureRoot, { recursive: true, force: true })
     },
   }
@@ -264,21 +263,62 @@ describe.runIf(enabled)('real DSH native composition', () => {
     }
   }, 120_000)
 
-  it('dispatches typed canonical values through the real PTC and Both run_code surfaces', async () => {
-    for (const mode of ['ptc', 'both'] as const) {
-      const composition = await startRealComposition(mode)
-      try {
-        const output = await callText(composition.ctx, composition.agent, 'run_code', {
-          description: `Read the package through ${mode} mode`,
-          code: [
-            'const value = await tools.read({ path: "adapters/dsh/package.json" })',
-            'return { kind: value.kind, found: value.text.includes("dsh-agentshim") }',
-          ].join('\n'),
-        })
-        expect(JSON.parse(output)).toEqual({ kind: 'read', found: true })
-      } finally {
-        await composition.dispose()
-      }
+  it('dispatches typed canonical values through the real PTC run_code surface', async () => {
+    const composition = await startRealComposition('ptc')
+    try {
+      await composition.ctx.workingDirectory.set(composition.agent, join(repoRoot, 'adapters', 'dsh'))
+      const output = await callText(composition.ctx, composition.agent, 'run_code', {
+        description: 'Read the package through PTC mode',
+        code: [
+          'const value = await tools.read({ path: "package.json" })',
+          'return { kind: value.kind, found: value.text.includes("dsh-agentshim") }',
+        ].join('\n'),
+      })
+      expect(JSON.parse(output)).toEqual({ kind: 'read', found: true })
+    } finally {
+      await composition.dispose()
+    }
+  }, 180_000)
+
+  it('follows committed working directories without moving existing background jobs', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agentshim-real-cwd-'))
+    const child = join(root, 'child')
+    await mkdir(child)
+    await writeFile(join(root, 'notes.txt'), 'original directory\n')
+    await writeFile(join(child, 'notes.txt'), 'changed directory\n')
+    const composition = await startRealComposition('native', undefined, root)
+    try {
+      const { ctx, agent } = composition
+      const observed: string[] = []
+      ctx.on('fs/observed', target => { observed.push(ctx.fs.processPath(target)) })
+      expect(await callText(ctx, agent, 'read', { path: 'notes.txt' })).toContain('original directory')
+      const started = await callText(ctx, agent, 'bash', {
+        command: 'pwd; sleep 30',
+        description: 'Keep the original working directory alive',
+        run_in_background: true,
+      })
+      const jobId = started.match(/started background job (bash-\d+)/)?.[1]
+      if (jobId === undefined) throw new Error(`missing DSH job id: ${started}`)
+      await ctx.workingDirectory.set(agent, child)
+      expect(agent.session.header.cwd).toBe(root)
+      expect(await callText(ctx, agent, 'read', { path: 'notes.txt' })).toContain('changed directory')
+      expect(observed).toContain(join(child, 'notes.txt'))
+      expect(await callText(ctx, agent, 'grep', { pattern: 'changed', path: 'notes.txt' })).toContain('changed directory')
+      expect(await callText(ctx, agent, 'glob', { pattern: 'notes.txt' })).toContain(join(child, 'notes.txt'))
+      expect(await callText(ctx, agent, 'run_program', {
+        program: process.execPath,
+        args: ['-e', 'console.log(process.cwd())'],
+      })).toContain(child)
+      expect(await callText(ctx, agent, 'bash', {
+        command: 'pwd', description: 'Print the current working directory',
+      })).toContain(child)
+      expect(await callText(ctx, agent, 'bash_status', { job_id: jobId })).toContain('Status: running')
+      await callText(ctx, agent, 'job_kill', { job_id: jobId, reason: 'working directory E2E cleanup' })
+      await ctx.workingDirectory.set(agent, root)
+      expect(await callText(ctx, agent, 'read', { path: 'notes.txt' })).toContain('original directory')
+    } finally {
+      await composition.dispose()
+      await rm(root, { recursive: true, force: true })
     }
   }, 180_000)
 

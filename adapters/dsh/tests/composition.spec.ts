@@ -4,11 +4,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
-import * as llm from '@deepseek-ai/dsh-llm'
-const createCallId = (llm as { ToolCallId?: (id: string) => any; CallId?: (id: string) => any }).ToolCallId
-  ?? (llm as { ToolCallId?: (id: string) => any; CallId?: (id: string) => any }).CallId
-  ?? ((id: string) => id)
-const CallId = createCallId
+import { ToolCallId as CallId } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import LocalAttachmentStore from '@deepseek-ai/dsh-attachment-local'
 import * as ObservationPolicy from '@deepseek-ai/dsh-fs-observation-policy'

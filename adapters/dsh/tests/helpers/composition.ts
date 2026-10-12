@@ -4,11 +4,8 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
-import * as llm from '@deepseek-ai/dsh-llm'
-const createCallId = (llm as { ToolCallId?: (id: string) => any; CallId?: (id: string) => any }).ToolCallId
-  ?? (llm as { ToolCallId?: (id: string) => any; CallId?: (id: string) => any }).CallId
-  ?? ((id: string) => id)
-export const CallId = createCallId
+import { ToolCallId as CallId } from '@deepseek-ai/dsh-llm'
+export { CallId }
 import { bindScopeParent, createScope } from '@deepseek-ai/dsh-scope'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'

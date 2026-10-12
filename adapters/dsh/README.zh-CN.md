@@ -13,7 +13,7 @@
 ## 运行环境要求
 
 - Node.js `^22.19.0 || >=24.0.0`。
-- 支持的 DSH 套件家族包括 `0.1.5-alpha.1`、`0.1.5-alpha.2`、`0.1.5-rc.1`、`0.1.5-rc.2`、`0.1.6-alpha.1`、`0.1.6-alpha.2`、`0.1.7-alpha.1`、`0.1.7-alpha.2`、`0.1.7-rc.1`、`0.1.7-rc.2` 以及 `0.2.0-rc.1`、`0.2.0-rc.2`。开发与 CI 使用 DSH `0.2.0-rc.2` 及 Cordis `4.0.4`；peer 声明仍保留受支持的既有 DSH 版本。
+- 支援 DSH `0.2.x` 穩定版，以及明列的預發行版 `0.2.0-rc.1`、`0.2.0-rc.2`、`0.2.1-alpha.1`、`0.2.1-alpha.2`。開發與 CI 使用 DSH `0.2.1-alpha.2` 及 Cordis `4.0.5-alpha.1`。不再支援 DSH `0.1.x`；未列出的預發行版需先驗證，再加入 peer 範圍。
 - 后台 Bash 命令需要 `ctx.jobs` 及任务控制器支持。
 
 不支持的平台、缺失可选的原生包、加载失败或插件 API 版本不为 `5` 均会拒绝插件激活。
@@ -50,7 +50,7 @@ dsh --profile headless --dump-config
 
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
-| `root` | `process.cwd()` | 仅用于插件激活与配置上下文；每个已安装的 agent process 使用该 agent session 的 canonical cwd；没有 session cwd 的 agent 保持不变。 |
+| `root` | `process.cwd()` | 仅用于插件激活与配置上下文；每次呼叫優先使用 DSH `workingDirectory` 的目前目錄，缺少該服務時使用 session header 的原始目錄；沒有有效目錄的 agent 保持不變。 |
 | `env` | `{}` | 叠加在 DSH 凭据清洗（credential-scrubbed）父环境变量之上的子环境变量。在此设定的 `AGENTSHIM_BASH` 也会在加载时驱动 Bash 探测。接受 GNU Bash 可执行文件（Git Bash `bash.exe`）、BusyBox-w32 派发器二进制文件（`busybox64u.exe`）或按 applet 命名的 BusyBox 副本（`sh.exe`/`ash.exe`/`bash.exe`）；shell 类型与调用形式由探针自动判定。`AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX` 在激活合并后解析一次，因此配置会覆盖父环境中的值。 |
 | `toolCallTimeoutMs` | `600000` | DSH 工具超时阈值；低于 600000 的值会被拒绝，进程超时上限为 590000 毫秒。 |
 | `readScope` | `unrestricted` | 只有显式设置 `normal` 才限制 `read`、`grep` 和 `glob`；它不配置进程 confinement。 |
@@ -61,6 +61,8 @@ dsh --profile headless --dump-config
 `readScope` 默认为 `unrestricted`，显式设置 `normal` 才限制 `read`、`grep` 和 `glob`。进程 confinement 不由本插件实现：若组合了官方 DSH `ctx.sandbox`／`ctx.sandboxPolicy`，插件只委托 exact argv；若服务缺失则保持原有 unconfined 行为。
 
 ## 进程与后台行为
+
+DSH `working_directory` 的目錄變更只影響後續呼叫，不改變執行中的工作。先前目錄的引擎會保留到 agent 結束，讓背景工作及產物仍可存取。沙箱權限仍由 DSH 策略錨定原始專案；換目錄不會擴大權限。
 
 在 DSH 沙箱策略封装确切的 argv 之前，每个进程调用都已完成预先准备。`read-only` 和 `workspace-write` 调用使用 `ctx.sandbox.confine()`；经批准的 `danger-full-access` 调用保持单次生效。沙箱隔离失败绝不会回退至未隔离状态重试。
 
@@ -91,11 +93,11 @@ pnpm test
 pnpm build
 pnpm test:release-packages
 pnpm test:packed
-pnpm test:packed:matrix # Linux：所有当前可发布的 DSH 套件
+pnpm test:packed:matrix # Linux：受支援且已發布的 DSH 0.2 預發行版
 pnpm verify:cutover
 ```
 
-源码/原生测试可以通过 `AGENTSHIM_DSH_NATIVE_DLL` 暂存本地构建的库。打包冒烟测试则不同：它会在隔离的临时消费者环境中全新打包并安装入口包及当前平台包，然后通过包导出接口执行原生读取。Linux 矩阵覆盖所有受支持且已发布的 DSH 套件。该目录中现有的 `.tgz` 文件绝不会用作开发或发布的验证证据。
+源码/原生测试可以通过 `AGENTSHIM_DSH_NATIVE_DLL` 暂存本地构建的库。打包冒烟测试则不同：它会在隔离的临时消费者环境中全新打包并安装入口包及当前平台包，然后通过包导出接口执行原生读取。Linux 測試矩陣涵蓋四個受支援且已發布的 DSH `0.2` 預發行版。该目录中现有的 `.tgz` 文件绝不会用作开发或发布的验证证据。
 
 ## 卸载
 

@@ -5,25 +5,13 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const TARGET_DSH_VERSION = '0.2.0-rc.2'
+const TARGET_DSH_VERSION = '0.2.1-alpha.2'
 const PUBLISHED_DSH_VERSIONS = [
-  '0.1.5-alpha.1',
-  '0.1.5-alpha.2',
-  '0.1.5-rc.1',
-  '0.1.5-rc.2',
-  '0.1.6-alpha.1',
-  '0.1.6-alpha.2',
-  '0.1.7-alpha.1',
-  '0.1.7-alpha.2',
-  '0.1.7-rc.1',
-  '0.1.7-rc.2',
   '0.2.0-rc.1',
+  '0.2.0-rc.2',
+  '0.2.1-alpha.1',
   TARGET_DSH_VERSION,
 ]
-const CORDIS_VERSION = '4.0.4'
-const CORDIS_PLUGIN_GROUP_VERSION = '1.0.4'
-const CORDIS_PLUGIN_LOADER_VERSION = '1.0.5'
-const CORDIS_PLUGIN_INCLUDE_VERSION = '1.0.9'
 const DSH_FAMILY_PACKAGES = [
   '@deepseek-ai/dsh-agent',
   '@deepseek-ai/dsh-attachment-local',
@@ -34,12 +22,14 @@ const DSH_FAMILY_PACKAGES = [
   '@deepseek-ai/dsh-fs',
   '@deepseek-ai/dsh-home-paths',
   '@deepseek-ai/dsh-http-proxy',
-  '@deepseek-ai/dsh-invariants',
   '@deepseek-ai/dsh-jobs-local',
   '@deepseek-ai/dsh-jobs',
   '@deepseek-ai/dsh-llm',
   '@deepseek-ai/dsh-output-retention',
+  '@deepseek-ai/dsh-ptc-runtime',
+  '@deepseek-ai/dsh-ptc-runtime-node',
   '@deepseek-ai/dsh-sandbox',
+  '@deepseek-ai/dsh-sandbox-policy',
   '@deepseek-ai/dsh-scope',
   '@deepseek-ai/dsh-session',
   '@deepseek-ai/dsh-session-projection',
@@ -97,30 +87,6 @@ function runPnpm(args, options = {}) {
   run(corepack, ['pnpm@11.21.0', ...args], options)
 }
 
-function packagesFor(version) {
-  if (version.startsWith('0.1.6-') || version.startsWith('0.1.7-') || version.startsWith('0.2.0-')) {
-    const packages = [
-      ...DSH_FAMILY_PACKAGES,
-      '@deepseek-ai/dsh-ptc-runtime',
-      '@deepseek-ai/dsh-ptc-runtime-node',
-      '@deepseek-ai/dsh-sandbox-policy',
-    ]
-    if (version.startsWith('0.1.7-')) {
-      packages.push('@deepseek-ai/cordis-plugin-group', '@deepseek-ai/dsh-app-boot', '@deepseek-ai/dsh-launch-environment')
-    }
-    return packages
-  }
-  return [
-    ...DSH_FAMILY_PACKAGES,
-    '@deepseek-ai/dsh-code-runtime',
-    '@deepseek-ai/dsh-code-runtime-worker-thread',
-  ]
-}
-
-function versionForPackage(packageName, dshVersion) {
-  return packageName === '@deepseek-ai/cordis-plugin-group' ? CORDIS_PLUGIN_GROUP_VERSION : dshVersion
-}
-
 const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 
 function publishedVersions(packageName) {
@@ -138,14 +104,12 @@ function publishedVersions(packageName) {
 }
 
 function verifyPublishedPackageMatrix(versions) {
-  const packageNames = new Set(versions.flatMap(version => packagesFor(version)))
   const versionsByPackage = new Map()
-  for (const packageName of packageNames) versionsByPackage.set(packageName, publishedVersions(packageName))
+  for (const packageName of DSH_FAMILY_PACKAGES) versionsByPackage.set(packageName, publishedVersions(packageName))
   for (const version of versions) {
-    for (const packageName of packagesFor(version)) {
-      const expectedVersion = versionForPackage(packageName, version)
-      if (!versionsByPackage.get(packageName).has(expectedVersion)) {
-        throw new Error(`published package matrix is missing ${packageName}@${expectedVersion}`)
+    for (const packageName of DSH_FAMILY_PACKAGES) {
+      if (!versionsByPackage.get(packageName).has(version)) {
+        throw new Error(`published package matrix is missing ${packageName}@${version}`)
       }
     }
   }
@@ -162,11 +126,20 @@ async function runPackedSmoke({ entryArchive, platformArchive, platformName, ver
   await mkdir(fixtureRoot)
   await writeFile(join(fixtureRoot, 'notes.txt'), `packed native read ${version}\n`)
 
+  const cordisPackages = version.startsWith('0.2.0-')
+    ? {
+        '@deepseek-ai/cordis': '4.0.4',
+        '@deepseek-ai/cordis-plugin-include': '1.0.9',
+        '@deepseek-ai/cordis-plugin-loader': '1.0.5',
+      }
+    : {
+        '@deepseek-ai/cordis': '4.0.5-alpha.1',
+        '@deepseek-ai/cordis-plugin-include': '1.0.10-alpha.1',
+        '@deepseek-ai/cordis-plugin-loader': '1.0.6-alpha.1',
+      }
   const dependencies = {
-    '@deepseek-ai/cordis': CORDIS_VERSION,
-    '@deepseek-ai/cordis-plugin-include': CORDIS_PLUGIN_INCLUDE_VERSION,
-    '@deepseek-ai/cordis-plugin-loader': CORDIS_PLUGIN_LOADER_VERSION,
-    ...Object.fromEntries(packagesFor(version).map(name => [name, versionForPackage(name, version)])),
+    ...cordisPackages,
+    ...Object.fromEntries(DSH_FAMILY_PACKAGES.map(name => [name, version])),
     'dsh-agentshim': localArchive(entryArchive),
     [platformName]: localArchive(platformArchive),
   }
@@ -187,8 +160,7 @@ async function runPackedSmoke({ entryArchive, platformArchive, platformName, ver
   await writeFile(join(consumer, 'smoke.mjs'), `
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
-import * as llm from '@deepseek-ai/dsh-llm'
-const createCallId = llm.ToolCallId ?? llm.CallId ?? (id => id)
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import { bindScopeParent, createScope } from '@deepseek-ai/dsh-scope'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -274,7 +246,7 @@ assert.notEqual(readSection, -1)
 assert(bashSection < readSection)
 const result = await ctx.tools.execute({
   signal: new AbortController().signal,
-  callId: createCallId('packed-read'),
+  callId: ToolCallId('packed-read'),
   name: 'read',
   arguments: { path: 'notes.txt' },
   agent,
