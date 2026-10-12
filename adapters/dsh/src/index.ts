@@ -1,3 +1,4 @@
+import { resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
@@ -12,7 +13,7 @@ import { PUBLIC_TOOL_NAMES } from './contracts.ts'
 import { BackgroundJobManager } from './jobs.ts'
 import { backgroundJobTimeoutMaxMs, loadNativeAddon, nativeEngineEnv, nativeLoadFailureError } from './native.ts'
 import type { NativeEngine, NativeHostOptions } from './native.ts'
-import { EnginePool } from './engine-pool.ts'
+import { canonicalOrUndefined, EnginePool } from './engine-pool.ts'
 import {
   DEFAULT_CAPTURE_MAX_BYTES,
   MAX_CAPTURE_MAX_BYTES,
@@ -132,7 +133,18 @@ function installAgentTools(
     const disposers: Array<() => void> = []
     const roots = new Set([root])
     try {
-      const definitions = buildToolDefinitions({ ctx, config: resolved, jobs, native: engine })
+      const artifactRoots = new Map<string, string>()
+
+      function buildDefinitions(native: NativeEngine, cwd: string): ReadonlyMap<string, ToolDefinition> {
+        return buildToolDefinitions({
+          ctx, config: resolved, jobs, native, cwd,
+          onArtifacts(artifacts) {
+            for (const { path } of artifacts) artifactRoots.set(canonicalOrUndefined(path) ?? path, cwd)
+          },
+        })
+      }
+
+      const definitions = buildDefinitions(engine, root)
       const definitionsByRoot = new Map([[root, definitions]])
 
       function definitionsFor(cwd: string): ReadonlyMap<string, ToolDefinition> {
@@ -145,7 +157,7 @@ function installAgentTools(
           return canonical
         }
         try {
-          const next = buildToolDefinitions({ ctx, config: resolved, jobs, native: acquired.engine })
+          const next = buildDefinitions(acquired.engine, acquired.root)
           definitionsByRoot.set(acquired.root, next)
           // Keep prior engines alive for their running jobs and session artifacts.
           roots.add(acquired.root)
@@ -168,11 +180,20 @@ function installAgentTools(
         disposers.push(agent.ctx.tools.register({
           ...definition,
           async execute(args, exec) {
+            if (name === 'bash_status') return definition.execute(args, exec)
             const directories = ctx.get('workingDirectory')
-            if (directories === undefined || name === 'bash_status') return definition.execute(args, exec)
-            const cwd = await directories.ensure(agent, exec.signal)
+            const cwd = directories === undefined ? root : await directories.ensure(agent, exec.signal)
             if (!installed.has(agent)) {
               throw new HarnessError('dsh-agentshim: agent tools have been disposed', 'AGENTSHIM_ENGINE_CLOSED')
+            }
+            if ((name === 'read' || name === 'grep')
+              && typeof args === 'object' && args !== null && 'path' in args && typeof args.path === 'string') {
+              const path = resolve(cwd, args.path)
+              const artifactRoot = artifactRoots.get(canonicalOrUndefined(path) ?? path)
+              if (artifactRoot !== undefined) {
+                // Only published artifacts return to their owning engine; ordinary paths use this call's cwd.
+                return definitionsByRoot.get(artifactRoot)!.get(name)!.execute({ ...args, path }, exec)
+              }
             }
             return definitionsFor(cwd).get(name)!.execute(args, exec)
           },

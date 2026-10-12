@@ -11,7 +11,6 @@ import type {
   SandboxPolicy,
 } from '@deepseek-ai/dsh-sandbox'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
-import type {} from '@deepseek-ai/dsh-working-directory'
 
 export const ESCALATION_PERMISSION_FIELD = 'sandbox_permissions'
 export const ESCALATION_JUSTIFICATION_FIELD = 'justification'
@@ -27,12 +26,8 @@ export interface ReadObservation {
   readonly pre: FsInfo | undefined
 }
 
-export async function beginReadObservation(ctx: Context, exec: ToolExecution, path: string): Promise<ReadObservation> {
-  const agent = exec.agent
-  const cwd = agent === undefined
-    ? undefined
-    : ctx.get('workingDirectory')?.get(agent.session) ?? agent.session.header.cwd
-  const target = await ctx.fs.resolve(path, { ...(cwd === undefined ? {} : { cwd }), signal: exec.signal })
+export async function beginReadObservation(ctx: Context, exec: ToolExecution, path: string, cwd: string): Promise<ReadObservation> {
+  const target = await ctx.fs.resolve(path, { cwd, signal: exec.signal })
   const pre = await ctx.fs.stat(target, exec.signal)
   if (pre === undefined) ctx.emit('fs/observed', target, { kind: 'absent' }, exec)
   return { target, pre }

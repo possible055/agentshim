@@ -1,6 +1,6 @@
 import { chmod, copyFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Context, Service } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
@@ -21,7 +21,7 @@ import * as TimeoutPolicy from '@deepseek-ai/dsh-tool-call-timeout-policy'
 import * as ToolJobs from '@deepseek-ai/dsh-tool-jobs'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition, ToolPresentationMode } from '@deepseek-ai/dsh-tools'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import * as agentshim from '../src/index.ts'
 import { MIN_TOOL_CALL_TIMEOUT_MS } from '../src/config.ts'
 
@@ -112,6 +112,7 @@ async function startRealComposition(
   mode: ToolPresentationMode = 'native',
   beforeAdapter?: (ctx: Context) => Promise<void>,
   root = repoRoot,
+  configOverrides: Partial<agentshim.Config> = {},
 ) {
   const captureRoot = await mkdtemp(join(tmpdir(), 'agentshim-real-captures-'))
   const ctx = new Context()
@@ -139,6 +140,7 @@ async function startRealComposition(
     captureRoot,
     env: {},
     toolCallTimeoutMs: MIN_TOOL_CALL_TIMEOUT_MS,
+    ...configOverrides,
   })
 
   const id = 'dsh-agentshim-real-e2e'
@@ -317,6 +319,114 @@ describe.runIf(enabled)('real DSH native composition', () => {
       await ctx.workingDirectory.set(agent, root)
       expect(await callText(ctx, agent, 'read', { path: 'notes.txt' })).toContain('original directory')
     } finally {
+      await composition.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  }, 180_000)
+
+  for (const readScope of ['normal', 'unrestricted'] as const) {
+    it(`reads foreground artifacts after directory changes with ${readScope} scope`, async () => {
+      const root = await mkdtemp(join(tmpdir(), 'agentshim-real-artifacts-'))
+      const child = join(root, 'child')
+      await mkdir(child)
+      const composition = await startRealComposition('native', undefined, root, { readScope })
+      try {
+        const { ctx, agent } = composition
+        const textOutput = await callText(ctx, agent, 'run_program', {
+          program: process.execPath,
+          args: ['-e', 'process.stdout.write("needle\\n".repeat(9000))'],
+        })
+        const textPath = textOutput.match(/Full raw stdout: (.+) \(\d+ bytes/)?.[1]
+        if (textPath === undefined) throw new Error(`missing text artifact: ${textOutput}`)
+        const binaryOutput = await callText(ctx, agent, 'bash', {
+          command: `"${process.execPath.replaceAll('\\', '/')}" -e 'process.stdout.write(Buffer.from([0,255,65,66]))'`,
+          description: 'Publish a binary artifact',
+        })
+        const binaryPath = binaryOutput.match(/Full raw output: (.+) \(\d+ bytes/)?.[1]
+        if (binaryPath === undefined) throw new Error(`missing binary artifact: ${binaryOutput}`)
+        expect(await callText(ctx, agent, 'read', { path: textPath, line_count: 2 })).toContain('needle')
+
+        await ctx.workingDirectory.set(agent, child)
+        expect(await callText(ctx, agent, 'read', { path: textPath, line_count: 2 })).toContain('needle')
+        expect(await callText(ctx, agent, 'grep', { path: textPath, pattern: 'needle', fixed_strings: true })).toContain('needle')
+        expect(await callText(ctx, agent, 'read', { path: relative(child, textPath), line_count: 2 })).toContain('needle')
+        expect(await callText(ctx, agent, 'grep', { path: relative(child, textPath), pattern: 'needle', fixed_strings: true })).toContain('needle')
+        expect(await callText(ctx, agent, 'read', { path: binaryPath, artifact_offset: 0 })).toContain('AP9BQg==')
+
+        const unknown = join(binaryPath, '..', 'unknown.bin')
+        await writeFile(unknown, Buffer.from([0, 255]))
+        const denied = await ctx.tools.execute({
+          signal: new AbortController().signal,
+          callId: CallId('unknown-artifact'),
+          name: 'read',
+          arguments: { path: unknown, artifact_offset: 0 },
+          agent,
+        })
+        expect(denied.isError).toBe(true)
+        expect(JSON.stringify(denied)).toContain('exact artifact capability')
+      } finally {
+        await composition.dispose()
+        await rm(root, { recursive: true, force: true })
+      }
+    }, 180_000)
+  }
+
+  it('reads background artifacts published after changing directories', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agentshim-real-background-artifacts-'))
+    const child = join(root, 'child')
+    await mkdir(child)
+    const composition = await startRealComposition('native', undefined, root, { readScope: 'normal' })
+    try {
+      const { ctx, agent } = composition
+      const started = await callText(ctx, agent, 'bash', {
+        command: `while [ ! -f release.txt ]; do sleep 0.01; done; "${process.execPath.replaceAll('\\', '/')}" -e 'process.stdout.write("background needle\\n".repeat(9000))'`,
+        description: 'Publish output after the directory change',
+        run_in_background: true,
+      })
+      const jobId = started.match(/started background job (bash-\d+)/)?.[1]
+      if (jobId === undefined) throw new Error(`missing job id: ${started}`)
+      await ctx.workingDirectory.set(agent, child)
+      await writeFile(join(root, 'release.txt'), 'release')
+      expect(await callText(ctx, agent, 'job_output', {
+        job_id: jobId, wait: true, timeout_ms: 10_000,
+      })).toContain('[status: completed')
+      const status = await callText(ctx, agent, 'bash_status', { job_id: jobId })
+      const path = status.match(/Artifacts: (.+)/)?.[1]
+      if (path === undefined) throw new Error(`missing background artifact: ${status}`)
+      expect(await callText(ctx, agent, 'read', { path, line_count: 2 })).toContain('background needle')
+      expect(await callText(ctx, agent, 'grep', { path, pattern: 'background needle', fixed_strings: true })).toContain('background needle')
+    } finally {
+      await composition.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  }, 180_000)
+
+  it('observes the same file read when the directory changes after ensure', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agentshim-real-observation-cwd-'))
+    const child = join(root, 'child')
+    await mkdir(child)
+    await writeFile(join(root, 'notes.txt'), 'original file\n')
+    await writeFile(join(child, 'notes.txt'), 'unread file\n')
+    const composition = await startRealComposition('native', undefined, root)
+    const { ctx, agent } = composition
+    const directories = ctx.workingDirectory
+    const ensure = directories.ensure.bind(directories)
+    const changed = vi.spyOn(directories, 'ensure').mockImplementationOnce(async (owner, signal) => {
+      const cwd = await ensure(owner, signal)
+      // Hold the caller until a direct SDK-style directory change commits.
+      await directories.set(owner, child, signal)
+      return cwd
+    })
+    try {
+      const observed: string[] = []
+      ctx.on('fs/observed', target => { observed.push(ctx.fs.processPath(target)) })
+      expect(await callText(ctx, agent, 'read', { path: 'notes.txt' })).toContain('original file')
+      expect(directories.get(agent.session)).toBe(child)
+      expect(observed).toEqual([join(root, 'notes.txt')])
+      expect(await callText(ctx, agent, 'read', { path: 'notes.txt' })).toContain('unread file')
+      expect(observed).toEqual([join(root, 'notes.txt'), join(child, 'notes.txt')])
+    } finally {
+      changed.mockRestore()
       await composition.dispose()
       await rm(root, { recursive: true, force: true })
     }

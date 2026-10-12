@@ -42,6 +42,7 @@ import {
 import { startBackgroundBashNative } from './jobs.ts'
 import type { BackgroundJobManager } from './jobs.ts'
 import type {
+  NativeArtifactInfo,
   NativeEngine,
   NativeGlobArgs,
   NativeGrepArgs,
@@ -60,6 +61,8 @@ export interface ToolDependencies {
   readonly config: ResolvedPluginConfig
   readonly jobs: BackgroundJobManager
   readonly native: NativeEngine
+  readonly cwd: string
+  readonly onArtifacts: (artifacts: readonly NativeArtifactInfo[]) => void
 }
 
 function nativeReadArgs(args: Record<string, unknown>): NativeReadArgs {
@@ -225,6 +228,7 @@ async function executeProcessNative(
       decision.wrappedArgv === undefined ? undefined : [...decision.wrappedArgv],
       nativeAttribution(decision.attribution),
     )
+    deps.onArtifacts(outcome.artifacts)
     if (outcome.failure !== undefined) {
       if (outcome.runnerFailed) {
         throw new HarnessError(`sandbox runner failed before the command ran: ${outcome.text}`, 'SANDBOX_UNAVAILABLE')
@@ -370,7 +374,7 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       validateReadArgs(args)
-      const observation = await beginReadObservation(deps.ctx, exec, args.path)
+      const observation = await beginReadObservation(deps.ctx, exec, args.path, deps.cwd)
       const native = await deps.native.readText(nativeReadArgs(args), exec.signal)
       const content = [
         { type: 'text' as const, text: native.text },
@@ -458,6 +462,7 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
       if (args.run_in_background === true) {
         const backgroundInput = {
           command: args.command,
+          onArtifacts: deps.onArtifacts,
           wire: {
             ...commonWire,
             detach: true,

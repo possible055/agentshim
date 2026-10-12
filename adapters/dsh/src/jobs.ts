@@ -5,7 +5,7 @@ import { TOOL_ABORTED } from '@deepseek-ai/dsh-tools'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { ProcessPolicy, SandboxAttribution } from './policy.ts'
 import { nativeBashArgs } from './native.ts'
-import type { NativeEngine, NativeJobOutcome, NativeSandboxAttribution } from './native.ts'
+import type { NativeArtifactPublished, NativeEngine, NativeJobOutcome, NativeSandboxAttribution } from './native.ts'
 
 const JOB_OUTPUT_LIMIT_BYTES = 64 * 1024
 const JOB_OUTPUT_POLL_MS = 10
@@ -85,6 +85,7 @@ function abortedError(): HarnessError {
 export interface BackgroundBashInput {
   readonly command: string
   readonly wire: Record<string, unknown>
+  readonly onArtifacts: (artifacts: readonly NativeArtifactPublished[]) => void
 }
 
 function nativeAttribution(attribution: SandboxAttribution | undefined): NativeSandboxAttribution | undefined {
@@ -140,7 +141,10 @@ export async function startBackgroundBashNative(
         const handle = engine.startBackgroundPrepared(prepared.handle, wrappedArgv, nativeAttribution(decision.attribution))
         let cancelled = false
         let outputError: unknown
-        const outcomePromise = handle.done()
+        const outcomePromise = handle.done().then(outcome => {
+          input.onArtifacts(outcome.artifacts)
+          return outcome
+        })
         nativeOutcomePromise = outcomePromise
 
         const appendOutput = (): void => {
