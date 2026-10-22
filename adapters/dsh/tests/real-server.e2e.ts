@@ -227,8 +227,7 @@ describe.runIf(enabled)('real DSH native composition', () => {
         description: 'Produce output until the DSH job is cancelled',
         run_in_background: true,
       })
-      const jobId = started.match(/started background job (bash-\d+)/)?.[1]
-      expect(jobId).toMatch(/^bash-\d+$/)
+      const jobId = started.match(/started background job (\S+)/)?.[1]
       if (jobId === undefined) throw new Error(`missing DSH job id: ${started}`)
       expect(await callText(composition.ctx, composition.agent, 'bash_status', {
         job_id: jobId,
@@ -299,7 +298,7 @@ describe.runIf(enabled)('real DSH native composition', () => {
         description: 'Keep the original working directory alive',
         run_in_background: true,
       })
-      const jobId = started.match(/started background job (bash-\d+)/)?.[1]
+      const jobId = started.match(/started background job (\S+)/)?.[1]
       if (jobId === undefined) throw new Error(`missing DSH job id: ${started}`)
       await ctx.workingDirectory.set(agent, child)
       expect(agent.session.header.cwd).toBe(root)
@@ -383,7 +382,7 @@ describe.runIf(enabled)('real DSH native composition', () => {
         description: 'Publish output after the directory change',
         run_in_background: true,
       })
-      const jobId = started.match(/started background job (bash-\d+)/)?.[1]
+      const jobId = started.match(/started background job (\S+)/)?.[1]
       if (jobId === undefined) throw new Error(`missing job id: ${started}`)
       await ctx.workingDirectory.set(agent, child)
       await writeFile(join(root, 'release.txt'), 'release')

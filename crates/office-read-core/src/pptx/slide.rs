@@ -858,16 +858,14 @@ pub(crate) fn extract_notes_text(xml_data: &[u8]) -> CoreResult<Option<String>> 
 
     // Find the body placeholder and extract text
     for shape in &shapes {
-        if let Shape::Auto(auto) = shape {
-            if let Some(ref ph) = auto.placeholder {
-                if ph.ph_type.as_deref() == Some("body") {
-                    if let Some(ref tb) = auto.text_body {
-                        let text = extract_plain_text_from_body(tb);
-                        if !text.is_empty() {
-                            return Ok(Some(text));
-                        }
-                    }
-                }
+        if let Shape::Auto(auto) = shape
+            && let Some(ref ph) = auto.placeholder
+            && ph.ph_type.as_deref() == Some("body")
+            && let Some(ref tb) = auto.text_body
+        {
+            let text = extract_plain_text_from_body(tb);
+            if !text.is_empty() {
+                return Ok(Some(text));
             }
         }
     }

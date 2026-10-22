@@ -145,6 +145,7 @@ impl Drop for GlobSpan<'_> {
             GlobStage::MergeWaitWorker => &counters.merge_wait_worker_ns,
             GlobStage::MergeWorkWorker => &counters.merge_work_worker_ns,
         };
+        #[allow(deprecated, reason = "fetch_update is required by the Rust 1.88 MSRV")]
         let _ = target.fetch_update(
             std::sync::atomic::Ordering::Relaxed,
             std::sync::atomic::Ordering::Relaxed,

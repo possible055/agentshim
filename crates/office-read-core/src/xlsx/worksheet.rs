@@ -109,11 +109,11 @@ impl Worksheet {
                     _ => {}
                 },
                 Event::Empty(ref e) => {
-                    if e.local_name().as_ref() == b"hyperlink" {
-                        if let Some(hl) = parse_hyperlink(e, rels)? {
-                            hyperlinks.push(hl);
-                            validate_hyperlinks(&hyperlinks)?;
-                        }
+                    if e.local_name().as_ref() == b"hyperlink"
+                        && let Some(hl) = parse_hyperlink(e, rels)?
+                    {
+                        hyperlinks.push(hl);
+                        validate_hyperlinks(&hyperlinks)?;
                     }
                 }
                 Event::Eof => break,

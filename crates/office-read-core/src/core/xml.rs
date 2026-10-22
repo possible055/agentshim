@@ -225,14 +225,13 @@ pub fn ensure_utf8(data: &[u8]) -> Option<Vec<u8>> {
         .position(|w| w.eq_ignore_ascii_case(b"encoding="))
     {
         let rest = &utf8[pos + 9..];
-        if let Some(&quote) = rest.first() {
-            if quote == b'"' || quote == b'\'' {
-                if let Some(end) = rest[1..].iter().position(|&b| b == quote) {
-                    let start = pos + 10;
-                    let end = start + end;
-                    utf8.splice(start..end, b"utf-8".iter().copied());
-                }
-            }
+        if let Some(&quote) = rest.first()
+            && (quote == b'"' || quote == b'\'')
+            && let Some(end) = rest[1..].iter().position(|&b| b == quote)
+        {
+            let start = pos + 10;
+            let end = start + end;
+            utf8.splice(start..end, b"utf-8".iter().copied());
         }
     }
 

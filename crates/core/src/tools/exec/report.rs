@@ -110,31 +110,24 @@ pub(crate) fn timeout_render_fits_budget(
     cancellation: &CancellationToken,
     output_budget: &dyn crate::output::CallBudget,
 ) -> bool {
-    serde_json::to_value(&render.details)
-        .ok()
-        .is_some_and(|details| {
-            let structured = crate::output::tool_error_structure(
-                "resource_timeout",
-                true,
+    serde_json::to_value(&render.details).is_ok_and(|details| {
+        let structured = crate::output::tool_error_structure(
+            "resource_timeout",
+            true,
+            &render.text,
+            Some(&details),
+        );
+        crate::output::tool_result_encoded_len(&render.text, Some(&structured), true)
+            <= crate::output::OutputLimits::for_content_within(
                 &render.text,
-                Some(&details),
-            );
-            crate::output::tool_result_encoded_len(&render.text, Some(&structured), true)
-                <= crate::output::OutputLimits::for_content_within(
-                    &render.text,
-                    output_budget.page_bytes(),
+                output_budget.page_bytes(),
+            )
+            .bytes
+            && output_budget.token_gate().is_none_or(|token_gate| {
+                matches!(
+                    token_gate.project_result(&render.text, Some(&structured), true, cancellation),
+                    crate::output::ProjectionDecision::Fits(_)
                 )
-                .bytes
-                && output_budget.token_gate().is_none_or(|token_gate| {
-                    matches!(
-                        token_gate.project_result(
-                            &render.text,
-                            Some(&structured),
-                            true,
-                            cancellation
-                        ),
-                        crate::output::ProjectionDecision::Fits(_)
-                    )
-                })
-        })
+            })
+    })
 }

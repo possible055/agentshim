@@ -260,12 +260,11 @@ fn parse_document(
     // described by the body-level sectPr (already in `sections`).
     let mut break_sections: Vec<SectionProperties> = Vec::new();
     for el in &elements {
-        if let BlockElement::Paragraph(p) = el {
-            if let Some(props) = &p.properties {
-                if let Some(sp) = &props.section_properties {
-                    break_sections.push(sp.clone());
-                }
-            }
+        if let BlockElement::Paragraph(p) = el
+            && let Some(props) = &p.properties
+            && let Some(sp) = &props.section_properties
+        {
+            break_sections.push(sp.clone());
         }
     }
     // Stitch break-derived section_properties in front of the
@@ -286,17 +285,17 @@ fn resolve_hyperlinks(
         match elem {
             BlockElement::Paragraph(p) => {
                 for content in &mut p.content {
-                    if let ParagraphContent::Hyperlink(hl) = content {
-                        if let HyperlinkTarget::External(ref r_id) = hl.target {
-                            let rel = rels.get_by_id(r_id).ok_or_else(|| {
-                                crate::core::Error::RelationshipNotFound(r_id.clone())
-                            })?;
-                            charge_model_text("office_docx_text_bytes", rel.target.len())?;
-                            if rel.target_mode == TargetMode::External {
-                                hl.target = HyperlinkTarget::External(rel.target.clone());
-                            } else {
-                                hl.target = HyperlinkTarget::Internal(rel.target.clone());
-                            }
+                    if let ParagraphContent::Hyperlink(hl) = content
+                        && let HyperlinkTarget::External(ref r_id) = hl.target
+                    {
+                        let rel = rels.get_by_id(r_id).ok_or_else(|| {
+                            crate::core::Error::RelationshipNotFound(r_id.clone())
+                        })?;
+                        charge_model_text("office_docx_text_bytes", rel.target.len())?;
+                        if rel.target_mode == TargetMode::External {
+                            hl.target = HyperlinkTarget::External(rel.target.clone());
+                        } else {
+                            hl.target = HyperlinkTarget::Internal(rel.target.clone());
                         }
                     }
                 }

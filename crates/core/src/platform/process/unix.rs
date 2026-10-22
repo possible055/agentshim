@@ -1111,16 +1111,14 @@ mod pidfd_exit_tests {
     }
 
     fn pidfd_descriptor_count() -> usize {
-        std::fs::read_dir("/proc/self/fd")
-            .map(|entries| {
-                entries
-                    .filter_map(Result::ok)
-                    .filter(|entry| {
-                        std::fs::read_link(entry.path())
-                            .is_ok_and(|target| target.to_string_lossy().contains("pidfd"))
-                    })
-                    .count()
-            })
-            .unwrap_or(0)
+        std::fs::read_dir("/proc/self/fd").map_or(0, |entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    std::fs::read_link(entry.path())
+                        .is_ok_and(|target| target.to_string_lossy().contains("pidfd"))
+                })
+                .count()
+        })
     }
 }

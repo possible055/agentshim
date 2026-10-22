@@ -82,13 +82,13 @@ pub fn global_read_state_guard() -> std::sync::MutexGuard<'static, ()> {
 
 #[cfg(any(test, feature = "test-hooks"))]
 pub fn take_forced_change() -> bool {
-    FORCED_CHANGES
-        .fetch_update(
-            std::sync::atomic::Ordering::SeqCst,
-            std::sync::atomic::Ordering::SeqCst,
-            |remaining| (remaining > 0).then(|| remaining - 1),
-        )
-        .is_ok()
+    #[allow(deprecated, reason = "fetch_update is required by the Rust 1.88 MSRV")]
+    let result = FORCED_CHANGES.fetch_update(
+        std::sync::atomic::Ordering::SeqCst,
+        std::sync::atomic::Ordering::SeqCst,
+        |remaining| (remaining > 0).then(|| remaining - 1),
+    );
+    result.is_ok()
 }
 
 #[cfg(not(any(test, feature = "test-hooks")))]

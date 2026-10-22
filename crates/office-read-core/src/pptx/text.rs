@@ -46,15 +46,15 @@ impl PptxDocument {
             }
         }
 
-        if let Some(ref notes) = slide.notes {
-            if !notes.is_empty() {
-                for line in notes.lines() {
-                    result.push_str("> ");
-                    result.push_str(line);
-                    result.push('\n');
-                }
+        if let Some(ref notes) = slide.notes
+            && !notes.is_empty()
+        {
+            for line in notes.lines() {
+                result.push_str("> ");
+                result.push_str(line);
                 result.push('\n');
             }
+            result.push('\n');
         }
 
         // Trim trailing whitespace
@@ -120,10 +120,10 @@ fn collect_markdown_entries(shapes: &[Shape], entries: &mut Vec<(Option<ShapePos
                 }
             }
             Shape::Picture(pic) => {
-                if let Some(ref alt) = pic.alt_text {
-                    if !alt.is_empty() {
-                        entries.push((pic.position.clone(), format!("![{alt}]()")));
-                    }
+                if let Some(ref alt) = pic.alt_text
+                    && !alt.is_empty()
+                {
+                    entries.push((pic.position.clone(), format!("![{alt}]()")));
                 }
             }
             Shape::Group(grp) => {

@@ -65,7 +65,9 @@ impl<R: Read + Seek> CfbReader<R> {
             crate::budget::charge_cfb_internal(mini_fat_data.len() as u64)
                 .map_err(map_budget_error)?;
             mini_fat_data
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect()
         } else {

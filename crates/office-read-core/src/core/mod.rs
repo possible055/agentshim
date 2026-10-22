@@ -16,6 +16,10 @@ pub mod opc;
 /// Relationship parsing, lookup, and serialization (`.rels` files).
 pub mod relationships;
 /// Unit types: `Emu`, `Twip`, `HalfPoint`, `Percentage1000`, `Angle60k`.
+#[allow(
+    dead_code,
+    reason = "upstream unit types are retained for disabled writer tests"
+)]
 pub mod units;
 /// XML reading utilities, namespace constants, and attribute helpers.
 pub mod xml;

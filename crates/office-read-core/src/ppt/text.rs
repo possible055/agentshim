@@ -67,17 +67,17 @@ pub struct TextRun {
 /// heuristics only when a usable directory can't be built at all (e.g. a
 /// minimal hand-built stream that never went through a real save cycle).
 pub fn extract_slides_text(stream: &[u8], current_user: Option<&[u8]>) -> Result<Vec<SlideText>> {
-    if let Some(dir) = persist::build(stream, current_user)? {
-        if let Some(slides) = extract_slides_via_persist(stream, &dir)? {
-            // A resolved-but-entirely-textless result is ambiguous: it's the
-            // correct answer for a genuinely text-free deck (image-only
-            // slides), but it's also what a corrupted persist chain that
-            // resolved to the wrong offsets looks like. Fall through to the
-            // weaker heuristics below rather than committing to it — if they
-            // also come up empty, this was the right answer all along.
-            if !slides.is_empty() && slides.iter().any(|s| !s.text_runs.is_empty()) {
-                return attach_persisted_notes(stream, &dir, slides);
-            }
+    if let Some(dir) = persist::build(stream, current_user)?
+        && let Some(slides) = extract_slides_via_persist(stream, &dir)?
+    {
+        // A resolved-but-entirely-textless result is ambiguous: it's the
+        // correct answer for a genuinely text-free deck (image-only
+        // slides), but it's also what a corrupted persist chain that
+        // resolved to the wrong offsets looks like. Fall through to the
+        // weaker heuristics below rather than committing to it — if they
+        // also come up empty, this was the right answer all along.
+        if !slides.is_empty() && slides.iter().any(|s| !s.text_runs.is_empty()) {
+            return attach_persisted_notes(stream, &dir, slides);
         }
     }
 
@@ -302,10 +302,10 @@ fn resolve_persisted_text(
     outline_texts: &[TextRun],
 ) -> Result<SlideText> {
     let mut text_runs = Vec::new();
-    if let Some(offset) = dir.resolve(persist_id_ref) {
-        if let Some(children) = bounded_container_children(stream, offset, container_type)? {
-            extract_shape_text(children, 0, outline_texts, &mut text_runs)?;
-        }
+    if let Some(offset) = dir.resolve(persist_id_ref)
+        && let Some(children) = bounded_container_children(stream, offset, container_type)?
+    {
+        extract_shape_text(children, 0, outline_texts, &mut text_runs)?;
     }
     Ok(SlideText { text_runs })
 }
@@ -362,12 +362,11 @@ fn extract_shape_text(
             RT_OUTLINE_TEXT_REF_ATOM if rec.data.len() >= 4 => {
                 let index =
                     i32::from_le_bytes([rec.data[0], rec.data[1], rec.data[2], rec.data[3]]);
-                if index >= 0 {
-                    if let Some(run) = outline_texts.get(index as usize) {
-                        if !run.text.is_empty() {
-                            push_text_run(out, run.text_type, run.text.clone())?;
-                        }
-                    }
+                if index >= 0
+                    && let Some(run) = outline_texts.get(index as usize)
+                    && !run.text.is_empty()
+                {
+                    push_text_run(out, run.text_type, run.text.clone())?;
                 }
             }
             _ if rec.header.is_container() => {
@@ -395,11 +394,11 @@ fn extract_slides_from_slide_list_cache(slide_list: &[u8]) -> Result<Vec<SlideTe
         let rec = rec?;
         match rec.header.rec_type {
             RT_SLIDE_PERSIST_ATOM => {
-                if let Some(slide) = current.take() {
-                    if !slide.text_runs.is_empty() {
-                        slides.push(slide);
-                        charge_slide()?;
-                    }
+                if let Some(slide) = current.take()
+                    && !slide.text_runs.is_empty()
+                {
+                    slides.push(slide);
+                    charge_slide()?;
                 }
                 current = Some(SlideText {
                     text_runs: Vec::new(),
@@ -430,11 +429,11 @@ fn extract_slides_from_slide_list_cache(slide_list: &[u8]) -> Result<Vec<SlideTe
         }
     }
 
-    if let Some(slide) = current {
-        if !slide.text_runs.is_empty() {
-            slides.push(slide);
-            charge_slide()?;
-        }
+    if let Some(slide) = current
+        && !slide.text_runs.is_empty()
+    {
+        slides.push(slide);
+        charge_slide()?;
     }
 
     Ok(slides)
@@ -500,10 +499,10 @@ fn find_descendant(
         if rec.header.rec_type == rec_type && rec.header.rec_instance == instance {
             return Ok(Some(rec.data));
         }
-        if rec.header.is_container() {
-            if let Some(found) = find_descendant(rec.data, rec_type, instance, depth + 1)? {
-                return Ok(Some(found));
-            }
+        if rec.header.is_container()
+            && let Some(found) = find_descendant(rec.data, rec_type, instance, depth + 1)?
+        {
+            return Ok(Some(found));
         }
     }
     Ok(None)
@@ -520,7 +519,9 @@ fn decode_utf16le(data: &[u8]) -> Result<String> {
     let worst_case = data.len().saturating_div(2).saturating_mul(3);
     crate::budget::check_ppt_text_allocation(worst_case).map_err(map_budget_error)?;
     let chars: Vec<u16> = data
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect();
     Ok(String::from_utf16_lossy(&chars))

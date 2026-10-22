@@ -90,10 +90,10 @@ impl ContentTypes {
             return Some(ct.as_str());
         }
         // Fall back to default by extension
-        if let Some(ext) = part_name.extension() {
-            if let Some(ct) = self.defaults.get(&ext.to_ascii_lowercase()) {
-                return Some(ct.as_str());
-            }
+        if let Some(ext) = part_name.extension()
+            && let Some(ct) = self.defaults.get(&ext.to_ascii_lowercase())
+        {
+            return Some(ct.as_str());
         }
         None
     }

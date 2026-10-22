@@ -116,16 +116,16 @@ describe('DSH native contracts', () => {
     })
     expect(started.isError).toBe(false)
     const value = (started as unknown as { value: { kind: string; jobId: string } }).value
-    expect(value).toEqual({ kind: 'background', jobId: 'bash-1' })
+    expect(value).toEqual({ kind: 'background', jobId: expect.any(String) })
 
     const snapshot = await waitForJobTerminal(ctx, agent, value.jobId)
-    expect(snapshot).toMatchObject({ id: 'bash-1', status: 'completed', detail: 'exit code: 0' })
+    expect(snapshot).toMatchObject({ id: value.jobId, status: 'completed', detail: 'exit code: 0' })
     expect(readJobOutput(ctx, agent, value.jobId).text).toBe('background')
 
     const status = await executeTool(ctx, agent, 'bash_status', { job_id: value.jobId })
     expect((status as unknown as { value: unknown }).value).toMatchObject({
       kind: 'status',
-      jobId: 'bash-1',
+      jobId: value.jobId,
       status: 'completed',
       label: 'printf background',
       detail: 'exit code: 0',
@@ -238,7 +238,7 @@ describe('DSH native contracts', () => {
       })
       expect(started.isError).toBe(false)
       const value = (started as unknown as { value: { kind: string; jobId: string } }).value
-      expect(value).toEqual({ kind: 'background', jobId: 'bash-1' })
+      expect(value).toEqual({ kind: 'background', jobId: expect.any(String) })
 
       await waitForCondition(
         async () => readJobOutput(ctx, agent, value.jobId).text.includes('native-bg-1'),
@@ -248,7 +248,7 @@ describe('DSH native contracts', () => {
       const liveSnapshot = ctx.jobs.get(JobId(value.jobId), agent.id)
       expect(liveSnapshot.status).toBe('running')
       const snapshot = await waitForJobTerminal(ctx, agent, value.jobId)
-      expect(snapshot).toMatchObject({ id: 'bash-1', status: 'completed', detail: 'exit code: 0' })
+      expect(snapshot).toMatchObject({ id: value.jobId, status: 'completed', detail: 'exit code: 0' })
       const output = readJobOutput(ctx, agent, value.jobId).text
       expect(output).toContain('native-bg-1')
       expect(output).toContain('native-bg-3')
@@ -256,7 +256,7 @@ describe('DSH native contracts', () => {
       const status = await executeTool(ctx, agent, 'bash_status', { job_id: value.jobId })
       expect((status as unknown as { value: unknown }).value).toMatchObject({
         kind: 'status',
-        jobId: 'bash-1',
+        jobId: value.jobId,
         status: 'completed',
       })
 

@@ -5,11 +5,16 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const TARGET_DSH_VERSION = '0.2.1-alpha.2'
+const TARGET_DSH_VERSION = '0.2.1-rc.2'
 const PUBLISHED_DSH_VERSIONS = [
   '0.2.0-rc.1',
   '0.2.0-rc.2',
   '0.2.1-alpha.1',
+  '0.2.1-alpha.2',
+  '0.2.1-alpha.3',
+  '0.2.1-alpha.4',
+  '0.2.1-alpha.5',
+  '0.2.1-rc.1',
   TARGET_DSH_VERSION,
 ]
 const DSH_FAMILY_PACKAGES = [
@@ -84,7 +89,7 @@ function run(program, args, options = {}) {
 const corepack = process.platform === 'win32' ? 'corepack.cmd' : 'corepack'
 
 function runPnpm(args, options = {}) {
-  run(corepack, ['pnpm@11.21.0', ...args], options)
+  run(corepack, ['pnpm@11.28.7', ...args], options)
 }
 
 const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm'
@@ -126,17 +131,36 @@ async function runPackedSmoke({ entryArchive, platformArchive, platformName, ver
   await mkdir(fixtureRoot)
   await writeFile(join(fixtureRoot, 'notes.txt'), `packed native read ${version}\n`)
 
-  const cordisPackages = version.startsWith('0.2.0-')
-    ? {
-        '@deepseek-ai/cordis': '4.0.4',
-        '@deepseek-ai/cordis-plugin-include': '1.0.9',
-        '@deepseek-ai/cordis-plugin-loader': '1.0.5',
-      }
-    : {
-        '@deepseek-ai/cordis': '4.0.5-alpha.1',
-        '@deepseek-ai/cordis-plugin-include': '1.0.10-alpha.1',
-        '@deepseek-ai/cordis-plugin-loader': '1.0.6-alpha.1',
-      }
+  let cordisPackages
+  if (version.startsWith('0.2.0-')) {
+    cordisPackages = {
+      '@deepseek-ai/cordis': '4.0.4',
+      '@deepseek-ai/cordis-plugin-include': '1.0.9',
+      '@deepseek-ai/cordis-plugin-loader': '1.0.5',
+      '@deepseek-ai/cordis-plugin-group': '1.0.4',
+    }
+  } else if (['0.2.1-alpha.1', '0.2.1-alpha.2'].includes(version)) {
+    cordisPackages = {
+      '@deepseek-ai/cordis': '4.0.5-alpha.1',
+      '@deepseek-ai/cordis-plugin-include': '1.0.10-alpha.1',
+      '@deepseek-ai/cordis-plugin-loader': '1.0.6-alpha.1',
+      '@deepseek-ai/cordis-plugin-group': '1.0.5-alpha.1',
+    }
+  } else if (version.startsWith('0.2.1-rc.')) {
+    cordisPackages = {
+      '@deepseek-ai/cordis': '4.0.5',
+      '@deepseek-ai/cordis-plugin-include': '1.0.10',
+      '@deepseek-ai/cordis-plugin-loader': '1.0.6',
+      '@deepseek-ai/cordis-plugin-group': '1.0.5',
+    }
+  } else {
+    cordisPackages = {
+      '@deepseek-ai/cordis': '4.0.5-alpha.2',
+      '@deepseek-ai/cordis-plugin-include': '1.0.10-alpha.2',
+      '@deepseek-ai/cordis-plugin-loader': '1.0.6-alpha.2',
+      '@deepseek-ai/cordis-plugin-group': '1.0.5-alpha.2',
+    }
+  }
   const dependencies = {
     ...cordisPackages,
     ...Object.fromEntries(DSH_FAMILY_PACKAGES.map(name => [name, version])),

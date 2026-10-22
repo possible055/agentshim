@@ -77,10 +77,10 @@ impl XlsxDocument {
     pub fn to_markdown(&self) -> String {
         let mut parts = Vec::new();
         for i in 0..self.worksheets.len() {
-            if let Some(md) = self.sheet_to_markdown(i) {
-                if !md.is_empty() {
-                    parts.push(md);
-                }
+            if let Some(md) = self.sheet_to_markdown(i)
+                && !md.is_empty()
+            {
+                parts.push(md);
             }
             if let Some(worksheet) = self.worksheets.get(i) {
                 for alt_text in &worksheet.picture_alt_text {
@@ -203,23 +203,21 @@ impl XlsxDocument {
         match &cell.value {
             CellValue::Empty => {}
             CellValue::Number(n) => {
-                if date::is_date_cell(cell.style_index, self.styles.as_ref()) {
-                    if let Some(dt) = date::DateTimeValue::from_serial(*n, self.workbook.date1904) {
-                        buf.push_str(&dt.to_iso_string());
-                        return;
-                    }
+                if date::is_date_cell(cell.style_index, self.styles.as_ref())
+                    && let Some(dt) = date::DateTimeValue::from_serial(*n, self.workbook.date1904)
+                {
+                    buf.push_str(&dt.to_iso_string());
+                    return;
                 }
-                if let Some(idx) = cell.style_index {
-                    if let Some(styles) = self.styles.as_ref() {
-                        if let Some(fmt_id) = styles.number_format_id_for(idx) {
-                            if fmt_id != 0 {
-                                let fmt_str = styles.number_format_for(idx);
-                                let formatted = numfmt::apply_format(*n, fmt_id, fmt_str);
-                                buf.push_str(&formatted);
-                                return;
-                            }
-                        }
-                    }
+                if let Some(idx) = cell.style_index
+                    && let Some(styles) = self.styles.as_ref()
+                    && let Some(fmt_id) = styles.number_format_id_for(idx)
+                    && fmt_id != 0
+                {
+                    let fmt_str = styles.number_format_for(idx);
+                    let formatted = numfmt::apply_format(*n, fmt_id, fmt_str);
+                    buf.push_str(&formatted);
+                    return;
                 }
                 write_number(*n, buf);
             }

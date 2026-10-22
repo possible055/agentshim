@@ -395,10 +395,10 @@ impl Recorder {
             return;
         }
         let dropped = self.dropped.swap(0, Ordering::AcqRel);
-        if dropped > 0 {
-            if let Some(record) = batch.last_mut() {
-                record.insert("dropped_since_last".to_owned(), json!(dropped));
-            }
+        if dropped > 0
+            && let Some(record) = batch.last_mut()
+        {
+            record.insert("dropped_since_last".to_owned(), json!(dropped));
         }
         while batch.len() > MAX_BATCH_RECORDS {
             let remaining = batch.split_off(MAX_BATCH_RECORDS);
@@ -411,16 +411,16 @@ impl Recorder {
     fn send_one(&self, batch: Batch) {
         let lost = batch_loss_count(&batch);
         let charge = batch.len().saturating_mul(LINE_BYTES);
-        if self
-            .queue
-            .bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-                queued
-                    .checked_add(charge)
-                    .filter(|total| *total <= MAX_QUEUED_BYTES)
-            })
-            .is_err()
-        {
+        #[allow(deprecated, reason = "fetch_update is required by the Rust 1.88 MSRV")]
+        let reservation =
+            self.queue
+                .bytes
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+                    queued
+                        .checked_add(charge)
+                        .filter(|total| *total <= MAX_QUEUED_BYTES)
+                });
+        if reservation.is_err() {
             self.dropped.fetch_add(lost, Ordering::Relaxed);
             return;
         }

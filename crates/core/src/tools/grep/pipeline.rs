@@ -210,10 +210,10 @@ fn search_single_file(
     context: &PipelineContext,
     state: &SharedPipelineState,
 ) {
-    if let Some(types) = types {
-        if !types.matched(base.absolute(), false).is_whitelist() {
-            return;
-        }
+    if let Some(types) = types
+        && !types.matched(base.absolute(), false).is_whitelist()
+    {
+        return;
     }
     let file_name = base.absolute().file_name().unwrap_or_default();
     let match_path = Path::new(file_name);
@@ -425,10 +425,10 @@ fn matches_candidate_entry(
     if !is_candidate {
         return false;
     }
-    if let Some(types) = types {
-        if !types.matched(entry.match_path, false).is_whitelist() {
-            return false;
-        }
+    if let Some(types) = types
+        && !types.matched(entry.match_path, false).is_whitelist()
+    {
+        return false;
     }
     glob.is_none_or(|glob| glob.is_match(entry.file_name, entry.match_path, Some(entry.key)))
 }

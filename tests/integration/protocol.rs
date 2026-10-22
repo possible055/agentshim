@@ -39,7 +39,7 @@ fn modern_lifecycle_serves_a_tool_call_and_shuts_down_at_eof() {
         .as_str()
         .expect("read text");
     assert!(!read_text.contains("Path: "));
-    assert!(!read_text.is_empty());
+    assert_ne!(read_text, "");
     assert!(!read_text.contains("Complete."));
     assert!(
         response["result"].get("structuredContent").is_none(),

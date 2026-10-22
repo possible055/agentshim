@@ -533,7 +533,13 @@ mod tests {
     #[test]
     #[ignore = "release contention gate"]
     fn two_counter_pool_handles_concurrent_exact_fits() {
-        assert!(!cfg!(debug_assertions), "run this gate with --release");
+        #[allow(
+            clippy::assertions_on_constants,
+            reason = "ignored release gates must still compile in debug builds"
+        )]
+        {
+            assert!(!cfg!(debug_assertions), "run this gate with --release");
+        }
         let gate = std::sync::Arc::new(OutputTokenGate::load().expect("embedded ranks"));
         for concurrency in [1, 4, 8, 16] {
             let started = std::time::Instant::now();
@@ -566,7 +572,13 @@ mod tests {
     #[test]
     #[ignore = "release small-output latency gate"]
     fn complete_ticket_fast_path_stays_within_small_output_p95_target() {
-        assert!(!cfg!(debug_assertions), "run this gate with --release");
+        #[allow(
+            clippy::assertions_on_constants,
+            reason = "ignored release gates must still compile in debug builds"
+        )]
+        {
+            assert!(!cfg!(debug_assertions), "run this gate with --release");
+        }
         let cancellation = CancellationToken::new();
         let token_gate = std::sync::Arc::new(OutputTokenGate::load().expect("embedded ranks"));
         let burst_gate = crate::output::BurstOutputGate::new(8_192);

@@ -127,7 +127,7 @@ fn status_reports_running_log_and_primary_exit_then_retains_completion() {
     assert_eq!(trees.terminal_count(), 1);
     let repeated = trees.status(&job_id, 0).expect("retained status");
     assert_eq!(repeated.state, status::JobState::Completed);
-    assert!(repeated.log.bytes.is_empty());
+    assert_eq!(repeated.log.bytes, [] as [u8; 0]);
 }
 
 #[cfg(windows)]

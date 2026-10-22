@@ -161,10 +161,10 @@ impl CompiledGlobFilter {
                 if rule.matcher.is_match(match_path) {
                     return false;
                 }
-                if let Some(key) = repo_key {
-                    if rule.matcher.is_match(key) {
-                        return false;
-                    }
+                if let Some(key) = repo_key
+                    && rule.matcher.is_match(key)
+                {
+                    return false;
                 }
             }
         }
@@ -182,10 +182,10 @@ impl CompiledGlobFilter {
                 if rule.matcher.is_match(match_path) {
                     return true;
                 }
-                if let Some(key) = repo_key {
-                    if rule.matcher.is_match(key) {
-                        return true;
-                    }
+                if let Some(key) = repo_key
+                    && rule.matcher.is_match(key)
+                {
+                    return true;
                 }
             }
         }
@@ -207,10 +207,10 @@ pub fn resolve_literal_prefix(patterns: &GlobPatterns, base: &ResolvedPath) -> O
     }
     let raw_prefix = literal_path_prefix(first_positive)?;
     let base_key = base.key();
-    if let Ok(stripped) = raw_prefix.strip_prefix(base_key) {
-        if !stripped.as_os_str().is_empty() {
-            return Some(stripped.to_path_buf());
-        }
+    if let Ok(stripped) = raw_prefix.strip_prefix(base_key)
+        && !stripped.as_os_str().is_empty()
+    {
+        return Some(stripped.to_path_buf());
     }
     Some(raw_prefix)
 }

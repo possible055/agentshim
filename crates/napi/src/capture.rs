@@ -113,10 +113,10 @@ impl CallCapture {
     }
 
     fn note_io_failure(&self, message: String) {
-        if let Ok(mut guard) = self.io_failed.lock() {
-            if guard.is_none() {
-                *guard = Some(message);
-            }
+        if let Ok(mut guard) = self.io_failed.lock()
+            && guard.is_none()
+        {
+            *guard = Some(message);
         }
     }
 

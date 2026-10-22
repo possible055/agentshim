@@ -203,7 +203,9 @@ pub fn extract_text(word_doc: &[u8], pieces: &[Piece], max_chars: u32) -> Result
                     DocError::InvalidPieceTable("Unicode piece is out of range".into())
                 })?;
             let code_units = word_doc[byte_offset..end]
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]));
             for character in std::char::decode_utf16(code_units) {
                 text.push(character.unwrap_or(char::REPLACEMENT_CHARACTER));

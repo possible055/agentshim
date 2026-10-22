@@ -683,10 +683,10 @@ impl Drop for EngineJobHandle {
             self.job.cancel_from_engine();
         }
         let guard = self.drain_thread.lock();
-        if let Ok(mut guard) = guard {
-            if let Some(handle) = guard.take() {
-                let _ = handle.join();
-            }
+        if let Ok(mut guard) = guard
+            && let Some(handle) = guard.take()
+        {
+            let _ = handle.join();
         }
     }
 }

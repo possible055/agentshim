@@ -470,6 +470,10 @@ impl AgentShim {
     }
 }
 
+#[expect(
+    clippy::unused_async_trait_impl,
+    reason = "protocol handlers must stay lazy until their futures are polled"
+)]
 impl ServerHandler for AgentShim {
     fn get_info(&self) -> ServerInfo {
         Self::server_info(self.read_scope())

@@ -277,17 +277,16 @@ where
         loop {
             let count = read_chunk(&mut reader, &mut input, cancellation)?;
             let is_last = count == 0;
-            if let Some(decoded) = decoder.decode(&input[..count], is_last)? {
-                if deliver(
+            if let Some(decoded) = decoder.decode(&input[..count], is_last)?
+                && deliver(
                     &decoded,
                     &mut decoded_bytes,
                     max_decoded_bytes,
                     cancellation,
                     &mut sink,
                 )? == DecodeControl::Stop
-                {
-                    break;
-                }
+            {
+                break;
             }
             if is_last {
                 break;

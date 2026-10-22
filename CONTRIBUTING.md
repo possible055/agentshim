@@ -2,6 +2,8 @@
 
 ## Validation
 
+The pinned build toolchain is Rust 1.99.1; the product MSRV remains Rust 1.88.
+
 Run the smallest relevant check while developing. For ordinary changes to the root package, use the same fast path as CI:
 
 ```console
@@ -56,7 +58,7 @@ Pre-commit blocks formatting, native Clippy, unused dependencies, dependency pol
 
 The dependency gate rejects vulnerabilities, unsound advisories, wildcard registry requirements, unknown sources, and unapproved licenses. Unmaintained advisories do not block this gate because the retained PDF dependency graph currently has no safe replacement for every such crate.
 
-Stable releases run cargo-semver-checks 0.44.0 against the latest reachable stable tag for the `agentshim` and `agentshim-core` public Rust APIs. Prereleases skip that gate because their APIs may still change before the stable release.
+Stable releases run cargo-semver-checks 0.51.0 against the latest reachable stable tag for the `agentshim` and `agentshim-core` public Rust APIs. Prereleases skip that gate because their APIs may still change before the stable release.
 
 ## Test isolation
 

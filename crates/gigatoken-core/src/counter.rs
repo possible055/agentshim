@@ -261,7 +261,7 @@ impl O200kCounter {
         let mut count = byte_count;
         let mut work = 0_usize;
         while let Some(Reverse(candidate)) = self.candidates.pop() {
-            if work % self.limits.cancellation_stride == 0 && cancelled() {
+            if work.is_multiple_of(self.limits.cancellation_stride) && cancelled() {
                 return None;
             }
             work = work.saturating_add(1);

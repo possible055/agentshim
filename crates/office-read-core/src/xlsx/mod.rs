@@ -203,24 +203,23 @@ impl XlsxDocument {
             for row in &worksheet.rows {
                 crate::budget::check_cancelled().map_err(crate::map_office_error_to_core)?;
                 for cell in &row.cells {
-                    if let crate::xlsx::cell::CellValue::SharedString(index) = cell.value {
-                        if index as usize >= shared_strings.len() {
-                            return Err(crate::core::Error::MalformedXml(
-                                "shared string index is out of range".to_owned(),
-                            )
-                            .into());
-                        }
+                    if let crate::xlsx::cell::CellValue::SharedString(index) = cell.value
+                        && index as usize >= shared_strings.len()
+                    {
+                        return Err(crate::core::Error::MalformedXml(
+                            "shared string index is out of range".to_owned(),
+                        )
+                        .into());
                     }
-                    if let Some(style_index) = cell.style_index {
-                        if !styles
+                    if let Some(style_index) = cell.style_index
+                        && !styles
                             .as_ref()
                             .is_some_and(|style_sheet| style_sheet.contains_style(style_index))
-                        {
-                            return Err(crate::core::Error::MalformedXml(
-                                "cell style index is out of range".to_owned(),
-                            )
-                            .into());
-                        }
+                    {
+                        return Err(crate::core::Error::MalformedXml(
+                            "cell style index is out of range".to_owned(),
+                        )
+                        .into());
                     }
                 }
             }
@@ -238,7 +237,8 @@ impl XlsxDocument {
                 .by_index(index)
                 .map_err(crate::core::Error::from)?
                 .name()
-                .to_string();
+                .map_err(crate::core::Error::from)?
+                .into_owned();
             if name.starts_with("xl/charts/chart") && name.ends_with(".xml") {
                 chart_names.push(name);
             }

@@ -24,12 +24,13 @@ fn decode_percent_encoding(input: &str) -> String {
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
-                decoded.push(hi << 4 | lo);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2]))
+        {
+            decoded.push(hi << 4 | lo);
+            i += 3;
+            continue;
         }
         decoded.push(bytes[i]);
         i += 1;
@@ -225,7 +226,7 @@ impl<R: Read + Seek> OpcReader<R> {
         crate::budget::check_zip_entries(archive.len()).map_err(map_budget_error)?;
         let mut entry_names = std::collections::HashSet::with_capacity(archive.len());
         for name in archive.file_names() {
-            let normalized = name.replace('\\', "/");
+            let normalized = name?.replace('\\', "/");
             if normalized.starts_with('/')
                 || normalized.split('/').any(|segment| segment == "..")
                 || !entry_names.insert(normalized)

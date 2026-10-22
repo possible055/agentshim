@@ -158,7 +158,10 @@ fn injected_environment_carries_the_probed_locale_and_no_colour_defaults() {
         STRIPPED_INHERITED_ENV.map(str::to_owned).to_vec(),
         "BASH_ENV and ENV must not reach a --noprofile --norc shell"
     );
-    assert!(plan.overrides.is_empty());
+    assert_eq!(
+        plan.overrides,
+        [] as [(std::string::String, std::string::String); 0]
+    );
 }
 
 /// `PATH` has to override rather than inject: on Windows the inherited variable may be spelled
@@ -220,7 +223,10 @@ fn disabled_msys_conversion_overrides_the_runtime_for_the_whole_bash_command() {
 fn disabled_msys_conversion_is_a_noop_outside_windows() {
     let plan = bash_environment(&runtime_fixture(None), MsysArgumentConversion::Disabled);
 
-    assert!(plan.overrides.is_empty());
+    assert_eq!(
+        plan.overrides,
+        [] as [(std::string::String, std::string::String); 0]
+    );
 }
 
 /// busybox has no MSYS2 argument rewriting, so the override would be dead weight on the

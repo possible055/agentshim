@@ -286,7 +286,7 @@ fn errors_mode_keeps_successful_handshakes_in_memory_until_an_error() {
     session.send(&modern_request(2, "tools/list", empty_params()));
     assert_eq!(session.receive()["id"], 2);
     session.close();
-    assert!(jsonl_paths(directory.path()).is_empty());
+    assert_eq!(jsonl_paths(directory.path()), [] as [std::path::PathBuf; 0]);
 
     let mut session = TestSession::builder()
         .log_dir(directory.path())
