@@ -527,7 +527,7 @@ jobs:
         if: matrix.platform != 'windows'
         shell: bash
         run: sh scripts/test-install-linux.sh "$PWD/dist" "${{ needs.preflight.outputs.version }}"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: agentshim-${{ matrix.target }}
           path: |
@@ -535,7 +535,7 @@ jobs:
             dist/*.${{ matrix.format }}.sha256
           if-no-files-found: error
           retention-days: 7
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: npm-platform-${{ matrix.npm_platform }}
           path: |
