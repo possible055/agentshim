@@ -411,11 +411,10 @@ impl Recorder {
     fn send_one(&self, batch: Batch) {
         let lost = batch_loss_count(&batch);
         let charge = batch.len().saturating_mul(LINE_BYTES);
-        #[allow(deprecated, reason = "fetch_update is required by the Rust 1.88 MSRV")]
         let reservation =
             self.queue
                 .bytes
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
                     queued
                         .checked_add(charge)
                         .filter(|total| *total <= MAX_QUEUED_BYTES)

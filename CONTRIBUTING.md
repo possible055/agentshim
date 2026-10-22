@@ -2,7 +2,7 @@
 
 ## Validation
 
-The pinned build toolchain is Rust 1.99.1; the product MSRV remains Rust 1.88.
+The pinned build toolchain and product MSRV are both Rust 1.99.1.
 
 Run the smallest relevant check while developing. For ordinary changes to the root package, use the same fast path as CI:
 

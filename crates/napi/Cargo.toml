@@ -2,7 +2,7 @@
 name = "agentshim-napi"
 version = "0.1.7-alpha.3"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.99.1"
 license = "Apache-2.0"
 description = "Native agentshim engine for in-process DSH hosts"
 

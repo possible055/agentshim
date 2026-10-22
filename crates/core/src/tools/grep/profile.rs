@@ -299,15 +299,13 @@ impl GrepProfiler {
         let Self::Enabled(counters) = self else {
             return;
         };
-        #[allow(deprecated, reason = "fetch_update is required by the Rust 1.88 MSRV")]
-        let _ = counters.speculative_lease_requested_bytes.fetch_update(
+        let _ = counters.speculative_lease_requested_bytes.try_update(
             std::sync::atomic::Ordering::Relaxed,
             std::sync::atomic::Ordering::Relaxed,
             |current| Some(current.saturating_add(requested)),
         );
         if granted {
-            #[allow(deprecated, reason = "fetch_update is required by the Rust 1.88 MSRV")]
-            let _ = counters.speculative_lease_granted_bytes.fetch_update(
+            let _ = counters.speculative_lease_granted_bytes.try_update(
                 std::sync::atomic::Ordering::Relaxed,
                 std::sync::atomic::Ordering::Relaxed,
                 |current| Some(current.saturating_add(requested)),
@@ -433,8 +431,7 @@ impl GrepProfiler {
 
     pub fn add_render_copy_bytes(&self, bytes: usize) {
         if let Self::Enabled(counters) = self {
-            #[allow(deprecated, reason = "fetch_update is required by the Rust 1.88 MSRV")]
-            let _ = counters.render_copy_bytes.fetch_update(
+            let _ = counters.render_copy_bytes.try_update(
                 std::sync::atomic::Ordering::Relaxed,
                 std::sync::atomic::Ordering::Relaxed,
                 |current| Some(current.saturating_add(bytes)),
@@ -580,8 +577,7 @@ impl Drop for GrepSpan<'_> {
             GrepStage::SearchVerifyWorker => &counters.search_verify_worker_ns,
             GrepStage::Render => &counters.render_ns,
         };
-        #[allow(deprecated, reason = "fetch_update is required by the Rust 1.88 MSRV")]
-        let _ = target.fetch_update(
+        let _ = target.try_update(
             std::sync::atomic::Ordering::Relaxed,
             std::sync::atomic::Ordering::Relaxed,
             |current| Some(current.saturating_add(elapsed)),

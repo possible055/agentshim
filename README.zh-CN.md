@@ -42,7 +42,7 @@ curl -fsSL https://github.com/possible055/agentshim/releases/latest/download/ins
 
 再次运行同一命令即可更新。安装指定版本时，传入 `-Version`（PowerShell）或 `--version`（sh）。
 
-**从源码构建**（需要 Rust 1.88）：
+**从源码构建**（需要 Rust 1.99.1）：
 
 ```console
 cargo build --release --locked

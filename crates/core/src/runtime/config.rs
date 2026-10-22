@@ -53,13 +53,13 @@ pub const DEFAULT_TOOL_TIMEOUT_SHELF: Duration = Duration::from_secs(600);
 /// deadline and protocol slack are subtracted.
 pub const MIN_TOOL_TIMEOUT_SHELF: Duration = Duration::from_secs(15);
 pub const MAX_TOOL_TIMEOUT_SHELF: Duration = Duration::from_secs(3600);
-pub const DEFAULT_BACKGROUND_JOB_TIMEOUT_MAX: Duration = Duration::from_secs(1800);
+pub const DEFAULT_BACKGROUND_JOB_TIMEOUT_MAX: Duration = Duration::from_mins(30);
 pub const MIN_BACKGROUND_JOB_TIMEOUT_MAX: Duration = Duration::from_secs(600);
 pub const MAX_BACKGROUND_JOB_TIMEOUT_MAX: Duration = Duration::from_secs(14400);
 /// The floor stays at one second so integration tests can exercise the idle watchdog
 /// quickly; the watchdog is opt-in, so the low bound costs nothing in production.
 pub const MIN_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
-pub const MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(86_400);
+pub const MAX_IDLE_TIMEOUT: Duration = Duration::from_hours(24);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeConfig {

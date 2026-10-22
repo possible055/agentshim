@@ -2,7 +2,7 @@
 name = "agentshim-office-read"
 version = "0.1.5"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.99.1"
 license = "Apache-2.0"
 description = "Bounded read-only Office document extraction for agentshim"
 

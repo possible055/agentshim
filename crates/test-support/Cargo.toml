@@ -2,7 +2,7 @@
 name = "agentshim-test-support"
 version = "0.1.7-alpha.3"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.99.1"
 license = "Apache-2.0"
 description = "Shared test fixtures and polling helpers for agentshim workspace tests"
 publish = false

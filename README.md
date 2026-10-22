@@ -42,7 +42,7 @@ Installs to `${XDG_DATA_HOME:-$HOME/.local/share}/agentshim/bin/agentshim` (e.g.
 
 Re-run the same command to update. Install a specific version with `-Version` (PowerShell) or `--version` (sh).
 
-**Build from source** (requires Rust 1.88):
+**Build from source** (requires Rust 1.99.1):
 
 ```console
 cargo build --release --locked

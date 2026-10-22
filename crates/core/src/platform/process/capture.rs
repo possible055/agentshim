@@ -474,12 +474,11 @@ pub fn drain_with_capture(
 
 #[cfg(windows)]
 pub fn write_stdin(mut writer: impl Write, input: Option<&str>) -> io::Result<()> {
-    if let Some(input) = input {
-        if let Err(error) = writer.write_all(input.as_bytes()) {
-            if !is_operation_aborted(&error) {
-                return Err(error);
-            }
-        }
+    if let Some(input) = input
+        && let Err(error) = writer.write_all(input.as_bytes())
+        && !is_operation_aborted(&error)
+    {
+        return Err(error);
     }
     Ok(())
 }

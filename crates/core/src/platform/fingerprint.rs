@@ -49,7 +49,7 @@ pub fn fingerprint_metrics() -> FingerprintMetrics {
 fn record_fingerprint_query(elapsed: std::time::Duration) {
     FINGERPRINT_QUERY_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let elapsed = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
-    let _ = FINGERPRINT_QUERY_NS.fetch_update(
+    let _ = FINGERPRINT_QUERY_NS.try_update(
         std::sync::atomic::Ordering::Relaxed,
         std::sync::atomic::Ordering::Relaxed,
         |current| Some(current.saturating_add(elapsed)),
