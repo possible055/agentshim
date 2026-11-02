@@ -1,7 +1,7 @@
 import { resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
+import { TOOL_ABORTED, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-working-directory'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
@@ -183,6 +183,23 @@ function installAgentTools(
             if (name === 'bash_status') return definition.execute(args, exec)
             const directories = ctx.get('workingDirectory')
             const cwd = directories === undefined ? root : await directories.ensure(agent, exec.signal)
+            if ((name === 'read' || name === 'grep' || name === 'glob')
+              && typeof args === 'object' && args !== null && 'path' in args && typeof args.path === 'string') {
+              const path = args.path
+              const homePrefix = path === '~' || path.startsWith('~/')
+                || (process.platform === 'win32' && path.startsWith('~\\'))
+              if (homePrefix) {
+                try {
+                  const target = await ctx.fs.resolve(path, { cwd, signal: exec.signal })
+                  args = { ...args, path: ctx.fs.processPath(target) }
+                } catch (error) {
+                  if (!(error instanceof HarnessError) || error.code !== 'FS_ABORTED') throw error
+                  const aborted = new HarnessError(error.message, TOOL_ABORTED, { cause: error })
+                  aborted.name = 'AbortError'
+                  throw aborted
+                }
+              }
+            }
             if (!installed.has(agent)) {
               throw new HarnessError('dsh-agentshim: agent tools have been disposed', 'AGENTSHIM_ENGINE_CLOSED')
             }

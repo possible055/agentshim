@@ -5,7 +5,9 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime, { renderToolsSdk, renderToolsSdkPy } from '@deepseek-ai/dsh-tools'
+import ToolRuntime from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
+import { renderToolsSdk, renderToolsSdkPy } from '@deepseek-ai/dsh-tool-executor-ptc'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { PUBLIC_TOOL_NAMES } from '../src/contracts.ts'
@@ -130,13 +132,12 @@ describe('agent scope replacement', () => {
     ]
 
     for (const { id, tool, args } of [...sharedConstraints.cases, ...adapterOnlyCases]) {
-      const result = await ctx.tools.execute({
+      const batch = await ctx.tools.execute({
         signal: callSignal,
-        callId: CallId(`invalid-${id}`),
-        name: tool,
-        arguments: args,
+        calls: [{ type: 'tool-call', id: CallId(`invalid-${id}`), name: tool, arguments: JSON.stringify(args) }],
         agent,
       })
+      const result = batch.results[0]!.result
       expect(result.isError, `${id}: ${JSON.stringify(args)}`).toBe(true)
       expect(result.error?.info).toMatchObject({ code: 'INVALID_ARGS' })
     }
@@ -167,6 +168,7 @@ describe('agent scope replacement', () => {
     contexts.push(ctx)
     await ctx.plugin(SystemPrompt, {})
     await ctx.plugin(ToolRuntime)
+    await ctx.plugin(NativeToolExecutor)
     await ctx.plugin(LocalFileSystem, { cwd: root })
     registerInheritedTools(ctx, ['bash', 'str_replace_editor'])
     pluginFibers.push(await ctx.plugin(agentshim, {
@@ -273,6 +275,7 @@ describe('agent scope replacement', () => {
     contexts.push(ctx)
     await ctx.plugin(SystemPrompt, {})
     await ctx.plugin(ToolRuntime)
+    await ctx.plugin(NativeToolExecutor)
     await ctx.plugin(LocalFileSystem, { cwd: root })
     await ctx.plugin(UnconfinedShell)
     registerInheritedTools(ctx, ['read', 'grep', 'glob', 'bash', 'pwsh', 'write'])
@@ -305,6 +308,7 @@ describe('agent scope replacement', () => {
     contexts.push(ctx)
     await ctx.plugin(SystemPrompt, {})
     await ctx.plugin(ToolRuntime)
+    await ctx.plugin(NativeToolExecutor)
     await ctx.plugin(LocalFileSystem, { cwd: root })
     await ctx.plugin(UnconfinedShell)
     registerInheritedTools(ctx, ['read', 'grep', 'glob', 'bash', 'pwsh', 'write'])
@@ -343,6 +347,7 @@ describe('agent scope replacement', () => {
     contexts.push(ctx)
     await ctx.plugin(SystemPrompt, {})
     await ctx.plugin(ToolRuntime)
+    await ctx.plugin(NativeToolExecutor)
     await ctx.plugin(LocalFileSystem, { cwd: root })
     registerInheritedTools(ctx, ['read', 'grep', 'glob', 'bash', 'pwsh', 'write'])
     const existing = await mintAgent(ctx, 'hmr-agent', root)
@@ -386,13 +391,17 @@ describe('agent scope replacement', () => {
         super(inner, 'shell')
       }
     })
-    const denied = await ctx.tools.execute({
+    const batch = await ctx.tools.execute({
       signal: callSignal,
-      callId: CallId('hmr-denied'),
-      name: 'bash',
-      arguments: { command: 'true', description: 'Run command after policy change' },
+      calls: [{
+        type: 'tool-call',
+        id: CallId('hmr-denied'),
+        name: 'bash',
+        arguments: JSON.stringify({ command: 'true', description: 'Run command after policy change' }),
+      }],
       agent: existing.agent,
     })
+    const denied = batch.results[0]!.result
     expect(denied.error?.info).toMatchObject({ code: 'AGENTSHIM_PROCESS_POLICY_CHANGED' })
   })
 
@@ -402,6 +411,7 @@ describe('agent scope replacement', () => {
     contexts.push(ctx)
     await ctx.plugin(SystemPrompt, {})
     await ctx.plugin(ToolRuntime)
+    await ctx.plugin(NativeToolExecutor)
     await ctx.plugin(UnconfinedShell)
     class RemoteFs extends Service {
       constructor(ctx: Context) {

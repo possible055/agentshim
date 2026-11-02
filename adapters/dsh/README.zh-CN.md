@@ -13,7 +13,8 @@
 ## 运行环境要求
 
 - Node.js `^22.23.4 || ^24.22.1 || >=26.12.1`。
-- 支援 DSH `0.2.x` 穩定版，以及明列的預發行版 `0.2.0-rc.1`、`0.2.0-rc.2`、`0.2.1-alpha.1`、`0.2.1-alpha.2`、`0.2.1-alpha.3`、`0.2.1-alpha.4`、`0.2.1-alpha.5`、`0.2.1-rc.1`、`0.2.1-rc.2`。開發與 CI 使用 DSH `0.2.1-rc.2` 及 Cordis `4.0.5`。不再支援 DSH `0.1.x`；未列出的預發行版需先驗證，再加入 peer 範圍。
+- 支援 DSH `0.2.x` 穩定版，以及明列的預發行版 `0.2.0-rc.1`、`0.2.0-rc.2`、`0.2.1-alpha.1`、`0.2.1-alpha.2`、`0.2.1-alpha.3`、`0.2.1-alpha.4`、`0.2.1-alpha.5`、`0.2.1-rc.1`、`0.2.1-rc.2`、`0.2.1-rc.5`、`0.2.2-alpha.2`。開發與 CI 使用 DSH `0.2.2-alpha.2` 及 Cordis `4.0.6-alpha.1`。不再支援 DSH `0.1.x`；未列出的預發行版需先驗證，再加入 peer 範圍。
+- DSH `0.2.2-alpha.2` 要求 Node.js 24.9 以上；adapter 範圍中的舊版 Node.js 必須搭配相容的 DSH。alpha.2 自訂組裝需掛載官方 native 或 PTC 工具執行器；標準 profile 已提供。
 - 后台 Bash 命令需要 `ctx.jobs` 及任务控制器支持。
 
 不支持的平台、缺失可选的原生包、加载失败或插件 API 版本不为 `5` 均会拒绝插件激活。
@@ -60,6 +61,8 @@ dsh --profile headless --dump-config
 
 `readScope` 默认为 `unrestricted`，显式设置 `normal` 才限制 `read`、`grep` 和 `glob`。进程 confinement 不由本插件实现：若组合了官方 DSH `ctx.sandbox`／`ctx.sandboxPolicy`，插件只委托 exact argv；若服务缺失则保持原有 unconfined 行为。
 
+`read`、`grep`、`glob` 的 home-prefix `path` 依已安裝的 DSH 本機檔案系統 provider 解析，包含其支援的 Windows `~\`。普通路徑與 glob pattern 維持原生語義；展開不會擴大 `readScope` 或 artifact 權限。
+
 ## 进程与后台行为
 
 DSH `working_directory` 的目錄變更只影響後續呼叫，不改變執行中的工作。先前目錄的引擎會保留到 agent 結束，讓背景工作及產物仍可存取。沙箱權限仍由 DSH 策略錨定原始專案；換目錄不會擴大權限。
@@ -84,6 +87,8 @@ dsh-agentshim-captures purge --all
 
 ## 开发质量门禁
 
+開發、CI、發布打包與全部相容性 consumer 統一使用 Node.js `26.13.0` 及 pnpm `11.28.7`。pnpm 需另行安裝；腳本不依賴 Corepack。
+
 ```sh
 cargo build --locked -p agentshim-napi
 pnpm install --frozen-lockfile
@@ -97,7 +102,7 @@ pnpm test:packed:matrix # Linux：受支援且已發布的 DSH 0.2 預發行版
 pnpm verify:cutover
 ```
 
-源码/原生测试可以通过 `AGENTSHIM_DSH_NATIVE_DLL` 暂存本地构建的库。打包冒烟测试则不同：它会在隔离的临时消费者环境中全新打包并安装入口包及当前平台包，然后通过包导出接口执行原生读取。Linux 測試矩陣涵蓋九個受支援且已發布的 DSH `0.2` 預發行版。该目录中现有的 `.tgz` 文件绝不会用作开发或发布的验证证据。
+源码/原生测试可以通过 `AGENTSHIM_DSH_NATIVE_DLL` 暂存本地构建的库。打包冒烟测试则不同：它会在隔离的临时消费者环境中全新打包并安装入口包及当前平台包，然后通过包导出接口执行原生读取。Linux 測試矩陣涵蓋十一個受支援且已發布的 DSH `0.2` 預發行版。矩陣驗證套件安裝、啟用與原生讀取，不代表每個 DSH 版本都跑過完整 adapter 測試。该目录中现有的 `.tgz` 文件绝不会用作开发或发布的验证证据。
 
 ## 卸载
 

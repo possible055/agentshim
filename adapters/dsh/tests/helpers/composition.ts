@@ -10,6 +10,7 @@ import { bindScopeParent, createScope } from '@deepseek-ai/dsh-scope'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -89,8 +90,8 @@ export function registerInheritedTools(ctx: Context, names: readonly string[]): 
   for (const name of names) ctx.tools.register(inheritedTool(name))
 }
 
-export async function makeRoot(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-agentshim-comp-'))
+export async function makeRoot(parent = tmpdir()): Promise<string> {
+  const root = await mkdtemp(join(parent, 'dsh-agentshim-comp-'))
   roots.push(root)
   return root
 }
@@ -104,6 +105,7 @@ export async function mountComposition(
   contexts.push(ctx)
   await ctx.plugin(SystemPrompt, {})
   await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutor)
   await ctx.plugin(LocalFileSystem, { cwd: root })
   await beforeAdapter?.(ctx)
   if (ctx.get('shell') === undefined) await ctx.plugin(UnconfinedShell)
@@ -229,13 +231,12 @@ export function visibleNames(ctx: Context, agent: Agent): string[] {
 }
 
 export async function runTool(ctx: Context, agent: Agent, name: string, args: Record<string, unknown>): Promise<string> {
-  const result = await ctx.tools.execute({
+  const batch = await ctx.tools.execute({
     signal: callSignal,
-    callId: CallId('c1'),
-    name,
-    arguments: args,
+    calls: [{ type: 'tool-call', id: CallId('c1'), name, arguments: JSON.stringify(args) }],
     agent,
   })
+  const result = batch.results[0]!.result
   const first = result.content[0]
   return first !== undefined && first.type === 'text' ? first.text : JSON.stringify(result.content)
 }

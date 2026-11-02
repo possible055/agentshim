@@ -1,6 +1,6 @@
 import { chmod, copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
+import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
@@ -10,9 +10,11 @@ import LocalAttachmentStore from '@deepseek-ai/dsh-attachment-local'
 import * as ObservationPolicy from '@deepseek-ai/dsh-fs-observation-policy'
 import { JobId } from '@deepseek-ai/dsh-jobs'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
-import { TOOL_ABORTED } from '@deepseek-ai/dsh-tools'
+import { TOOL_ABORTED, type ToolExecutionToken } from '@deepseek-ai/dsh-tools'
+import { ToolExecutionPipeline } from '@deepseek-ai/dsh-tools/pipeline'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import { promptSections, pwshSectionOrder } from '../src/tools.ts'
 import * as agentshim from '../src/index.ts'
@@ -48,16 +50,14 @@ describe('DSH native contracts', () => {
     agent: Agent,
     name: string,
     args: Record<string, unknown>,
-    options: { signal?: AbortSignal; parent?: symbol } = {},
+    options: { signal?: AbortSignal } = {},
   ) {
-    return ctx.tools.execute({
+    const batch = await ctx.tools.execute({
       signal: options.signal ?? callSignal,
-      callId: CallId('c9'),
-      name,
-      arguments: args,
+      calls: [{ type: 'tool-call', id: CallId('c9'), name, arguments: JSON.stringify(args) }],
       agent,
-      ...(options.parent === undefined ? {} : { parent: options.parent as never }),
     })
+    return batch.results[0]!.result
   }
 
   it.skipIf(stagedNativeAddon === undefined)('serves read, grep, glob, and Bash in-process', async () => {
@@ -323,7 +323,7 @@ describe('DSH native contracts', () => {
   })
 
   it('applies the DSH fs observation policy across a native read', async () => {
-    const root = await makeRoot()
+    const root = await makeRoot(homedir())
     const ctx = await mountComposition(root)
     await ctx.plugin(ObservationPolicy)
     const file = join(root, 'notes.txt')
@@ -335,7 +335,13 @@ describe('DSH native contracts', () => {
       observed(target.displayPath, observation)
     })
 
-    await executeTool(ctx, agent, 'read', { path: 'notes.txt' })
+    const homeFile = (process.platform === 'win32' ? '~\\' : '~/') + relative(homedir(), file)
+    const homeRoot = '~/' + relative(homedir(), root).replaceAll('\\', '/')
+    const read = await executeTool(ctx, agent, 'read', { path: homeFile })
+    expect(read.isError, JSON.stringify(read)).toBe(false)
+    expect(read.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('content') })
+    expect(await runTool(ctx, agent, 'grep', { pattern: 'content', path: homeFile })).toContain('content')
+    expect(await runTool(ctx, agent, 'glob', { pattern: 'notes.txt', path: homeRoot })).toContain('notes.txt')
     expect(observed).toHaveBeenCalledWith(expect.stringContaining('notes.txt'), expect.objectContaining({ kind: 'present' }))
 
     const target = await ctx.fs.resolve('notes.txt', { cwd: root })
@@ -348,12 +354,31 @@ describe('DSH native contracts', () => {
     expect(observed).toHaveBeenCalledWith(expect.stringContaining('missing.txt'), { kind: 'absent' })
   })
 
+  it('keeps home-prefix filesystem access inside the normal read scope', async () => {
+    const root = await makeRoot()
+    const outside = await makeRoot(homedir())
+    const file = join(outside, 'outside.txt')
+    await writeFile(file, 'outside content')
+    const ctx = await mountComposition(root, { readScope: 'normal' })
+    const { agent } = await mintStandardAgent(ctx, 'home-scope', root)
+    for (const [name, args, code] of [
+      ['read', { path: '~/' + relative(homedir(), file).replaceAll('\\', '/') }, 'AGENTSHIM_READ_PATH_FAILED'],
+      ['grep', { path: '~/' + relative(homedir(), file).replaceAll('\\', '/'), pattern: 'outside' }, 'AGENTSHIM_GREP_PATH_FAILED'],
+      ['glob', { path: '~/' + relative(homedir(), outside).replaceAll('\\', '/'), pattern: '*.txt' }, 'AGENTSHIM_GLOB_PATH_FAILED'],
+    ] as const) {
+      const result = await executeTool(ctx, agent, name, args)
+      expect(result.isError).toBe(true)
+      expect(result.error?.info).toMatchObject({ code })
+    }
+  })
+
   it('reads via the native engine regardless of ctx.fs.processPath mapping', async () => {
     const root = await makeRoot()
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(SystemPrompt, {})
     await ctx.plugin(ToolRuntime)
+    await ctx.plugin(NativeToolExecutor)
     await ctx.plugin(LocalFileSystem, { cwd: root })
     await ctx.plugin(UnconfinedShell)
     pluginFibers.push(await ctx.plugin(agentshim, {
@@ -410,13 +435,17 @@ describe('DSH native contracts', () => {
     await ctx.plugin(StubLlm)
     const { agent } = await mintStandardAgent(ctx, 'i-code', root)
 
-    const result = await executeTool(
-      ctx,
+    const pipeline = new ToolExecutionPipeline(ctx)
+    const prepared = await pipeline.prepare({
+      signal: callSignal,
+      callId: CallId('nested-pdf'),
+      name: 'read',
+      arguments: { path: 'doc.pdf', pdf_mode: 'image' },
       agent,
-      'read',
-      { path: 'doc.pdf', pdf_mode: 'image' },
-      { parent: Symbol('code-mode') },
-    )
+      parent: Symbol('code-mode') as ToolExecutionToken,
+    })
+    const outcome = prepared.kind === 'dispatch' ? await pipeline.dispatch(prepared.exec) : prepared
+    const result = await pipeline.complete(prepared.exec, outcome)
     expect(result.isError).toBe(false)
     const blocks = result.content as Array<{ type: string; text?: string; attachment?: { attachmentId: string } }>
     const image = blocks.find(block => block.type === 'image')
@@ -661,6 +690,22 @@ describe('DSH native contracts', () => {
     const result = await pending
     expect(result.isError).toBe(true)
     expect(result.error?.info).toMatchObject({ name: 'AbortError', code: TOOL_ABORTED })
+
+    const resolve = ctx.fs.resolve.bind(ctx.fs)
+    for (const name of ['read', 'grep', 'glob']) {
+      const cancellation = new AbortController()
+      const resolver = vi.spyOn(ctx.fs, 'resolve').mockImplementationOnce((path, options) => {
+        cancellation.abort()
+        return resolve(path, options)
+      })
+      try {
+        const cancelled = await executeTool(ctx, agent, name, { path: '~', pattern: 'needle' }, { signal: cancellation.signal })
+        expect(cancelled.isError).toBe(true)
+        expect(cancelled.error?.info).toMatchObject({ name: 'AbortError', code: TOOL_ABORTED })
+      } finally {
+        resolver.mockRestore()
+      }
+    }
   })
 
   it('cancels and settles an in-flight call before plugin teardown returns', async () => {

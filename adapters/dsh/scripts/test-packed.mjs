@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const TARGET_DSH_VERSION = '0.2.1-rc.2'
+const TARGET_DSH_VERSION = '0.2.2-alpha.2'
 const PUBLISHED_DSH_VERSIONS = [
   '0.2.0-rc.1',
   '0.2.0-rc.2',
@@ -15,6 +15,8 @@ const PUBLISHED_DSH_VERSIONS = [
   '0.2.1-alpha.4',
   '0.2.1-alpha.5',
   '0.2.1-rc.1',
+  '0.2.1-rc.2',
+  '0.2.1-rc.5',
   TARGET_DSH_VERSION,
 ]
 const DSH_FAMILY_PACKAGES = [
@@ -84,12 +86,13 @@ function run(program, args, options = {}) {
   })
   if (result.error !== undefined) throw result.error
   if (result.status !== 0) throw new Error(`${program} ${args.join(' ')} exited with ${String(result.status)}`)
+  return result
 }
 
-const corepack = process.platform === 'win32' ? 'corepack.cmd' : 'corepack'
+const pnpmCommand = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
 
 function runPnpm(args, options = {}) {
-  run(corepack, ['pnpm@11.28.7', ...args], options)
+  run(pnpmCommand, args, options)
 }
 
 const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm'
@@ -108,11 +111,17 @@ function publishedVersions(packageName) {
   return new Set(Array.isArray(parsed) ? parsed : [parsed])
 }
 
+function familyPackages(version) {
+  return version === '0.2.2-alpha.2'
+    ? [...DSH_FAMILY_PACKAGES, '@deepseek-ai/dsh-tool-executor-native']
+    : DSH_FAMILY_PACKAGES
+}
+
 function verifyPublishedPackageMatrix(versions) {
   const versionsByPackage = new Map()
-  for (const packageName of DSH_FAMILY_PACKAGES) versionsByPackage.set(packageName, publishedVersions(packageName))
   for (const version of versions) {
-    for (const packageName of DSH_FAMILY_PACKAGES) {
+    for (const packageName of familyPackages(version)) {
+      if (!versionsByPackage.has(packageName)) versionsByPackage.set(packageName, publishedVersions(packageName))
       if (!versionsByPackage.get(packageName).has(version)) {
         throw new Error(`published package matrix is missing ${packageName}@${version}`)
       }
@@ -132,7 +141,14 @@ async function runPackedSmoke({ entryArchive, platformArchive, platformName, ver
   await writeFile(join(fixtureRoot, 'notes.txt'), `packed native read ${version}\n`)
 
   let cordisPackages
-  if (version.startsWith('0.2.0-')) {
+  if (version === '0.2.2-alpha.2') {
+    cordisPackages = {
+      '@deepseek-ai/cordis': '4.0.6-alpha.1',
+      '@deepseek-ai/cordis-plugin-include': '1.0.11-alpha.1',
+      '@deepseek-ai/cordis-plugin-loader': '1.0.7-alpha.1',
+      '@deepseek-ai/cordis-plugin-group': '1.0.6-alpha.1',
+    }
+  } else if (version.startsWith('0.2.0-')) {
     cordisPackages = {
       '@deepseek-ai/cordis': '4.0.4',
       '@deepseek-ai/cordis-plugin-include': '1.0.9',
@@ -163,7 +179,7 @@ async function runPackedSmoke({ entryArchive, platformArchive, platformName, ver
   }
   const dependencies = {
     ...cordisPackages,
-    ...Object.fromEntries(DSH_FAMILY_PACKAGES.map(name => [name, version])),
+    ...Object.fromEntries(familyPackages(version).map(name => [name, version])),
     'dsh-agentshim': localArchive(entryArchive),
     [platformName]: localArchive(platformArchive),
   }
@@ -192,6 +208,7 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as agentshim from 'dsh-agentshim'
 
 const version = ${expectedVersion}
+const separateExecutor = version === '0.2.2-alpha.2'
 const root = process.env.AGENTSHIM_PACKED_FIXTURE
 const resolvedEntry = import.meta.resolve('dsh-agentshim')
 assert.match(resolvedEntry, /node_modules\\/dsh-agentshim\\/lib\\/index\\.js$/)
@@ -220,6 +237,7 @@ assert.equal(typeof systemPrompt.getSectionOrder('TOOL_READ'), 'number')
 assert.equal(systemPrompt.getSectionOrder('TOOL_BASH'), 1000)
 assert.equal(systemPrompt.getSectionOrder('TOOL_READ'), 1100)
 await ctx.plugin(ToolRuntime)
+if (separateExecutor) await ctx.plugin(await import('@deepseek-ai/dsh-tool-executor-native'))
 await ctx.plugin(LocalFileSystem, { cwd: root })
 
 const inherited = {
@@ -268,13 +286,25 @@ const readSection = sectionNames.indexOf('tool:read')
 assert.notEqual(bashSection, -1)
 assert.notEqual(readSection, -1)
 assert(bashSection < readSection)
-const result = await ctx.tools.execute({
-  signal: new AbortController().signal,
-  callId: ToolCallId('packed-read'),
-  name: 'read',
-  arguments: { path: 'notes.txt' },
-  agent,
-})
+const signal = new AbortController().signal
+const result = separateExecutor
+  ? (await ctx.tools.execute({
+    signal,
+    calls: [{
+      type: 'tool-call',
+      id: ToolCallId('packed-read'),
+      name: 'read',
+      arguments: JSON.stringify({ path: 'notes.txt' }),
+    }],
+    agent,
+  })).results[0].result
+  : await ctx.tools.execute({
+    signal,
+    callId: ToolCallId('packed-read'),
+    name: 'read',
+    arguments: { path: 'notes.txt' },
+    agent,
+  })
 assert.equal(result.isError, false)
 assert((result.content[0]?.text ?? '').includes('packed native read ' + version))
 await plugin.dispose()
@@ -296,6 +326,9 @@ process.exit(0)
     timeout: 60_000,
   })
 }
+
+const pnpmVersion = run(pnpmCommand, ['--version'], { stdio: ['ignore', 'pipe', 'inherit'] }).stdout.trim()
+assert.equal(pnpmVersion, '11.28.7', 'packed smoke requires pnpm 11.28.7; install it with npm install --global pnpm@11.28.7')
 
 const temporaryRoot = await mkdtemp(join(tmpdir(), 'dsh-agentshim-packed-'))
 try {

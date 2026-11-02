@@ -20,7 +20,9 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import * as TimeoutPolicy from '@deepseek-ai/dsh-tool-call-timeout-policy'
 import * as ToolJobs from '@deepseek-ai/dsh-tool-jobs'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
-import type { ToolDefinition, ToolPresentationMode } from '@deepseek-ai/dsh-tools'
+import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
+import * as PtcToolExecutor from '@deepseek-ai/dsh-tool-executor-ptc'
 import { describe, expect, it, vi } from 'vitest'
 import * as agentshim from '../src/index.ts'
 import { MIN_TOOL_CALL_TIMEOUT_MS } from '../src/config.ts'
@@ -109,7 +111,7 @@ function registerInheritedCatalog(ctx: Context): void {
 }
 
 async function startRealComposition(
-  mode: ToolPresentationMode = 'native',
+  mode: 'native' | 'ptc' = 'native',
   beforeAdapter?: (ctx: Context) => Promise<void>,
   root = repoRoot,
   configOverrides: Partial<agentshim.Config> = {},
@@ -123,7 +125,9 @@ async function startRealComposition(
     await ctx.plugin(WorkspaceWritePolicy)
     await ctx.plugin(NodePtcRuntime, {})
   }
-  await ctx.plugin(ToolRuntime, { mode })
+  await ctx.plugin(ToolRuntime)
+  if (mode === 'native') await ctx.plugin(NativeToolExecutor)
+  else await ctx.plugin(PtcToolExecutor, {})
   registerInheritedCatalog(ctx)
   await ctx.plugin(TimeoutPolicy)
   await ctx.plugin(AgentRegistry)
@@ -151,6 +155,7 @@ async function startRealComposition(
       session: inner.sessions.create(SessionId(id), { meta: { cwd: root } }),
       options: { provider: 'stub-provider', model: 'stub-model' },
       status: 'busy',
+      inbox: { nextStep: [], nextTurn: [] },
       inject: () => undefined,
       followup: () => undefined,
     } as unknown as Agent
@@ -173,13 +178,12 @@ async function startRealComposition(
 }
 
 async function callText(ctx: Context, agent: Agent, name: string, args: Record<string, unknown>): Promise<string> {
-  const result = await ctx.tools.execute({
+  const batch = await ctx.tools.execute({
     signal: new AbortController().signal,
-    callId: CallId(`real-${name}`),
-    name,
-    arguments: args,
+    calls: [{ type: 'tool-call', id: CallId(`real-${name}`), name, arguments: JSON.stringify(args) }],
     agent,
   })
+  const result = batch.results[0]!.result
   if (result.isError) {
     throw new Error(`real tool ${name} failed: ${JSON.stringify(result)}`)
   }
@@ -196,13 +200,17 @@ interface ForegroundValue {
 }
 
 async function callForeground(ctx: Context, agent: Agent, command: string, description: string): Promise<ForegroundValue> {
-  const result = await ctx.tools.execute({
+  const batch = await ctx.tools.execute({
     signal: new AbortController().signal,
-    callId: CallId(`real-bash-${description}`),
-    name: 'bash',
-    arguments: { command, description },
+    calls: [{
+      type: 'tool-call',
+      id: CallId(`real-bash-${description}`),
+      name: 'bash',
+      arguments: JSON.stringify({ command, description }),
+    }],
     agent,
   })
+  const result = batch.results[0]!.result
   if (result.isError) {
     throw new Error(`real confined bash failed: ${JSON.stringify(result)}`)
   }
@@ -354,13 +362,17 @@ describe.runIf(enabled)('real DSH native composition', () => {
 
         const unknown = join(binaryPath, '..', 'unknown.bin')
         await writeFile(unknown, Buffer.from([0, 255]))
-        const denied = await ctx.tools.execute({
+        const batch = await ctx.tools.execute({
           signal: new AbortController().signal,
-          callId: CallId('unknown-artifact'),
-          name: 'read',
-          arguments: { path: unknown, artifact_offset: 0 },
+          calls: [{
+            type: 'tool-call',
+            id: CallId('unknown-artifact'),
+            name: 'read',
+            arguments: JSON.stringify({ path: unknown, artifact_offset: 0 }),
+          }],
           agent,
         })
+        const denied = batch.results[0]!.result
         expect(denied.isError).toBe(true)
         expect(JSON.stringify(denied)).toContain('exact artifact capability')
       } finally {

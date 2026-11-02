@@ -5,7 +5,8 @@
 ## Requirements
 
 - Node.js `^22.23.4 || ^24.22.1 || >=26.12.1`.
-- DSH `0.2.x` stable releases and the explicitly supported prereleases `0.2.0-rc.1`, `0.2.0-rc.2`, `0.2.1-alpha.1`, `0.2.1-alpha.2`, `0.2.1-alpha.3`, `0.2.1-alpha.4`, `0.2.1-alpha.5`, `0.2.1-rc.1`, and `0.2.1-rc.2`. Development and CI use DSH `0.2.1-rc.2` with Cordis `4.0.5`. DSH `0.1.x` is no longer supported; unlisted prereleases require validation before being added to the peer range.
+- DSH `0.2.x` stable releases and the explicitly supported prereleases `0.2.0-rc.1`, `0.2.0-rc.2`, `0.2.1-alpha.1`, `0.2.1-alpha.2`, `0.2.1-alpha.3`, `0.2.1-alpha.4`, `0.2.1-alpha.5`, `0.2.1-rc.1`, `0.2.1-rc.2`, `0.2.1-rc.5`, and `0.2.2-alpha.2`. Development and CI use DSH `0.2.2-alpha.2` with Cordis `4.0.6-alpha.1`. DSH `0.1.x` is no longer supported; unlisted prereleases require validation before being added to the peer range.
+- DSH `0.2.2-alpha.2` requires Node.js 24.9 or newer; older Node.js versions in the adapter range require a compatible DSH release. Custom alpha.2 compositions must mount an official native or PTC tool executor; standard profiles already provide one.
 - A local filesystem provider for the configured root.
 - One supported platform: Windows x64 MSVC, macOS ARM64, Linux x64 glibc, or Linux ARM64 glibc.
 - Background Bash requires `ctx.jobs` and a job controller.
@@ -54,6 +55,8 @@ The entry package exact-pins its platform package. There is no install script or
 
 `read`, `grep`, and `glob` use the configured `readScope` (`unrestricted` by default; `normal` is opt-in). Process confinement is not implemented by this plugin: when composed, the plugin delegates exact argv to the official DSH `ctx.sandbox` and `ctx.sandboxPolicy` services, while an absent service preserves the existing unconfined behavior.
 
+Home-prefix `path` inputs to `read`, `grep`, and `glob` follow the installed DSH local filesystem provider, including Windows `~\` expansion when supported. Ordinary paths and glob patterns retain native semantics; expansion does not widen `readScope` or artifact capabilities.
+
 ## Process and background behavior
 
 DSH `working_directory` changes apply to subsequent calls, not already running jobs. Prior per-directory engines stay alive until agent disposal so their jobs and artifacts remain available. Sandbox permissions remain anchored to the original project by DSH policy; changing cwd does not widen them.
@@ -78,6 +81,8 @@ dsh-agentshim-captures purge --all
 
 ## Development gates
 
+Development, CI, release packaging, and every packed compatibility consumer use Node.js `26.13.0` with pnpm `11.28.7`. Install pnpm separately; the scripts do not require Corepack.
+
 ```sh
 cargo build --locked -p agentshim-napi
 pnpm install --frozen-lockfile
@@ -91,7 +96,7 @@ pnpm test:packed:matrix # Linux: supported published DSH 0.2 prereleases
 pnpm verify:cutover
 ```
 
-Source/native tests may stage the locally built library through `AGENTSHIM_DSH_NATIVE_DLL`. The packed smoke does not: it fresh-packs and installs the entry plus the current platform package in isolated temporary consumers, then executes a native read through the package export. The Linux matrix covers the nine supported published DSH `0.2` prereleases. Existing `.tgz` files in this directory are never used as development or release evidence.
+Source/native tests may stage the locally built library through `AGENTSHIM_DSH_NATIVE_DLL`. The packed smoke does not: it fresh-packs and installs the entry plus the current platform package in isolated temporary consumers, then executes a native read through the package export. The Linux matrix covers the eleven supported published DSH `0.2` prereleases. The matrix verifies package installation, activation, and a native read; it does not run the full adapter test suite against every DSH version. Existing `.tgz` files in this directory are never used as development or release evidence.
 
 ## Remove
 
