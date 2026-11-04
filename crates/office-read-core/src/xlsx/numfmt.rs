@@ -288,7 +288,7 @@ fn apply_custom(n: f64, fmt: &str) -> String {
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
-#[cfg(any())]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -296,17 +296,6 @@ mod tests {
     fn builtin_general() {
         assert_eq!(apply_format(42.0, 0, None), "42");
         assert_eq!(apply_format(4.25, 0, None), "4.25");
-    }
-
-    #[test]
-    fn builtin_format_code_lookup() {
-        assert_eq!(builtin_format_code(0), Some("General"));
-        assert_eq!(builtin_format_code(4), Some("#,##0.00"));
-        assert_eq!(builtin_format_code(14), Some("m/d/yyyy"));
-        assert_eq!(builtin_format_code(49), Some("@"));
-        // Custom-format ID range has no built-in code.
-        assert_eq!(builtin_format_code(164), None);
-        assert_eq!(builtin_format_code(200), None);
     }
 
     #[test]

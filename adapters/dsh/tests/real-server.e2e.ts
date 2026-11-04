@@ -313,14 +313,14 @@ describe.runIf(enabled)('real DSH native composition', () => {
       expect(await callText(ctx, agent, 'read', { path: 'notes.txt' })).toContain('changed directory')
       expect(observed).toContain(join(child, 'notes.txt'))
       expect(await callText(ctx, agent, 'grep', { pattern: 'changed', path: 'notes.txt' })).toContain('changed directory')
-      expect(await callText(ctx, agent, 'glob', { pattern: 'notes.txt' })).toContain(join(child, 'notes.txt'))
+      expect(await callText(ctx, agent, 'glob', { pattern: 'notes.txt' })).toContain(join(child, 'notes.txt').replaceAll('\\', '/'))
       expect(await callText(ctx, agent, 'run_program', {
         program: process.execPath,
         args: ['-e', 'console.log(process.cwd())'],
       })).toContain(child)
       expect(await callText(ctx, agent, 'bash', {
-        command: 'pwd', description: 'Print the current working directory',
-      })).toContain(child)
+        command: process.platform === 'win32' ? 'pwd -W' : 'pwd', description: 'Print the current working directory',
+      })).toContain(child.replaceAll('\\', '/'))
       expect(await callText(ctx, agent, 'bash_status', { job_id: jobId })).toContain('Status: running')
       await callText(ctx, agent, 'job_kill', { job_id: jobId, reason: 'working directory E2E cleanup' })
       await ctx.workingDirectory.set(agent, root)

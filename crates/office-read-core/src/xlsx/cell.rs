@@ -95,7 +95,7 @@ pub struct Cell {
     pub style_index: Option<u32>,
 }
 
-#[cfg(any())]
+#[cfg(test)]
 mod tests {
     use super::*;
 

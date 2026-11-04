@@ -253,7 +253,7 @@ pub fn is_date_cell(style_index: Option<u32>, styles: Option<&StyleSheet>) -> bo
     false
 }
 
-#[cfg(any())]
+#[cfg(test)]
 mod tests {
     use super::*;
 

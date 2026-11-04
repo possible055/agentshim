@@ -208,7 +208,8 @@ impl BackgroundJob {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         self.finished.cancel();
-        let _ = self.done_tx.send(Some(outcome));
+        // A short-lived job can finish before the first done() subscriber exists.
+        let _ = self.done_tx.send_replace(Some(outcome));
     }
 
     fn timeout_ms(&self) -> u64 {

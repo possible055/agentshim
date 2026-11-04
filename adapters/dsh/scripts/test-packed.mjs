@@ -5,20 +5,21 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const TARGET_DSH_VERSION = '0.2.2-alpha.2'
-const PUBLISHED_DSH_VERSIONS = [
-  '0.2.0-rc.1',
-  '0.2.0-rc.2',
-  '0.2.1-alpha.1',
-  '0.2.1-alpha.2',
-  '0.2.1-alpha.3',
-  '0.2.1-alpha.4',
-  '0.2.1-alpha.5',
-  '0.2.1-rc.1',
-  '0.2.1-rc.2',
-  '0.2.1-rc.5',
-  TARGET_DSH_VERSION,
-]
+const CORDIS_VERSIONS = new Map([
+  ['0.2.0-rc.1', ['4.0.4', '1.0.9', '1.0.5', '1.0.4']],
+  ['0.2.0-rc.2', ['4.0.4', '1.0.9', '1.0.5', '1.0.4']],
+  ['0.2.1-alpha.1', ['4.0.5-alpha.1', '1.0.10-alpha.1', '1.0.6-alpha.1', '1.0.5-alpha.1']],
+  ['0.2.1-alpha.2', ['4.0.5-alpha.1', '1.0.10-alpha.1', '1.0.6-alpha.1', '1.0.5-alpha.1']],
+  ['0.2.1-alpha.3', ['4.0.5-alpha.2', '1.0.10-alpha.2', '1.0.6-alpha.2', '1.0.5-alpha.2']],
+  ['0.2.1-alpha.4', ['4.0.5-alpha.2', '1.0.10-alpha.2', '1.0.6-alpha.2', '1.0.5-alpha.2']],
+  ['0.2.1-alpha.5', ['4.0.5-alpha.2', '1.0.10-alpha.2', '1.0.6-alpha.2', '1.0.5-alpha.2']],
+  ['0.2.1-rc.1', ['4.0.5', '1.0.10', '1.0.6', '1.0.5']],
+  ['0.2.1-rc.2', ['4.0.5', '1.0.10', '1.0.6', '1.0.5']],
+  ['0.2.1-rc.5', ['4.0.5', '1.0.10', '1.0.6', '1.0.5']],
+  ['0.2.2-alpha.2', ['4.0.6-alpha.1', '1.0.11-alpha.1', '1.0.7-alpha.1', '1.0.6-alpha.1']],
+  ['0.2.2-alpha.3', ['4.0.6-alpha.2', '1.0.11-alpha.2', '1.0.7-alpha.2', '1.0.6-alpha.2']],
+  ['0.2.2-rc.1', ['4.1.0', '1.1.0', '1.1.0', '1.1.0']],
+])
 const DSH_FAMILY_PACKAGES = [
   '@deepseek-ai/dsh-agent',
   '@deepseek-ai/dsh-attachment-local',
@@ -76,6 +77,16 @@ const platform = platformByRuntime[`${process.platform}-${process.arch}`]
 if (platform === undefined) throw new Error(`packed smoke does not support ${process.platform}-${process.arch}`)
 const entryManifest = JSON.parse(await readFile(join(adapterRoot, 'package.json'), 'utf8'))
 const platformManifest = JSON.parse(await readFile(join(adapterRoot, 'npm', platform, 'package.json'), 'utf8'))
+const TARGET_DSH_VERSION = entryManifest.devDependencies['@deepseek-ai/dsh-tools']
+const dshPeerRange = entryManifest.peerDependencies['@deepseek-ai/dsh-tools']
+const PUBLISHED_DSH_VERSIONS = dshPeerRange.split(' || ').filter(version => version !== '0.2.x')
+for (const [name, range] of Object.entries(entryManifest.peerDependencies)) {
+  if (name.startsWith('@deepseek-ai/dsh-')) assert.equal(range, dshPeerRange, `${name} peer range drifted`)
+}
+for (const version of PUBLISHED_DSH_VERSIONS) {
+  assert(CORDIS_VERSIONS.has(version), `missing exact Cordis versions for DSH ${version}`)
+}
+assert(PUBLISHED_DSH_VERSIONS.includes(TARGET_DSH_VERSION), 'development DSH must be in the supported matrix')
 
 function run(program, args, options = {}) {
   const result = spawnSync(program, args, {
@@ -100,7 +111,7 @@ const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 function publishedVersions(packageName) {
   const result = spawnSync(npmCommand, ['view', packageName, 'versions', '--json'], {
     encoding: 'utf8',
-    shell: false,
+    shell: process.platform === 'win32',
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   if (result.error !== undefined) throw result.error
@@ -112,8 +123,9 @@ function publishedVersions(packageName) {
 }
 
 function familyPackages(version) {
-  return version === '0.2.2-alpha.2'
-    ? [...DSH_FAMILY_PACKAGES, '@deepseek-ai/dsh-tool-executor-native']
+  return version.startsWith('0.2.2-')
+    ? [...DSH_FAMILY_PACKAGES, '@deepseek-ai/dsh-tool-executor-native',
+        ...(version === '0.2.2-alpha.2' ? [] : ['@deepseek-ai/dsh-fs-patch'])]
     : DSH_FAMILY_PACKAGES
 }
 
@@ -140,43 +152,14 @@ async function runPackedSmoke({ entryArchive, platformArchive, platformName, ver
   await mkdir(fixtureRoot)
   await writeFile(join(fixtureRoot, 'notes.txt'), `packed native read ${version}\n`)
 
-  let cordisPackages
-  if (version === '0.2.2-alpha.2') {
-    cordisPackages = {
-      '@deepseek-ai/cordis': '4.0.6-alpha.1',
-      '@deepseek-ai/cordis-plugin-include': '1.0.11-alpha.1',
-      '@deepseek-ai/cordis-plugin-loader': '1.0.7-alpha.1',
-      '@deepseek-ai/cordis-plugin-group': '1.0.6-alpha.1',
-    }
-  } else if (version.startsWith('0.2.0-')) {
-    cordisPackages = {
-      '@deepseek-ai/cordis': '4.0.4',
-      '@deepseek-ai/cordis-plugin-include': '1.0.9',
-      '@deepseek-ai/cordis-plugin-loader': '1.0.5',
-      '@deepseek-ai/cordis-plugin-group': '1.0.4',
-    }
-  } else if (['0.2.1-alpha.1', '0.2.1-alpha.2'].includes(version)) {
-    cordisPackages = {
-      '@deepseek-ai/cordis': '4.0.5-alpha.1',
-      '@deepseek-ai/cordis-plugin-include': '1.0.10-alpha.1',
-      '@deepseek-ai/cordis-plugin-loader': '1.0.6-alpha.1',
-      '@deepseek-ai/cordis-plugin-group': '1.0.5-alpha.1',
-    }
-  } else if (version.startsWith('0.2.1-rc.')) {
-    cordisPackages = {
-      '@deepseek-ai/cordis': '4.0.5',
-      '@deepseek-ai/cordis-plugin-include': '1.0.10',
-      '@deepseek-ai/cordis-plugin-loader': '1.0.6',
-      '@deepseek-ai/cordis-plugin-group': '1.0.5',
-    }
-  } else {
-    cordisPackages = {
-      '@deepseek-ai/cordis': '4.0.5-alpha.2',
-      '@deepseek-ai/cordis-plugin-include': '1.0.10-alpha.2',
-      '@deepseek-ai/cordis-plugin-loader': '1.0.6-alpha.2',
-      '@deepseek-ai/cordis-plugin-group': '1.0.5-alpha.2',
-    }
-  }
+  const cordisVersions = CORDIS_VERSIONS.get(version)
+  assert(cordisVersions !== undefined, `missing exact Cordis versions for DSH ${version}`)
+  const cordisPackages = Object.fromEntries([
+    '@deepseek-ai/cordis',
+    '@deepseek-ai/cordis-plugin-include',
+    '@deepseek-ai/cordis-plugin-loader',
+    '@deepseek-ai/cordis-plugin-group',
+  ].map((name, index) => [name, cordisVersions[index]]))
   const dependencies = {
     ...cordisPackages,
     ...Object.fromEntries(familyPackages(version).map(name => [name, version])),
@@ -208,7 +191,7 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as agentshim from 'dsh-agentshim'
 
 const version = ${expectedVersion}
-const separateExecutor = version === '0.2.2-alpha.2'
+const separateExecutor = version.startsWith('0.2.2-')
 const root = process.env.AGENTSHIM_PACKED_FIXTURE
 const resolvedEntry = import.meta.resolve('dsh-agentshim')
 assert.match(resolvedEntry, /node_modules\\/dsh-agentshim\\/lib\\/index\\.js$/)

@@ -174,6 +174,27 @@ pub(in crate::tools::bash) fn invalid(message: impl Into<String>) -> ProcessErro
 }
 
 impl locate::BashRuntime {
+    fn prepare_launch(
+        &self,
+        command: &str,
+        msys_argument_conversion: MsysArgumentConversion,
+    ) -> (Vec<String>, EnvironmentPlan) {
+        let environment = bash_environment(self, msys_argument_conversion);
+        #[cfg(windows)]
+        if self.flavor == ShellFlavor::Bash && command.len() > 8000 {
+            // MSYS truncates long quoted native argv near 8 KiB, below CreateProcessW's limit.
+            let mut environment = environment;
+            environment
+                .overrides
+                .push(("AGENTSHIM_BASH_COMMAND".to_owned(), command.to_owned()));
+            return (
+                self.launch_args("eval -- \"$AGENTSHIM_BASH_COMMAND\""),
+                environment,
+            );
+        }
+        (self.launch_args(command), environment)
+    }
+
     /// Every command goes through the same non-interactive, profile-free invocation, which is
     /// what the tool description promises the caller. A busybox dispatcher needs the `sh`
     /// applet name as an argv prefix; applet-named copies and GNU bash do not.
@@ -359,11 +380,13 @@ pub(crate) fn prepare_bash_foreground(
         executable: runtime.executable.clone(),
         launcher: launcher_for(&runtime.executable)?,
     };
+    let (args, environment) =
+        runtime.prepare_launch(&request.command, request.msys_argument_conversion);
     Ok(PreparedBash {
         resolved,
         cwd,
-        args: runtime.launch_args(&request.command),
-        environment: bash_environment(&runtime, request.msys_argument_conversion),
+        args,
+        environment,
         deadline,
         request_timeout_ms: request.timeout_ms(timeout_ceiling_ms),
         msys_retry_available: msys_retry_available(request, runtime.flavor),

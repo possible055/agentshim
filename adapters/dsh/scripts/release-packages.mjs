@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { readFile, readdir, writeFile } from 'node:fs/promises'
-import { basename, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const ENTRY_NAME = 'dsh-agentshim'
@@ -28,7 +28,10 @@ function packageFilename(name, version) {
 }
 
 function tar(archive, operation, members = []) {
-  const result = spawnSync('tar', [operation, archive, ...members], { encoding: 'utf8' })
+  const result = spawnSync('tar', [operation, basename(archive), ...members], {
+    cwd: dirname(archive),
+    encoding: 'utf8',
+  })
   if (result.error !== undefined) throw result.error
   if (result.status !== 0) {
     throw new Error(`tar ${operation} ${archive} ${members.join(' ')} failed: ${result.stderr || result.stdout}`)

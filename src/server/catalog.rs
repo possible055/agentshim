@@ -3,9 +3,10 @@ use std::sync::Arc;
 use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Value, json};
 
-use crate::path::ReadScope;
+use crate::{ClientProfile, path::ReadScope};
 pub(super) fn tool_catalog(
     read_scope: ReadScope,
+    client_profile: ClientProfile,
     max_timeout_ms: u64,
     default_timeout_ms: u64,
     background_timeout_max_ms: u64,
@@ -19,6 +20,7 @@ pub(super) fn tool_catalog(
             max_timeout_ms,
             default_timeout_ms,
             background_timeout_max_ms,
+            client_profile,
         ),
         bash_status_tool(),
     ]
@@ -307,8 +309,8 @@ fn run_program_tool(max: u64, default: u64) -> Tool {
     clippy::too_many_lines,
     reason = "the three mutually exclusive public Bash variants stay adjacent in one schema"
 )]
-fn bash_tool(max: u64, default: u64, background_max: u64) -> Tool {
-    Tool::new(
+fn bash_tool(max: u64, default: u64, background_max: u64, profile: ClientProfile) -> Tool {
+    let mut tool = Tool::new(
         "bash",
         "Run a non-interactive POSIX Bash command and return merged stdout/stderr plus its exit status. Use portable POSIX sh syntax, not PowerShell. Run in the repository root by default; use detach=true with log_path for long work, then poll bash_status. Foreground nonzero exit is a completed command result, not a tool-call error; use action=terminate with a job_id to stop a detached tree. MCP does not sandbox spawned processes.",
         schema(json!({
@@ -417,7 +419,47 @@ fn bash_tool(max: u64, default: u64, background_max: u64) -> Tool {
             .destructive(true)
             .idempotent(false)
             .open_world(true),
-    )
+    );
+    if profile == ClientProfile::Cursor {
+        tool.input_schema = cursor_bash_schema(&tool.input_schema, max, default, background_max);
+        tool.description = Some(format!(
+            "{} Choose exactly one request shape: foreground requires command with detach omitted or false; background requires command, detach=true, and log_path; termination requires only action=terminate and job_id. Do not mix termination fields with command fields.",
+            tool.description.as_deref().expect("Bash description"),
+        ).into());
+    }
+    tool
+}
+
+fn cursor_bash_schema(
+    original: &JsonObject,
+    max: u64,
+    default: u64,
+    background_max: u64,
+) -> Arc<JsonObject> {
+    // Cursor drops top-level unions when projecting MCP tools for the model.
+    // Runtime validation still enforces the three mutually exclusive request shapes.
+    let mut properties = JsonObject::new();
+    for variant in original["oneOf"].as_array().expect("Bash variants") {
+        for (name, property) in variant["properties"].as_object().expect("Bash properties") {
+            properties.insert(name.clone(), property.clone());
+        }
+    }
+    properties.insert("detach".to_owned(), json!({
+        "type": "boolean",
+        "default": false,
+        "description": "Set true with command and log_path to start a background job; omit or set false for foreground execution. Omit for termination."
+    }));
+    properties.insert("timeout_ms".to_owned(), json!({
+        "type": "integer",
+        "minimum": 1,
+        "maximum": max.max(background_max),
+        "description": format!("Execution timeout in milliseconds: foreground 1..={max} (default {default}); background 1..={background_max} (default {background_max}). Omit for termination.")
+    }));
+    schema(json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": properties
+    }))
 }
 
 fn bash_status_tool() -> Tool {
@@ -443,7 +485,7 @@ fn bash_status_tool() -> Tool {
                 "cursor": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Optional byte cursor for incremental log reads."
+                    "description": "Optional byte cursor for incremental log reads. Pass the response's next_cursor value unchanged to continue without skipping output."
                 },
                 "max_bytes": {
                     "type": "integer",

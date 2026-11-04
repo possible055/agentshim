@@ -203,7 +203,7 @@ pub fn read_short_unicode_string(data: &[u8], pos: usize) -> Result<(String, usi
     Ok((s, offset))
 }
 
-#[cfg(any())]
+#[cfg(test)]
 mod tests {
     use super::*;
 

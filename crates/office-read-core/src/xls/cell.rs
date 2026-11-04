@@ -343,7 +343,7 @@ pub fn decode_rk(rk: u32) -> f64 {
     if div_100 { val / 100.0 } else { val }
 }
 
-#[cfg(any())]
+#[cfg(test)]
 mod tests {
     use super::*;
 

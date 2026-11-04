@@ -182,3 +182,56 @@ fn mcp_catalog_matches_host_divergence_snapshot() {
         string_array(&expected["bash_status"]["mcp"]["required"])
     );
 }
+
+#[test]
+fn cursor_bash_schema_exposes_run_and_control_parameters_without_root_unions() {
+    let divergence: serde_json::Value =
+        serde_json::from_str(include_str!("../../../evals/host-divergence.json"))
+            .expect("host divergence fixture");
+    let expected = &divergence["bash"]["mcp"]["cursorProjection"];
+    let root = tempfile::tempdir().expect("root");
+    let server = configured_server(
+        root.path(),
+        crate::ClientProfile::Cursor,
+        std::time::Duration::from_secs(120),
+        MODEL_BYTE_LIMIT,
+    );
+    let bash = rmcp::ServerHandler::get_tool(&server, "bash").expect("bash");
+    let schema = &bash.input_schema;
+    let properties = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .expect("Cursor bash must expose top-level properties");
+    assert_eq!(
+        properties.keys().cloned().collect::<Vec<_>>(),
+        string_array(&expected["fields"])
+    );
+    for union in ["oneOf", "anyOf", "allOf"] {
+        assert!(schema.get(union).is_none(), "Cursor loses root unions");
+    }
+    assert_eq!(schema["type"], "object");
+    assert_eq!(schema["additionalProperties"], false);
+    assert!(schema.get("required").is_none());
+    assert_eq!(
+        schema.get("required").map(string_array).unwrap_or_default(),
+        string_array(&expected["required"])
+    );
+    assert_eq!(properties["detach"]["default"], false);
+    assert!(properties["detach"].get("const").is_none());
+    assert_eq!(properties["action"]["const"], "terminate");
+    assert_eq!(properties["timeout_ms"]["maximum"], 1_800_000);
+    assert!(properties["timeout_ms"].get("default").is_none());
+    let description = bash.description.as_deref().expect("description");
+    for shape in [
+        "command",
+        "detach=true",
+        "log_path",
+        "action=terminate",
+        "job_id",
+    ] {
+        assert!(
+            description.contains(shape),
+            "missing shape guidance: {shape}"
+        );
+    }
+}

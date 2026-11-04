@@ -13,8 +13,8 @@
 ## 运行环境要求
 
 - Node.js `^22.23.4 || ^24.22.1 || >=26.12.1`。
-- 支援 DSH `0.2.x` 穩定版，以及明列的預發行版 `0.2.0-rc.1`、`0.2.0-rc.2`、`0.2.1-alpha.1`、`0.2.1-alpha.2`、`0.2.1-alpha.3`、`0.2.1-alpha.4`、`0.2.1-alpha.5`、`0.2.1-rc.1`、`0.2.1-rc.2`、`0.2.1-rc.5`、`0.2.2-alpha.2`。開發與 CI 使用 DSH `0.2.2-alpha.2` 及 Cordis `4.0.6-alpha.1`。不再支援 DSH `0.1.x`；未列出的預發行版需先驗證，再加入 peer 範圍。
-- DSH `0.2.2-alpha.2` 要求 Node.js 24.9 以上；adapter 範圍中的舊版 Node.js 必須搭配相容的 DSH。alpha.2 自訂組裝需掛載官方 native 或 PTC 工具執行器；標準 profile 已提供。
+- 支援 DSH `0.2.x` 穩定版與 [package.json](./package.json) 明列的預發行版；開發與 CI 使用 `devDependencies` 釘選的 DSH／Cordis 版本。不支援 DSH `0.1.x`，未列出的預發行版須先驗證。
+- DSH `0.2.2` 預發行版要求 Node.js 24.9 以上；adapter 範圍中的舊版 Node.js 必須搭配相容的 DSH。DSH `0.2.2` 自訂組裝需掛載官方 native 或 PTC 工具執行器；標準 profile 已提供。
 - 后台 Bash 命令需要 `ctx.jobs` 及任务控制器支持。
 
 不支持的平台、缺失可选的原生包、加载失败或插件 API 版本不为 `5` 均会拒绝插件激活。
@@ -102,7 +102,7 @@ pnpm test:packed:matrix # Linux：受支援且已發布的 DSH 0.2 預發行版
 pnpm verify:cutover
 ```
 
-源码/原生测试可以通过 `AGENTSHIM_DSH_NATIVE_DLL` 暂存本地构建的库。打包冒烟测试则不同：它会在隔离的临时消费者环境中全新打包并安装入口包及当前平台包，然后通过包导出接口执行原生读取。Linux 測試矩陣涵蓋十一個受支援且已發布的 DSH `0.2` 預發行版。矩陣驗證套件安裝、啟用與原生讀取，不代表每個 DSH 版本都跑過完整 adapter 測試。该目录中现有的 `.tgz` 文件绝不会用作开发或发布的验证证据。
+源码/原生测试可以通过 `AGENTSHIM_DSH_NATIVE_DLL` 暂存本地构建的库。打包冒烟测试则不同：它会在隔离的临时消费者环境中全新打包并安装入口包及当前平台包，然后通过包导出接口执行原生读取。Linux 測試矩陣涵蓋 `package.json` 明列的全部已發布 DSH 預發行版。矩陣驗證套件安裝、啟用與原生讀取，不代表每個 DSH 版本都跑過完整 adapter 測試。该目录中现有的 `.tgz` 文件绝不会用作开发或发布的验证证据。
 
 ## 卸载
 

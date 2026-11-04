@@ -336,15 +336,21 @@ fn unix_session_escape_does_not_detach_pipe_workers() {
 
 #[cfg(unix)]
 #[test]
-fn unix_stdin_failure_terminates_process_tree_immediately() {
+fn unix_closed_stdin_still_obeys_the_process_deadline() {
     let mut request = request("/bin/sh".to_owned());
-    request.timeout_ms = Some(10_000);
+    request.timeout_ms = Some(100);
     request.stdin = Some("i".repeat(MAX_STDIN_BYTES));
     request.args = vec!["-c".to_owned(), "exec 0<&-; sleep 30".to_owned()];
     let started = std::time::Instant::now();
 
-    let error = execute_unix(&request).expect_err("stdin failure");
+    let error = execute_unix(&request).expect_err("process deadline");
 
-    assert!(matches!(error, ProcessError::Io(_)));
+    assert!(matches!(
+        error,
+        ProcessError::Timeout {
+            timeout_ms: 100,
+            ..
+        }
+    ));
     assert!(started.elapsed() < Duration::from_secs(2));
 }

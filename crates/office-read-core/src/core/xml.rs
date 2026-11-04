@@ -238,7 +238,7 @@ pub fn ensure_utf8(data: &[u8]) -> Option<Vec<u8>> {
     Some(utf8)
 }
 
-#[cfg(any())]
+#[cfg(test)]
 mod attr_tests {
     use super::unescape_attr_value;
     use quick_xml::events::BytesStart;

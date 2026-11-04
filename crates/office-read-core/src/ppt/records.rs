@@ -188,7 +188,7 @@ fn map_budget_error(error: crate::OfficeReadError) -> PptError {
     }
 }
 
-#[cfg(any())]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -263,7 +263,7 @@ mod tests {
 
         // Recursing explicitly into the container's own bounded child region
         // reaches both children.
-        let nested: Vec<_> = RecordIter::new(&records[0].data)
+        let nested: Vec<_> = RecordIter::new(records[0].data)
             .collect::<std::result::Result<_, _>>()
             .unwrap();
         assert_eq!(nested.len(), 2);
@@ -310,12 +310,9 @@ mod tests {
         assert_eq!(records[1].header.rec_type, RT_TEXT_BYTES);
         assert_eq!(records[1].data, b"sibling text");
 
-        // Descending into the corrupt container's own children must clamp to
-        // the bytes actually available, not panic or run past the container.
-        let inner: Vec<_> = RecordIter::new(&records[0].data)
-            .collect::<std::result::Result<_, _>>()
-            .unwrap();
-        assert_eq!(inner.len(), 1);
-        assert!(inner[0].data.len() < 1_000_000);
+        let error = RecordIter::new(records[0].data)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect_err("corrupt nested record");
+        assert!(matches!(error, PptError::InvalidRecord(_)));
     }
 }

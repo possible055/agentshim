@@ -266,7 +266,7 @@ fn parse_num_instance(
     }))
 }
 
-#[cfg(any())]
+#[cfg(test)]
 mod tests {
     use super::*;
 

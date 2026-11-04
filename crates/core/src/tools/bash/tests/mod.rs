@@ -131,7 +131,7 @@ fn windows_argument_echo_command(root: &std::path::Path) -> String {
         .to_string_lossy()
         .replace('\\', "/")
         .replace('\'', "'\"'\"'");
-    format!("powershell.exe -NoProfile -File '{script}' /E")
+    format!("powershell.exe -NoProfile -ExecutionPolicy Bypass -File '{script}' /E")
 }
 
 mod busybox;

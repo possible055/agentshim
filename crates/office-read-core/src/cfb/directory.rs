@@ -153,7 +153,7 @@ fn map_budget_error(error: crate::OfficeReadError) -> CfbError {
     }
 }
 
-#[cfg(any())]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -167,14 +167,18 @@ mod tests {
             buf[i * 2 + 1] = bytes[1];
         }
         // Name size in bytes (including null terminator).
-        let name_size = ((utf16.len() + 1) * 2) as u16;
+        let name_size = if entry_type == 0 {
+            0
+        } else {
+            ((utf16.len() + 1) * 2) as u16
+        };
         buf[0x40..0x42].copy_from_slice(&name_size.to_le_bytes());
         buf[0x42] = entry_type;
         buf[0x43] = 1; // black
         // No siblings/children.
-        buf[0x44..0x48].copy_from_slice(&super::NO_ENTRY.to_le_bytes());
-        buf[0x48..0x4C].copy_from_slice(&super::NO_ENTRY.to_le_bytes());
-        buf[0x4C..0x50].copy_from_slice(&super::NO_ENTRY.to_le_bytes());
+        buf[0x44..0x48].copy_from_slice(&u32::MAX.to_le_bytes());
+        buf[0x48..0x4C].copy_from_slice(&u32::MAX.to_le_bytes());
+        buf[0x4C..0x50].copy_from_slice(&u32::MAX.to_le_bytes());
         buf
     }
 

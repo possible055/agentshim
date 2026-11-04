@@ -1,6 +1,6 @@
 import { realpath, stat } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
-import { ensureCaptureRoot, resolveCaptureRoot } from './capture.ts'
+import { DEFAULT_CAPTURE_MAX_BYTES, ensureCaptureRoot, resolveCaptureRoot } from './capture.ts'
 
 export const MIN_TOOL_CALL_TIMEOUT_MS = 600_000
 
@@ -42,7 +42,7 @@ export async function resolvePluginConfig(input: PluginConfigInput): Promise<Res
     root,
     readScope: input.readScope ?? 'unrestricted',
     captureRoot,
-    captureMaxBytes: input.captureMaxBytes ?? 64 * 1024 * 1024,
+    captureMaxBytes: input.captureMaxBytes ?? DEFAULT_CAPTURE_MAX_BYTES,
     captureCleanup: input.captureCleanup ?? 'never',
   }
 }

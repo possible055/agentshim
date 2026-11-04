@@ -426,7 +426,7 @@ describe('native addon loading', () => {
     await engine.close()
   })
 
-  it.skipIf(stagedAddon === undefined)('starts, drains, cancels, and settles a native background bash job', async () => {
+  it.skipIf(stagedAddon === undefined)('settles native background jobs for early and late done subscribers', async () => {
     process.env.AGENTSHIM_DSH_NATIVE_DLL = stagedAddon!
     const result = loadNativeAddon()
     if (result.engine === undefined) throw new Error('unreachable')
@@ -442,19 +442,27 @@ describe('native addon loading', () => {
 
     const handle = engine.startBackgroundPrepared(prepared.handle)
 
-    const output1 = handle.readOutput()
-    expect(output1.length).toBeGreaterThanOrEqual(0)
+    let output1 = ''
+    await waitForCondition(() => {
+      output1 += handle.readOutput()
+      return output1.includes('line-1')
+    }, 5_000, 'the first background output to arrive')
 
     const outcome = await handle.done()
     expect(outcome.status).toBe('completed')
     expect(outcome.exitCode).toBe('0')
 
-    const finalOutput = handle.readOutput()
-    expect(finalOutput).toContain('line-1')
-    expect(finalOutput).toContain('line-6')
+    const finalOutput = output1 + handle.readOutput()
+    expect(finalOutput).toBe('line-1\nline-2\nline-3\nline-4\nline-5\nline-6\n')
 
     await handle.dispose()
+    const latePrepared = engine.prepareBash({ command: 'while :; do :; done', background: true })
+    const lateHandle = engine.startBackgroundPrepared(latePrepared.handle)
     await engine.close()
+    const lateOutcome = await lateHandle.done()
+    expect(lateOutcome.status).toBe('killed')
+    expect(lateOutcome.failure).toBeUndefined()
+    await lateHandle.dispose()
   })
 
   it.skipIf(stagedAddon === undefined)('settles at least three native background jobs concurrently', async () => {

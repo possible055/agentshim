@@ -14,7 +14,7 @@ use crate::{
     tools::{
         ToolOutput,
         bash::{
-            BashRequest, bash_environment, invalid,
+            BashRequest, invalid,
             locate::{BashLocator, LocateError},
         },
         exec::{
@@ -75,8 +75,8 @@ pub(in crate::tools::bash) fn execute_detached(
         launcher: launcher_for(&runtime.executable)?,
     };
     ensure_before_spawn(Some(deadline), pre_spawn_timeout_ms)?;
-    let environment = bash_environment(&runtime, request.msys_argument_conversion);
-    let args = runtime.launch_args(&request.command);
+    let (args, environment) =
+        runtime.prepare_launch(&request.command, request.msys_argument_conversion);
     let launch = DetachedLaunch {
         resolved: &resolved,
         cwd: &cwd,

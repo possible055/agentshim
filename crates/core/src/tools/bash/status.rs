@@ -203,9 +203,12 @@ fn snapshot_from_once(
         offset = offset.saturating_add(read);
     }
     let reaches_end = start.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX)) >= total;
+    // A page smaller than one code point advances using byte escapes; only an
+    // incomplete character at a live log's end must wait for more bytes.
     if let Err(error) = std::str::from_utf8(&bytes)
         && error.error_len().is_none()
         && !(finalized && reaches_end)
+        && (error.valid_up_to() > 0 || reaches_end)
     {
         bytes.truncate(error.valid_up_to());
     }
@@ -233,15 +236,53 @@ pub fn render_with_budget(
     cancellation: &CancellationToken,
     output_budget: &dyn crate::output::CallBudget,
 ) -> Result<ToolOutput, ProcessError> {
-    let available = requested_tail_bytes.min(snapshot.log.bytes.len());
-    let full = render(snapshot, available);
+    render_log_with_budget(
+        snapshot,
+        requested_tail_bytes,
+        LogDirection::Tail,
+        cancellation,
+        output_budget,
+    )
+}
+
+/// Render from the cursor forward, exposing continuation for exactly the bytes delivered.
+pub fn render_cursor_with_budget(
+    snapshot: &JobSnapshot,
+    requested_bytes: usize,
+    cancellation: &CancellationToken,
+    output_budget: &dyn crate::output::CallBudget,
+) -> Result<ToolOutput, ProcessError> {
+    render_log_with_budget(
+        snapshot,
+        requested_bytes,
+        LogDirection::Forward,
+        cancellation,
+        output_budget,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum LogDirection {
+    Tail,
+    Forward,
+}
+
+fn render_log_with_budget(
+    snapshot: &JobSnapshot,
+    requested_bytes: usize,
+    direction: LogDirection,
+    cancellation: &CancellationToken,
+    output_budget: &dyn crate::output::CallBudget,
+) -> Result<ToolOutput, ProcessError> {
+    let available = requested_bytes.min(snapshot.log.bytes.len());
+    let full = render(snapshot, available, direction);
     if full.fits_content_and_call(output_budget, cancellation) {
         return Ok(full);
     }
     if cancellation.is_cancelled() {
         return Err(crate::output::OutputError::Cancelled.into());
     }
-    let minimal = render(snapshot, 0);
+    let minimal = render(snapshot, 0, direction);
     if !minimal.fits_content_and_call(output_budget, cancellation) {
         return Err(crate::output::OutputError::RequiredContentTooLarge.into());
     }
@@ -252,14 +293,17 @@ pub fn render_with_budget(
             return Err(crate::output::OutputError::Cancelled.into());
         }
         let midpoint = low + (high - low) / 2;
-        let candidate = render(snapshot, midpoint);
+        let candidate = render(snapshot, midpoint, direction);
         if candidate.fits_content_and_call(output_budget, cancellation) {
             low = midpoint;
         } else {
             high = midpoint;
         }
     }
-    Ok(render(snapshot, low))
+    if matches!(direction, LogDirection::Forward) && available > 0 && low == 0 {
+        return Err(crate::output::OutputError::RequiredContentTooLarge.into());
+    }
+    Ok(render(snapshot, low, direction))
 }
 
 pub fn render_termination_with_budget(
@@ -291,7 +335,18 @@ pub fn render_termination_with_budget(
     Ok(output)
 }
 
-fn render(snapshot: &JobSnapshot, tail_bytes: usize) -> ToolOutput {
+fn render(snapshot: &JobSnapshot, requested_bytes: usize, direction: LogDirection) -> ToolOutput {
+    let shown = requested_bytes.min(snapshot.log.bytes.len());
+    let (offset, start_field, heading) = match direction {
+        LogDirection::Tail => (snapshot.log.bytes.len() - shown, "tail_start", "log tail"),
+        LogDirection::Forward => (0, "chunk_start", "log chunk"),
+    };
+    let chunk_start = snapshot
+        .log
+        .start
+        .saturating_add(u64::try_from(offset).unwrap_or(u64::MAX));
+    let next_cursor = chunk_start.saturating_add(u64::try_from(shown).unwrap_or(u64::MAX));
+    let (chunk, invalid) = escape_invalid_utf8(&snapshot.log.bytes[offset..offset + shown]);
     let exit = snapshot.primary_exit.as_deref().unwrap_or("pending");
     let mut text = format!(
         "Job: {}\nState: {}\nPID: {}\nRuntime ms: {}\nTimeout ms: {}\nRemaining ms: {}\nExit: {}\nLog: {}",
@@ -319,20 +374,27 @@ fn render(snapshot: &JobSnapshot, tail_bytes: usize) -> ToolOutput {
         text.push_str("\nLog error: ");
         text.push_str(error);
     } else {
-        let shown = tail_bytes.min(snapshot.log.bytes.len());
         let omitted = snapshot
             .log
             .total
             .saturating_sub(u64::try_from(shown).unwrap_or(u64::MAX));
         write!(
             text,
-            "\nLog: total={} tail_start={} shown={} omitted={}.",
-            snapshot.log.total, omitted, shown, omitted
+            "\nLog: total={} {start_field}={chunk_start} shown={shown} omitted={omitted}",
+            snapshot.log.total
         )
         .expect("write to string");
         if shown > 0 {
-            let bytes = &snapshot.log.bytes[snapshot.log.bytes.len() - shown..];
-            let (body, invalid) = escape_invalid_utf8(bytes);
+            write!(text, " next_cursor={next_cursor}").expect("write to string");
+        }
+        text.push('.');
+        if matches!(direction, LogDirection::Forward)
+            && shown > 0
+            && next_cursor < snapshot.log.total
+        {
+            write!(text, "\nPartial: next_cursor={next_cursor}").expect("write to string");
+        }
+        if shown > 0 {
             if invalid > 0 {
                 write!(
                     text,
@@ -340,15 +402,9 @@ fn render(snapshot: &JobSnapshot, tail_bytes: usize) -> ToolOutput {
                 )
                 .expect("write to string");
             }
-            text.push_str("\n\n--- log tail ---\n");
-            text.push_str(&body);
+            write!(text, "\n\n--- {heading} ---\n{chunk}").expect("write to string");
         }
     }
-    let (chunk, invalid) = escape_invalid_utf8(&snapshot.log.bytes);
-    let next_cursor = snapshot
-        .log
-        .start
-        .saturating_add(u64::try_from(snapshot.log.bytes.len()).unwrap_or(u64::MAX));
     ToolOutput::new(text.clone()).with_structured(serde_json::json!({
         "tool": "bash_status",
         "job": {
@@ -359,12 +415,12 @@ fn render(snapshot: &JobSnapshot, tail_bytes: usize) -> ToolOutput {
             "remainingMs": snapshot.remaining.map(|remaining| u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX)),
             "cause": snapshot.cause,
             "totalBytes": snapshot.log.total,
-            "chunkStart": snapshot.log.start,
+            "chunkStart": chunk_start,
             "nextCursor": next_cursor,
             "chunk": chunk,
             "invalidUtf8Bytes": invalid,
             "capture": "repository-log",
-            "truncated": false,
+            "truncated": u64::try_from(shown).unwrap_or(u64::MAX) < snapshot.log.total,
             "error": snapshot.log.error,
         }
     }))
@@ -425,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn live_cursor_does_not_split_valid_utf8_and_terminal_incomplete_bytes_remain_visible() {
+    fn cursor_reads_preserve_utf8_when_possible_and_make_progress_on_small_pages() {
         let fixture = tempfile::NamedTempFile::new().expect("fixture");
         std::fs::write(fixture.path(), "abcéx").expect("write");
         let file = std::fs::File::open(fixture.path()).expect("open");
@@ -442,5 +498,11 @@ mod tests {
         assert_eq!(live.bytes, b"a");
         let terminal = snapshot_from(&file, 0, 2, true);
         assert_eq!(terminal.bytes, [b'a', 0xc3]);
+
+        std::fs::write(fixture.path(), "中A").expect("multibyte write");
+        for (cursor, expected) in "中A".as_bytes().iter().enumerate() {
+            let page = snapshot_from(&file, u64::try_from(cursor).expect("cursor"), 1, false);
+            assert_eq!(page.bytes, [*expected], "one-byte page at {cursor}");
+        }
     }
 }

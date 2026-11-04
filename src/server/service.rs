@@ -207,6 +207,7 @@ impl AgentShimBuilder {
         let host_config = McpHostConfig::new(&runtime, self.read_scope, self.client_profile)?;
         let catalog = Arc::new(tool_catalog(
             host_config.read_scope,
+            host_config.client_profile,
             host_config.max_timeout_ms,
             host_config.default_timeout_ms,
             host_config.background_timeout_max_ms,
@@ -399,6 +400,7 @@ impl AgentShim {
     }
 
     #[must_use]
+    /// Default-profile catalog for snapshots; live instances use their configured catalog.
     pub fn tools_result_for(read_scope: ReadScope) -> ListToolsResult {
         let max_timeout_ms = agentshim_core::tools::exec::default_max_timeout_ms();
         let default_timeout_ms =
@@ -409,6 +411,7 @@ impl AgentShim {
         ListToolsResult::with_all_items(
             tool_catalog(
                 read_scope,
+                crate::ClientProfile::default(),
                 max_timeout_ms,
                 default_timeout_ms,
                 background_timeout_max_ms,

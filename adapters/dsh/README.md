@@ -5,8 +5,8 @@
 ## Requirements
 
 - Node.js `^22.23.4 || ^24.22.1 || >=26.12.1`.
-- DSH `0.2.x` stable releases and the explicitly supported prereleases `0.2.0-rc.1`, `0.2.0-rc.2`, `0.2.1-alpha.1`, `0.2.1-alpha.2`, `0.2.1-alpha.3`, `0.2.1-alpha.4`, `0.2.1-alpha.5`, `0.2.1-rc.1`, `0.2.1-rc.2`, `0.2.1-rc.5`, and `0.2.2-alpha.2`. Development and CI use DSH `0.2.2-alpha.2` with Cordis `4.0.6-alpha.1`. DSH `0.1.x` is no longer supported; unlisted prereleases require validation before being added to the peer range.
-- DSH `0.2.2-alpha.2` requires Node.js 24.9 or newer; older Node.js versions in the adapter range require a compatible DSH release. Custom alpha.2 compositions must mount an official native or PTC tool executor; standard profiles already provide one.
+- DSH `0.2.x` stable releases and the explicitly supported prereleases in [package.json](./package.json). Development and CI use the DSH and Cordis versions pinned in `devDependencies`. DSH `0.1.x` is unsupported; unlisted prereleases require validation before inclusion.
+- DSH `0.2.2` prereleases require Node.js 24.9 or newer; older Node.js versions in the adapter range require a compatible DSH release. Custom DSH `0.2.2` compositions must mount an official native or PTC tool executor; standard profiles already provide one.
 - A local filesystem provider for the configured root.
 - One supported platform: Windows x64 MSVC, macOS ARM64, Linux x64 glibc, or Linux ARM64 glibc.
 - Background Bash requires `ctx.jobs` and a job controller.
@@ -96,7 +96,7 @@ pnpm test:packed:matrix # Linux: supported published DSH 0.2 prereleases
 pnpm verify:cutover
 ```
 
-Source/native tests may stage the locally built library through `AGENTSHIM_DSH_NATIVE_DLL`. The packed smoke does not: it fresh-packs and installs the entry plus the current platform package in isolated temporary consumers, then executes a native read through the package export. The Linux matrix covers the eleven supported published DSH `0.2` prereleases. The matrix verifies package installation, activation, and a native read; it does not run the full adapter test suite against every DSH version. Existing `.tgz` files in this directory are never used as development or release evidence.
+Source/native tests may stage the locally built library through `AGENTSHIM_DSH_NATIVE_DLL`. The packed smoke does not: it fresh-packs and installs the entry plus the current platform package in isolated temporary consumers, then executes a native read through the package export. The Linux matrix covers all published DSH prereleases listed in `package.json`. The matrix verifies package installation, activation, and a native read; it does not run the full adapter test suite against every DSH version. Existing `.tgz` files in this directory are never used as development or release evidence.
 
 ## Remove
 

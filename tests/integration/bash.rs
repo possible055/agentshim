@@ -322,6 +322,123 @@ fn detached_job_status_and_termination_work_over_real_stdio_at_capacity() {
     session.close();
 }
 
+#[test]
+fn detached_log_cursor_pages_preserve_all_output_with_a_small_response_budget() {
+    assert!(
+        agentshim::bash_report().is_ok(),
+        "Bash is required for cursor paging"
+    );
+    let fixture = tempfile::tempdir().expect("fixture");
+    let mut session = TestSession::builder()
+        .root(fixture.path())
+        .output_bytes(4096)
+        .burst_tokens(32768)
+        .spawn();
+    session.send(&modern_request(1, "server/discover", empty_params()));
+    assert_eq!(session.receive()["id"], 1);
+    let body = format!("BEGIN{}END", "0".repeat(9000));
+    let detached = session.call_tool(
+        2,
+        "bash",
+        json!({ "command": format!("printf '%s' '{body}'"), "detach": true, "log_path": "pages.log" }),
+    );
+    assert_eq!(detached["result"]["isError"], false);
+    let job_id = response_text(&detached)
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("job_id="))
+        .expect("job_id")
+        .to_owned();
+    let mut request_id = 3;
+    poll_until_within(Duration::from_secs(5), "completed log producer", || {
+        let status = session.call_tool(
+            request_id,
+            "bash_status",
+            json!({ "job_id": job_id, "cursor": 0, "max_bytes": 0 }),
+        );
+        request_id += 1;
+        assert_eq!(status["result"]["isError"], false);
+        assert!(!response_text(&status).contains("next_cursor="));
+        response_text(&status)
+            .contains("State: completed")
+            .then_some(())
+    });
+
+    let mut cursor = 0;
+    let mut received = String::new();
+    while cursor < body.len() {
+        let page = session.call_tool(
+            request_id,
+            "bash_status",
+            json!({ "job_id": job_id, "cursor": cursor, "max_bytes": 16384 }),
+        );
+        request_id += 1;
+        assert_eq!(page["result"]["isError"], false);
+        let text = response_text(&page);
+        assert!(text.contains(&format!("chunk_start={cursor} ")), "{text}");
+        let next = text
+            .split_whitespace()
+            .find_map(|part| part.strip_prefix("next_cursor="))
+            .expect("text continuation cursor")
+            .trim_end_matches('.')
+            .parse::<usize>()
+            .expect("byte cursor");
+        assert!(next > cursor && next <= body.len(), "{text}");
+        let (_, chunk) = text.split_once("--- log chunk ---\n").expect("log chunk");
+        assert_eq!(chunk, &body[cursor..next]);
+        received.push_str(chunk);
+        cursor = next;
+    }
+    assert_eq!(received, body);
+    session.close();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn abrupt_server_death_still_kills_the_detached_primary() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let mut session = TestSession::builder().root(fixture.path()).spawn();
+    session.handshake();
+    let response = session.call_tool(
+        2,
+        "bash",
+        json!({ "command": "while :; do :; done", "detach": true, "log_path": "parent.log" }),
+    );
+    assert_eq!(response["result"]["isError"], false);
+    let pid = response_text(&response)
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("pid="))
+        .expect("primary pid")
+        .parse::<i32>()
+        .expect("numeric pid");
+    session.child.kill().expect("abrupt server death");
+    session.child.wait().expect("reap server");
+    let cleanup_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let stopped = poll_until_within(Duration::from_secs(3), "parent-death signal", || {
+        let dead = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => matches!(
+                stat.rsplit_once(')')
+                    .expect("process stat")
+                    .1
+                    .split_whitespace()
+                    .next(),
+                Some("Z" | "X")
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => panic!("read primary status: {error}"),
+        };
+        if dead {
+            Some(true)
+        } else if std::time::Instant::now() >= cleanup_deadline {
+            // SAFETY: This is the primary created by this fixture; clean up before failing.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            Some(false)
+        } else {
+            None
+        }
+    });
+    assert!(stopped, "the primary survived an abrupt server death");
+}
+
 const DETACHED_LOG_QUOTA_TEST_BYTES: u64 = 1024 * 1024;
 const DETACHED_LOG_WRITE_BLOCK_BYTES: u64 = 65_536;
 

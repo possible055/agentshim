@@ -1,3 +1,4 @@
+import type { SandboxAttribution } from './policy.ts'
 import { createRequire as nodeCreateRequire } from 'node:module'
 import { randomUUID } from 'node:crypto'
 import { scrubbedParentEnv } from '@deepseek-ai/dsh-subprocess'
@@ -145,6 +146,29 @@ export interface NativeSandboxAttribution {
   readonly runnerFailureRules?: readonly NativeRunnerFailureRule[]
 }
 
+/**
+ * Map a confinement decision's attribution to the native classification
+ * inputs; `undefined` when the backend supplied no evidence rules at all.
+ */
+export function nativeAttribution(attribution: SandboxAttribution | undefined): NativeSandboxAttribution | undefined {
+  if (attribution === undefined) return undefined
+  const denialSignatures = attribution.denialSignatures.length === 0
+    ? undefined
+    : [...attribution.denialSignatures]
+  const runnerFailureRules = attribution.runnerFailureRules.length === 0
+    ? undefined
+    : attribution.runnerFailureRules.map(rule => ({
+        ...(rule.allowedExitCodes === undefined ? {} : { allowedExitCodes: [...rule.allowedExitCodes] }),
+        fatalSignatures: [...rule.fatalSignatures],
+        ...(rule.informationalLines === undefined ? {} : { informationalLines: [...rule.informationalLines] }),
+      }))
+  if (denialSignatures === undefined && runnerFailureRules === undefined) return undefined
+  return {
+    ...(denialSignatures === undefined ? {} : { denialSignatures }),
+    ...(runnerFailureRules === undefined ? {} : { runnerFailureRules }),
+  }
+}
+
 export interface NativeRunProgramArgs {
   readonly program: string
   readonly args: readonly string[]
@@ -164,17 +188,11 @@ export interface NativeBashArgs {
 }
 
 export function nativeRunProgramArgs(args: Record<string, unknown>): NativeRunProgramArgs {
-  const env: Record<string, string> = {}
-  if (args.env !== undefined && typeof args.env === 'object') {
-    for (const [key, value] of Object.entries(args.env as Record<string, unknown>)) {
-      if (typeof value === 'string') env[key] = value
-    }
-  }
   return {
     program: args.program as string,
     args: Array.isArray(args.args) ? (args.args as string[]) : [],
     ...(args.cwd === undefined ? {} : { cwd: args.cwd as string }),
-    ...(Object.keys(env).length === 0 ? {} : { env }),
+    ...(args.env === undefined ? {} : { env: args.env as Readonly<Record<string, string>> }),
     ...(Array.isArray(args.unset_env) ? { unsetEnv: args.unset_env as string[] } : {}),
     ...(args.stdin === undefined ? {} : { stdin: args.stdin as string }),
     ...(args.timeout_ms === undefined ? {} : { timeoutMs: args.timeout_ms as number }),
@@ -205,8 +223,8 @@ export interface NativeJobOutcome {
   readonly limitExceeded: boolean
   readonly artifacts: readonly NativeArtifactPublished[]
   readonly failure?: NativeFailure
-  readonly denied?: boolean
-  readonly runnerFailed?: boolean
+  readonly denied: boolean
+  readonly runnerFailed: boolean
 }
 
 export interface NativeJobHandle {

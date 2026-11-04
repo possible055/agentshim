@@ -4,6 +4,7 @@ import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { JobId } from '@deepseek-ai/dsh-jobs'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolCallView, ToolDefinition, ToolResultView, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { PromptSectionOrderName } from '@deepseek-ai/dsh-system-prompt'
 import type { ResolvedPluginConfig } from './config.ts'
 import { materializeReadAttachments } from './content.ts'
 import {
@@ -11,7 +12,7 @@ import {
   completeReadObservation,
   createProcessPolicy,
 } from './policy.ts'
-import type { ProcessPolicy, SandboxAttribution } from './policy.ts'
+import type { ProcessPolicy } from './policy.ts'
 import {
   assertExactKeys,
   assertBoolean,
@@ -47,10 +48,10 @@ import type {
   NativeGlobArgs,
   NativeGrepArgs,
   NativeReadArgs,
-  NativeSandboxAttribution,
   NativeProcessStream,
 } from './native.ts'
 import {
+  nativeAttribution,
   nativeBashArgs,
   nativeFailureError,
   nativeRunProgramArgs,
@@ -175,29 +176,6 @@ function processStream(stream: NativeProcessStream) {
 }
 
 /**
- * Map a confinement decision's attribution to the native classification
- * inputs; `undefined` when the backend supplied no evidence rules at all.
- */
-function nativeAttribution(attribution: SandboxAttribution | undefined): NativeSandboxAttribution | undefined {
-  if (attribution === undefined) return undefined
-  const denialSignatures = attribution.denialSignatures.length === 0
-    ? undefined
-    : [...attribution.denialSignatures]
-  const runnerFailureRules = attribution.runnerFailureRules.length === 0
-    ? undefined
-    : attribution.runnerFailureRules.map(rule => ({
-        ...(rule.allowedExitCodes === undefined ? {} : { allowedExitCodes: [...rule.allowedExitCodes] }),
-        fatalSignatures: [...rule.fatalSignatures],
-        ...(rule.informationalLines === undefined ? {} : { informationalLines: [...rule.informationalLines] }),
-      }))
-  if (denialSignatures === undefined && runnerFailureRules === undefined) return undefined
-  return {
-    ...(denialSignatures === undefined ? {} : { denialSignatures }),
-    ...(runnerFailureRules === undefined ? {} : { runnerFailureRules }),
-  }
-}
-
-/**
  * In-process foreground execution: prepare the final argv, wrap it through the
  * standing sandbox policy (escalation stays one-call), spawn through the
  * Engine's durable capture, and let the engine classify the settled outcome
@@ -238,21 +216,20 @@ async function executeProcessNative(
     const notices = outcome.artifacts
       .map(artifact => `Full raw ${artifact.stream}: ${artifact.path} (${artifact.bytes} bytes${artifact.complete ? '' : ', incomplete'})`)
     const text = [outcome.text, ...notices].join('\n')
-    const hasClassification = typeof outcome.denied === 'boolean' && typeof outcome.runnerFailed === 'boolean'
     return {
       kind: 'foreground' as const,
       text,
       exitCode: outcome.exitCode ?? (outcome.childNonzero ? '1' : '0'),
       stdout: processStream(outcome.stdout),
       stderr: processStream(outcome.stderr),
-      limitExceeded: outcome.limitExceeded ?? false,
-      outcomeUncertain: outcome.outcomeUncertain ?? false,
-      ...(decision.attribution === undefined || !hasClassification ? {} : {
+      limitExceeded: outcome.limitExceeded,
+      outcomeUncertain: outcome.outcomeUncertain,
+      ...(decision.attribution === undefined ? {} : {
         sandbox: {
           mode: decision.attribution.mode,
           ...(decision.attribution.enforcement === undefined ? {} : { enforcement: decision.attribution.enforcement }),
-          denied: outcome.denied as boolean,
-          runnerFailed: outcome.runnerFailed as boolean,
+          denied: outcome.denied,
+          runnerFailed: outcome.runnerFailed,
         },
       }),
     }
@@ -465,7 +442,6 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
           onArtifacts: deps.onArtifacts,
           wire: {
             ...commonWire,
-            detach: true,
             ...(args.timeoutMs === undefined ? {} : { timeout_ms: args.timeoutMs }),
           },
         }
@@ -515,16 +491,13 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
       const snapshot = jobs.get(JobId(args.job_id), exec.agent?.id)
       const native = deps.jobs.outcome(snapshot.id)
       const nativeOutcome = native?.outcome
-      const hasClassification = nativeOutcome !== undefined
-        && typeof nativeOutcome.denied === 'boolean'
-        && typeof nativeOutcome.runnerFailed === 'boolean'
-      const sandbox = nativeOutcome === undefined || native === undefined || native.sandbox === undefined || !hasClassification
+      const sandbox = nativeOutcome === undefined || native === undefined || native.sandbox === undefined
         ? undefined
         : {
             mode: native.sandbox.mode,
             ...(native.sandbox.enforcement === undefined ? {} : { enforcement: native.sandbox.enforcement }),
-            denied: nativeOutcome.denied as boolean,
-            runnerFailed: nativeOutcome.runnerFailed as boolean,
+            denied: nativeOutcome.denied,
+            runnerFailed: nativeOutcome.runnerFailed,
           }
       return {
         kind: 'status' as const,
@@ -539,10 +512,10 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
             message: nativeOutcome.failure.message,
             retryable: nativeOutcome.failure.retryable,
           } }),
-          artifacts: [...(nativeOutcome.artifacts ?? [])],
-          limitExceeded: nativeOutcome.limitExceeded ?? false,
-          ...(typeof nativeOutcome.denied !== 'boolean' ? {} : { denied: nativeOutcome.denied }),
-          ...(typeof nativeOutcome.runnerFailed !== 'boolean' ? {} : { runnerFailed: nativeOutcome.runnerFailed }),
+          artifacts: [...nativeOutcome.artifacts],
+          limitExceeded: nativeOutcome.limitExceeded,
+          denied: nativeOutcome.denied,
+          runnerFailed: nativeOutcome.runnerFailed,
           ...(sandbox === undefined ? {} : { sandbox }),
         }),
         ...(native?.error === undefined ? {} : { failure: {
@@ -570,36 +543,8 @@ export function buildToolDefinitions(deps: ToolDependencies): ReadonlyMap<string
   return new Map(PUBLIC_TOOL_NAMES.map(name => [name, definitions[name]]))
 }
 
-interface SystemPromptOrderService {
-  readonly getSectionOrder?: (name: string) => unknown
-}
-
-function getSystemPromptService(ctx: Context | undefined): SystemPromptOrderService | undefined {
-  if (ctx === undefined) return undefined
-  try {
-    if (typeof ctx.get === 'function') {
-      const fromGet = ctx.get('systemPrompt')
-      if (fromGet !== undefined && fromGet !== null) return fromGet as SystemPromptOrderService
-    }
-  } catch {
-    // Cordis proxies can throw for absent services; try the property shape too.
-  }
-  try {
-    return (ctx as unknown as { systemPrompt?: SystemPromptOrderService }).systemPrompt ?? undefined
-  } catch {
-    return undefined
-  }
-}
-
-function resolveOrder(ctx: Context | undefined, name: string, fallback: number): number {
-  const service = getSystemPromptService(ctx)
-  try {
-    if (typeof service?.getSectionOrder !== 'function') return fallback
-    const resolved = service.getSectionOrder(name)
-    return typeof resolved === 'number' && Number.isFinite(resolved) ? resolved : fallback
-  } catch {
-    return fallback
-  }
+function resolveOrder(ctx: Context, name: PromptSectionOrderName, fallback: number): number {
+  return ctx.get('systemPrompt')?.getSectionOrder(name) ?? fallback
 }
 
 export function promptSections(ctx: Context): ReadonlyArray<{ readonly name: string; readonly order: number; readonly text: string }> {

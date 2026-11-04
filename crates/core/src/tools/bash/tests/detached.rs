@@ -128,6 +128,45 @@ fn status_reports_running_log_and_primary_exit_then_retains_completion() {
     let repeated = trees.status(&job_id, 0).expect("retained status");
     assert_eq!(repeated.state, status::JobState::Completed);
     assert_eq!(repeated.log.bytes, [] as [u8; 0]);
+    assert_eq!(repeated.log.start, repeated.log.total);
+    let tail = trees.status(&job_id, 4).expect("retained tail");
+    assert_eq!(tail.log.bytes, b"one\n");
+    assert_eq!(tail.log.start + 4, tail.log.total);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn detached_job_outlives_its_launching_thread() {
+    assert!(bash_is_available(), "Bash is required for detached jobs");
+    let fixture = tempfile::tempdir().expect("fixture");
+    let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
+    let trees = trees();
+    let response = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                spawn_detached(
+                    &root,
+                    &trees,
+                    "while [ ! -f release ]; do :; done; printf survived; exit 7",
+                    "thread.log",
+                )
+            })
+            .join()
+            .expect("launch thread")
+            .expect("detached job")
+    });
+    std::fs::write(fixture.path().join("release"), b"ready").expect("release child");
+    let job_id = response_job_id(&response);
+    let completed = agentshim_test_support::poll::poll_until_within(
+        Duration::from_secs(5),
+        "detached job to finish after its launching thread exited",
+        || {
+            let snapshot = trees.status(&job_id, 8192).expect("status");
+            (snapshot.state == status::JobState::Completed).then_some(snapshot)
+        },
+    );
+    assert_eq!(completed.primary_exit.as_deref(), Some("7"));
+    assert_eq!(completed.log.bytes, b"survived");
 }
 
 #[cfg(windows)]

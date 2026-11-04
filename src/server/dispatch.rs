@@ -423,7 +423,12 @@ impl AgentShim {
                         std::thread::sleep(Duration::from_millis(request.wait_ms));
                         snapshot = read_snapshot()?;
                     }
-                    crate::tools::bash::status::render_with_budget(
+                    let render = if request.cursor.is_some() {
+                        crate::tools::bash::status::render_cursor_with_budget
+                    } else {
+                        crate::tools::bash::status::render_with_budget
+                    };
+                    render(
                         &snapshot,
                         request.max_bytes.unwrap_or(request.tail_bytes),
                         &cancellation,

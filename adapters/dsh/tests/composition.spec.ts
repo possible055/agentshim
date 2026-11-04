@@ -753,7 +753,7 @@ describe('DSH native contracts', () => {
   })
 
   it('resolves section orders from the system-prompt service with static fallbacks', async () => {
-    const fallbackCtx = {} as unknown as Parameters<typeof promptSections>[0]
+    const fallbackCtx = new Context()
     const fallbackMap = new Map(promptSections(fallbackCtx).map(s => [s.name, s.order]))
     expect(fallbackMap.get('tool:bash')).toBe(1000)
     expect(fallbackMap.get('tool:run_program')).toBe(1005)
@@ -765,14 +765,14 @@ describe('DSH native contracts', () => {
 
     // Dynamic getSectionOrder resolution
     const mockCtx = {
-      systemPrompt: {
+      get: () => ({
         getSectionOrder: (key: string) => {
           if (key === 'TOOL_BASH') return 2000
           if (key === 'TOOL_READ') return 2100
           if (key === 'TOOL_PWSH') return 2010
           return undefined
         },
-      },
+      }),
     } as unknown as Parameters<typeof promptSections>[0]
     const fromCtx = promptSections(mockCtx)
     const fromCtxMap = new Map(fromCtx.map(s => [s.name, s.order]))
@@ -800,19 +800,12 @@ describe('DSH native contracts', () => {
         throw new Error('service lookup failed')
       },
     }, 'systemPrompt', { value: { getSectionOrder: () => 2200 } }) as unknown as Parameters<typeof promptSections>[0]
-    expect(promptSections(getThrowsCtx).find(section => section.name === 'tool:bash')?.order).toBe(2200)
+    expect(() => promptSections(getThrowsCtx)).toThrow('service lookup failed')
 
     const methodThrowsCtx = {
       get: () => ({ getSectionOrder: () => { throw new Error('order lookup failed') } }),
     } as unknown as Parameters<typeof promptSections>[0]
-    expect(promptSections(methodThrowsCtx).find(section => section.name === 'tool:bash')?.order).toBe(1000)
-
-    for (const invalidOrder of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, '100']) {
-      const invalidOrderCtx = {
-        get: () => ({ getSectionOrder: () => invalidOrder }),
-      } as unknown as Parameters<typeof promptSections>[0]
-      expect(promptSections(invalidOrderCtx).find(section => section.name === 'tool:bash')?.order).toBe(1000)
-    }
+    expect(() => promptSections(methodThrowsCtx)).toThrow('order lookup failed')
 
     const throwingService = {}
     Object.defineProperty(throwingService, 'getSectionOrder', {
@@ -821,7 +814,7 @@ describe('DSH native contracts', () => {
       },
     })
     const getterThrowsCtx = { get: () => throwingService } as unknown as Parameters<typeof promptSections>[0]
-    expect(promptSections(getterThrowsCtx).find(section => section.name === 'tool:bash')?.order).toBe(1000)
+    expect(() => promptSections(getterThrowsCtx)).toThrow('section order getter failed')
 
     const missingServiceCtx = { get: () => undefined } as unknown as Parameters<typeof promptSections>[0]
     Object.defineProperty(missingServiceCtx, 'systemPrompt', {

@@ -165,7 +165,7 @@ impl CfbHeader {
     }
 }
 
-#[cfg(any())]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -190,12 +190,13 @@ mod tests {
         buf[0x30..0x34].copy_from_slice(&0u32.to_le_bytes());
         // Mini-stream cutoff = 4096
         buf[0x38..0x3C].copy_from_slice(&4096u32.to_le_bytes());
-        // First mini-FAT sector = END_OF_CHAIN (none)
-        buf[0x3C..0x40].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
-        // DIFAT entries all FREE_SECT
+        // First mini-FAT sector = 0xFFFF_FFFEu32 (none)
+        buf[0x3C..0x40].copy_from_slice(&0xFFFF_FFFEu32.to_le_bytes());
+        buf[0x44..0x48].copy_from_slice(&0xFFFF_FFFEu32.to_le_bytes());
+        // DIFAT entries all u32::MAX
         for i in 0..109 {
             let off = 0x4C + i * 4;
-            buf[off..off + 4].copy_from_slice(&FREE_SECT.to_le_bytes());
+            buf[off..off + 4].copy_from_slice(&u32::MAX.to_le_bytes());
         }
         // First DIFAT entry = sector 1 (where the FAT lives)
         buf[0x4C..0x50].copy_from_slice(&1u32.to_le_bytes());
@@ -212,28 +213,37 @@ mod tests {
         assert_eq!(header.fat_sector_count, 1);
         assert_eq!(header.first_dir_sector, 0);
         assert_eq!(header.mini_stream_cutoff, 4096);
-        assert_eq!(header.first_mini_fat_sector, END_OF_CHAIN);
+        assert_eq!(header.first_mini_fat_sector, 0xFFFF_FFFEu32);
     }
 
     #[test]
     fn bad_signature_rejected() {
         let mut buf = build_v3_header();
         buf[0] = 0x00;
-        assert!(CfbHeader::parse(&buf).is_err());
+        assert!(matches!(
+            CfbHeader::parse(&buf),
+            Err(CfbError::InvalidHeader(_))
+        ));
     }
 
     #[test]
     fn bad_version_rejected() {
         let mut buf = build_v3_header();
         buf[0x1A..0x1C].copy_from_slice(&5u16.to_le_bytes());
-        assert!(CfbHeader::parse(&buf).is_err());
+        assert!(matches!(
+            CfbHeader::parse(&buf),
+            Err(CfbError::InvalidHeader(_))
+        ));
     }
 
     #[test]
     fn bad_byte_order_rejected() {
         let mut buf = build_v3_header();
         buf[0x1C..0x1E].copy_from_slice(&0xFFFFu16.to_le_bytes());
-        assert!(CfbHeader::parse(&buf).is_err());
+        assert!(matches!(
+            CfbHeader::parse(&buf),
+            Err(CfbError::InvalidHeader(_))
+        ));
     }
 
     #[test]
@@ -249,6 +259,9 @@ mod tests {
     #[test]
     fn too_short_buffer_rejected() {
         let buf = vec![0u8; 100];
-        assert!(CfbHeader::parse(&buf).is_err());
+        assert!(matches!(
+            CfbHeader::parse(&buf),
+            Err(CfbError::InvalidHeader(_))
+        ));
     }
 }

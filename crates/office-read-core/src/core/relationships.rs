@@ -193,71 +193,33 @@ impl Relationships {
     }
 }
 
-#[cfg(any())]
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    const SAMPLE_RELS: &[u8] = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1"
-    Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"
-    Target="word/document.xml"/>
-  <Relationship Id="rId2"
-    Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties"
-    Target="docProps/core.xml"/>
-  <Relationship Id="rId3"
-    Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties"
-    Target="docProps/app.xml"/>
-</Relationships>"#;
-
     #[test]
-    fn parse_relationships() {
-        let rels = Relationships::parse(SAMPLE_RELS).unwrap();
-        assert_eq!(rels.all().len(), 3);
-    }
-
-    #[test]
-    fn get_by_id() {
-        let rels = Relationships::parse(SAMPLE_RELS).unwrap();
-        let r = rels.get_by_id("rId1").unwrap();
-        assert_eq!(r.target, "word/document.xml");
-        assert_eq!(r.target_mode, TargetMode::Internal);
-    }
-
-    #[test]
-    fn get_by_type() {
-        let rels = Relationships::parse(SAMPLE_RELS).unwrap();
-        let docs = rels.get_by_type(rel_types::OFFICE_DOCUMENT);
-        assert_eq!(docs.len(), 1);
-        assert_eq!(docs[0].target, "word/document.xml");
-    }
-
-    #[test]
-    fn first_by_type() {
-        let rels = Relationships::parse(SAMPLE_RELS).unwrap();
-        let r = rels.first_by_type(rel_types::CORE_PROPERTIES).unwrap();
-        assert_eq!(r.target, "docProps/core.xml");
-    }
-
-    #[test]
-    fn resolve_target_from_root() {
-        let rels = Relationships::parse(SAMPLE_RELS).unwrap();
-        let part = rels.resolve_target_from_root("rId1").unwrap();
-        assert_eq!(part.as_str(), "/word/document.xml");
-    }
-
-    #[test]
-    fn builder_round_trip() {
-        let mut builder = RelationshipsBuilder::new();
-        let id = builder.add(rel_types::OFFICE_DOCUMENT, "word/document.xml");
-        assert_eq!(id, "rId1");
-
-        let xml = builder.serialize();
-        let rels = Relationships::parse(&xml).unwrap();
-        assert_eq!(rels.all().len(), 1);
+    fn normalizes_relationships_and_rejects_ambiguous_ids_and_modes() {
+        let relationships = Relationships::parse(br#"<Relationships>
+            <Relationship Id="r1" Type="http://purl.oclc.org/ooxml/officeDocument/relationships/styles" Target="styles.xml"/>
+            </Relationships>"#).expect("relationships");
         assert_eq!(
-            rels.get_by_id("rId1").unwrap().rel_type,
-            rel_types::OFFICE_DOCUMENT
+            relationships
+                .get_by_id("r1")
+                .expect("relationship")
+                .rel_type,
+            rel_types::STYLES
         );
+        assert_eq!(
+            relationships
+                .resolve_target("r1", &PartName::new("/word/document.xml").expect("source"))
+                .expect("target"),
+            PartName::new("/word/styles.xml").expect("expected part")
+        );
+        for malformed in [
+            br#"<Relationships><Relationship Id="r1" Type="t" Target="x"/><Relationship Id="r1" Type="t" Target="y"/></Relationships>"#.as_slice(),
+            br#"<Relationships><Relationship Id="r1" Type="t" Target="x" TargetMode="unknown"/></Relationships>"#.as_slice(),
+        ] {
+            assert!(matches!(Relationships::parse(malformed), Err(Error::MalformedXml(_))));
+        }
     }
 }

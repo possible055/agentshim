@@ -2,6 +2,10 @@
   "bash": {
     "mcp": {
       "owner": "server-detached-tree",
+      "cursorProjection": {
+        "fields": ["action", "command", "cwd", "detach", "job_id", "log_path", "msys_argument_conversion", "timeout_ms"],
+        "required": []
+      },
       "variants": [
         {
           "fields": ["command", "cwd", "detach", "msys_argument_conversion", "timeout_ms"],
@@ -24,6 +28,7 @@
     },
     "intentionalDifferences": [
       "MCP exposes separate foreground, detached, and terminate variants; DSH exposes run_in_background and delegates lifecycle to ctx.jobs.",
+      "Cursor flattens the MCP bash variants into top-level properties without global required fields or unions; runtime still validates exactly one request shape. Its timeout_ms maximum covers both foreground and background limits, with mode-specific limits in the description.",
       "DSH requires a model-facing description and uses workdir/timeoutMs names; MCP uses cwd/timeout_ms."
     ]
   },

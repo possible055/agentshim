@@ -34,7 +34,23 @@ fn empty_native_success_is_only_the_exit_code() {
 
 #[test]
 fn stdin_child_fixture() {
-    if std::env::var("AGENTSHIM_STDIN_FIXTURE").as_deref() != Ok("child") {
+    let mode = std::env::var("AGENTSHIM_STDIN_FIXTURE");
+    if mode.as_deref() == Ok("close") {
+        #[cfg(unix)]
+        // SAFETY: This fixture owns stdin and closes it before any read.
+        unsafe {
+            libc::close(libc::STDIN_FILENO);
+        }
+        #[cfg(windows)]
+        // SAFETY: This fixture owns the inherited stdin handle.
+        unsafe {
+            use std::os::windows::io::AsRawHandle;
+            windows_sys::Win32::Foundation::CloseHandle(std::io::stdin().as_raw_handle());
+        }
+        println!("early-close-output");
+        std::process::exit(7);
+    }
+    if mode.as_deref() != Ok("child") {
         return;
     }
     let mut input = String::new();
@@ -78,6 +94,21 @@ fn omitted_and_supplied_stdin_preserve_the_execution_contract() {
     )
     .expect("supplied stdin");
     assert!(with_input.contains("stdin-bytes=7"), "{with_input}");
+
+    request
+        .env
+        .insert("AGENTSHIM_STDIN_FIXTURE".to_owned(), "close".to_owned());
+    request.stdin = Some("x".repeat(MAX_STDIN_BYTES));
+    let early_close = execute(
+        &root,
+        &resolver,
+        &request,
+        Duration::from_secs(5),
+        &CancellationToken::new(),
+    )
+    .expect("closing stdin does not discard a completed result");
+    assert!(early_close.contains("early-close-output"), "{early_close}");
+    assert!(early_close.contains("Exit code: 7"), "{early_close}");
 }
 
 #[cfg(windows)]

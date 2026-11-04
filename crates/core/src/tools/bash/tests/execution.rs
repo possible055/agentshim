@@ -316,11 +316,15 @@ fn a_command_reports_merged_output_the_resolved_bash_and_the_exit_code() {
         .resolve(&CancellationToken::new())
         .expect("probed bash");
 
-    let output = run("printf 'out\\n'; printf 'err\\n' >&2; exit 3").expect("bash result");
+    let command = format!(
+        "value='{}'; printf 'out%s\\n' \"${{#value}}\"; printf 'err\\n' >&2; exit 3",
+        "0".repeat(9000)
+    );
+    let output = run(&command).expect("bash result");
 
     assert!(output.contains(&format!("Bash: {}", runtime.executable.display())));
     assert!(output.contains("--- output ---"));
-    assert!(output.contains("out"));
+    assert!(output.contains("out9000"), "{output}");
     assert!(output.contains("err"));
     assert!(output.contains("Exit code: 3"));
     assert!(output.contains("Duration ms:"));

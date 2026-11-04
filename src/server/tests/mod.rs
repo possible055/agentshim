@@ -301,7 +301,13 @@ async fn mcp_instances_keep_timeout_catalog_dispatch_and_output_limits_isolated(
     let codex_max = agentshim_core::tools::exec::max_timeout_ms_from_shelf(codex_shelf);
     assert_eq!(catalog_timeout(&cursor, "maximum"), cursor_max);
     assert_eq!(catalog_timeout(&codex, "maximum"), codex_max);
-    assert_eq!(bash_catalog_timeout(&cursor, 0, "maximum"), cursor_max);
+    let cursor_bash = rmcp::ServerHandler::get_tool(&cursor, "bash").expect("Cursor bash");
+    assert!(
+        cursor_bash.input_schema["properties"]["timeout_ms"]["description"]
+            .as_str()
+            .expect("Cursor timeout guidance")
+            .contains(&format!("foreground 1..={cursor_max} "))
+    );
     assert_eq!(bash_catalog_timeout(&codex, 0, "maximum"), codex_max);
     assert_eq!(
         bash_catalog_timeout(&codex, 1, "maximum"),

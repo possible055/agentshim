@@ -3,9 +3,9 @@ import { HarnessError } from '@deepseek-ai/dsh-llm'
 import type { JobHandle, JobId, JobOutcome } from '@deepseek-ai/dsh-jobs'
 import { TOOL_ABORTED } from '@deepseek-ai/dsh-tools'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { ProcessPolicy, SandboxAttribution } from './policy.ts'
-import { nativeBashArgs } from './native.ts'
-import type { NativeArtifactPublished, NativeEngine, NativeJobOutcome, NativeSandboxAttribution } from './native.ts'
+import type { ProcessPolicy } from './policy.ts'
+import { nativeAttribution, nativeBashArgs } from './native.ts'
+import type { NativeArtifactPublished, NativeEngine, NativeJobOutcome } from './native.ts'
 
 const JOB_OUTPUT_LIMIT_BYTES = 64 * 1024
 const JOB_OUTPUT_POLL_MS = 10
@@ -86,23 +86,6 @@ export interface BackgroundBashInput {
   readonly command: string
   readonly wire: Record<string, unknown>
   readonly onArtifacts: (artifacts: readonly NativeArtifactPublished[]) => void
-}
-
-function nativeAttribution(attribution: SandboxAttribution | undefined): NativeSandboxAttribution | undefined {
-  if (attribution === undefined) return undefined
-  const denialSignatures = attribution.denialSignatures.length === 0 ? undefined : [...attribution.denialSignatures]
-  const runnerFailureRules = attribution.runnerFailureRules.length === 0
-    ? undefined
-    : attribution.runnerFailureRules.map(rule => ({
-        ...(rule.allowedExitCodes === undefined ? {} : { allowedExitCodes: [...rule.allowedExitCodes] }),
-        fatalSignatures: [...rule.fatalSignatures],
-        ...(rule.informationalLines === undefined ? {} : { informationalLines: [...rule.informationalLines] }),
-      }))
-  if (denialSignatures === undefined && runnerFailureRules === undefined) return undefined
-  return {
-    ...(denialSignatures === undefined ? {} : { denialSignatures }),
-    ...(runnerFailureRules === undefined ? {} : { runnerFailureRules }),
-  }
 }
 
 /**

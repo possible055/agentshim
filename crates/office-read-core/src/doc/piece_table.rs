@@ -276,7 +276,7 @@ pub fn sanitize_text(text: &str) -> String {
     result
 }
 
-#[cfg(any())]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -338,7 +338,7 @@ mod tests {
             is_compressed: true,
         }];
 
-        let text = extract_text(&word_doc, &pieces, 5);
+        let text = extract_text(&word_doc, &pieces, 5).expect("extract text");
         assert_eq!(text, "Hello");
     }
 
@@ -359,7 +359,7 @@ mod tests {
             is_compressed: false,
         }];
 
-        let text = extract_text(&word_doc, &pieces, 2);
+        let text = extract_text(&word_doc, &pieces, 2).expect("extract text");
         assert_eq!(text, "Hi");
     }
 
@@ -388,7 +388,7 @@ mod tests {
             },
         ];
 
-        let text = extract_text(&word_doc, &pieces, 4);
+        let text = extract_text(&word_doc, &pieces, 4).expect("extract text");
         assert_eq!(text, "ABCD");
     }
 
@@ -427,7 +427,7 @@ mod tests {
             is_compressed: true,
         }];
 
-        let text = extract_text(&word_doc, &pieces, 3);
+        let text = extract_text(&word_doc, &pieces, 3).expect("extract text");
         assert_eq!(text, "Hel");
     }
 }

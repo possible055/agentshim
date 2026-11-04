@@ -318,6 +318,11 @@ impl DetachedTrees {
         let (mut snapshot, reader, finalized) = self.lookup_job(job_id, refresh)?;
         if finalized {
             if tail_bytes < snapshot.log.bytes.len() {
+                let skipped = snapshot.log.bytes.len() - tail_bytes;
+                snapshot.log.start = snapshot
+                    .log
+                    .start
+                    .saturating_add(u64::try_from(skipped).unwrap_or(u64::MAX));
                 snapshot.log.bytes = snapshot.log.bytes
                     [snapshot.log.bytes.len().saturating_sub(tail_bytes)..]
                     .to_vec();

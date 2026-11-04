@@ -104,66 +104,34 @@ impl ContentTypes {
     }
 }
 
-#[cfg(any())]
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    const SAMPLE_CT_XML: &[u8] = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Default Extension="png" ContentType="image/png"/>
-  <Override PartName="/word/document.xml"
-            ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
-  <Override PartName="/docProps/core.xml"
-            ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
-</Types>"#;
-
     #[test]
-    fn parse_content_types() {
-        let ct = ContentTypes::parse(SAMPLE_CT_XML).unwrap();
-        assert_eq!(ct.defaults().len(), 3);
-        assert_eq!(ct.overrides().len(), 2);
-    }
-
-    #[test]
-    fn resolve_override() {
-        let ct = ContentTypes::parse(SAMPLE_CT_XML).unwrap();
-        let part = PartName::new("/word/document.xml").unwrap();
+    fn resolves_overrides_and_rejects_duplicate_content_types() {
+        let types = ContentTypes::parse(
+            br#"<Types>
+            <Default Extension="xml" ContentType="application/xml"/>
+            <Override PartName="/word/document.xml" ContentType="application/word"/>
+            </Types>"#,
+        )
+        .expect("content types");
         assert_eq!(
-            ct.resolve(&part),
-            Some(
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
-            )
+            types.resolve(&PartName::new("/word/document.xml").expect("part")),
+            Some("application/word")
         );
-    }
-
-    #[test]
-    fn resolve_default_by_extension() {
-        let ct = ContentTypes::parse(SAMPLE_CT_XML).unwrap();
-        let part = PartName::new("/word/media/image1.png").unwrap();
-        assert_eq!(ct.resolve(&part), Some("image/png"));
-    }
-
-    #[test]
-    fn resolve_unknown_returns_none() {
-        let ct = ContentTypes::parse(SAMPLE_CT_XML).unwrap();
-        let part = PartName::new("/word/unknown.bin").unwrap();
-        assert_eq!(ct.resolve(&part), None);
-    }
-
-    #[test]
-    fn builder_round_trip() {
-        let mut builder = ContentTypesBuilder::new();
-        builder.add_default("png", "image/png");
-        builder.add_override(
-            PartName::new("/word/document.xml").unwrap(),
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+        assert_eq!(
+            types.resolve(&PartName::new("/notes.xml").expect("part")),
+            Some("application/xml")
         );
-        let xml = builder.serialize();
-        let ct = ContentTypes::parse(&xml).unwrap();
-        assert_eq!(ct.defaults().get("png"), Some(&"image/png".to_string()));
-        let part = PartName::new("/word/document.xml").unwrap();
-        assert!(ct.resolve(&part).is_some());
+        let duplicate = br#"<Types>
+            <Default Extension="xml" ContentType="application/xml"/>
+            <Default Extension="xml" ContentType="application/word"/>
+            </Types>"#;
+        assert!(matches!(
+            ContentTypes::parse(duplicate),
+            Err(crate::core::error::Error::MalformedXml(_))
+        ));
     }
 }

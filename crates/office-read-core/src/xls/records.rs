@@ -160,7 +160,7 @@ fn map_budget_error(error: crate::OfficeReadError) -> XlsError {
     XlsError::Cfb(error)
 }
 
-#[cfg(any())]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -210,18 +210,15 @@ mod tests {
     }
 
     #[test]
-    fn truncated_record_tolerant() {
-        // Record says 10 bytes but only 2 available — should return partial data.
+    fn truncated_record_is_rejected() {
         let mut stream = Vec::new();
         stream.extend_from_slice(&RT_BOF.to_le_bytes());
         stream.extend_from_slice(&10u16.to_le_bytes());
         stream.extend_from_slice(&[0x00, 0x00]);
-        let results: Vec<_> = RecordIter::new(&stream)
-            .collect::<std::result::Result<_, _>>()
-            .unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].record_type, RT_BOF);
-        assert_eq!(results[0].data.len(), 2); // only 2 bytes available
+        let error = RecordIter::new(&stream)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect_err("truncated record");
+        assert!(matches!(error, XlsError::InvalidRecord(_)));
     }
 
     #[test]

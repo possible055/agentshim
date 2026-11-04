@@ -112,32 +112,25 @@ pub fn spawn_detached_capture(
         .stdout(Stdio::from(write))
         .stderr(Stdio::from(duplicate));
     apply_environment(&mut command, environment);
+    #[cfg(target_os = "linux")]
+    // SAFETY: getpid is a side-effect-free query of this process's identity.
+    let parent_pid = unsafe { libc::getpid() };
     // Safety: `pre_exec` runs the closure between `fork` and `exec`, so it may
     // only call async-signal-safe functions; `setsid`, `prctl`, and `getppid`
     // are, and the closure performs no allocation.
     unsafe {
-        command.pre_exec(|| {
+        command.pre_exec(move || {
             if libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());
             }
             #[cfg(target_os = "linux")]
-            arm_parent_death_signal()?;
+            arm_parent_death_signal(parent_pid)?;
             Ok(())
         });
     }
-    let child = command.spawn()?;
-    let pid = i32::try_from(child.id())
-        .map_err(|_| ProcessError::Io(io::Error::other("child process ID does not fit pid_t")))?;
-    record_spawn_for_tests(pid);
-    Ok((
-        DetachedTree {
-            pid: child.id(),
-            process_group: pid,
-            child,
-            primary_exit: None,
-        },
-        File::from(read),
-    ))
+    let tree = spawn_detached_owned(command)?;
+    record_spawn_for_tests(tree.process_group);
+    Ok((tree, File::from(read)))
 }
 
 fn exit_label(status: std::process::ExitStatus) -> String {
@@ -169,16 +162,19 @@ fn spawn_lifecycle(
         });
     let merged_reader = configure_output(&mut command, plan.streams)?;
     apply_environment(&mut command, plan.environment);
+    #[cfg(target_os = "linux")]
+    // SAFETY: getpid is a side-effect-free query of this process's identity.
+    let parent_pid = unsafe { libc::getpid() };
     // Safety: `pre_exec` runs the closure between `fork` and `exec`, so it may
     // only call async-signal-safe functions; `setsid`, `prctl`, and `getppid`
     // are, and the closure performs no allocation.
     unsafe {
-        command.pre_exec(|| {
+        command.pre_exec(move || {
             if libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());
             }
             #[cfg(target_os = "linux")]
-            arm_parent_death_signal()?;
+            arm_parent_death_signal(parent_pid)?;
             Ok(())
         });
     }
@@ -552,6 +548,10 @@ impl UnixIo {
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+                self.stdin.take();
+                Ok(())
+            }
             Err(error) => {
                 self.stdin.take();
                 Err(error)
@@ -778,21 +778,19 @@ fn pidfd_open(pid: i32) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(descriptor) })
 }
 
-/// Request the kernel to deliver `SIGKILL` when the parent process exits, so an abrupt
-/// owner death (SIGKILL, OOM, crash) still reaps the child tree without relying on
-/// `Drop`. The `getppid` re-check closes the race where the parent dies between fork
+/// Request `SIGKILL` for the primary child when its owning parent thread exits.
+/// That thread stays alive until tree cleanup, or abrupt process death. This does
+/// not independently kill descendants. The `getppid` re-check closes the race between fork
 /// and `prctl`: if reparenting already happened the pdeathsig would never fire, so the
 /// child must bail out before `exec`.
 #[cfg(target_os = "linux")]
-fn arm_parent_death_signal() -> io::Result<()> {
-    // Safety: `getppid` is a pure kernel query with no side effects.
-    let ppid = unsafe { libc::getppid() };
+fn arm_parent_death_signal(parent_pid: libc::pid_t) -> io::Result<()> {
     // SAFETY: PR_SET_PDEATHSIG with SIGKILL is a valid Linux prctl request.
     if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } == -1 {
         return Err(io::Error::last_os_error());
     }
     // Safety: `getppid` is a pure kernel query with no side effects.
-    if unsafe { libc::getppid() } != ppid {
+    if unsafe { libc::getppid() } != parent_pid {
         return Err(io::Error::other(
             "parent died before parent-death signal was armed",
         ));
@@ -817,19 +815,54 @@ pub fn spawn_detached(
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(duplicate));
     apply_environment(&mut command, environment);
+    #[cfg(target_os = "linux")]
+    // SAFETY: getpid is a side-effect-free query of this process's identity.
+    let parent_pid = unsafe { libc::getpid() };
     // Safety: `pre_exec` runs the closure between `fork` and `exec`, so it may
     // only call async-signal-safe functions; `setsid`, `prctl`, and `getppid`
     // are, and the closure performs no allocation.
     unsafe {
-        command.pre_exec(|| {
+        command.pre_exec(move || {
             if libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());
             }
             #[cfg(target_os = "linux")]
-            arm_parent_death_signal()?;
+            arm_parent_death_signal(parent_pid)?;
             Ok(())
         });
     }
+    spawn_detached_owned(command)
+}
+
+fn spawn_detached_owned(command: Command) -> Result<DetachedTree, ProcessError> {
+    #[cfg(target_os = "linux")]
+    {
+        // PDEATHSIG follows the spawning thread, so a blocking-pool worker cannot
+        // own it. Keep a joinable thread alive for exactly this tree's lifetime.
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let thread = thread::Builder::new()
+            .name("agentshim-spawn-owner".to_owned())
+            .spawn(move || {
+                // An undelivered tree is dropped here and cleans up its process group.
+                let _ = result_tx.send(spawn_detached_direct(command));
+                let _ = release_rx.recv();
+            })?;
+        let owner = SpawnOwner {
+            release: Some(release_tx),
+            thread: Some(thread),
+        };
+        let mut tree = result_rx.recv().map_err(|error| {
+            ProcessError::Worker(format!("detached spawn owner failed: {error}"))
+        })??;
+        tree.spawn_owner = Some(owner);
+        Ok(tree)
+    }
+    #[cfg(not(target_os = "linux"))]
+    spawn_detached_direct(command)
+}
+
+fn spawn_detached_direct(mut command: Command) -> Result<DetachedTree, ProcessError> {
     let mut child = command.spawn()?;
     let pid = child.id();
     let Ok(process_group) = i32::try_from(pid) else {
@@ -844,7 +877,27 @@ pub fn spawn_detached(
         process_group,
         child,
         primary_exit: None,
+        #[cfg(target_os = "linux")]
+        spawn_owner: None,
     })
+}
+
+#[cfg(target_os = "linux")]
+struct SpawnOwner {
+    release: Option<std::sync::mpsc::Sender<()>>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for SpawnOwner {
+    fn drop(&mut self) {
+        self.release.take();
+        if let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+        {
+            tracing::error!("detached spawn owner thread panicked");
+        }
+    }
 }
 
 pub struct DetachedTree {
@@ -852,6 +905,8 @@ pub struct DetachedTree {
     process_group: i32,
     child: Child,
     primary_exit: Option<String>,
+    #[cfg(target_os = "linux")]
+    spawn_owner: Option<SpawnOwner>,
 }
 
 impl DetachedTree {
