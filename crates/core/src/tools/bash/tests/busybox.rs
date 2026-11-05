@@ -9,9 +9,13 @@ use super::*;
 use crate::tools::bash::status;
 
 fn test_busybox() -> Option<PathBuf> {
-    std::env::var_os("AGENTSHIM_TEST_BUSYBOX")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute() && path.is_file())
+    let path = PathBuf::from(std::env::var_os("AGENTSHIM_TEST_BUSYBOX")?);
+    assert!(
+        path.is_absolute() && path.is_file(),
+        "AGENTSHIM_TEST_BUSYBOX must name an existing absolute file: {}",
+        path.display()
+    );
+    Some(path)
 }
 
 fn busybox_locator(busybox: &std::path::Path) -> BashLocator {
@@ -181,12 +185,16 @@ fn a_timeout_terminates_busybox_spawned_children() {
     };
     let fixture = tempfile::tempdir().expect("fixture");
     let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
-    let mut timed = request("(sleep 2; printf late > late-marker) & printf 'spawned\\n'; wait");
+    let locator = busybox_locator(&busybox);
+    let runtime = locator.resolve(&CancellationToken::new()).expect("busybox");
+    let mut timed = request(
+        "(sleep 2; printf late > late-marker) & printf '%s\\n' \"$!\" > child.pid; printf 'spawned\\n'; wait",
+    );
     timed.timeout_ms = Some(750);
 
     let error = execute_output(
         &root,
-        &busybox_locator(&busybox),
+        &locator,
         None,
         &timed,
         Duration::from_millis(750),
@@ -195,7 +203,8 @@ fn a_timeout_terminates_busybox_spawned_children() {
     .expect_err("the background wait must run into the timeout");
 
     assert!(matches!(error, ProcessError::Timeout { .. }), "{error}");
-    std::thread::sleep(Duration::from_millis(3_000));
+    let pid = read_shell_child_pid(&fixture.path().join("child.pid"));
+    assert_shell_child_exited(&runtime, pid);
     assert!(
         !fixture.path().join("late-marker").exists(),
         "a busybox-spawned child survived timeout containment"

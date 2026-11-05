@@ -510,14 +510,14 @@ fn test_parse_unclosed_dictionary() {
 fn test_parse_dictionary_missing_value() {
     let input = b"<< /Type >>";
     let result = parse_object(input);
-    assert!(result.is_err());
+    assert!(matches!(result, Err(nom::Err::Error(_))));
 }
 
 #[test]
 fn test_parse_dictionary_non_name_key() {
     let input = b"<< 123 /Value >>";
     let result = parse_object(input);
-    assert!(result.is_err());
+    assert!(matches!(result, Err(nom::Err::Error(_))));
 }
 
 // ========================================================================

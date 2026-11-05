@@ -7,31 +7,49 @@ repos:
     rev: v6.0.0
     hooks:
       - id: check-yaml
+        name: Repository / YAML syntax
       - id: check-toml
+        name: Repository / TOML syntax
       - id: check-json
+        name: Repository / JSON syntax
       - id: end-of-file-fixer
+        name: Repository / Final newline
+        stages: [pre-commit]
       - id: trailing-whitespace
+        name: Repository / Trailing whitespace
+        stages: [pre-commit]
       - id: mixed-line-ending
+        name: Repository / Line endings
       - id: check-added-large-files
+        name: Repository / Large files
         args: ["--maxkb=5000"]
+        stages: [pre-commit]
       - id: check-merge-conflict
+        name: Repository / Merge conflict markers
       - id: check-case-conflict
+        name: Repository / Case conflicts
       - id: check-shebang-scripts-are-executable
+        name: Repository / Executable scripts
         exclude: '\.rs$'
+        stages: [pre-commit]
       - id: detect-private-key
+        name: Repository / Private keys
 
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.30.1
     hooks:
       - id: gitleaks-system
+        name: Repository / Staged secrets
         pass_filenames: false
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.3
     hooks:
       - id: ruff-format
+        name: Repository / Python format
         types: [python]
       - id: ruff-check
+        name: Repository / Python lint
         args: ["--fix"]
         types: [python]
 
@@ -39,6 +57,7 @@ repos:
     rev: v1.49.0
     hooks:
       - id: typos
+        name: Repository / Spelling
         # The upstream hook defaults to --write-changes, which silently
         # applies single-suggestion corrections inside string literals and
         # data assets. Check-only; corrections are applied deliberately.
@@ -46,15 +65,43 @@ repos:
 
   - repo: local
     hooks:
+      - id: hook-output-tests
+        name: Repository / Hook self-tests
+        entry: python3 -m unittest discover -s scripts -p test_hooks.py
+        language: system
+        files: '^scripts/(hooks/(pre-commit|pre-push)|check-test-sleeps\.sh|test_hooks\.py)$'
+        pass_filenames: false
+
       - id: uv-lock-check
-        name: uv lock check
+        name: Repository / Python dependency lock
         entry: uv lock --locked
         language: system
         files: '(pyproject\.toml|uv\.lock)$'
         pass_filenames: false
 
+      - id: contract-snapshot-check
+        name: Repository / Contract snapshots current
+        entry: python3
+        args: ["scripts/generate-contracts.py", "--check"]
+        language: system
+        files: '^(contracts/|scripts/generate-contracts\.py$)'
+        pass_filenames: false
+
+      - id: proc-stat-eval-tests
+        name: Evals / proc_stat parser self-tests
+        # runpy keeps the repository root as the import base for the evals.* import.
+        entry: python3
+        args:
+          [
+            "-c",
+            'import runpy; runpy.run_path("evals/framework/monitor/test_proc_stat.py", run_name="__main__")',
+          ]
+        language: system
+        files: '^evals/framework/monitor/'
+        pass_filenames: false
+
       - id: mypy
-        name: mypy
+        name: Repository / Python typecheck
         entry: uv run --frozen --group dev -- mypy
         language: system
         args:
@@ -68,117 +115,91 @@ repos:
         pass_filenames: false
         require_serial: true
 
+      - id: cargo-fmt
+        name: Rust / Format
+        entry: cargo fmt --all -- --check
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: cargo-clippy
+        name: Rust / Compiler and Clippy warnings (workspace)
+        entry: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: cargo-structural-audit
+        name: Rust / Cognitive complexity
+        entry: >-
+          cargo clippy --locked -p agentshim -p agentshim-core -p agentshim-napi
+          -p agentshim-gigatoken --lib --bins --no-deps -- -W clippy::cognitive-complexity
+        language: system
+        pass_filenames: false
+        always_run: true
+
       - id: dsh-lint
-        name: DSH adapter lint
+        name: DSH / Lint
         entry: pnpm --dir adapters/dsh lint
         language: system
         files: '^adapters/dsh/(?:.*\.[cm]?[jt]sx?|package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|tsconfig(?:\.build)?\.json)$'
         pass_filenames: false
 
       - id: dsh-typecheck
-        name: DSH adapter typecheck
+        name: DSH / Typecheck
         entry: pnpm --dir adapters/dsh typecheck
         language: system
         files: '^adapters/dsh/(?:.*\.[cm]?[jt]sx?|package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|tsconfig(?:\.build)?\.json)$'
         pass_filenames: false
 
-      - id: cargo-fmt
-        name: cargo fmt
-        entry: cargo fmt --all -- --check
+      - id: dsh-build
+        name: DSH / Production build and types
+        entry: pnpm --dir adapters/dsh build
         language: system
-        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|crates/.*\.(rs|toml)|tests/.*\.rs|benches/.*\.rs)$'
+        stages: [pre-push]
         pass_filenames: false
+        always_run: true
 
-      - id: cargo-clippy-core
-        name: cargo clippy (core & host)
-        entry: cargo clippy -p agentshim -p agentshim-core -p agentshim-napi -p agentshim-test-support --all-targets -- -D warnings
+      - id: cargo-clippy-linux
+        name: Rust / Linux Clippy (workspace)
+        entry: >-
+          bash -c 'if [ "$(uname -s)" = Linux ]; then
+          exec cargo clippy --locked --target x86_64-unknown-linux-gnu
+          --workspace --all-targets --all-features -- -D warnings;
+          fi'
         language: system
-        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|clippy\.toml|src/.*\.rs|crates/(core|napi|test-support)/.*\.(rs|toml)|tests/.*\.rs|benches/.*\.rs)$'
+        stages: [pre-push]
         pass_filenames: false
+        always_run: true
 
-      - id: cargo-clippy-pdf
-        name: cargo clippy (pdf-read)
-        entry: cargo clippy -p agentshim-pdf-read --all-targets --all-features -- -D warnings
+      - id: cargo-test
+        name: Rust / Workspace unit, contract and integration tests
+        entry: cargo nextest run --locked --retries 2 --flaky-result fail --workspace
         language: system
-        files: '^(Cargo\.(toml|lock)|crates/pdf-read-core/.*\.(rs|toml))$'
+        stages: [pre-push]
         pass_filenames: false
+        always_run: true
 
-      - id: cargo-clippy-office
-        name: cargo clippy (office-read)
-        entry: cargo clippy -p agentshim-office-read --all-targets --all-features -- -D warnings
+      - id: dsh-test
+        name: DSH / Unit tests
+        entry: pnpm --dir adapters/dsh test:unit
         language: system
-        files: '^(Cargo\.(toml|lock)|crates/office-read-core/.*\.(rs|toml))$'
+        stages: [pre-push]
         pass_filenames: false
-
-      - id: cargo-clippy-gigatoken
-        name: cargo clippy (gigatoken)
-        entry: cargo clippy -p agentshim-gigatoken --all-targets --all-features -- -D warnings
-        language: system
-        files: '^(Cargo\.(toml|lock)|crates/gigatoken-core/.*\.(rs|toml))$'
-        pass_filenames: false
-
-      - id: cargo-structural-audit
-        name: cargo structural audit
-        entry: cargo clippy -p agentshim -p agentshim-core -p agentshim-napi -p agentshim-gigatoken --lib --bins --no-deps -- -W clippy::cognitive-complexity
-        language: system
-        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|clippy\.toml|src/.*\.rs|crates/(core|napi|gigatoken-core)/.*\.(rs|toml))$'
-        pass_filenames: false
-        verbose: true
+        always_run: true
 
       - id: cargo-machete
-        name: cargo machete
+        name: Rust / Unused dependencies
         entry: cargo machete
         language: system
+        stages: [pre-push]
         files: '(^|/)Cargo\.(toml|lock)$'
         pass_filenames: false
 
       - id: cargo-deny
-        name: cargo deny
-        entry: cargo deny check advisories bans licenses sources
+        name: Rust / Dependency policy
+        entry: cargo deny --locked check advisories bans licenses sources
         language: system
+        stages: [pre-push]
         files: '(^|/)(Cargo\.(toml|lock)|deny\.toml)$'
-        pass_filenames: false
-
-      - id: cargo-clippy-linux
-        name: cargo clippy (linux target)
-        entry: >-
-          bash -c 'if [ "$(uname -s)" = Linux ]; then
-          exec cargo clippy --target x86_64-unknown-linux-gnu -p agentshim -p agentshim-core
-          -p agentshim-napi -p agentshim-test-support --all-targets -- -D warnings;
-          fi'
-        language: system
-        stages: [pre-push]
-        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|crates/(core|napi|test-support)/.*\.(rs|toml)|tests/.*\.rs|benches/.*\.rs)$'
-        pass_filenames: false
-
-      - id: cargo-test-core
-        name: cargo test (core & host)
-        entry: cargo test --locked -p agentshim -p agentshim-core -p agentshim-napi -p agentshim-test-support --tests
-        language: system
-        stages: [pre-push]
-        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|src/.*\.rs|crates/(core|napi|test-support)/.*\.(rs|toml)|tests/.*\.rs)$'
-        pass_filenames: false
-
-      - id: cargo-test-pdf
-        name: cargo test (pdf-read)
-        entry: cargo test --locked -p agentshim-pdf-read --tests
-        language: system
-        stages: [pre-push]
-        files: '^(Cargo\.(toml|lock)|crates/pdf-read-core/.*\.(rs|toml))$'
-        pass_filenames: false
-
-      - id: cargo-test-office
-        name: cargo test (office-read)
-        entry: cargo test --locked -p agentshim-office-read --tests
-        language: system
-        stages: [pre-push]
-        files: '^(Cargo\.(toml|lock)|crates/office-read-core/.*\.(rs|toml))$'
-        pass_filenames: false
-
-      - id: cargo-test-gigatoken
-        name: cargo test (gigatoken)
-        entry: cargo test --locked -p agentshim-gigatoken --tests
-        language: system
-        stages: [pre-push]
-        files: '^(Cargo\.(toml|lock)|crates/gigatoken-core/.*\.(rs|toml))$'
         pass_filenames: false

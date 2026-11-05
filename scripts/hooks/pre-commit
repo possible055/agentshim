@@ -1,18 +1,24 @@
 #!/usr/bin/env bash
-# pre-commit prints hook results to stdout; redirect to stderr so editors
-# surface hook failures from UI-driven git operations.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ARGS=(hook-impl --config=.pre-commit-config.yaml --hook-type=pre-commit --hook-dir "$HERE" -- "$@")
 
 if command -v pre-commit >/dev/null 2>&1; then
-    exec pre-commit "${ARGS[@]}" 1>&2
+    COMMAND=(pre-commit)
+elif command -v uv >/dev/null 2>&1; then
+    COMMAND=(uv run --frozen --group dev -- pre-commit)
+else
+    echo 'pre-commit not found on PATH; install it or unset core.hooksPath' >&2
+    exit 1
 fi
 
-if command -v uv >/dev/null 2>&1; then
-    exec uv run --frozen --group dev -- pre-commit "${ARGS[@]}" 1>&2
+OUTPUT="$(mktemp)"
+trap 'rm -f "$OUTPUT"' EXIT
+if "${COMMAND[@]}" "${ARGS[@]}" >"$OUTPUT" 2>&1; then
+    exit 0
+else
+    status=$?
+    cat "$OUTPUT" >&2
+    exit "$status"
 fi
-
-echo 'pre-commit not found on PATH; install it or unset core.hooksPath' >&2
-exit 1

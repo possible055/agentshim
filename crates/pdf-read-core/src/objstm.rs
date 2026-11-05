@@ -382,23 +382,23 @@ mod tests {
     fn test_parse_object_stream_not_stream() {
         let obj = Object::Integer(42);
         let result = parse_object_stream(&obj);
-        assert!(result.is_err());
+        assert!(matches!(result, Err(Error::InvalidPdf(_))));
     }
 
     #[test]
     fn test_parse_object_stream_missing_type() {
         let mut dict = HashMap::new();
         dict.insert("N".to_string(), Object::Integer(1));
-        dict.insert("First".to_string(), Object::Integer(5));
+        dict.insert("First".to_string(), Object::Integer(3));
 
         let stream = Object::Stream {
             dict,
             data: Bytes::from(b"1 0 42".to_vec()),
         };
 
-        // Should still work - Type is optional if we trust the caller
-        let result = parse_object_stream(&stream);
-        assert!(result.is_ok());
+        // Type is optional if we trust the caller
+        let objects = parse_object_stream(&stream).expect("missing /Type still parses");
+        assert_eq!(objects.get(&1).unwrap().as_integer(), Some(42));
     }
 
     #[test]
@@ -413,7 +413,7 @@ mod tests {
         };
 
         let result = parse_object_stream(&stream);
-        assert!(result.is_err());
+        assert!(matches!(result, Err(Error::InvalidPdf(_))));
     }
 
     #[test]
@@ -428,7 +428,7 @@ mod tests {
         };
 
         let result = parse_object_stream(&stream);
-        assert!(result.is_err());
+        assert!(matches!(result, Err(Error::InvalidPdf(_))));
     }
 
     #[test]
@@ -444,7 +444,7 @@ mod tests {
         };
 
         let result = parse_object_stream(&stream);
-        assert!(result.is_err());
+        assert!(matches!(result, Err(Error::InvalidPdf(_))));
     }
 
     #[test]
@@ -460,6 +460,6 @@ mod tests {
         };
 
         let result = parse_object_stream(&stream);
-        assert!(result.is_err());
+        assert!(matches!(result, Err(Error::InvalidPdf(_))));
     }
 }

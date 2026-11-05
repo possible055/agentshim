@@ -70,6 +70,37 @@ pub fn forced_runtime_limit() -> Option<std::time::Duration> {
     None
 }
 
+/// Sets both forced PDF timings for the guard's lifetime and restores the previous
+/// values on drop, so a panicking test cannot leak a forced block into tests running
+/// concurrently on other threads. Pair it with [`global_read_state_guard`].
+#[cfg(any(test, feature = "test-hooks"))]
+pub struct ForcedPdfTimingsGuard {
+    prev_block_ms: u64,
+    prev_runtime_limit_ms: u64,
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl ForcedPdfTimingsGuard {
+    pub fn set(block_ms: u64, runtime_limit_ms: u64) -> Self {
+        Self {
+            prev_block_ms: FORCED_PDF_BLOCK_MS.swap(block_ms, std::sync::atomic::Ordering::SeqCst),
+            prev_runtime_limit_ms: FORCED_PDF_RUNTIME_LIMIT
+                .swap(runtime_limit_ms, std::sync::atomic::Ordering::SeqCst),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl Drop for ForcedPdfTimingsGuard {
+    fn drop(&mut self) {
+        FORCED_PDF_BLOCK_MS.store(self.prev_block_ms, std::sync::atomic::Ordering::SeqCst);
+        FORCED_PDF_RUNTIME_LIMIT.store(
+            self.prev_runtime_limit_ms,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+}
+
 /// Serialises tests that read or write process-global read state: the forced-change seam,
 /// the forced runtime ceiling, and the PDF gate acquisition counter. All are global, so
 /// concurrent PDF tests would otherwise see each other's writes.

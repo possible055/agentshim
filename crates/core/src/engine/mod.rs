@@ -691,14 +691,12 @@ mod tests {
             exec::ProcessError,
             glob::GlobRequest,
             grep::GrepRequest,
-            read::{
-                FORCED_PDF_BLOCK_MS, FORCED_PDF_RUNTIME_LIMIT, ReadError, ReadRequest,
-                global_read_state_guard,
-            },
+            read::{ForcedPdfTimingsGuard, ReadError, ReadRequest, global_read_state_guard},
             run_program::ProcessRequest,
         },
     };
     use agentshim_test_support::pdf::pdf_with_text;
+    use agentshim_test_support::poll::poll_until_within;
 
     fn context() -> OperationContext {
         OperationContext::new(
@@ -877,8 +875,7 @@ mod tests {
                 let root = Arc::new(RepositoryRoot::open(fixture.path()).expect("root"));
                 let resources = RuntimeResources::new(RuntimeConfig::for_tests(1));
                 let engine = ToolEngine::new(root, ReadScope::Normal, resources.clone());
-                FORCED_PDF_RUNTIME_LIMIT.store(20, std::sync::atomic::Ordering::SeqCst);
-                FORCED_PDF_BLOCK_MS.store(250, std::sync::atomic::Ordering::SeqCst);
+                let _timings = ForcedPdfTimingsGuard::set(250, 20);
 
                 let started = std::time::Instant::now();
                 let result = engine.read(read_request("blocked.pdf"), context()).await;
@@ -897,10 +894,9 @@ mod tests {
                 .expect("text read");
                 assert!(text.text.contains("still responsive"));
 
-                tokio::time::sleep(Duration::from_millis(300)).await;
-                assert_eq!(resources.available_pdf_slots(), 1);
-                FORCED_PDF_BLOCK_MS.store(0, std::sync::atomic::Ordering::SeqCst);
-                FORCED_PDF_RUNTIME_LIMIT.store(0, std::sync::atomic::Ordering::SeqCst);
+                poll_until_within(Duration::from_secs(2), "pdf slot release", || {
+                    (resources.available_pdf_slots() == 1).then_some(())
+                });
             });
     }
 

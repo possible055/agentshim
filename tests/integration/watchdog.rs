@@ -71,13 +71,14 @@ fn inbound_pings_keep_the_server_alive_until_they_stop() {
     let mut session = TestSession::builder()
         .root(env!("CARGO_MANIFEST_DIR"))
         .profile("codex")
-        .idle_timeout_secs(2)
+        .idle_timeout_secs(1)
         .log_mode("off")
         .spawn();
     session.handshake();
 
-    for id in 2..=8 {
-        thread::sleep(Duration::from_millis(500));
+    for id in 2..=9 {
+        // sleep-allow: scenario pacing — the ping cadence is the behavior under test
+        thread::sleep(Duration::from_millis(250));
         session.send(&modern_request(id, "ping", empty_params()));
         assert_eq!(session.receive()["id"], id);
     }
@@ -89,9 +90,9 @@ fn inbound_pings_keep_the_server_alive_until_they_stop() {
 
 #[test]
 fn a_live_detached_tree_defers_idle_shutdown() {
-    if agentshim::bash_report().is_err() {
-        return;
-    }
+    agentshim::bash_report().expect(
+        "GNU bash is required on CI and dev hosts; the missing-bash contract has a dedicated test",
+    );
     let fixture = tempfile::tempdir().expect("fixture");
     let mut session = TestSession::builder()
         .root(fixture.path())

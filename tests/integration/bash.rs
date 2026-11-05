@@ -8,9 +8,9 @@ use agentshim_test_support::poll::{poll_until_within, wait_for_quiet};
 #[test]
 #[ignore = "local stress: saturates stdout while shutdown races a blocked protocol drain"]
 fn stdin_eof_terminates_detached_trees_while_the_drain_is_still_blocked() {
-    if agentshim::bash_report().is_err() {
-        return;
-    }
+    agentshim::bash_report().expect(
+        "GNU bash is required on CI and dev hosts; the missing-bash contract has a dedicated test",
+    );
     let fixture = tempfile::tempdir().expect("fixture");
     let mut session = TestSession::builder()
         .root(fixture.path())
@@ -80,9 +80,9 @@ fn stdin_eof_terminates_detached_trees_while_the_drain_is_still_blocked() {
 #[test]
 #[ignore = "local stress: launches sixteen detached process trees"]
 fn shutdown_of_sixteen_detached_trees_shares_one_deadline() {
-    if agentshim::bash_report().is_err() {
-        return;
-    }
+    agentshim::bash_report().expect(
+        "GNU bash is required on CI and dev hosts; the missing-bash contract has a dedicated test",
+    );
     let fixture = tempfile::tempdir().expect("fixture");
     let mut session = TestSession::builder()
         .root(fixture.path())
@@ -129,9 +129,9 @@ fn shutdown_of_sixteen_detached_trees_shares_one_deadline() {
 /// including the discovery probe — ever sees it.
 #[test]
 fn bash_env_and_env_are_not_sourced_by_foreground_or_detached_bash() {
-    if agentshim::bash_report().is_err() {
-        return;
-    }
+    agentshim::bash_report().expect(
+        "GNU bash is required on CI and dev hosts; the missing-bash contract has a dedicated test",
+    );
     let fixture = tempfile::tempdir().expect("fixture");
     std::fs::write(
         fixture.path().join("env.sh"),
@@ -198,9 +198,9 @@ fn bash_env_and_env_are_not_sourced_by_foreground_or_detached_bash() {
 
 #[test]
 fn detached_roster_saturation_fails_before_blocking_scheduling_over_stdio() {
-    if agentshim::bash_report().is_err() {
-        return;
-    }
+    agentshim::bash_report().expect(
+        "GNU bash is required on CI and dev hosts; the missing-bash contract has a dedicated test",
+    );
     let fixture = tempfile::tempdir().expect("fixture");
     let mut session = TestSession::builder()
         .root(fixture.path())
@@ -243,9 +243,9 @@ fn detached_roster_saturation_fails_before_blocking_scheduling_over_stdio() {
 
 #[test]
 fn detached_job_status_and_termination_work_over_real_stdio_at_capacity() {
-    if agentshim::bash_report().is_err() {
-        return;
-    }
+    agentshim::bash_report().expect(
+        "GNU bash is required on CI and dev hosts; the missing-bash contract has a dedicated test",
+    );
     let fixture = tempfile::tempdir().expect("fixture");
     let mut session = TestSession::builder()
         .root(fixture.path())
@@ -444,9 +444,9 @@ const DETACHED_LOG_WRITE_BLOCK_BYTES: u64 = 65_536;
 
 #[test]
 fn detached_log_quota_terminates_the_owned_tree() {
-    if agentshim::bash_report().is_err() {
-        return;
-    }
+    agentshim::bash_report().expect(
+        "GNU bash is required on CI and dev hosts; the missing-bash contract has a dedicated test",
+    );
     let fixture = tempfile::tempdir().expect("fixture");
     let mut session = TestSession::builder()
         .root(fixture.path())

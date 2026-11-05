@@ -123,6 +123,42 @@ fn bash_is_available() -> bool {
         .is_ok()
 }
 
+pub(super) fn read_shell_child_pid(path: &std::path::Path) -> u32 {
+    agentshim_test_support::poll::poll_until_within(
+        Duration::from_secs(5),
+        "shell child PID",
+        || match std::fs::read_to_string(path) {
+            Ok(text) if text.ends_with('\n') => Some(text.trim().parse().expect("shell child PID")),
+            Ok(_) => None,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => panic!("cannot read shell child PID: {error}"),
+        },
+    )
+}
+
+pub(super) fn assert_shell_child_exited(runtime: &locate::BashRuntime, pid: u32) {
+    // MSYS shell PIDs are not Win32 PIDs; query them through the same shell runtime.
+    let command = format!("if kill -0 {pid} 2>/dev/null; then printf alive; fi");
+    agentshim_test_support::poll::poll_until_within(
+        Duration::from_secs(5),
+        "shell child to exit",
+        || {
+            let output = std::process::Command::new(&runtime.executable)
+                .args(runtime.launch_args(&command))
+                .env_remove("BASH_ENV")
+                .env_remove("ENV")
+                .output()
+                .expect("query shell child liveness");
+            assert!(output.status.success(), "{output:?}");
+            match output.stdout.as_slice() {
+                b"alive" => None,
+                b"" => Some(()),
+                other => panic!("unexpected shell liveness output: {other:?}"),
+            }
+        },
+    );
+}
+
 #[cfg(windows)]
 fn windows_argument_echo_command(root: &std::path::Path) -> String {
     let script = root.join("echo-argument.ps1");

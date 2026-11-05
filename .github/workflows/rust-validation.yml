@@ -203,17 +203,22 @@ jobs:
         run: cargo clippy --locked -p agentshim --all-targets --all-features -- -D warnings
       - name: Test root package default features
         if: ${{ !inputs.engine_only }}
-        run: cargo nextest run --locked --retries 2 --final-status-level flaky -p agentshim
+        run: cargo nextest run --locked --retries 2 --flaky-result fail --final-status-level flaky -p agentshim
       - name: Test bench-internals profiled paths
         if: ${{ !inputs.engine_only }}
-        run: cargo nextest run --locked --retries 2 --final-status-level flaky -p agentshim-core --features bench-internals --lib profiled
+        run: cargo nextest run --locked --retries 2 --flaky-result fail --final-status-level flaky -p agentshim-core --features bench-internals --lib profiled
       - name: Lint engine packages
         run: cargo clippy --locked -p agentshim-core -p agentshim-napi -p agentshim-test-support --all-targets --all-features -- -D warnings
       - name: Test engine packages default features
-        run: cargo nextest run --locked --retries 2 --final-status-level flaky -p agentshim-core -p agentshim-napi -p agentshim-test-support
+        run: cargo nextest run --locked --retries 2 --flaky-result fail --final-status-level flaky -p agentshim-core -p agentshim-napi -p agentshim-test-support
       - name: Check root package targets
         if: ${{ inputs.engine_only }}
         run: cargo check --locked -p agentshim --all-targets
+      - name: Test root package on unix runner
+        if: ${{ inputs.engine_only }}
+        # The root E2E suite must execute somewhere besides windows: several tests
+        # are cfg(linux) and never compile on the windows runner.
+        run: cargo nextest run --locked --retries 2 --flaky-result fail --final-status-level flaky -p agentshim
       - name: Test documentation examples
         if: ${{ inputs.engine_only }}
         # pdf-read and office-read retained upstream doctests reference the original
@@ -224,7 +229,7 @@ jobs:
         run: cargo clippy --locked -p agentshim-pdf-read -p agentshim-office-read -p agentshim-gigatoken --all-targets --all-features -- -D warnings
       - name: Test derivative packages default features
         if: ${{ !inputs.engine_only && steps.validation-scope.outputs.scope == 'full' }}
-        run: cargo nextest run --locked --retries 2 --final-status-level flaky -p agentshim-pdf-read -p agentshim-office-read -p agentshim-gigatoken
+        run: cargo nextest run --locked --retries 2 --flaky-result fail --final-status-level flaky -p agentshim-pdf-read -p agentshim-office-read -p agentshim-gigatoken
       - name: Check PDF rendering-only feature profile
         if: ${{ !inputs.engine_only && steps.validation-scope.outputs.scope == 'full' }}
         run: cargo check --locked -p agentshim-pdf-read --all-targets --no-default-features --features rendering

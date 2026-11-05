@@ -28,7 +28,8 @@ pub(crate) use hooks::run_forced_pdf_block;
 use hooks::{AFTER_READ_HOOK, BEFORE_READ_HOOK};
 #[cfg(any(test, feature = "test-hooks"))]
 pub use hooks::{
-    FORCED_CHANGES, FORCED_PDF_BLOCK_MS, FORCED_PDF_RUNTIME_LIMIT, global_read_state_guard,
+    FORCED_CHANGES, FORCED_PDF_BLOCK_MS, FORCED_PDF_RUNTIME_LIMIT, ForcedPdfTimingsGuard,
+    global_read_state_guard,
 };
 #[cfg(test)]
 use pdf::MAX_IMAGE_BASE64_BYTES;

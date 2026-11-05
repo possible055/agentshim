@@ -1,4 +1,5 @@
 use super::*;
+use crate::tools::bash::tests::{assert_shell_child_exited, read_shell_child_pid};
 
 fn available_bash() -> Option<Arc<BashRuntime>> {
     BashLocator::capture()
@@ -326,7 +327,7 @@ fn successful_primary_with_a_pipe_holding_descendant_is_bounded() {
     let budget = Budget::new(Duration::from_secs(5));
     let args = probe_invocation(
         &runtime,
-        "(sleep 1; printf late > delayed-marker) & printf 'probe complete\\n'",
+        "(sleep 1; printf late > delayed-marker) & printf '%s\\n' \"$!\" > child.pid; printf 'probe complete\\n'",
     );
     let started = Instant::now();
     let output = probe_output_in(
@@ -342,7 +343,8 @@ fn successful_primary_with_a_pipe_holding_descendant_is_bounded() {
 
     assert!(output.contains("probe complete"));
     assert!(started.elapsed() < Duration::from_secs(6));
-    std::thread::sleep(Duration::from_millis(1_250));
+    let pid = read_shell_child_pid(&fixture.path().join("child.pid"));
+    assert_shell_child_exited(&runtime, pid);
     assert!(
         !fixture.path().join("delayed-marker").exists(),
         "probe descendant survived process-tree cleanup"
@@ -358,26 +360,30 @@ fn cancelling_a_running_probe_terminates_its_process_tree() {
     let cwd = fixture.path().to_owned();
     let cancellation = CancellationToken::new();
     let worker_cancellation = cancellation.clone();
+    let worker_runtime = Arc::clone(&runtime);
     let worker = std::thread::spawn(move || {
         let budget = Budget::new(Duration::from_secs(5));
-        let args = probe_invocation(&runtime, "(sleep 1; printf late > delayed-marker) & wait");
+        let args = probe_invocation(
+            &worker_runtime,
+            "(sleep 1; printf late > delayed-marker) & printf '%s\\n' \"$!\" > child.pid; wait",
+        );
         probe_output_in(
-            &runtime.executable,
+            &worker_runtime.executable,
             &args,
-            runtime.path.as_deref(),
+            worker_runtime.path.as_deref(),
             &budget,
             &worker_cancellation,
             &cwd,
         )
     });
-    std::thread::sleep(Duration::from_millis(100));
+    let pid = read_shell_child_pid(&fixture.path().join("child.pid"));
     cancellation.cancel();
 
     assert!(matches!(
         worker.join().expect("probe worker"),
         Err(ProbeError::Cancelled)
     ));
-    std::thread::sleep(Duration::from_millis(1_250));
+    assert_shell_child_exited(&runtime, pid);
     assert!(
         !fixture.path().join("delayed-marker").exists(),
         "cancelled probe descendant survived process-tree cleanup"

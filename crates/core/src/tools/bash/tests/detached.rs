@@ -1,5 +1,6 @@
 use super::*;
 use crate::tools::bash::{detached as job_registry, status};
+use agentshim_test_support::poll::{poll_until_within, wait_for_quiet};
 use std::time::Instant;
 
 pub(super) fn detach_request(command: &str, log_path: &str) -> BashRequest {
@@ -425,7 +426,7 @@ fn a_backgrounded_child_does_not_hold_the_foreground_call_open() {
         &root,
         &locator,
         None,
-        &request("(sleep 1; printf late > delayed-marker) & printf 'parent done\\n'"),
+        &request("(sleep 1; printf late > delayed-marker) & printf '%s\\n' \"$!\" > child.pid; printf 'parent done\\n'"),
         Duration::from_secs(20),
         &CancellationToken::new(),
     )
@@ -438,7 +439,9 @@ fn a_backgrounded_child_does_not_hold_the_foreground_call_open() {
         started.elapsed() < Duration::from_secs(10),
         "the call waited for a backgrounded child instead of terminating the tree"
     );
-    std::thread::sleep(Duration::from_millis(1_250));
+    let pid = read_shell_child_pid(&fixture.path().join("child.pid"));
+    let runtime = locator.resolve(&CancellationToken::new()).expect("bash");
+    assert_shell_child_exited(&runtime, pid);
     assert!(
         !fixture.path().join("delayed-marker").exists(),
         "the backgrounded child survived long enough to write after the response"
@@ -494,11 +497,10 @@ fn a_degraded_liveness_query_keeps_the_owner_and_capacity() {
         "a degraded liveness query dropped the owner of a running tree"
     );
     let before = std::fs::read_to_string(&marker).unwrap_or_default().len();
-    std::thread::sleep(Duration::from_millis(750));
-    let after = std::fs::read_to_string(&marker).unwrap_or_default().len();
-    assert!(
-        after > before,
-        "the running tree was killed by a slot dropped on a query error"
+    poll_until_within(
+        Duration::from_secs(5),
+        "the degraded tree to keep running",
+        || (std::fs::read_to_string(&marker).unwrap_or_default().len() > before).then_some(()),
     );
     trees.terminate_all();
 }
@@ -633,11 +635,14 @@ fn shutdown_racing_a_detached_call_rolls_back_the_late_commit() {
     assert!(matches!(error, ProcessError::Cancelled), "{error}");
     assert_eq!(trees.live_count(), 0, "the late tree entered the roster");
     assert_eq!(trees.reserved_count(), 0, "the reservation was released");
-    std::thread::sleep(Duration::from_millis(1_500));
-    assert!(
-        std::fs::read_to_string(fixture.path().join("late-marker"))
-            .unwrap_or_default()
-            .is_empty(),
+    let settled = wait_for_quiet(
+        &fixture.path().join("late-marker"),
+        Duration::from_millis(300),
+        Instant::now() + Duration::from_secs(3),
+        "late-marker to stay settled after the rolled-back shutdown",
+    );
+    assert_eq!(
+        settled, 0,
         "the rolled-back tree kept running after shutdown"
     );
 }

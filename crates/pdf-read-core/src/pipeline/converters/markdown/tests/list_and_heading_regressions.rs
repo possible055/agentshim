@@ -395,7 +395,6 @@ fn test_issue12_preserves_normal_multi_word_bold() {
 /// Issue #12 (BOUND case) — closing `**` lands mid-CamelCase:
 /// `**N orthW** ind` (intended `**N**orthWind` or `**NorthWind**`).
 /// This is the pattern not yet covered by the inline-bold regex.
-/// Marked `#[ignore]` until the bound coalescer lands.
 #[test]
 fn test_issue12_bound_camelcase_bold_coalesces() {
     let input = "**N orthW** ind";

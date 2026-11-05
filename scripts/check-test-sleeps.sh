@@ -9,6 +9,12 @@
 # pacing. The gate only inspects lines added between the two SHAs, so untouched
 # legacy sites never fail it.
 #
+# Test code means dedicated test trees (tests/, benches/, and the sibling
+# tests.rs / tests/ conventions inside product crates) and, in product .rs files,
+# everything from the first inline `mod tests` block onward. Only the inline class
+# also flags tokio::time::sleep: production code legitimately sleeps on tokio, and
+# only the test region of the file is a violation there.
+#
 # Usage: check-test-sleeps.sh <base-sha> <head-sha>
 set -euo pipefail
 
@@ -21,18 +27,20 @@ head=$2
 
 changed=$(git diff --name-only "$base" "$head")
 # Test-only trees, plus the sibling `tests.rs` / `tests/` conventions inside
-# product crates. Files that mix product code and an inline `mod tests` are a
-# known blind spot; new tests there belong in the sibling convention anyway.
+# product crates.
 test_files=$(printf '%s\n' "$changed" |
     grep -E '(^tests/|^benches/|^crates/[^/]+/tests/|^adapters/dsh/tests/)|(/tests/|/tests\.rs$)' |
     grep -E '\.(rs|ts)$' || true)
 
-if [ -z "$test_files" ]; then
-    exit 0
-fi
+# Product .rs files whose added lines may sit inside an inline `mod tests`.
+inline_files=$(printf '%s\n' "$changed" |
+    grep -E '^(src/|crates/[^/]+/src/)' |
+    grep -E '\.rs$' |
+    grep -vE '(^tests/|^benches/|/tests/|/tests\.rs$|^crates/test-support/src/)' || true)
 
 status=0
 while IFS= read -r file; do
+    [ -n "$file" ] || continue
     case "$file" in
         # The sanctioned homes of raw sleeps: the poll helpers themselves.
         crates/test-support/src/* | adapters/dsh/tests/helpers/*) continue ;;
@@ -57,6 +65,43 @@ while IFS= read -r file; do
     ' || status=1
 done <<EOF
 $test_files
+EOF
+
+while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    # First inline test module in the head version of the file; empty when the
+    # file declares its tests in a sibling file or was deleted in this diff.
+    boundary=$(git show "$head:$file" 2>/dev/null | awk '
+        prev ~ /^#\[cfg\(test\)\]$/ && /^mod tests([ ]*[{]|$)/ { print NR; exit }
+        /^mod tests[ ]*[{]$/ { print NR; exit }
+        { prev = $0 }
+    ' || true)
+    [ -n "$boundary" ] || continue
+    git diff "$base" "$head" -- "$file" | awk -v file="$file" -v boundary="$boundary" '
+        /^\+\+\+|^---/ { next }
+        /^@@ / {
+            split(substr($0, index($0, "+") + 1), range, ",")
+            newline = range[1] + 0
+            next
+        }
+        /^ / { newline++; prev = substr($0, 2); next }
+        /^-/ { next }
+        /^\+/ {
+            line = substr($0, 2)
+            is_sleep = line ~ /thread::sleep[ \t]*\(/ || line ~ /tokio::time::sleep[ \t]*\(/
+            if (newline >= boundary && is_sleep &&
+                line !~ /sleep-allow:/ && prev !~ /sleep-allow:/) {
+                printf "%s: new sleep in an inline test module without a sleep-allow marker: %s\n", file, line
+                bad = 1
+            }
+            newline++
+            prev = line
+            next
+        }
+        END { exit bad }
+    ' || status=1
+done <<EOF
+$inline_files
 EOF
 
 if [ "$status" -ne 0 ]; then

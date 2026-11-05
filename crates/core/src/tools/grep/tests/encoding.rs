@@ -45,7 +45,8 @@ fn legacy_encoded_files_are_searched_after_decoding() {
 #[test]
 fn large_legacy_file_streams_without_a_decoded_whole_file_limit() {
     let fixture = tempfile::tempdir().expect("fixture");
-    let text = "繁體中文測試資料內容\n".repeat(350_000);
+    let line = "繁體中文測試資料內容".repeat(4) + "\n";
+    let text = line.repeat(75_000);
     let encoded = encoding_rs::BIG5.encode(&text).0;
     assert!(text.len() > 8 * 1024 * 1024);
     fs::write(fixture.path().join("large-big5.txt"), encoded).expect("large Big5 source");
