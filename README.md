@@ -2,72 +2,65 @@
 
 English | [简体中文](README.zh-CN.md)
 
-AgentShim gives coding agents a small, focused set of tools for working with source code. Codex and Cursor connect to its local stdio MCP server; DSH uses the native adapter in this repository. The server treats the directory you start it in as the repository root and provides first-class Windows x86-64 support with compatibility releases for Linux and macOS.
+AgentShim gives coding agents tools to read and search files and run commands. Codex and Cursor connect to its local MCP server; DSH can use the native adapter instead.
 
-## Why use it
+Windows x64, Linux x64, and Linux ARM64 are natively supported. A compatibility release is also available for macOS Apple Silicon.
 
-- **Predictable file access.** `read`, `grep`, and `glob` use unrestricted scope by default for compatibility; opt into `--read-scope normal` when repository/skill/plugin boundaries are required. This read scope does not constrain spawned processes.
-- **Managed long-running Bash.** `run_program` takes one executable and literal arguments. `bash` handles POSIX composition and can detach work under an instance-bound `job_id`; `bash_status` reports lifecycle, primary exit status, and a bounded log tail, while `bash` can terminate the complete owned tree.
-- **Cross-platform.** Full support for Windows x86-64, with compatibility release assets for Linux x86-64, Linux ARM64, and macOS Apple Silicon.
-- **Reads structured documents.** `read` returns PDF page text or rendered images and Markdown for DOCX, XLSX, PPTX, DOC, XLS, and PPT, with continuation cursors for long documents.
+## Quick start
 
-## Tools
+### 1. Install
 
-| Tool | Description |
-| --- | --- |
-| `read` | Read source files with line numbers. Supports UTF-8, BOM-detected UTF-16, WHATWG encoding labels, PDFs, and six Office formats. |
-| `grep` | Search file contents with Rust regex or literal strings. |
-| `glob` | Find files. Gitignored files are included by default; `.git` and common large directories stay excluded. |
-| `run_program` | Run one program with a literal argument list, without a shell. |
-| `bash` | Run a POSIX bash command line and return merged stdout and stderr. |
-| `bash_status` | Inspect one detached Bash job and its bounded log tail. |
-
-## Install
-
-**Windows (PowerShell):**
+On Windows, run in PowerShell:
 
 ```powershell
 irm https://github.com/possible055/agentshim/releases/latest/download/install.ps1 | iex
 ```
 
-Installs to `%LOCALAPPDATA%\agentshim\bin\agentshim.exe` (e.g. `C:\Users\<user>\AppData\Local\agentshim\bin\agentshim.exe`).
-
-**Linux / macOS:**
+On Linux or macOS Apple Silicon, run:
 
 ```sh
 curl -fsSL https://github.com/possible055/agentshim/releases/latest/download/install.sh | sh
 ```
 
-Installs to `${XDG_DATA_HOME:-$HOME/.local/share}/agentshim/bin/agentshim` (e.g. `~/.local/share/agentshim/bin/agentshim`).
+The installer prints the executable's absolute path. By default, it installs to:
 
-Re-run the same command to update. Install a specific version with `-Version` (PowerShell) or `--version` (sh).
+| System | Executable |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\agentshim\bin\agentshim.exe` |
+| Linux | `${XDG_DATA_HOME:-$HOME/.local/share}/agentshim/bin/agentshim` |
+| macOS | `${XDG_DATA_HOME:-$HOME/.local/share}/agentshim/bin/agentshim` |
 
-**Build from source** (requires Rust 1.99.1):
+Re-running the command installs the latest stable release. It can downgrade an existing prerelease, so check your current version first. To install a specific release, including an alpha, replace `0.1.7-alpha.3` below with the desired published version:
 
-```console
-cargo build --release --locked
+```powershell
+$installer = Invoke-RestMethod https://github.com/possible055/agentshim/releases/latest/download/install.ps1
+& ([scriptblock]::Create($installer)) -Version 0.1.7-alpha.3
 ```
 
-The binary is at `target/release/agentshim` (Linux and macOS) or `target/release/agentshim.exe` (Windows).
+```sh
+curl -fsSL https://github.com/possible055/agentshim/releases/latest/download/install.sh | sh -s -- --version 0.1.7-alpha.3
+```
 
-An existing `codexshim` installation is not removed or overwritten. After installing AgentShim, update each client to the new executable and MCP server name, verify the six tools, and then remove the old installation if it is no longer needed.
+These commands install the specified version; they do not automatically track newer alpha releases. If you used a custom directory, pass the same directory with `-InstallDir` (PowerShell) or `--install-dir` (sh) so the MCP configuration continues to point to the updated executable. Restart your MCP client after updating.
 
-## Configure Codex
+### 2. Configure your MCP client
 
-Copy the matching example into `~/.codex/config.toml` (user-level) or a project's `.codex/config.toml`, then replace `command` with the absolute path to your `agentshim` binary:
+#### Codex
 
-- [Windows example](config/codex.windows.toml.example)
-- [Linux example](config/codex.linux.toml.example)
-- [macOS example](config/codex.macos.toml.example)
+Add the configuration for your system to `~/.codex/config.toml` or your project's `.codex/config.toml`. Replace the example `command` path with the absolute path printed by the installer. In particular, a custom installation directory or `XDG_DATA_HOME` changes the path.
+
+If the file already has a `[features]` section, add the feature setting to that section instead of creating another one. Keep any existing MCP server settings.
+
+By default, `read`, `grep`, and `glob` can access any path readable by the server user. Add `"--read-scope", "normal"` to `args` to restrict those tools to the repository and Codex skill/plugin paths. This does not restrict processes started by `run_program` or `bash`.
+
+<details>
+<summary>Windows x64</summary>
 
 ```toml
 [mcp_servers.agentshim]
 required = true
-command = "/absolute/path/to/agentshim"
+command = "C:/Users/<username>/AppData/Local/agentshim/bin/agentshim.exe"
 args = ["serve", "--client-profile", "codex"]
-# Unrestricted mode (default) allows any absolute read/grep/glob path. To
-# restrict to repository and Codex skill/plugin paths, use:
-# args = ["serve", "--client-profile", "codex", "--read-scope", "normal"]
 supports_parallel_tool_calls = true
 tool_timeout_sec = 600
 enabled_tools = ["read", "grep", "glob", "run_program", "bash", "bash_status"]
@@ -78,9 +71,54 @@ env = { CODEX_MCP_PROTOCOL_VERSION = "2026-07-28" }
 mcp_2026_07_28 = true
 ```
 
-## Configure Cursor
+</details>
 
-Copy the [Cursor example](config/cursor.mcp.json.example) to `~/.cursor/mcp.json`, replace `command` with the absolute path to the binary, and restart Cursor:
+<details>
+<summary>Linux x64 / ARM64</summary>
+
+```toml
+[mcp_servers.agentshim]
+required = true
+command = "/home/<username>/.local/share/agentshim/bin/agentshim"
+args = ["serve", "--client-profile", "codex"]
+supports_parallel_tool_calls = true
+tool_timeout_sec = 600
+enabled_tools = ["read", "grep", "glob", "run_program", "bash", "bash_status"]
+default_tools_approval_mode = "approve"
+env = { CODEX_MCP_PROTOCOL_VERSION = "2026-07-28" }
+
+[features]
+mcp_2026_07_28 = true
+```
+
+</details>
+
+<details>
+<summary>macOS Apple Silicon</summary>
+
+```toml
+[mcp_servers.agentshim]
+required = true
+command = "/Users/<username>/.local/share/agentshim/bin/agentshim"
+args = ["serve", "--client-profile", "codex"]
+supports_parallel_tool_calls = true
+tool_timeout_sec = 600
+enabled_tools = ["read", "grep", "glob", "run_program", "bash", "bash_status"]
+default_tools_approval_mode = "approve"
+env = { CODEX_MCP_PROTOCOL_VERSION = "2026-07-28" }
+
+[features]
+mcp_2026_07_28 = true
+```
+
+</details>
+
+These examples set `default_tools_approval_mode` to `"approve"`. Review this setting against your preferred Codex approval policy before using it.
+
+<details>
+<summary>Cursor</summary>
+
+Add the following to `~/.cursor/mcp.json`, replacing `command` with the absolute path printed by the installer. On Windows, escape backslashes in JSON or use forward slashes.
 
 ```json
 {
@@ -94,24 +132,59 @@ Copy the [Cursor example](config/cursor.mcp.json.example) to `~/.cursor/mcp.json
 }
 ```
 
-On Windows, JSON paths must escape each backslash.
+See the [Cursor example](config/cursor.mcp.json.example).
 
-## Configure DSH
+</details>
 
-Install the native adapter and its exact optional platform package into your target DSH profile (e.g. `web` for Web UI, `headless` for CLI):
+### 3. Check the connection
+
+Restart your client and check that the AgentShim MCP server is connected. It should provide `read`, `grep`, `glob`, `run_program`, `bash`, and `bash_status`. If it does not connect, check the executable path and your client's configuration, then see [Diagnostics](#diagnostics).
+
+## Tools and access
+
+| Tool | Purpose |
+| --- | --- |
+| `read` | Read text, PDF, and Office files. |
+| `grep` | Search file contents using a Rust regex or literal string. |
+| `glob` | Find files by pattern. |
+| `run_program` | Run an executable with literal arguments, without a shell. |
+| `bash` | Run a Bash command, in the foreground or as a detached job. |
+| `bash_status` | Check a detached job and read the end of its log. |
+
+The MCP server uses its starting directory as the repository root. `grep` and `glob` include gitignored files by default, but exclude `.git` and common large directories.
+
+## Other ways to use AgentShim
+
+### DSH
+
+The DSH adapter loads a platform native addon in-process; it does not use the MCP server or require the `agentshim` executable. Install it in the profile you use:
 
 ```sh
 dsh plugin --profile web add dsh-agentshim
 dsh web --dump-config
 ```
 
-DSH loads `agentshim-core` through the platform addon in-process; it does not start the MCP server or require an installed `agentshim` executable. Unsupported platforms, missing packages, and native API mismatches fail plugin activation. See the [DSH adapter guide](adapters/dsh/README.md) for configuration, capture retention, sandbox approval behavior, and removal.
+See the [DSH adapter guide](adapters/dsh/README.md) for requirements, configuration, and removal.
 
-## Options
+<details>
+<summary>Build from source</summary>
 
-### `--client-profile`
+Requires Rust 1.99.1:
 
-Selects the aggregate burst policy. These layers are separate limits, not a single cap:
+```sh
+cargo build --release --locked
+```
+
+The executable is `target/release/agentshim` on Linux and macOS, or `target/release/agentshim.exe` on Windows. Use its absolute path in your MCP configuration.
+
+</details>
+
+## Reference
+
+<details>
+<summary>Client profiles and read scope</summary>
+
+`--client-profile` selects the aggregate burst policy. These layers are separate limits, not a single cap:
 
 | Layer | Value | Meaning |
 | --- | ---: | --- |
@@ -146,7 +219,10 @@ The DSH adapter uses the official DSH `ctx.sandbox` and `ctx.sandboxPolicy` serv
 
 The versioned cross-adapter contract is [`contracts/tool-contract-v1.json`](contracts/tool-contract-v1.json). The generator also checks in the MCP JSON-Schema projection and DSH parameter/output projection under [`contracts/generated/`](contracts/generated/). Validate every projection with `python3 scripts/generate-contracts.py --check`. MCP keeps legacy error classes in `error.code`; classes with a v1 mapping are normalized in `error.canonicalCode`, while unmapped legacy classes retain their class name.
 
-### Long-running work
+</details>
+
+<details>
+<summary>Detached Bash jobs and Windows arguments</summary>
 
 `bash` accepts `detach` with a `log_path` inside the repository. Output goes to that file and the call returns an opaque instance-bound `job_id`, plus the diagnostic pid and log path:
 
@@ -176,7 +252,10 @@ Git Bash converts arguments that look like POSIX paths before launching native W
 { "command": "robocopy \"$source\" \"$destination\" /E", "msys_argument_conversion": "disabled" }
 ```
 
-### Reading PDFs
+</details>
+
+<details>
+<summary>Reading PDF and Office documents</summary>
 
 `read` detects a PDF from its `%PDF-` header, regardless of extension. PDF inputs reject `encoding`, `start_line`, and `line_count`.
 
@@ -199,11 +278,15 @@ The response tells you how far it got and how to continue. A document that mixes
 
 `read` accepts DOCX, XLSX, PPTX, DOC, XLS, and PPT paths and returns Markdown. The extension selects the Office candidate family, while the ZIP content type or CFB stream signature determines the actual format. Office inputs reject text and PDF parameters. A partial response carries an opaque `office_cursor`; replay it verbatim with the same path. PDF and Office reads share one structured-document slot, so they cannot hold their large memory reservations concurrently.
 
-### Environment variables
+</details>
+
+<details>
+<summary>Environment variables and runtime limits</summary>
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `CODEX_MCP_PROTOCOL_VERSION` | — | MCP protocol version advertised to Codex. |
+| `AGENTSHIM_IO_WORKERS` | available CPUs, up to `4` | Worker lanes; 1–16. |
 | `AGENTSHIM_FOREGROUND_CALLS` | `16` | Shared per-instance limit for concurrent `read`, `glob`, `grep`, `run_program`, and foreground `bash` calls; 1–32. |
 | `AGENTSHIM_DETACHED_CALLS` | `16` | Per-instance live detached `bash` trees; 1–16. |
 | `AGENTSHIM_DETACHED_LOG_BYTES` | `67108864` | Per-job detached log termination threshold; 1048576–4294967296. Exceeding it terminates the owned process tree; an in-flight write block may extend the final file past the threshold. |
@@ -235,12 +318,14 @@ cancels the existing graceful-shutdown token. A request arriving in the final in
 between that check and cancellation can still race with shutdown; enabling the watchdog
 accepts that narrow boundary condition.
 
+</details>
+
 ## Diagnostics
 
 Logs are UTC-dated JSONL files:
 
 - Windows: `%LOCALAPPDATA%\agentshim\logs`
-- Linux: `${XDG_STATE_HOME:-$HOME/.local/state}/agentshim/logs`
+- Linux and macOS: `${XDG_STATE_HOME:-$HOME/.local/state}/agentshim/logs`
 
 Retention: 512 MiB total, 30 days. Inspect or purge:
 
@@ -261,4 +346,4 @@ Records contain identifiers, phases, outcomes, timings, and error classes — ne
 
 ## License
 
-[MIT](LICENSE)
+AgentShim's own code is licensed under [MIT](LICENSE). Third-party components retain their respective licenses and notices.

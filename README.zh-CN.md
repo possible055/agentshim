@@ -2,72 +2,65 @@
 
 [English](README.md) | 简体中文
 
-AgentShim 为 coding agent 提供一组精简而专注的源代码工具。Codex 与 Cursor 连接本地 stdio MCP 服务，DSH 则使用本仓库提供的原生 adapter。服务将启动目录作为仓库根目录，优先支持 Windows x86-64，并为 Linux 与 macOS 提供兼容性发行资产。
+AgentShim 为 coding agent 提供文件读取、搜索和命令执行工具。Codex 与 Cursor 连接本地 MCP 服务；DSH 可使用原生 adapter。
 
-## 为什么使用
+原生支持 Windows x64、Linux x64 和 Linux ARM64；macOS Apple Silicon 提供兼容性发行版。
 
-- **可预测的文件访问。** 为保持兼容，`read`、`grep` 和 `glob` 默认使用 unrestricted；需要仓库、skill 与 plugin 边界时显式设置 `--read-scope normal`。该 read scope 不会限制所启动进程的可见范围。
-- **可管理的长时间 Bash。** `run_program` 接收单一可执行文件和字面量参数。`bash` 处理 POSIX 命令组合，也可用 instance-bound `job_id` detach；`bash_status` 回报生命周期、primary exit status 与 bounded log tail，`bash` 还能终止完整的 server-owned tree。
-- **跨平台。** 完全支持 Windows x86-64，并为 Linux x86-64、Linux ARM64 与 macOS Apple Silicon 提供兼容性发行资产。
-- **可读结构化文档。** `read` 可返回 PDF 页面文字或渲染图片，也可将 DOCX、XLSX、PPTX、DOC、XLS 与 PPT 转为 Markdown；长文档带续读游标。
+## 快速开始
 
-## 工具
+### 1. 安装
 
-| 工具 | 说明 |
-| --- | --- |
-| `read` | 读取源文件并附带行号。支持 UTF-8、带 BOM 的 UTF-16、WHATWG 编码标签、PDF 与六种 Office 格式。 |
-| `grep` | 使用 Rust 正则或字面字符串搜索文件内容。 |
-| `glob` | 查找文件。默认包含被 gitignore 的文件；`.git` 与常见超大目录仍排除。 |
-| `run_program` | 以字面量参数列表运行单个程序，不经 shell。 |
-| `bash` | 运行 POSIX bash 命令行，返回合并后的 stdout 与 stderr。 |
-| `bash_status` | 检查一笔 detached Bash job 与 bounded log tail。 |
-
-## 安装
-
-**Windows (PowerShell):**
+Windows PowerShell：
 
 ```powershell
 irm https://github.com/possible055/agentshim/releases/latest/download/install.ps1 | iex
 ```
 
-默认安装至 `%LOCALAPPDATA%\agentshim\bin\agentshim.exe`（例如 `C:\Users\<user>\AppData\Local\agentshim\bin\agentshim.exe`）。
-
-**Linux / macOS:**
+Linux 或 macOS Apple Silicon：
 
 ```sh
 curl -fsSL https://github.com/possible055/agentshim/releases/latest/download/install.sh | sh
 ```
 
-默认安装至 `${XDG_DATA_HOME:-$HOME/.local/share}/agentshim/bin/agentshim`（例如 `~/.local/share/agentshim/bin/agentshim`）。
+安装器会输出可执行文件的绝对路径。默认安装位置：
 
-再次运行同一命令即可更新。安装指定版本时，传入 `-Version`（PowerShell）或 `--version`（sh）。
+| 系统 | 可执行文件 |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\agentshim\bin\agentshim.exe` |
+| Linux | `${XDG_DATA_HOME:-$HOME/.local/share}/agentshim/bin/agentshim` |
+| macOS | `${XDG_DATA_HOME:-$HOME/.local/share}/agentshim/bin/agentshim` |
 
-**从源码构建**（需要 Rust 1.99.1）：
+再次运行上述命令会安装最新稳定版；如果当前安装的是预发布版本，可能发生降级，请先确认当前版本。要安装指定版本（包括 alpha），将以下示例中的 `0.1.7-alpha.3` 替换为所需的已发布版本：
 
-```console
-cargo build --release --locked
+```powershell
+$installer = Invoke-RestMethod https://github.com/possible055/agentshim/releases/latest/download/install.ps1
+& ([scriptblock]::Create($installer)) -Version 0.1.7-alpha.3
 ```
 
-二进制位于 `target/release/agentshim`（Linux 与 macOS）或 `target/release/agentshim.exe`（Windows）。
+```sh
+curl -fsSL https://github.com/possible055/agentshim/releases/latest/download/install.sh | sh -s -- --version 0.1.7-alpha.3
+```
 
-现有 `codexshim` 安装不会被删除或覆盖。安装 AgentShim 后，请先将各客户端切换到新的可执行文件与 MCP server 名称，确认六个工具可用，再视需要移除旧安装。
+这些命令安装指定版本，不会自动跟进更新的 alpha 版本。如果使用了自定义目录，请通过 `-InstallDir`（PowerShell）或 `--install-dir`（sh）指定原目录，确保 MCP 配置仍指向更新后的可执行文件。更新后请重启 MCP 客户端。
 
-## 配置 Codex
+### 2. 配置 MCP 客户端
 
-将对应的示例复制到 `~/.codex/config.toml`（用户级）或项目的 `.codex/config.toml`，然后将 `command` 替换为 `agentshim` 二进制的绝对路径：
+#### Codex
 
-- [Windows 示例](config/codex.windows.toml.example)
-- [Linux 示例](config/codex.linux.toml.example)
-- [macOS 示例](config/codex.macos.toml.example)
+将适用于系统的配置添加到 `~/.codex/config.toml` 或项目的 `.codex/config.toml`，并将 `command` 替换为安装器输出的绝对路径。自定义安装目录或 `XDG_DATA_HOME` 会改变路径。
+
+如果文件已有 `[features]` 段，请将设置添加到该段，不要重复创建；保留已有的 MCP 服务配置。
+
+默认情况下，`read`、`grep` 和 `glob` 可访问服务用户能读取的任意路径。要限制在仓库及 Codex skill/plugin 路径内，请向 `args` 添加 `"--read-scope", "normal"`；这不限制 `run_program` 或 `bash` 启动的进程。
+
+<details>
+<summary>Windows x64</summary>
 
 ```toml
 [mcp_servers.agentshim]
 required = true
-command = "/absolute/path/to/agentshim"
+command = "C:/Users/<username>/AppData/Local/agentshim/bin/agentshim.exe"
 args = ["serve", "--client-profile", "codex"]
-# 无限制模式（默认）允许任意绝对路径的 read/grep/glob。若要
-# 限制在仓库与 Codex skill/plugin 路径内，请使用：
-# args = ["serve", "--client-profile", "codex", "--read-scope", "normal"]
 supports_parallel_tool_calls = true
 tool_timeout_sec = 600
 enabled_tools = ["read", "grep", "glob", "run_program", "bash", "bash_status"]
@@ -78,9 +71,54 @@ env = { CODEX_MCP_PROTOCOL_VERSION = "2026-07-28" }
 mcp_2026_07_28 = true
 ```
 
-## 配置 Cursor
+</details>
 
-将 [Cursor 示例](config/cursor.mcp.json.example)复制到 `~/.cursor/mcp.json`，把 `command` 替换为二进制文件的绝对路径，然后重启 Cursor：
+<details>
+<summary>Linux x64 / ARM64</summary>
+
+```toml
+[mcp_servers.agentshim]
+required = true
+command = "/home/<username>/.local/share/agentshim/bin/agentshim"
+args = ["serve", "--client-profile", "codex"]
+supports_parallel_tool_calls = true
+tool_timeout_sec = 600
+enabled_tools = ["read", "grep", "glob", "run_program", "bash", "bash_status"]
+default_tools_approval_mode = "approve"
+env = { CODEX_MCP_PROTOCOL_VERSION = "2026-07-28" }
+
+[features]
+mcp_2026_07_28 = true
+```
+
+</details>
+
+<details>
+<summary>macOS Apple Silicon</summary>
+
+```toml
+[mcp_servers.agentshim]
+required = true
+command = "/Users/<username>/.local/share/agentshim/bin/agentshim"
+args = ["serve", "--client-profile", "codex"]
+supports_parallel_tool_calls = true
+tool_timeout_sec = 600
+enabled_tools = ["read", "grep", "glob", "run_program", "bash", "bash_status"]
+default_tools_approval_mode = "approve"
+env = { CODEX_MCP_PROTOCOL_VERSION = "2026-07-28" }
+
+[features]
+mcp_2026_07_28 = true
+```
+
+</details>
+
+示例将 `default_tools_approval_mode` 设为 `"approve"`；使用前请根据自己的 Codex 审批策略检查此设置。
+
+<details>
+<summary>Cursor</summary>
+
+将以下配置添加到 `~/.cursor/mcp.json`，并将 `command` 替换为安装器输出的绝对路径。Windows JSON 路径需转义反斜杠，也可使用正斜杠。
 
 ```json
 {
@@ -94,20 +132,54 @@ mcp_2026_07_28 = true
 }
 ```
 
-在 Windows 上，JSON 路径必须转义每个反斜杠。
+参见 [Cursor 示例](config/cursor.mcp.json.example)。
 
-## 配置 DSH
+</details>
 
-将原生 adapter 及其精确可选平台包安装到目标 DSH profile（如 Web UI 使用 `web`，CLI 任务使用 `headless`）：
+### 3. 检查连接
+
+重启客户端，确认 AgentShim MCP 服务已连接并提供 `read`、`grep`、`glob`、`run_program`、`bash` 和 `bash_status`。如无法连接，请检查可执行文件路径和客户端配置，参见[诊断](#诊断)。
+
+## 工具与访问范围
+
+| 工具 | 用途 |
+| --- | --- |
+| `read` | 读取文本、PDF 和 Office 文件。 |
+| `grep` | 使用 Rust 正则或字面字符串搜索文件内容。 |
+| `glob` | 按模式查找文件。 |
+| `run_program` | 不经 shell，以字面量参数运行可执行文件。 |
+| `bash` | 在前台或作为 detached job 运行 Bash 命令。 |
+| `bash_status` | 检查 detached job 并读取日志末尾。 |
+
+MCP 服务以启动目录为仓库根目录。`grep` 和 `glob` 默认包含 gitignore 文件，但排除 `.git` 和常见大型目录。
+
+## 其他使用方式
+
+### DSH
+
+DSH adapter 在进程内加载平台原生 addon，不使用 MCP 服务，也不需要 `agentshim` 可执行文件。将其安装到使用的 profile：
 
 ```sh
 dsh plugin --profile web add dsh-agentshim
 dsh web --dump-config
 ```
 
-DSH 通过平台 addon 在进程内加载 `agentshim-core`；它不会启动 MCP 服务，也不需要已安装的 `agentshim` 可执行文件。不支持的平台、缺失的包或原生 API 不匹配都会导致 plugin activation 失败。配置、capture 保留策略、sandbox 审批行为与移除流程请参阅 [DSH adapter 指南](adapters/dsh/README.md)。
+要求、配置和移除方法参见 [DSH adapter 指南](adapters/dsh/README.md)。
 
-## 选项
+<details>
+<summary>从源码构建</summary>
+
+需要 Rust 1.99.1：
+
+```sh
+cargo build --release --locked
+```
+
+可执行文件位于 Linux、macOS 的 `target/release/agentshim` 或 Windows 的 `target/release/agentshim.exe`。在 MCP 配置中使用其绝对路径。
+
+</details>
+
+## 参考
 
 ### `--client-profile`
 
@@ -142,7 +214,7 @@ args = ["serve", "--read-scope", "normal"]
 
 `--read-scope` 只约束 `read`、`grep` 和 `glob`。MCP 不提供进程 sandbox；`run_program` 或 `bash` 启动的程序会继承服务用户的完整文件系统权限。DSH 若组合了官方 `ctx.sandbox`／`ctx.sandboxPolicy`，则由该官方服务负责 exact argv 的 confinement。
 
-版本化的跨 adapter contract 是 [`contracts/tool-contract-v1.json`](contracts/tool-contract-v1.json)。MCP 保留 `error.code` 的 legacy class；有 v1 对应的 class 才会在 `error.canonicalCode` 中规范化，尚未对应的 class 则保留原名。
+版本化的跨 adapter contract 是 [`contracts/tool-contract-v1.json`](contracts/tool-contract-v1.json)。生成器还维护 [`contracts/generated/`](contracts/generated/) 中的 MCP JSON Schema 和 DSH 参数／输出投影；可用 `python3 scripts/generate-contracts.py --check` 验证。MCP 保留 `error.code` 的 legacy class；有 v1 对应的 class 才会在 `error.canonicalCode` 中规范化，尚未对应的 class 则保留原名。
 
 ### 长时间任务
 
@@ -164,7 +236,7 @@ args = ["serve", "--read-scope", "normal"]
 { "action": "terminate", "job_id": "bash-550e8400-e29b-41d4-a716-446655440000" }
 ```
 
-同时最多可有 16 棵 active detached 进程树。`timeout_ms` 自进程树成功 spawn 起算；省略时使用 `AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX`，显式值只能缩短它。Deadline 到期会主动终止完整进程树并记录 `timed_out`。实例保留最近 32 笔 terminal record，每笔最多 16 KiB final tail；ID 不跨 reconnect 或 restart，也不提供 list API。完整 log 仍可用 `read(log_path)` 读取，terminal eviction 不会删除该文件。
+同时最多可有 16 棵 active detached 进程树。日志超过 `AGENTSHIM_DETACHED_LOG_BYTES` 时会终止进程树并记录 `log_quota_exceeded`。`timeout_ms` 自进程树成功 spawn 起算；省略时使用 `AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX`，显式值只能缩短它。Deadline 到期会主动终止完整进程树并记录 `timed_out`。实例保留最近 32 笔 terminal record，每笔最多 16 KiB final tail；ID 不跨 reconnect 或 restart，也不提供 list API。完整 log 仍可用 `read(log_path)` 读取，terminal eviction 不会删除该文件。
 
 ### Windows Bash 参数转换
 
@@ -202,8 +274,10 @@ Git Bash 在启动 Windows 原生程序前，会转换看起来像 POSIX 路径�
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `CODEX_MCP_PROTOCOL_VERSION` | — | 向 Codex 声明的 MCP 协议版本。 |
+| `AGENTSHIM_IO_WORKERS` | 可用 CPU 数，最多 `4` | Worker lane 数量；1–16。 |
 | `AGENTSHIM_FOREGROUND_CALLS` | `16` | 每个实例共享的 `read`、`glob`、`grep`、`run_program` 及前台 `bash` 并行上限；1–32。 |
 | `AGENTSHIM_DETACHED_CALLS` | `16` | 每个实例存活中的 detached `bash` 进程树数量；1–16。 |
+| `AGENTSHIM_DETACHED_LOG_BYTES` | `67108864` | 单个 detached 日志的终止阈值，范围 1048576–4294967296 字节；超过后终止进程树，进行中的写入块可能使文件略大于阈值。 |
 | `AGENTSHIM_BACKGROUND_JOB_TIMEOUT_MAX` | `1800` | detached／background Bash 的最长运行时间（秒）；600–14400。省略的 job timeout 使用此值，显式值只能缩短它。 |
 | `AGENTSHIM_OUTPUT_BYTES` | `32000` | 每次呼叫的输出上限（字节）；4096–262144。 |
 | `AGENTSHIM_BURST_TOKENS` | profile 默认值 | 共用的预估模型 token 预算；2048–32768。 |
@@ -221,7 +295,11 @@ Git Bash 在启动 Windows 原生程序前，会转换看起来像 POSIX 路径�
 | `AGENTSHIM_LOG_DIR` | 平台默认 | 用绝对路径覆盖日志目录。 |
 | `AGENTSHIM_RESPECT_GITIGNORE` | `false` | 设为 `true` 时，`grep` 与 `glob` 才套用 `.gitignore`／`.ignore`。省略 `include_ignored` 时跟随此默认值。由于调用方读不到这项设定，过滤生效且结果为空时，响应末尾会附上一行建议改用 `include_ignored=true`。`.git` 以及 `node_modules`、`target`、`.venv`、`venv`、`dist`、`build`、`__pycache__` 无论开关都排除。binary、输出预算与内存上限仍会挡住内容。 |
 
+共享的 256 MiB 运行时内存值是内部软预留目标，并非进程 RSS 限制。PDF 和搜索代码还执行各自的单次调用限制；子进程不计入该目标，Windows 可通过上述 Job Object 设置硬限制。
+
 在 Windows 上使用 DSH adapter 时，上述三个 `AGENTSHIM_WINDOWS_*` Job Object 设定会从 plugin 的显式 `env` 配置读取为 host policy，同时也会传给 child process。native host 不会读取自身的 ambient process environment。
+
+stdio 传输最多容纳 256 个未完成请求及 16 MiB 序列化请求数据；超过任一上限会关闭实例。stdout 连续 5 秒无法写入也会关闭实例。
 
 空闲看门狗在确认静默后会再次复核活动时间戳，然后才取消既有的优雅关闭 token。在这次复核与取消之间的最后窗口内到达的请求，仍可能与关闭发生竞态；启用看门狗即接受这一狭窄的边界条件。
 
@@ -230,7 +308,7 @@ Git Bash 在启动 Windows 原生程序前，会转换看起来像 POSIX 路径�
 日志为按 UTC 日期命名的 JSONL 文件：
 
 - Windows: `%LOCALAPPDATA%\agentshim\logs`
-- Linux: `${XDG_STATE_HOME:-$HOME/.local/state}/agentshim/logs`
+- Linux 和 macOS: `${XDG_STATE_HOME:-$HOME/.local/state}/agentshim/logs`
 
 保留策略：总量 512 MiB，保留 30 天。可查看或清理：
 
@@ -251,4 +329,4 @@ agentshim logs purge
 
 ## 许可证
 
-[MIT](LICENSE)
+AgentShim 自有代码采用 [MIT](LICENSE) 许可证；第三方组件保留各自的许可证和声明。

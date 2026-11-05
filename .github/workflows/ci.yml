@@ -15,6 +15,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  repository-quality:
+    name: Repository quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: 0.12.10
+          python-version: '3.12'
+      - name: Check repository data syntax
+        run: |
+          uv run --frozen --group dev -- pre-commit run check-yaml --all-files
+          uv run --frozen --group dev -- pre-commit run check-toml --all-files
+          uv run --frozen --group dev -- pre-commit run check-json --all-files
+      - name: Check Python tooling
+        run: |
+          uv lock --locked
+          uv run --frozen --group dev -- ruff format --check evals scripts
+          uv run --frozen --group dev -- ruff check evals scripts
+          uv run --frozen --group dev -- mypy --config-file=pyproject.toml --no-error-summary evals scripts
+      - name: Check contract snapshots
+        run: uv run --frozen --group dev -- python scripts/generate-contracts.py --check
+      - name: Check GitHub Actions workflows
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          "$(go env GOPATH)/bin/actionlint" -shellcheck= -pyflakes=
+
   windows-validation:
     name: Windows x86-64 CI
     uses: ./.github/workflows/rust-validation.yml
@@ -37,4 +65,15 @@ jobs:
       system: Linux
       machine: x86_64
       runner_arch: X64
+      engine_only: true
+
+  linux-arm64-validation:
+    name: Linux ARM64 Core/NAPI CI
+    uses: ./.github/workflows/rust-validation.yml
+    with:
+      runner: ubuntu-24.04-arm
+      platform: unix
+      system: Linux
+      machine: aarch64
+      runner_arch: ARM64
       engine_only: true

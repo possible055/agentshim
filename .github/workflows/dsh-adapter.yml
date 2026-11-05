@@ -9,6 +9,7 @@ on:
       - crates/core/**
       - crates/napi/**
       - crates/pdf-read-core/**
+      - crates/office-read-core/**
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
@@ -19,6 +20,7 @@ on:
       - crates/core/**
       - crates/napi/**
       - crates/pdf-read-core/**
+      - crates/office-read-core/**
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
@@ -60,10 +62,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macOS runners bill at 10x, so pull requests validate on the two cheap
-        # platforms. Pushes keep the full matrix because release.yml preflight
-        # accepts a release commit only if its push run succeeded.
-        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-24.04","windows-2025"]') || fromJSON('["ubuntu-24.04","windows-2025","macos-15"]') }}
+        os: [ubuntu-24.04, ubuntu-24.04-arm, windows-2025]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -81,12 +80,12 @@ jobs:
       - run: cargo build --locked -p agentshim-napi
       - run: pnpm --dir adapters/dsh test:platform
       - run: pnpm --dir adapters/dsh test:composition
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && runner.arch == 'X64'
       - run: pnpm --dir adapters/dsh test:e2e
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && runner.arch == 'X64'
         env:
           AGENTSHIM_REAL_E2E: '1'
       - run: pnpm --dir adapters/dsh build
       - run: pnpm --dir adapters/dsh test:packed
       - run: pnpm --dir adapters/dsh test:packed:matrix
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && runner.arch == 'X64'

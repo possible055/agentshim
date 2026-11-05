@@ -14,7 +14,7 @@ name = "agentshim"
 version = "0.1.7-alpha.5"
 edition = "2024"
 rust-version = "1.99.1"
-license = "Apache-2.0"
+license = "MIT"
 description = "High-performance, capability-aware repository tools and process execution for coding agents"
 autotests = true
 
